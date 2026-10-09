@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **199 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **202 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -29,8 +29,9 @@ conclusion drawn from it is vacuously true.
 | --- | --- | --- |
 | 401 | `AuthenticationError` | Missing, malformed or no-longer-valid credentials |
 | 403 | `PermissionDeniedError` | Authenticated, but not permitted in this workspace |
+| 402 | `PlanLimitExceededError` (`plan_limit_exceeded`), `PaymentRequiredError` (`payment_required`) | The plan does not stretch that far; the plan asked for is not paid for |
 | 404 | `NotFoundError`, `TenantIsolationError` | Absent, or outside the caller's workspace |
-| 409 | `ConflictError` | Uniqueness or state conflict |
+| 409 | `ConflictError` | Uniqueness or state conflict. Two entitlement codes (ADR-131): `channel_capacity_exceeded` - every channel slot is taken - and `channel_type_not_allowed` - the plan in force does not include that channel |
 | 422 | `ValidationError` | Rejected by a business rule |
 | 429 | `RateLimitedError` | Upstream is rate limiting |
 | 502 | `ExternalServiceError` | A provider failed |
@@ -175,6 +176,8 @@ Accepting an invitation for an address that already has an account adds or reins
 
 `phone_number_id` is unique across the platform, not per workspace: it is how an inbound webhook is attributed to a workspace, so two workspaces claiming one number would make attribution ambiguous.
 
+**A number is a channel connection, and an active one takes a channel slot** (ADR-131). Connecting and enabling go through the channel capacity guard - asked once before Wasla calls Meta, so a workspace at capacity never causes a Graph call, and again under the workspace's lock in the transaction that activates the number. The refusals are `409 channel_capacity_exceeded` (`details`: `effective_limit`, `active`, `channel`, `typed_capacity`, `over_limit`) and `409 channel_type_not_allowed` (`details`: `channel`, `allowed_channel_types`); when both apply, capacity is the one returned. They replace the `402` a second number used to get. Disabling and releasing are never refused, and free the slot; re-authorising an active number's credential takes no new one. A workspace in a capacity reduction's grace, or with a scheduled downgrade the new connection would not fit, is refused too. See [BILLING.md](BILLING.md).
+
 ## Billing checkout
 
 | Method | Path | Purpose | Access |
@@ -255,8 +258,10 @@ payment was recorded.
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
 | GET | `/api/v1/billing/plans` | The catalogue: public plans, plus this workspace's own custom plan (`is_custom: true`) and never another's. Each carries `prices` - its active monthly and yearly options - and `billing_required` (false for Starter, which has none); `price`/`interval` stay the monthly price for earlier clients | Workspace member |
-| GET | `/api/v1/billing/entitlements` | Every limit, broken down: `base_limit`, `topup_limit`, `platform_grant_limit`, `effective_limit` (= `limit`), `used`, `remaining`, `over_limit`, `enforced`, and the period for usage keys | Workspace member |
-| GET | `/api/v1/billing/topups` | Top-ups this workspace may buy (`?entitlement_key=`): active global ones and its own | Workspace member |
+| GET | `/api/v1/billing/entitlements` | Every limit, broken down: `base_limit`, `topup_limit`, `platform_grant_limit`, `effective_limit` (= `limit`), `used`, `remaining`, `over_limit`, `enforced`, and the period for usage keys. `period_ai_turns` adds `held` and `used_by_channel`; `channel_connections` adds `channel_capacity` (general and typed slots, active connections by channel, `allowed_channel_types`) | Workspace member |
+| GET | `/api/v1/billing/channel-capacity` | Channel slots in force and what takes them, the capacity a scheduled change leaves (`scheduled`), an open reduction and its grace (`reduction`), what the automatic fallback would keep and disable now (`automatic_fallback`), a saved pre-selection, and the `selection_revision` a selection must name | Workspace member |
+| POST | `/api/v1/billing/channel-capacity/selection` | Keep these connections: `{"keep": [connection_id], "expected_revision"}`. During a grace the other active connections are **disabled** now - never released or deleted; before a boundary the choice is saved and applied there if it still fits | Workspace **owner** |
+| GET | `/api/v1/billing/topups` | Top-ups this workspace may buy (`?entitlement_key=`): active, priced global ones and its own, offered to its plan; a channel slot typed for a channel its plan does not include is not listed | Workspace member |
 | POST | `/api/v1/billing/topups/{topup_id}/checkout` | Buy one: a `TOPUP` invoice and a hosted page (`201`) | Workspace **owner** |
 | GET | `/api/v1/billing/topup-purchases` | Its top-ups, bought and granted, newest first (`limit`, `offset`) | Workspace **owner** |
 | GET | `/api/v1/billing/summary` | Billing -> Usage & Top-ups in one read: subscription (plan, version, `plan_price`, `billing_interval`, `billing_period_*` and `paid_through`, `usage_period_*`, `next_renewal_at`/`next_renewal_amount`, the scheduled version **and price**), the seven keys, live top-ups, recent purchases, the open custom plan offer, renewals awaiting payment (`payment_required`) and `automatic_renewal` | Workspace **owner** |
@@ -274,21 +279,76 @@ POST /api/v1/billing/topups/{topup_id}/checkout   {"idempotency_key": "..."}
 
 The body names nothing that could price the purchase (`422` if it tries). A
 product the workspace cannot see is `404`, exactly like one that does not
-exist. `409` for a free product, a workspace that is not active, a key the plan
-already leaves unlimited, or an `idempotency_key` already used - that `409`
-carries `details.purchase_id`, and no second page is opened. The allowance is
-granted when the signed Paymob callback settles the invoice, once, and lasts
-until `expires_at`, the end of the current billing period. A top-up is never
-charged to a saved card and never renews.
+exist - a product offered only to other plans included. `409` for a free or
+unpriced product, a workspace that is not active, a key the plan already
+leaves unlimited, or an `idempotency_key` already used - that `409` carries
+`details.purchase_id`, and no second page is opened. `422`
+`topup_not_available` for a channel slot typed for a channel the plan does not
+include: a top-up never opens a channel type. The allowance is granted when the
+signed Paymob callback settles the invoice, once, and lasts until `expires_at`
+- the end of the usage cycle for a usage key, the end of the billing term (a
+year on a yearly price) for a capacity key such as `channel_connections`. A
+top-up is never charged to a saved card and never renews.
 
 ```
 GET /api/v1/billing/entitlements
   -> 200 [{"key": "period_ai_turns", "kind": "usage", "enforced": true,
-           "base_limit": 5000, "topup_limit": 10000, "platform_grant_limit": 0,
-           "effective_limit": 15000, "limit": 15000, "used": 6200,
-           "remaining": 8800, "over_limit": false, "allowed": true,
-           "period_start": "...", "period_end": "..."}, ...]
+           "base_limit": 1000, "topup_limit": 0, "platform_grant_limit": 0,
+           "effective_limit": 1000, "limit": 1000, "used": 742, "held": 0,
+           "remaining": 258, "over_limit": false, "allowed": true,
+           "used_by_channel": [{"channel": "whatsapp", "used": 500},
+                               {"channel": "instagram", "used": 242}],
+           "period_start": "...", "period_end": "..."},
+          {"key": "channel_connections", "kind": "capacity", "enforced": true,
+           "base_limit": 1, "topup_limit": 2, "platform_grant_limit": 0,
+           "effective_limit": 3, "limit": 3, "used": 3, "remaining": 0,
+           "over_limit": false, "allowed": true,
+           "channel_capacity": {"general_limit": 3, "general_topup_limit": 2,
+             "general_platform_grant_limit": 0, "typed_slots": [],
+             "active_by_channel": [{"channel": "whatsapp", "count": 1},
+                                   {"channel": "instagram", "count": 1},
+                                   {"channel": "messenger", "count": 1}],
+             "allowed_channel_types": ["whatsapp", "instagram", "messenger"]}}, ...]
 ```
+
+**One AI allowance per workspace** (ADR-131): `used` counts every channel's
+charges together, and `used_by_channel` is a breakdown for display that no
+limit is ever compared with. `held` is the turns generating right now - a turn
+holds a unit when it starts and is charged only if it produces a usable outcome
+(a reply, or a handoff the agent's tool made); a provider error, a timeout or
+an empty answer gives the unit back. `remaining` leaves the holds out.
+
+**Channel capacity** is general slots (the plan's, plus general top-ups and
+grants) and typed slots (bought or granted for one channel type). A typed slot
+serves its own channel first; the rest overflow into general slots.
+`remaining` is what is left for a connection of a type with no typed slot of
+its own; `GET /billing/channel-capacity` has the full picture, and
+`GET /channel-connections` the connections themselves.
+
+```
+POST /api/v1/billing/channel-capacity/selection
+  {"keep": ["<oldest number>", "<instagram page>", "<messenger page>"], "expected_revision": 4}
+  -> 200 {"applied": true, "kept": [...3], "disabled": [...4], "capacity": {...}}
+```
+
+`404` for a connection that is not this workspace's; `422` for a selection that
+does not fit the target capacity or keeps a channel the target plan does not
+include; `409` for a stale `expected_revision` or when there is nothing to
+choose. The disabled connections keep their history, conversations, contacts,
+credentials and claim, and are re-enabled later through the guard.
+
+## Channel connections
+
+| Method | Path | Purpose | Access |
+| --- | --- | --- | --- |
+| GET | `/api/v1/channel-connections` | Every connection the workspace holds, active and disabled, newest first (`?channel=`): `channel`, `external_account_id`, `status`, `health`, `counts_toward_capacity`, `disabled_reason` (`manual`, `capacity_reduction`, `capacity_reduction_automatic`), `disabled_at`, `ownership_started_at` | Workspace member |
+
+Read-only on purpose (ADR-131). A connection is made by its channel's own
+connect flow - `POST /whatsapp/accounts` for a number - which runs the
+provider's ownership checks and the capacity guard; there is no generic create
+that could make a connection for a channel without an adapter. Released
+connections are history and are not listed; their conversations stay in the
+inbox.
 
 ## Webhook
 
@@ -498,14 +558,14 @@ Six behaviours worth knowing:
 
 | Method | Path | Role |
 | --- | --- | --- |
-| POST | `/api/v1/contacts/{contact_id}/opt-out` | Any workspace member |
-| DELETE | `/api/v1/contacts/{contact_id}/opt-out` | Owner or admin |
+| POST | `/api/v1/contacts/{contact_id}/opt-out` | Any workspace member. Body `{"channel", "source"?}` |
+| DELETE | `/api/v1/contacts/{contact_id}/opt-out?channel=` | Owner or admin |
 
 Recording is any member's to do — the person handling the conversation is the one a customer says "stop" to. Clearing takes an administrator, because undoing somebody's own refusal should be deliberate.
 
 - **Recording is idempotent and never moves the timestamp.** The first refusal is the one that counts.
 - **A customer whose whole message is a stop word is opted out automatically**, on the inbound path. It does not silence the agent.
-- **The opt-out is the person's**, not one identifier's ([ADR-122](../DECISIONS.md)): the response lists every identity it covers in `identities` (`{id, channel, kind, value}`). `wa_id` is deprecated and null for a customer known only by a business-scoped id.
+- **The opt-out is per channel** ([ADR-131](../DECISIONS.md), superseding ADR-122's person-level opt-out): a STOP on WhatsApp covers every WhatsApp number of the workspace and each way WhatsApp addresses the person, and nothing on Instagram or Messenger; clearing one re-admits that channel alone. The response carries `channels` - one entry per channel the person has an identity or a recorded consent on: `{channel, opted_out, marketing_opt_out_at, opt_out_source, opt_out_via, resumed_at, identities}` - and every identity in `identities` (`{id, channel, kind, value}`). The person-level `marketing_opt_out_at` it used to carry is gone. `wa_id` is deprecated and null for a customer known only by a business-scoped id.
 
 ## Usage
 
@@ -520,7 +580,7 @@ Administrators only, unlike analytics: usage is the input to a bill and to a pla
 
 - **Both take an optional `since` and `until`**, UTC, half-open `[since, until)`. Given neither, the last thirty days. A window longer than 366 days is refused.
 - **The response carries the window it applied**, because a figure without its period is not quotable.
-- **`counters`** are the named meters a plan limit is written against, every one present even at zero; **`totals`** is the unabridged list, so a meter added later is visible before anything is renamed to carry it.
+- **`counters`** are the named meters a plan limit is written against, every one present even at zero; **`totals`** is the unabridged list, so a meter added later is visible before anything is renamed to carry it. `messages_received` and `messages_sent` count every channel: WhatsApp's own meters and the channel-neutral `message_received` / `message_sent` fill them together (ADR-131).
 - **`/daily` is sparse**: a day on which nothing happened has no point. Filling zeros is the client's job, because only the client knows whether it is drawing bars or a cumulative line. Narrow it with repeated `event_type=`.
 
 ## Analytics
@@ -848,7 +908,7 @@ token or a raw provider payload.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/features` | The entitlement keys, their units and how each is enforced |
+| GET | `/features` | The entitlement keys, their units and how each is enforced: `channel_connections` (enforced, concurrency-safe), `allowed_channel_types` (`kind: channel_policy`), and the retired `whatsapp_numbers` (`kind: retired`, `replaced_by: channel_connections`) |
 | GET | `/plans` | The catalogue, with the current and latest version and subscriber counts; `?scope=tenant&tenant_id=` lists one company's custom plans |
 | POST | `/plans` | Create a plan and its version 1 |
 | GET | `/plans/{plan_id}` | One plan |
@@ -857,8 +917,8 @@ token or a raw provider payload.
 | POST | `/plans/{plan_id}/deactivate` | Stop offering it; existing subscribers keep it |
 | DELETE | `/plans/{plan_id}` | Delete a plan nothing has referenced (owner only) |
 | GET | `/plans/{plan_id}/versions` | Every version, with subscribers per version |
-| POST | `/plans/{plan_id}/versions` | Publish new terms for new customers |
-| POST | `/plans/{plan_id}/versions/preview` | What publishing would mean; writes nothing |
+| POST | `/plans/{plan_id}/versions` | Publish new terms for new customers. `allowed_channel_types` is required beside the limits; `whatsapp_numbers` is refused (`422`) - channel capacity is `channel_connections` |
+| POST | `/plans/{plan_id}/versions/preview` | What publishing would mean; writes nothing. Per limit, `workspaces_above_new_limit`; for the channel types, what is `removed` and `added` and `workspaces_holding_a_removed_type` |
 | POST | `/plans/{plan_id}/migrations` | Count (`confirm: false`) or schedule (`confirm: true`) a cohort move at next renewal; each subscriber keeps their billing term, and a target not sold on a term in use is `422` |
 | GET | `/plan-versions/{version_id}` | One version: its limits and every price it has had, retired ones marked |
 | GET | `/plan-versions/{version_id}/prices` | Its price history with what still names each price; `?active=true` is what new customers can choose |
@@ -883,18 +943,18 @@ token or a raw provider payload.
 | POST | `/reconciliation/{payment_id}/run` | Ask the provider about one payment now; never charges |
 | GET | `/incidents` | Durable billing incidents |
 | POST | `/incidents/{id}/resolve` | Close one with an audited note |
-| GET | `/tenants/{tenant_id}/summary` | One company's billing in one read: plan, version, custom flag, period, renewal, the seven keys broken down, live top-ups, recent invoices, payments, incidents and timeline |
+| GET | `/tenants/{tenant_id}/summary` | One company's billing in one read: plan, version, custom flag, period, renewal, the seven keys broken down - AI turns `used`, `held` and by channel, channel capacity by slot and active connections by channel - its latest capacity reduction and grace end, live top-ups, recent invoices, payments, incidents and timeline |
 | POST | `/tenants/{tenant_id}/custom-plan/preview` | What a custom plan would mean for the company; writes nothing |
 | POST | `/tenants/{tenant_id}/custom-plan` | Create a `tenant`-scoped plan and version 1, optionally assign it now or at renewal (ADR-113); `financial_basis: customer_checkout` makes an offer instead (ADR-114) |
 | GET | `/tenants/{tenant_id}/custom-offers` | Every custom plan offer made to the company |
 | POST | `/tenants/{tenant_id}/custom-offers` | Offer one **price** (`plan_price_id`, monthly or yearly) of the company's own custom plan; grants nothing. `plan_version_id` alone is accepted only for a version with one active price |
 | POST | `/custom-offers/{offer_id}/cancel` | Withdraw an open offer (`expected_revision`, `reason`) |
-| POST | `/tenants/{tenant_id}/topups/grant` | Complimentary allowance until the period ends; no invoice or payment |
+| POST | `/tenants/{tenant_id}/topups/grant` | Complimentary allowance until the period ends; no invoice or payment. For `channel_connections`, an optional `channel_type`; `422` for a channel the company's plan does not include |
 | GET | `/topups` | Top-up products, filtered by scope, workspace, key, activity |
-| POST | `/topups` | Create a product (global or for one company) |
+| POST | `/topups` | Create a product (global or for one company). For `channel_connections`: `channel_type` (omit for a general slot) and `eligible_plan_codes` (omit or `[]` for every plan); `price` may be omitted, leaving the product inactive |
 | GET | `/topups/{topup_id}` | One product, with how many purchases name it |
-| PATCH | `/topups/{topup_id}` | Price, quantity, name, visibility for new purchases |
-| POST | `/topups/{topup_id}/activate` | Offer it again |
+| PATCH | `/topups/{topup_id}` | Price, quantity, name, visibility, channel type, eligible plans - for new purchases |
+| POST | `/topups/{topup_id}/activate` | Offer it (again); `409` while it has no price |
 | POST | `/topups/{topup_id}/deactivate` | Stop new purchases; nobody's purchase changes |
 | DELETE | `/topups/{topup_id}` | Delete a product nobody bought (owner only) |
 | GET | `/topup-purchases` | Purchases and grants, filtered by workspace, status, source, key |
@@ -952,7 +1012,9 @@ currency and yearly term are the offer's price's own.
 
 A custom plan assigned to another company answers `422` with error code
 `custom_plan_not_available_for_workspace`. Creating one requires all seven
-limits (`null` is unlimited, `0` is none); a priced one assigned `now` needs a
+limits (`null` is unlimited, `0` is none) - `channel_connections` among them,
+never `whatsapp_numbers` - and `allowed_channel_types`, a list of channel
+labels with no wildcard; a priced one assigned `now` needs a
 `financial_basis` of `customer_checkout`, `manual_payment` or `complimentary`.
 
 ## Planned platform endpoints

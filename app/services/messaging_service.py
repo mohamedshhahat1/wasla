@@ -927,12 +927,14 @@ class MessagingService:
 
         if isinstance(outcome, RecipientOptedOutError):
             # The provider says the person stopped marketing messages: nothing
-            # was delivered, and their contact now says so too, through the
-            # one opt-out writer (OMNI-046).
+            # was delivered, and their consent on this channel now says so
+            # too, through the one opt-out writer (OMNI-046, ENT-19).
             await self._undelivered(message, reason=str(outcome))
-            contact = await self._contacts.require_by_id(conversation.contact_id)
-            if record_opt_out(
-                contact,
+            if await record_opt_out(
+                self._session,
+                tenant_id=self._tenant_id,
+                contact_id=conversation.contact_id,
+                channel=connection.channel,
                 source=OptOutSource.CUSTOMER,
                 via=OptOutVia.PROVIDER_REFUSAL,
                 at=datetime.now(UTC),
@@ -1002,13 +1004,15 @@ class MessagingService:
         # cost the workspace nothing to deliver, and the failed row above
         # already records that the attempt happened. Everything that leaves this
         # way is counted once - an agent's reply, a person's, a follow-up, a
-        # campaign - under the channel's decided meter (ADR-122).
+        # campaign - under the channel's meter, stamped with it (ENT-22).
         meters = message_meters(connection.channel)
         if meters is not None:
             self._usage.record(
                 meters.sent,
                 occurred_at=now,
                 meta={"conversation_id": str(conversation_id), "kind": kind.value},
+                channel=connection.channel,
+                connection_id=connection.id,
             )
         await self._session.flush()
         return message

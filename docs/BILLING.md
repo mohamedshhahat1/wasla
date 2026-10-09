@@ -115,7 +115,7 @@ is billed and nothing about what they may do - the limits are the version's.
   cycle the clock is in; the sweep records it (`_advance_usage`) with no
   invoice, no charge and no change to the billing term, catching up any number
   of missed months in one step.
-- **Capacities** (`storage_bytes`, `whatsapp_numbers`, `team_members`,
+- **Capacities** (`storage_bytes`, `channel_connections`, `team_members`,
   `knowledge_documents`) are continuous and do not reset.
 - **Top-ups:** a usage top-up expires with its monthly usage cycle; a capacity
   top-up with the billing term (a year on a yearly price). Expiry deletes
@@ -148,11 +148,11 @@ holds, so it never makes one unlimited by leaving it out.
 
 | Key | Kind | Unit | Enforced by |
 | --- | --- | --- | --- |
-| `period_messages` | usage (per period) | messages sent and received | **Nothing.** Metered only (ADR-030): no customer message is refused over billing. A top-up raises the reported allowance and `remaining`; the API says `enforced: false`. |
-| `period_ai_turns` | usage | AI-answered customer turns | `EntitlementService.consume`, under the workspace's advisory lock; exhausted hands the conversation to a person. |
+| `period_messages` | usage (per period) | messages sent and received, on every channel | **Nothing.** Metered only (ADR-030): no customer message is refused over billing. A top-up raises the reported allowance and `remaining`; the API says `enforced: false`. |
+| `period_ai_turns` | usage | AI-answered customer turns, one allowance for every channel | `EntitlementService.hold_ai_turn` at engagement, under the workspace's advisory lock; charged only for a usable outcome (ADR-131); exhausted hands the conversation to a person. |
 | `period_campaign_messages` | usage | campaign messages | `reserve_period` when a campaign is scheduled, counting other live campaigns' unsent recipients, under the lock. |
 | `storage_bytes` | capacity | bytes held (integer; 1 GiB = 1024³) | `reserve` on upload, under the lock; inbound media over it is skipped. |
-| `whatsapp_numbers` | capacity | connected numbers (disabled and released ones do not count) | `reserve_or_refuse` on connect. |
+| `channel_connections` | capacity | active connections on every channel - a WhatsApp number is one (disabled and released ones do not count) | `ChannelCapacityGuard` on connect, enable and reconnect: 409, never 402 (ADR-131). Replaced `whatsapp_numbers`, which is refused on anything new. |
 | `team_members` | capacity | active members plus open invitations | `reserve_or_refuse` on invite and reinstate. |
 | `knowledge_documents` | capacity | documents, whatever their indexing state | `reserve_or_refuse` on submit. |
 
@@ -194,14 +194,15 @@ checkout opens. The base meter resets at the boundary. There is **no
 carry-over**: bought on 10 October in a 25 September - 25 October period, a
 top-up counts from 10 to 25 October.
 
-**Capacity top-ups** (`storage_bytes`, `whatsapp_numbers`, `team_members`,
+**Capacity top-ups** (`storage_bytes`, `channel_connections`, `team_members`,
 `knowledge_documents`) also end with the current period in v1. When one expires
 the effective capacity returns to the plan's, and **nothing is deleted**: numbers
 stay connected, members stay members, documents stay searchable, stored media
 stays readable. The workspace reads `over_limit: true` with `remaining: 0`, and
 creating, connecting, inviting or uploading is refused until usage is back
 within the limit or more capacity is bought. A downgrade at renewal behaves the
-same way.
+same way - except for channel connections, which a reduction brings back
+within capacity by the owner's choice or, after a week, by age (below).
 
 A plan change during the period does not touch a live top-up: it keeps its own
 `expires_at`, and the effective limit is the *new* plan version's limit plus
@@ -394,6 +395,156 @@ packs in one purchase; top-ups for `agents` or `owned_workspaces`; enforcement o
 `period_messages`; automatic self-refund.
 
 
+## Entitlements and channel capacity (ADR-131)
+
+The rules a second channel needed, taken by the product (ENT-01..ENT-24) and
+enforced in the backend. Every figure below is a placeholder platform staff
+edit through the platform API; no code reads a plan's name.
+
+```text
+Workspace
+  Subscription -> Plan -> PlanVersion (limits + allowed_channel_types, immutable) -> PlanPrice
+  Usage, per usage cycle
+    period_ai_turns           enforced, one allowance for every channel, held then charged
+    period_messages           metered only, every channel
+    period_campaign_messages  unchanged
+  Capacity, continuous
+    channel_connections       enforced: included + general and typed top-ups + grants
+    storage_bytes, team_members, knowledge_documents   unchanged
+  Channel policy
+    allowed_channel_types     enforced: connect, typed top-ups, automation
+```
+
+### AI turns: one allowance, held then charged
+
+`period_ai_turns` is one meter per workspace. Every `ai_turn` event carries the
+channel and connection it was taken on (and the turn), for display only:
+`GET /billing/entitlements` reports `used`, `held`, `remaining` and
+`used_by_channel` ("742 of 1,000, from every channel together").
+
+A turn **holds** one unit when it engages: in that transaction, under the
+workspace's `period_ai_turns` advisory lock, `used + held + 1 <= limit` is
+checked, where `held` counts turns still generating - taken inside the usage
+cycle in force and younger than `AI_TURN_HOLD_TTL_SECONDS` (900). No hold, no
+provider call: the conversation goes to a person with `AI_QUOTA_EXHAUSTED`, as
+before. The lock is released at that commit, never held across an inference;
+a turn waits up to 20 s for it, and contention beyond that is retried, not lost.
+
+When generation ends the turn **settles**:
+
+| Outcome | Settles as |
+| --- | --- |
+| Reply text generated - delivered, refused by the channel, or withheld by a re-read after it was written | **charged**: one `ai_turn` event, at the hold's moment |
+| The agent's handoff tool executed | **charged** |
+| Provider error or timeout past the turn's retries | released (`generation_failed`) |
+| Empty answer; sentiment escalation before composition | released (`not_chargeable`) |
+| Refused before generation (person owns it, no agent, workspace or channel not served, `channel_not_in_plan`, quota) | never held |
+
+Settling is idempotent: a second settle changes nothing, and a unique index
+allows one `ai_turn` per turn. The billing sweep releases holds past their TTL
+(`hold_expired`); a settle arriving after that still charges (`late_charge`) -
+usage that happened is never refused afterwards. Provider requests and tokens
+are still recorded as cost and enforced against nothing (ADR-104).
+
+### Channel capacity
+
+`channel_connections` replaced `whatsapp_numbers`. A WhatsApp number is one
+connection; every connection, on every channel, weighs one slot; only an active,
+unreleased connection takes one. A version published before ADR-131 is read
+with its number limit as its capacity and WhatsApp as its only channel type.
+
+    general slots = version's channel_connections
+                  + live general channel top-ups + live general platform grants
+    typed slots   = live top-ups and grants for one channel type
+
+A set of active connections fits when
+`sum over types T of max(0, active[T] - typed[T]) <= general` - a typed slot
+absorbs its own channel first, and the overflow uses general slots. An
+unlimited version is unlimited.
+
+`ChannelCapacityGuard` is asked on every activation - `POST
+/whatsapp/accounts`, `POST /whatsapp/accounts/{id}/enable`, a reconnect, the
+neutral `ChannelConnectionService` every adapter's connect flow uses - first
+before any provider call, then under the workspace's lock in the activating
+transaction. An adapter proves ownership with its provider before it can call
+`ChannelConnectionService.connect`, so its flow starts with
+`ChannelConnectionService.precheck(channel)` - the same lock-free first answer
+WhatsApp's flow gives itself before Meta's ownership read. While a downgrade is
+scheduled a new connection must also fit the scheduled plan.
+
+| Refusal | Status | Details |
+| --- | --- | --- |
+| `channel_capacity_exceeded` | 409 | `effective_limit`, `active`, `channel`, `typed_capacity`, `over_limit` |
+| `channel_type_not_allowed` | 409 | `channel`, `allowed_channel_types` |
+
+Capacity is judged first. Never refused: disabling, releasing, reading, inbound
+traffic, and re-authorising an active connection's credential.
+
+### Allowed channel types
+
+A plan version names the channel types it allows - vocabulary labels
+(`whatsapp`, `instagram`, `messenger`, `telegram`, `tiktok`), required on every
+new version and custom plan, no wildcard; an empty list is "no channel". Adding
+a channel to a plan is a new version, which existing subscribers adopt only by
+migration at renewal. A top-up never opens a channel type.
+
+### Channel top-ups
+
+Exactly the semantics of a WhatsApp number top-up - one-time, frozen, paid
+through the hosted checkout, granted once, valid until the end of the billing
+term (a year on a yearly price), never renewed, never charged to a saved card,
+refunds before the grant cancel and after it go to review - with two additions:
+
+- `channel_type`: null is a general slot any allowed type may use; a typed slot
+  serves only its channel. A typed product for a type the plan does not allow
+  is not listed, and its checkout and grant answer 422.
+- **Eligible plans** (`topup_product_plans`): none means every plan; otherwise
+  a workspace on another plan sees no product (404 at checkout).
+
+A product whose price staff have not set is inactive and cannot be activated
+(409, and a database check); migration 0098 seeds six such placeholders - a
+general slot and one per channel type.
+
+### When capacity falls: the reduction
+
+A downgrade or migration taking effect, a channel top-up or grant expiring
+(one still in refund review included), or a refund withdrawn can leave a
+workspace with more connections than slots, or a connection of a type the plan
+dropped. That boundary opens one **capacity reduction** per workspace:
+
+1. A pre-selection the owner made while the change was scheduled
+   (`POST /billing/channel-capacity/selection`) is applied at once if it still
+   fits.
+2. Otherwise a grace of `CHANNEL_CAPACITY_GRACE_DAYS` (7) begins. Every
+   connection keeps working; no new connection or re-enable fits; owners are
+   emailed at scheduling, at the boundary and 48 hours before the end.
+3. An owner selects which to keep - the selection must fit the capacity in
+   force and its channel types (422 otherwise) - and the others are disabled.
+4. With no selection, the billing worker at the grace end disables connections
+   of a type the plan no longer allows first, then the newest, keeping the
+   oldest by `ownership_started_at`.
+
+Disabled means disabled: claim, credential, conversations and contacts kept,
+pending follow-ups cancelled, `disabled_reason` `capacity_reduction` or
+`capacity_reduction_automatic`, every disable audited with its reduction. An
+owner may enable one later through the guard. Capacity coming back - a top-up,
+a grant, an upgrade - closes the reduction with nothing disabled.
+
+`GET /billing/channel-capacity` shows the capacity in force, active connections
+by channel, typed slots, the scheduled plan's capacity, the open reduction and
+its grace end, and what the automatic fallback would keep and disable.
+
+### Suspended, cancelled or expired
+
+The paid plan stops resolving and the default plan applies (ADR-061). Nothing is
+disabled, released or deleted and no reduction opens: the workspace reads
+`over_limit` with `remaining: 0`, and new connections and re-enables are
+refused until it fits. On a connection whose type the default plan does not
+allow, AI turns, campaign copies and follow-ups are refused as
+`channel_not_in_plan` and never charged; inbound is stored and a person may
+reply. Paying the overdue invoice restores the paid plan and its capacity, with
+nothing to re-enable.
+
 ## Plans
 
 A plan is a row in `plans`: a stable `code`, a name, a price in `Numeric` (never float — 19.99 is not representable in binary floating point, and that error reaches an invoice), an interval, trial days, and its limits.
@@ -402,7 +553,7 @@ A plan is a row in `plans`: a stable `code`, a name, a price in `Numeric` (never
 
 | Key | Counts |
 | --- | --- |
-| `whatsapp_numbers` | Connected numbers that are not disabled |
+| `channel_connections` | Active, unreleased connections on every channel (ADR-131); a version published before it is read with its `whatsapp_numbers` |
 | `agents` | Configured agents, drafts and disabled ones included |
 | `team_members` | Memberships |
 | `knowledge_documents` | Documents |
@@ -411,7 +562,7 @@ A plan is a row in `plans`: a stable `code`, a name, a price in `Numeric` (never
 | `period_ai_turns` | Customer turns an agent took on in the billing period — one per answered customer message, however many provider calls it took (AI-02) |
 | `period_campaign_messages` | Campaign messages in the billing period |
 
-The first five measure what exists now; a workspace over one stays over it until something is deleted, because downgrading a plan should stop somebody adding more rather than delete their work. The last three count `usage_events` since `current_period_start`, which is what makes "1,000 messages a month" reset.
+A version also states `allowed_channel_types` - the channel types a workspace on it may connect and automate (ADR-131). The first five keys measure what exists now; a workspace over one stays over it until something is deleted, because downgrading a plan should stop somebody adding more rather than delete their work. Channel connections are the one exception: a reduction disables - never deletes - the connections that no longer fit, by the owner's choice or after a week. The last three count `usage_events` since `current_period_start`, which is what makes "1,000 messages a month" reset.
 
 ### Storage is the one that is a `SUM` (ADR-091)
 
@@ -627,9 +778,11 @@ Limits are never compared inline. `EntitlementService` is the only thing that re
 
 | Where | What happens |
 | --- | --- |
-| Creating an agent, connecting a number, inviting a colleague, submitting a document | **402**, from a dependency in the route signature |
+| Creating an agent, inviting a colleague, submitting a document | **402**, from a dependency in the route signature |
+| Connecting, enabling or reconnecting a channel connection | **409** `channel_capacity_exceeded` or `channel_type_not_allowed`, from `ChannelCapacityGuard` - before any provider call, and again under the workspace's lock (ADR-131) |
 | Scheduling a campaign | **402** for the whole audience at once, in the service, before a single message goes out |
-| An agent turn with no AI turns left | No provider is called; the conversation is handed to a person with reason `AI_QUOTA_EXHAUSTED`, the turn is completed, and the job is released, not dead-lettered |
+| An agent turn with no AI turns left | No hold, no provider call; the conversation is handed to a person with reason `AI_QUOTA_EXHAUSTED`, the turn is completed, and the job is released, not dead-lettered |
+| An AI turn, campaign copy or follow-up on a channel the plan in force does not include | Refused as `channel_not_in_plan`, never charged (ADR-131); inbound and a person's reply on it are unaffected |
 | A customer's inbound message | **Never refused.** No check exists on that path at all |
 | Any read, including usage and entitlements | Never refused |
 | A person's own reply | Never refused |
@@ -638,7 +791,7 @@ The guards are declared like the role guards — `slot: AgentSlotDep` in the sig
 
 **Nothing on the inbound path is refused, and that is the most important line here.** The words belong to a customer who owes us nothing, and a non-2xx to Meta is retried until the subscription is disabled: a billing problem would become a permanently broken integration. Inbound messages count against the allowance and are never rejected because of it, so a workspace can exceed a period limit. That overage is visible in usage and is the platform's to price or to chase.
 
-A workspace that downgrades keeps everything it already has. Its limits stop it adding more; nothing deletes an agent or disconnects a number, because a plan change is not a reason to destroy somebody's work.
+A workspace that downgrades keeps everything it already has. Its limits stop it adding more; nothing deletes an agent or a connection, because a plan change is not a reason to destroy somebody's work. Channel connections that no longer fit are *disabled* - claim, credential and history kept - by the owner's choice or, after the grace, by age (ADR-131).
 
 ## Platform revenue reporting
 

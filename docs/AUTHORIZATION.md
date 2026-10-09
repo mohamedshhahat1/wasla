@@ -130,6 +130,8 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/auth/refresh` | **ANON** | no | client | - |
 | `POST` | `/api/v1/auth/register` | **ANON** | no | client | - |
 | `POST` | `/api/v1/auth/workspace` | **USER** | no | none | - |
+| `GET` | `/api/v1/billing/channel-capacity` | **MEMBER** | yes | workspace | - |
+| `POST` | `/api/v1/billing/channel-capacity/selection` | **OWNER** | yes | workspace | - |
 | `GET` | `/api/v1/billing/entitlements` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/billing/plans` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/billing/subscription` | **MEMBER** | yes | workspace | - |
@@ -149,6 +151,7 @@ authoritative answer is always the dependency tree.
 | `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace | - |
 | `DELETE` | `/api/v1/contacts/{contact_id}/opt-out` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/contacts/{contact_id}/opt-out` | **MEMBER** | yes | workspace | - |
+| `GET` | `/api/v1/channel-connections` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/conversations` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/conversations/{conversation_id}` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/conversations/{conversation_id}/assignment` | **MEMBER** | yes | workspace | - |
@@ -206,9 +209,9 @@ authoritative answer is always the dependency tree.
 | `GET` | `/api/v1/webhooks/whatsapp` | **ANON** | no | none | - |
 | `POST` | `/api/v1/webhooks/whatsapp` | **ANON** | no | none | - |
 | `GET` | `/api/v1/whatsapp/accounts` | **MEMBER** | yes | workspace | - |
-| `POST` | `/api/v1/whatsapp/accounts` | **ADMIN** | yes | workspace | whatsapp_numbers |
+| `POST` | `/api/v1/whatsapp/accounts` | **ADMIN** | yes | workspace | channel_connections, allowed_channel_types (409) |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/disable` | **ADMIN** | yes | workspace | - |
-| `POST` | `/api/v1/whatsapp/accounts/{account_id}/enable` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/whatsapp/accounts/{account_id}/enable` | **ADMIN** | yes | workspace | channel_connections, allowed_channel_types (409) |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/release` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/verify` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/workspace/members` | **MEMBER** | yes | workspace | - |
@@ -456,6 +459,8 @@ than a theoretical one. `TEAM_MEMBERS` counted every membership row, so removing
 a colleague on a two-seat plan would have consumed the seat permanently and made
 removal a one-way door out of the plan. `WHATSAPP_NUMBERS` excluded `disabled`
 but not `released`, so handing a number back would have cost a slot forever.
+(ADR-131 retired that key: `channel_connections` counts active, unreleased
+connections of every channel, by the same rule.)
 
 **Fixed** in `EntitlementService._resource_count`: the rule is "does this still
 occupy something?", not "does a row exist".

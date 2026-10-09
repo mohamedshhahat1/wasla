@@ -1,6 +1,6 @@
 # AI Agents
 
-**Status: Implemented** — an agent answers a customer end to end, in a worker of its own, grounded in the workspace's own documents; every provider call it makes is metered, every customer turn is charged once, and every turn records how it ended. Decisions: ADR-007, ADR-014, ADR-015, ADR-027, ADR-104, ADR-105.
+**Status: Implemented** — an agent answers a customer end to end, in a worker of its own, grounded in the workspace's own documents; every provider call it makes is metered, every customer turn that produced something usable is charged once - from one allowance for every channel - and every turn records how it ended. Decisions: ADR-007, ADR-014, ADR-015, ADR-027, ADR-104, ADR-105, ADR-131.
 
 Scope: agent configuration, orchestration, tool calling, and conversation memory. What an agent sees of an attached file is covered in [MEDIA.md](MEDIA.md); when an agent is stopped from replying at all, in [SENTIMENT.md](SENTIMENT.md).
 
@@ -49,16 +49,19 @@ Webhook stores + projects the message (each gets its position) -> enqueue a job
   -> claim the logical turn          [lost? another attempt owns it: stop]
   -> plan: HUMAN mode? no answering agent?          [complete, no charge]
   -> lifecycle gate: workspace suspended or deleted? conversation closed?
-     number disabled?                               [complete, no charge]
-  -> charge one AI turn AND engage the turn, one transaction
+     connection disabled? channel not in the plan in force?
+                                                    [complete, no charge]
+  -> hold one AI turn AND engage the turn, one transaction
      [no turn left: hand to a person as AI_QUOTA_EXHAUSTED, complete]
+     [lock contended: give the claim back, retry the job]
   -> load history (by sequence) -> sentiment on its newest customer message
      [connection released for the call; escalated? complete]
   -> build the memory window -> collect granted tools
   -> per round, up to 3:
        release the connection -> record one provider request -> Responses API
        -> reacquire -> run any tool calls, feed results back
-  -> commit the turn's token usage
+  -> settle the hold: charge it (words, or an executed handoff) or release it,
+     committed with the turn's token usage [raised before an outcome: release]
   -> read workspace, agent, conversation and number again, as columns
      [anything changed: suppress, complete with why]
   -> words?    shorten to fit WhatsApp if needed -> send one message
@@ -88,7 +91,8 @@ These stop a turn before it costs the customer a turn or the platform a provider
 - **No active default.** If nothing is configured to answer, the turn ends rather than falling back to some built-in prompt.
 - **A workspace no longer served.** A suspended workspace, and a deleted one for the whole of its retention window, gets no inference, no tool and no message. That includes the media that arrives in front of a turn: a file for a suspended or deleted workspace, or on a released number, is not downloaded, stored or read by a paid model - the media worker checks the same lifecycle fresh before Meta, the object store and every paid read, and records the file `SKIPPED` (MEDIA-08, [MEDIA.md](MEDIA.md)). Retention decides when data is erased; it does not keep the AI serving in the meantime. The guarantee holds *during* a turn as well as before it: the executor re-reads the workspace, the agent, the conversation and the number immediately before every tool call, so a workspace suspended while a model was composing writes no CRM record and schedules no customer message (TOOL-03). A follow-up a tool scheduled earlier is cancelled at the transition and refused again at send time, so nothing automated leaves a workspace that is not being served (TOOL-04).
 - **A closed conversation, or a disabled number.** A colleague closed it on purpose; a disabled number cannot send.
-- **No AI turn left.** The conversation is handed to a person with reason `AI_QUOTA_EXHAUSTED`. The customer is not told about the business's plan.
+- **No AI turn left.** No hold is taken and no provider called; the conversation is handed to a person with reason `AI_QUOTA_EXHAUSTED`. The customer is not told about the business's plan.
+- **Channel not in the plan in force** (ENT-16). A subscription that lapsed falls back to the default plan; on a connection of a type that plan does not include the turn completes as `channel_not_in_plan`, uncharged. Inbound is still stored and a person may reply.
 
 And one bounds the turn once it runs:
 
@@ -170,19 +174,30 @@ Empty-means-unrestricted is the right default for a developer's container and th
 
 **Neither is reachable from a prompt or a tool.** Model choice, token ceiling, temperature and system prompt are configuration, and no tool declares an argument by any of those names — `tests/integration/test_ai_security.py` asserts that structurally over the whole registry, so a tool added later cannot quietly expose one.
 
-### A turn is charged once, when it engages (ADR-104)
+### A turn is held when it engages and charged for a usable outcome (ADR-104, ADR-131)
 
 **What a customer's plan counts is AI turns, not provider requests.** One turn is a sentiment classification and one to three inference rounds. When the allowance was written in provider requests, the classifier — which nothing checked — spent the last unit of every period and the customer was never answered; four concurrent turns against an allowance of one produced four classifications and no replies (AI-02).
 
-`PERIOD_AI_TURNS` is reserved through `EntitlementService.consume` exactly once per turn, **in the same transaction that engages the turn**. A duplicate job that lost the claim therefore spends nothing, and a reservation that finds the turn no longer engageable rolls its charge back. A turn that will not reach a provider — a person owns the conversation, the workspace is suspended — is never charged.
+**One allowance for the whole workspace** (ENT-01). `period_ai_turns` is a single meter, whatever channel the conversation is on; each `ai_turn` charge records its channel, connection and turn for reporting, and `GET /billing/entitlements` breaks `used` down by channel for display only.
+
+**Held at engagement** (ENT-03). In the transaction that engages the turn, under a PostgreSQL advisory lock keyed on (workspace, `period_ai_turns`), the worker counts the cycle's charges plus the turns still holding a unit and writes a hold if one more fits. A duplicate job that lost the claim writes no hold; a turn that will not reach a provider — a person owns the conversation, the workspace is suspended, the channel is not in the plan in force — never holds. With nothing left, no provider is called and the conversation goes to a person as `AI_QUOTA_EXHAUSTED`. The lock is waited for up to 20 s; contention beyond that gives the turn's claim back and retries the job, which has engaged nothing.
+
+**Charged when it produced something usable** (ENT-02). When generation ends, the turn settles in one short transaction on its own row:
+
+| The turn produced | Settles as |
+| --- | --- |
+| Reply text — whether then sent, refused by the channel, or withheld because a colleague took over after it was written | charged, once |
+| A handoff the agent's own tool executed | charged |
+| A provider error or timeout past its retries, or anything else raised before an outcome | released |
+| An empty answer; a sentiment escalation before any composition | released |
+
+A settle is idempotent and a unique index allows one `ai_turn` per turn. A hold whose worker died stops counting after `AI_TURN_HOLD_TTL_SECONDS` and the billing sweep releases it; a settle that arrives after that still charges (`late_charge`), because usage that happened is never refused afterwards.
 
 **Provider requests are still recorded, as cost.** Every call writes `ai_request` with its tokens, tagged `purpose=agent` or `purpose=sentiment`: one row before each inference round, one for the classification. Nothing checks those against a limit. They are what the platform pays for, and the plan is what the customer bought; neither is derived from the other.
 
-**The concurrent race is closed, and the fix is platform-wide rather than AI-only.** `consume` takes a PostgreSQL advisory lock keyed on (workspace, limit), re-checks under it, records the meter, and flushes before releasing — so two workers cannot both spend the last permitted turn. It is a general primitive on `EntitlementService`: any limit fed by a usage meter can use it, and messages and campaigns are free to adopt it without a second mechanism being invented.
+**The concurrent race stays closed.** Ten turns overlapping against an allowance of three hold three, reply three and hand seven to a person; ten failing turns charge nothing and give every hold back (`tests/integration/test_ai_turn_charging.py`, mutation-tested — counting no holds, or taking the hold without the lock, fails it).
 
-The race was real and larger than an estimate suggested. With the lock removed, ten concurrent reservations against an allowance of three **all ten succeeded**; with it, exactly three do. `tests/integration/test_ai_security.py::test_concurrent_reservations_cannot_oversell_the_allowance` runs that on ten real connections, and it is mutation-tested: deleting the lock fails it.
-
-**What the lock does not do.** It is held only for the reservation's own short transaction — never across an inference, which would serialise every conversation a busy workspace is having. The worker therefore reserves on a separate session and commits before calling the provider. The consequence is deliberate and is the safe direction: a crash between reserving and calling bills a request that did not happen, where the alternative would give away requests that did.
+**What the lock does not do.** It is held only for the hold's own short transaction — never across an inference, which would serialise every conversation a busy workspace is having (ADR-080). The hold is what makes that safe: a turn still generating is counted by the next decision without anybody waiting for it.
 
 ## What leaves Wasla (ADR-055)
 

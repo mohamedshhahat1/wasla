@@ -60,7 +60,8 @@ from app.db.models.campaign import (
     OptOutVia,
     RecipientStatus,
 )
-from app.db.models.channel import ContactIdentity
+from app.db.models.channel import Channel, ContactIdentity
+from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import Contact, Message, MessageOrigin, MessageStatus
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
@@ -72,14 +73,21 @@ from app.repositories.campaign_repository import (
     CampaignRepository,
     CampaignStatistics,
 )
-from app.repositories.channel_repository import ContactIdentityRepository
+from app.repositories.channel_repository import (
+    ChannelConnectionRepository,
+    ContactIdentityRepository,
+)
+from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
-from app.services.entitlement_service import EntitlementService
+from app.services.entitlement_service import (
+    CHANNEL_NOT_IN_PLAN_DETAIL,
+    EntitlementService,
+)
 from app.services.messaging_service import MessagingService
-from app.services.opt_out import record_opt_out
+from app.services.opt_out import record_opt_out, record_resume
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -143,6 +151,7 @@ class CampaignService:
         tenant_id: uuid.UUID,
         messaging: MessagingService | None = None,
         entitlements: EntitlementService | None = None,
+        default_plan_code: str | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -162,6 +171,9 @@ class CampaignService:
         self._tenant_id = tenant_id
         self._messaging = messaging
         self._entitlements = entitlements
+        # The plan in force decides which channels a campaign may still send on
+        # (ENT-16); a workspace not served is on the default plan.
+        self._default_plan_code = default_plan_code
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
@@ -483,6 +495,8 @@ class CampaignService:
 
         sent = failed = skipped = 0
         throttled_until: datetime | None = None
+        # Asked once per batch: the plan in force does not change per person.
+        in_plan = await self._channel_in_plan(campaign)
         for recipient in claimed:
             if await self._campaigns.is_cancelled(campaign.id):
                 # A cancel landing mid-batch now stops at the next recipient
@@ -510,6 +524,12 @@ class CampaignService:
                     },
                 )
                 break
+            if not in_plan:
+                # ENT-16: a channel the plan in force does not include sends
+                # nothing automated. A policy outcome, never retried.
+                self._skip(recipient, CHANNEL_NOT_IN_PLAN_DETAIL)
+                skipped += 1
+                continue
             try:
                 outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
             except ConnectionThrottledError as error:
@@ -580,6 +600,19 @@ class CampaignService:
             skipped=skipped,
         )
 
+    async def _channel_of(self, campaign: Campaign) -> Channel:
+        """The channel this campaign sends on: its connection's."""
+        connection = await ChannelConnectionRepository(
+            self._session, tenant_id=self._tenant_id
+        ).require_by_id(campaign.account_id)
+        return connection.channel
+
+    async def _channel_in_plan(self, campaign: Campaign) -> bool:
+        """Whether the plan in force includes the channel this campaign sends on (ENT-16)."""
+        return await EntitlementService(
+            self._session, tenant_id=self._tenant_id, default_plan_code=self._default_plan_code
+        ).channel_in_plan(await self._channel_of(campaign))
+
     async def _blocking_reason(self, campaign: Campaign) -> str | None:
         """Why this campaign must not send at all, or None.
 
@@ -611,10 +644,12 @@ class CampaignService:
         contact = await self._contacts.get_by_id(recipient.contact_id)
         if contact is None:
             return self._skip(recipient, "This contact no longer exists.")
-        if not contact.accepts_campaigns:
+        if not await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).accepts_marketing(contact.id, await self._channel_of(campaign)):
             # Checked again here, not only when the audience was built. Somebody
             # who opts out while a campaign is running must not receive the rest
-            # of it.
+            # of it - on the channel this campaign sends on (ENT-19).
             return self._skip(recipient, "This contact has opted out of campaigns.")
 
         if recipient.message_id is not None:
@@ -790,10 +825,11 @@ class CampaignService:
         self,
         *,
         contact_id: uuid.UUID,
+        channel: Channel,
         source: OptOutSource,
         at: datetime | None = None,
     ) -> Contact:
-        """Record that this person does not want campaign messages.
+        """Record that this person wants no marketing on `channel` (ENT-19).
 
         Idempotent, and it never moves the timestamp forward. The first refusal
         is the one that matters: a second "stop" from someone already opted out
@@ -802,36 +838,53 @@ class CampaignService:
         contact = await self._contacts.require_by_id(contact_id)
         # The same writer every other route uses (OMNI-030): recorded by a
         # colleague, whoever they say decided.
-        record_opt_out(contact, source=source, via=OptOutVia.TEAM, at=at or datetime.now(UTC))
+        await record_opt_out(
+            self._session,
+            tenant_id=self._tenant_id,
+            contact_id=contact.id,
+            channel=channel,
+            source=source,
+            via=OptOutVia.TEAM,
+            at=at or datetime.now(UTC),
+        )
         return contact
 
-    async def opt_out_identities(self, contact_id: uuid.UUID) -> list[ContactIdentity]:
-        """Every identity a contact's opt-out covers: all of them (ADR-122).
+    async def opt_out_view(
+        self, contact_id: uuid.UUID
+    ) -> tuple[list[ContactIdentity], list[ContactChannelConsent]]:
+        """A contact's identities and its consent on each channel (ENT-19).
 
-        The opt-out is recorded on the person, so it applies to each way a
-        channel addresses them - their phone and any business-scoped id alike.
+        An opt-out covers the identities of its own channel - a WhatsApp phone
+        and a WhatsApp business-scoped id alike - and none of another's.
         """
-        return await ContactIdentityRepository(
+        identities = await ContactIdentityRepository(
             self._session, tenant_id=self._tenant_id
         ).list_for_contact(contact_id)
+        consents = await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).for_contact(contact_id)
+        return identities, consents
 
-    async def clear_opt_out(self, contact_id: uuid.UUID) -> Contact:
-        """Let this person receive campaigns again.
+    async def clear_opt_out(self, contact_id: uuid.UUID, *, channel: Channel) -> Contact:
+        """Let this person receive marketing on `channel` again (ENT-19).
 
         A person's own decision to stop is not one a workspace should undo
         lightly, and this exists mostly for the case a colleague recorded it in
         error. What it cannot do is be triggered by anything automatic: nothing
         on the inbound path calls it, so a customer writing back after opting
-        out does not silently re-enrol.
+        out does not silently re-enrol. The re-admission is recorded, so a
+        replay of older opt-out evidence cannot undo it (OMNI-030).
         """
         contact = await self._contacts.require_by_id(contact_id)
-        contact.marketing_opt_out_at = None
-        contact.opt_out_source = None
-        contact.opt_out_via = None
-        # Evidence of the re-admission, so a replay of older opt-out evidence
-        # cannot undo it (OMNI-030).
-        contact.marketing_resumed_at = datetime.now(UTC)
-        logger.info("campaign.opt_out_cleared", extra={"contact_id": str(contact.id)})
+        await record_resume(
+            self._session,
+            tenant_id=self._tenant_id,
+            contact_id=contact.id,
+            channel=channel,
+            source=OptOutSource.TEAM,
+            via=OptOutVia.TEAM,
+            at=datetime.now(UTC),
+        )
         return contact
 
 

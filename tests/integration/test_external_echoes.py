@@ -56,6 +56,7 @@ from app.services.channel_ingestion_service import (
 from app.services.messaging_service import MessagingService
 from app.workers.queue import AgentQueue
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.channel_plans import allow_channels
 from tests.integration.ai_harness import (
     FakeProviders,
     TurnRunner,
@@ -84,6 +85,8 @@ async def _setup(
     tenant = Tenant(name=f"Echoes {tag}", slug=f"echoes-{tag}")
     session.add(tenant)
     await session.flush()
+    # Automation runs on Instagram only under a plan that includes it (ENT-16).
+    await allow_channels(session, tenant.id)
     connection = ChannelConnection(
         id=uuid.uuid4(),
         tenant_id=tenant.id,
@@ -156,7 +159,6 @@ async def test_an_echo_of_wasla_s_own_send_changes_nothing(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     sent = await MessagingService(
         session=db_session, settings=settings, tenant_id=conversation.tenant_id, channels=registry

@@ -42,7 +42,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.campaign import OptOutSource
+from app.core.config import Settings
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -64,6 +64,7 @@ from app.db.models.whatsapp import WhatsAppAccount
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.workers.follow_up_worker import FollowUpWorker
+from tests.consent import seed_opt_out
 
 pytestmark = pytest.mark.integration
 
@@ -138,14 +139,11 @@ async def _scenario(
         display_phone_number="+201000000001",
         ownership_started_at=datetime.now(UTC) - timedelta(days=1),
     )
-    contact = Contact(
-        tenant_id=tenant.id,
-        wa_id=f"2015{uuid.uuid4().int % 10_000_000:07d}",
-        marketing_opt_out_at=datetime.now(UTC) if opted_out else None,
-        opt_out_source=OptOutSource.CUSTOMER if opted_out else None,
-    )
+    contact = Contact(tenant_id=tenant.id, wa_id=f"2015{uuid.uuid4().int % 10_000_000:07d}")
     session.add_all([account, contact])
     await session.flush()
+    if opted_out:
+        await seed_opt_out(session, tenant_id=tenant.id, contact_id=contact.id)
 
     conversation = Conversation(
         tenant_id=tenant.id,
@@ -217,7 +215,7 @@ async def test_an_agents_follow_up_on_a_human_owned_conversation_sends_nothing(
 
 
 async def test_a_colleagues_follow_up_on_a_human_owned_conversation_is_sent(
-    db_session: AsyncSession,
+    db_session: AsyncSession, settings: Settings
 ) -> None:
     """PD-CRM-1: a person's reminder on a conversation a person owns goes out (TG-5).
 
@@ -238,7 +236,7 @@ async def test_a_colleagues_follow_up_on_a_human_owned_conversation_is_sent(
 
     worker = FollowUpWorker(
         database=SessionHandle(db_session),  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        settings=settings,
         messaging_factory=factory,  # type: ignore[arg-type]
     )
     handled = await worker.run_once()
@@ -394,7 +392,7 @@ async def test_handing_back_to_the_ai_does_not_cancel_anything(
 
 
 async def test_the_sweep_sends_nothing_when_the_takeover_lands_after_the_claim(
-    db_session: AsyncSession,
+    db_session: AsyncSession, settings: Settings
 ) -> None:
     """The race, driven through the real worker rather than the service.
 
@@ -420,7 +418,7 @@ async def test_the_sweep_sends_nothing_when_the_takeover_lands_after_the_claim(
 
     worker = FollowUpWorker(
         database=SessionHandle(db_session),  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        settings=settings,
         messaging_factory=factory,  # type: ignore[arg-type]
     )
     handled = await worker.run_once()

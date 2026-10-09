@@ -49,7 +49,14 @@ from .channel import (
     IdentityScope,
     IdentitySource,
 )
+from .channel_capacity import (
+    CapacityReductionCause,
+    CapacityReductionStatus,
+    ChannelCapacityPreselection,
+    ChannelCapacityReduction,
+)
 from .channel_event import ChannelEvent, ChannelEventKind, ChannelEventState
+from .consent import ContactChannelConsent
 from .conversation import (
     Contact,
     Conversation,
@@ -230,7 +237,11 @@ __all__ = [
     "Campaign",
     "CampaignRecipient",
     "CampaignStatus",
+    "CapacityReductionCause",
+    "CapacityReductionStatus",
     "Channel",
+    "ChannelCapacityPreselection",
+    "ChannelCapacityReduction",
     "ChannelConnection",
     "ChannelEvent",
     "ChannelEventKind",
@@ -238,6 +249,7 @@ __all__ = [
     "ConnectionHealth",
     "ConnectionStatus",
     "Contact",
+    "ContactChannelConsent",
     "ContactIdentity",
     "Conversation",
     "ConversationMode",

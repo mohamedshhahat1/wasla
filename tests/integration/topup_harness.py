@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -20,9 +21,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.billing import LimitKey, Plan, Subscription
+from app.db.models.channel import Channel
 from app.db.models.invoice import Payment
 from app.db.models.tenant import Tenant
-from app.db.models.topup import TopupEntitlement, TopupProduct, TopupScope, TopupValidity
+from app.db.models.topup import (
+    TopupEntitlement,
+    TopupProduct,
+    TopupProductPlan,
+    TopupScope,
+    TopupValidity,
+)
 from app.db.models.user import User
 from app.integrations.billing.paymob import PaymobProvider, hmac_signature
 from app.services.checkout_service import CheckoutService
@@ -159,7 +167,7 @@ async def catalogue(session: AsyncSession) -> tuple[Plan, Plan]:
             "period_ai_turns": 100,
             "period_campaign_messages": 100,
             "storage_bytes": GIB,
-            "whatsapp_numbers": 1,
+            "channel_connections": 1,
             "team_members": 2,
             "knowledge_documents": 10,
         },
@@ -174,7 +182,7 @@ async def catalogue(session: AsyncSession) -> tuple[Plan, Plan]:
             "period_ai_turns": 5_000,
             "period_campaign_messages": 1_000,
             "storage_bytes": 10 * GIB,
-            "whatsapp_numbers": 1,
+            "channel_connections": 1,
             "team_members": 10,
             "knowledge_documents": 500,
         },
@@ -228,11 +236,15 @@ async def product(
     code: str | None = None,
     active: bool = True,
     public: bool = True,
+    channel_type: Channel | None = None,
+    eligible: Sequence[Plan] = (),
 ) -> TopupProduct:
+    """A product as platform staff would publish it; `eligible` empty offers every plan."""
     row = TopupProduct(
         code=code or f"tu-{uuid.uuid4().hex[:10]}",
         name=f"{entitlement.value} +{quantity}",
         entitlement_key=entitlement,
+        channel_type=channel_type,
         quantity=quantity,
         price=Decimal(price),
         currency="EGP",
@@ -243,6 +255,11 @@ async def product(
         validity_policy=TopupValidity.CURRENT_PERIOD_END,
     )
     session.add(row)
+    await session.flush()
+    for plan in eligible:
+        session.add(
+            TopupProductPlan(topup_product_id=row.id, plan_id=plan.id, created_at=base_now())
+        )
     await session.flush()
     return row
 
@@ -259,9 +276,9 @@ async def buy(
 ) -> tuple[StartedTopupCheckout, Payment]:
     """Open a top-up checkout through the real service; the page is not yet paid."""
     checkout = CheckoutService(session, tenant_id=tenant.id, provider=paymob.provider())
-    started = await TopupService(session, tenant_id=tenant.id, checkout=checkout).start_checkout(
-        item.id, actor=owner, idempotency_key=idempotency_key, now=now
-    )
+    started = await TopupService(
+        session, tenant_id=tenant.id, checkout=checkout, default_plan_code="starter"
+    ).start_checkout(item.id, actor=owner, idempotency_key=idempotency_key, now=now)
     payment = await session.get(Payment, started.payment_id)
     assert payment is not None
     return started, payment

@@ -68,9 +68,11 @@ from app.db.models.billing import (
     MAX_PLAN_NAME_LENGTH,
     MAX_PLAN_PRICE,
     RESOURCE_LIMITS,
+    RETIRED_LIMIT_KEY,
     TOPUP_LIMITS,
     LimitKey,
 )
+from app.db.models.channel import CHANNEL_TYPE, Channel
 from app.db.models.enums import _enum_type
 from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 
@@ -84,19 +86,35 @@ class TopupEntitlement(StrEnum):
     A native enum rather than a free string, so an unknown key is refused by
     the database as well as by the API: a product that raised a key nothing
     reads would be money taken for nothing.
+
+    `WHATSAPP_NUMBERS` is retired (ENT-05, ADR-131). PostgreSQL cannot drop an
+    enum label, so the member stays for the type to match the database, and a
+    trigger refuses it on every new product and purchase. A purchase written
+    before the change still counts, toward `channel_connections`.
     """
 
     PERIOD_MESSAGES = LimitKey.PERIOD_MESSAGES.value
     PERIOD_AI_TURNS = LimitKey.PERIOD_AI_TURNS.value
     PERIOD_CAMPAIGN_MESSAGES = LimitKey.PERIOD_CAMPAIGN_MESSAGES.value
     STORAGE_BYTES = LimitKey.STORAGE_BYTES.value
-    WHATSAPP_NUMBERS = LimitKey.WHATSAPP_NUMBERS.value
+    WHATSAPP_NUMBERS = RETIRED_LIMIT_KEY
     TEAM_MEMBERS = LimitKey.TEAM_MEMBERS.value
     KNOWLEDGE_DOCUMENTS = LimitKey.KNOWLEDGE_DOCUMENTS.value
+    # Appended, as `ALTER TYPE ... ADD VALUE` appends (0093).
+    CHANNEL_CONNECTIONS = LimitKey.CHANNEL_CONNECTIONS.value
 
     @property
     def limit_key(self) -> LimitKey:
+        if self is TopupEntitlement.WHATSAPP_NUMBERS:
+            # A pre-change purchase raised the number limit, which is now the
+            # channel capacity: the slots it bought are slots (ENT-05).
+            return LimitKey.CHANNEL_CONNECTIONS
         return LimitKey(self.value)
+
+    @property
+    def is_retired(self) -> bool:
+        """Whether no new product or purchase may name this key (ENT-05)."""
+        return self is TopupEntitlement.WHATSAPP_NUMBERS
 
     @property
     def is_capacity(self) -> bool:
@@ -104,9 +122,22 @@ class TopupEntitlement(StrEnum):
         return self.limit_key in RESOURCE_LIMITS
 
 
+#: The keys a product may still be created for: every member but the retired.
+SELLABLE_TOPUP_ENTITLEMENTS: Final[tuple[TopupEntitlement, ...]] = tuple(
+    member for member in TopupEntitlement if not member.is_retired
+)
+
+#: The keys whose quantity is channel slots: the current one and the retired
+#: number key a purchase written before ADR-131 may still carry.
+CHANNEL_SLOT_ENTITLEMENTS: Final[tuple[TopupEntitlement, ...]] = tuple(
+    member for member in TopupEntitlement if member.limit_key is LimitKey.CHANNEL_CONNECTIONS
+)
+
 # The two sets are one fact written twice; saying so at import is cheaper than
 # finding out from a top-up that raises nothing.
-if {member.limit_key for member in TopupEntitlement} != set(TOPUP_LIMITS):  # pragma: no cover
+if {member.limit_key for member in SELLABLE_TOPUP_ENTITLEMENTS} != set(
+    TOPUP_LIMITS
+):  # pragma: no cover
     raise RuntimeError("TopupEntitlement and TOPUP_LIMITS disagree about the top-up keys.")
 
 
@@ -195,6 +226,7 @@ TOPUP_SOURCE_TYPE = _enum_type(TopupSource, name="topup_source")
 TOPUP_STATUS_TYPE = _enum_type(TopupStatus, name="topup_status")
 
 _QUANTITY_CHECK = f"quantity > 0 AND quantity <= {MAX_LIMIT_VALUE}"
+_TYPED_CHECK = "channel_type IS NULL OR entitlement_key = 'channel_connections'"
 
 
 class TopupProduct(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
@@ -209,6 +241,11 @@ class TopupProduct(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         CheckConstraint(f"price >= 0 AND price <= {MAX_PLAN_PRICE}", name="price_in_range"),
         CheckConstraint(CURRENCY_CHECK_SQL, name="currency_supported"),
         CheckConstraint("(scope = 'tenant') = (tenant_id IS NOT NULL)", name="scope_tenant"),
+        # Only channel capacity can be typed (ENT-11): a slot usable by one
+        # channel type. Every other key is untyped.
+        CheckConstraint(_TYPED_CHECK, name="channel_type_for_channel_capacity"),
+        # A product nobody has priced is never offered (ENT-20, 0098).
+        CheckConstraint("NOT is_active OR price IS NOT NULL", name="priced_when_active"),
     )
 
     code: Mapped[str] = mapped_column(String(MAX_PLAN_CODE_LENGTH), nullable=False)
@@ -217,10 +254,17 @@ class TopupProduct(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     entitlement_key: Mapped[TopupEntitlement] = mapped_column(
         TOPUP_ENTITLEMENT_TYPE, nullable=False
     )
+    # A `channel_connections` slot usable only by connections of this channel
+    # type, or null for a general slot any allowed type may use (ENT-11). A
+    # typed product never opens a channel type: one the workspace's plan does
+    # not allow is not listed, not sold and not granted to it (ENT-12).
+    channel_type: Mapped[Channel | None] = mapped_column(CHANNEL_TYPE, nullable=True)
     # BIGINT: a storage top-up is counted in bytes, and 25 GiB does not fit in
     # an INTEGER.
     quantity: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Null until platform staff price it - the placeholder products the
+    # catalogue is seeded with wait here, inactive (ENT-20). Never invented.
+    price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     currency: Mapped[str] = mapped_column(
         String(CURRENCY_LENGTH), nullable=False, default=DEFAULT_CURRENCY
     )
@@ -248,13 +292,45 @@ class TopupProduct(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     )
 
     def visible_to(self, tenant_id: uuid.UUID) -> bool:
-        """Whether a customer of `tenant_id` may see and buy this now."""
+        """Whether a customer of `tenant_id` may see and buy this now.
+
+        Scope and state only. Plan eligibility (ENT-13) and the plan's allowed
+        channel types (ENT-12) depend on the workspace's plan, which
+        `TopupService` resolves and checks beside this.
+        """
         if not (self.is_active and self.is_public):
             return False
         return self.scope is TopupScope.GLOBAL or self.tenant_id == tenant_id
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic helper
         return f"TopupProduct(code={self.code!r}, entitlement={self.entitlement_key!r})"
+
+
+class TopupProductPlan(Base):
+    """One plan a top-up product is offered to (ENT-13).
+
+    A product with no rows here is offered to every plan - today's behaviour.
+    A product with rows is seen, bought and granted only by workspaces whose
+    pinned plan is one of them. Platform staff decide, through the product API.
+    Cascades both ways: eligibility is a property of the pair and means nothing
+    once either is gone, and neither a sold product nor a held plan can be
+    deleted anyway.
+    """
+
+    __tablename__ = "topup_product_plans"
+    __table_args__ = (Index("ix_topup_product_plans_plan_id", "plan_id"),)
+
+    topup_product_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topup_products.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("plans.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class TopupPurchase(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
@@ -319,6 +395,7 @@ class TopupPurchase(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
             "source <> 'purchase' OR (invoice_id IS NOT NULL AND topup_product_id IS NOT NULL)",
             name="purchase_is_invoiced",
         ),
+        CheckConstraint(_TYPED_CHECK, name="channel_type_for_channel_capacity"),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -345,6 +422,9 @@ class TopupPurchase(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
         TOPUP_ENTITLEMENT_TYPE, nullable=False
     )
     quantity: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Frozen with the rest (ENT-10): a typed slot stays the type it was bought
+    # or granted for, whatever the product becomes. Null is a general slot.
+    channel_type: Mapped[Channel | None] = mapped_column(CHANNEL_TYPE, nullable=True)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(
@@ -404,6 +484,7 @@ TOPUP_SNAPSHOT_FUNCTION_SQL: Final = """
            OR NEW.product_name IS DISTINCT FROM OLD.product_name
            OR NEW.entitlement_key IS DISTINCT FROM OLD.entitlement_key
            OR NEW.quantity IS DISTINCT FROM OLD.quantity
+           OR NEW.channel_type IS DISTINCT FROM OLD.channel_type
            OR NEW.unit_price IS DISTINCT FROM OLD.unit_price
            OR NEW.total_amount IS DISTINCT FROM OLD.total_amount
            OR NEW.currency IS DISTINCT FROM OLD.currency
@@ -483,6 +564,33 @@ TOPUP_GRANT_PAID_TRIGGER_SQL: Final = (
     "EXECUTE FUNCTION topup_purchases_refuse_unpaid_grant()"
 )
 
+# **`whatsapp_numbers` is retired** (ENT-05, ADR-131). The label stays in the
+# type because PostgreSQL cannot drop one; this refuses it on every new product
+# and purchase, and on a product re-pointed at it, so no writer - the API, a
+# fixture, SQL - can sell or grant the old key again. Restated verbatim by 0093.
+TOPUP_RETIRED_KEY_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION topup_refuse_retired_key() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    BEGIN
+        IF NEW.entitlement_key::text = 'whatsapp_numbers' THEN
+            RAISE EXCEPTION 'whatsapp_numbers is retired; sell channel_connections instead'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        RETURN NEW;
+    END;
+    $$
+    """
+TOPUP_PRODUCTS_RETIRED_KEY_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER topup_products_retired_key BEFORE INSERT OR UPDATE OF entitlement_key "
+    "ON topup_products FOR EACH ROW EXECUTE FUNCTION topup_refuse_retired_key()"
+)
+TOPUP_PURCHASES_RETIRED_KEY_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER topup_purchases_retired_key BEFORE INSERT ON topup_purchases "
+    "FOR EACH ROW EXECUTE FUNCTION topup_refuse_retired_key()"
+)
+
 for _statement in (
     TOPUP_SNAPSHOT_FUNCTION_SQL,
     TOPUP_SNAPSHOT_TRIGGER_SQL,
@@ -490,16 +598,25 @@ for _statement in (
     TOPUP_SCOPE_TRIGGER_SQL,
     TOPUP_GRANT_PAID_FUNCTION_SQL,
     TOPUP_GRANT_PAID_TRIGGER_SQL,
+    TOPUP_RETIRED_KEY_FUNCTION_SQL,
+    TOPUP_PURCHASES_RETIRED_KEY_TRIGGER_SQL,
 ):
     event.listen(TopupPurchase.__table__, "after_create", DDL(_statement))  # type: ignore[no-untyped-call]
+# The function exists by the time the products trigger needs it only if the
+# purchases table was built first; restating it here makes the order moot.
+event.listen(TopupProduct.__table__, "after_create", DDL(TOPUP_RETIRED_KEY_FUNCTION_SQL))  # type: ignore[no-untyped-call]
+event.listen(TopupProduct.__table__, "after_create", DDL(TOPUP_PRODUCTS_RETIRED_KEY_TRIGGER_SQL))  # type: ignore[no-untyped-call]
 
 
 __all__ = [
     "ACTIVE_TOPUP_STATUSES",
+    "CHANNEL_SLOT_ENTITLEMENTS",
     "PLATFORM_GRANT_NAME",
+    "SELLABLE_TOPUP_ENTITLEMENTS",
     "TOPUP_TRANSITIONS",
     "TopupEntitlement",
     "TopupProduct",
+    "TopupProductPlan",
     "TopupPurchase",
     "TopupScope",
     "TopupSource",

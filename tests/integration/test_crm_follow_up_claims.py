@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.core.exceptions import ConflictError
 from app.db.models.conversation import (
     Conversation,
@@ -158,7 +159,7 @@ async def _claim(crm: CrmWorld) -> dict[uuid.UUID, uuid.UUID | None]:
 def _worker(crm: CrmWorld, gate: GatedMessaging) -> FollowUpWorker:
     return FollowUpWorker(
         database=crm.database,
-        settings=object(),  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, environment="test"),
         messaging_factory=gate.factory,  # type: ignore[arg-type]
     )
 

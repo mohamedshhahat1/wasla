@@ -40,6 +40,7 @@ from app.db.models.billing import (
 )
 from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
 from app.db.models.campaign import Campaign, CampaignStatus
+from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -75,6 +76,7 @@ from app.schemas.platform_billing import (
 )
 from app.schemas.topup import TopupGrantCreate
 from app.services.campaign_service import CampaignService
+from app.services.channel_capacity import ChannelCapacityExceededError, ChannelCapacityGuard
 from app.services.checkout_service import APPLIED, DUPLICATE, REFUSED, CheckoutService
 from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
@@ -91,7 +93,7 @@ LIMITS = {
     "period_ai_turns": 5,
     "period_campaign_messages": 8,
     "storage_bytes": 1024**3,
-    "whatsapp_numbers": 1,
+    "channel_connections": 1,
     "team_members": 10,
     "knowledge_documents": 50,
 }
@@ -168,7 +170,7 @@ async def world(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[World]
             billing_anchor_at=now,
         )
         ai = _product(TopupEntitlement.PERIOD_AI_TURNS, 5, f"race-ai-{tag}")
-        numbers = _product(TopupEntitlement.WHATSAPP_NUMBERS, 2, f"race-num-{tag}")
+        numbers = _product(TopupEntitlement.CHANNEL_CONNECTIONS, 2, f"race-num-{tag}")
         session.add_all([subscription, ai, numbers])
         await session.commit()
         built = World(
@@ -676,10 +678,10 @@ async def test_capacity_creation_racing_a_topup_expiry_respects_each_moment(
         async def run() -> str:
             async with maker() as session:
                 try:
-                    await EntitlementService(
-                        session, tenant_id=world.tenant_id, clock=lambda: at
-                    ).reserve_or_refuse(LimitKey.WHATSAPP_NUMBERS)
-                except PlanLimitExceededError:
+                    await ChannelCapacityGuard(
+                        session, tenant_id=world.tenant_id, default_plan_code=None, clock=lambda: at
+                    ).reserve_or_refuse(Channel.WHATSAPP)
+                except ChannelCapacityExceededError:
                     await session.rollback()
                     return f"{label}:refused"
                 session.add(
@@ -710,7 +712,7 @@ async def test_capacity_creation_racing_a_topup_expiry_respects_each_moment(
     assert held == outcomes.count("before:created") + outcomes.count("after:created")
     assert held <= 3
     assert outcomes.count("after:created") <= 1
-    assert await _limit(maker, world, LimitKey.WHATSAPP_NUMBERS, at=after) == 1
+    assert await _limit(maker, world, LimitKey.CHANNEL_CONNECTIONS, at=after) == 1
 
 
 # ------------------------------------------------------------- custom plans
@@ -730,6 +732,7 @@ async def _custom_plan(
                 price=Decimal("150.00"),
                 currency="EGP",
                 interval=BillingInterval.MONTHLY,
+                allowed_channel_types=[Channel.WHATSAPP],
                 limits=dict(LIMITS),
                 scope=PlanScope.TENANT,
                 tenant_id=world.tenant_id,
@@ -842,6 +845,7 @@ async def test_two_publishes_of_one_custom_version_one_wins(
                             price=Decimal(price),
                             currency="EGP",
                             interval=BillingInterval.MONTHLY,
+                            allowed_channel_types=[Channel.WHATSAPP],
                             limits=dict(LIMITS),
                             expected_version=1,
                             reason="Race publish.",

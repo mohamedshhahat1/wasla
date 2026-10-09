@@ -9,8 +9,8 @@ shared ingestion, projection, identity, media and sending code through a channel
 that is not WhatsApp and see that none of it reaches for WhatsApp's rules.
 
 The application never registers it: `default_registry()` operates WhatsApp
-only, and `ChannelRegistry` refuses a channel whose meter is undecided unless a
-test passes `unmetered=True` (ADR-122).
+only. A test registers it in a registry of its own; its messages are counted
+under the neutral meters with their channel (ENT-22), like any channel's.
 
 The payload is this module's own shape, not any provider's:
 

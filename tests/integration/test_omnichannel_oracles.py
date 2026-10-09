@@ -65,8 +65,15 @@ from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
-from scripts.omnichannel_invariants import CENSUS, INVARIANTS, census, violations
+from scripts.omnichannel_invariants import (
+    CENSUS,
+    ENTITLEMENT_INVARIANTS,
+    INVARIANTS,
+    census,
+    violations,
+)
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.channel_plans import allow_channels
 
 pytestmark = pytest.mark.integration
 
@@ -126,6 +133,11 @@ async def _tenant(session: AsyncSession, label: str) -> Tenant:
     tenant = Tenant(name=f"Oracle {label} {tag}", slug=f"oracle-{label}-{tag}")
     session.add(tenant)
     await session.flush()
+    # A workspace holds a plan (ADR-131): one allowing every channel and the
+    # connections this population makes. Without it the workspace reads the
+    # deployment's default plan - one WhatsApp number on a migration-built
+    # schema - and the entitlement ledger would judge that, not the write paths.
+    await allow_channels(session, tenant.id, limits={"channel_connections": 10})
     return tenant
 
 
@@ -340,7 +352,6 @@ async def test_no_write_path_breaks_an_invariant(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.INSTAGRAM: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     instagram = await _synthetic(db_session, acme)
     now = int(datetime.now(UTC).timestamp())
@@ -376,7 +387,7 @@ async def test_no_write_path_breaks_an_invariant(
 
     after, census_after = await _sweep(db_session)
 
-    assert set(after) == {check.name for check in INVARIANTS}
+    assert set(after) == {check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS}
     added = {name: after[name] - before[name] for name in after if after[name] != before[name]}
     assert added == {}, f"the population broke invariants: {added}"
     grew = {name: census_after[name] - census_before[name] for name in census_after}
@@ -508,7 +519,7 @@ async def test_the_operator_checks_run_on_a_read_only_replica(prepared_database:
                 async with connection.begin():
                     await connection.execute(text("CREATE TEMPORARY TABLE oracle_probe (x int)"))
         assert "read-only" in str(refused.value).lower()
-        assert set(found) == {check.name for check in INVARIANTS}
+        assert set(found) == {check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS}
         assert set(counted) == {check.name for check in CENSUS}
     finally:
         await engine.dispose()

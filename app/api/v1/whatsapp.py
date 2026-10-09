@@ -18,7 +18,6 @@ from fastapi import APIRouter, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
-    NumberSlotDep,
     TenantAdminDep,
     WhatsAppAccountServiceDep,
 )
@@ -39,7 +38,13 @@ router = APIRouter(route_class=CommittingRoute, prefix="/whatsapp/accounts", tag
     status_code=status.HTTP_201_CREATED,
     summary="Connect a WhatsApp Business number",
     responses={
-        409: {"description": "Another workspace already holds this number."},
+        409: {
+            "description": (
+                "Another workspace already holds this number; or no channel slot is free "
+                "(`channel_capacity_exceeded`); or the plan does not include WhatsApp "
+                "(`channel_type_not_allowed`)."
+            )
+        },
         422: {"description": "Control of the number could not be proven with this credential."},
     },
 )
@@ -47,8 +52,9 @@ async def connect_account(
     payload: WhatsAppAccountConnectRequest,
     workspace: TenantAdminDep,
     service: WhatsAppAccountServiceDep,
-    slot: NumberSlotDep,
 ) -> WhatsAppAccountResponse:
+    # The channel capacity guard runs in the service: before Meta is asked,
+    # then authoritatively under the workspace's lock before the insert (ENT-08).
     account = await service.connect(
         # Named, so the trail says who claimed this number rather than only
         # that it appeared.
@@ -94,7 +100,19 @@ async def disable_account(
     return WhatsAppAccountResponse.model_validate(account)
 
 
-@router.post("/{account_id}/enable", summary="Resume traffic")
+@router.post(
+    "/{account_id}/enable",
+    summary="Resume traffic",
+    responses={
+        409: {
+            "description": (
+                "The number freed its channel slot when it was disabled and none is free "
+                "now (`channel_capacity_exceeded`), or the plan does not include WhatsApp "
+                "(`channel_type_not_allowed`)."
+            )
+        }
+    },
+)
 async def enable_account(
     account_id: uuid.UUID,
     workspace: TenantAdminDep,

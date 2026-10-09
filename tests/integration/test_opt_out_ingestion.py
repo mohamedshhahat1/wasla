@@ -22,6 +22,7 @@ from app.db.models.conversation import Contact
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.consent import consent_of, opted_out_at
 from tests.integration.identity_lookup import contact_by_phone
 
 pytestmark = pytest.mark.integration
@@ -93,9 +94,10 @@ async def test_a_customer_saying_stop_is_opted_out(db_session: AsyncSession) -> 
     assert outcome.opt_outs == 1
     contact = await _contact(db_session, account)
     assert contact is not None
-    assert contact.marketing_opt_out_at is not None
-    assert contact.opt_out_source is OptOutSource.CUSTOMER
-    assert contact.accepts_campaigns is False
+    consent = await consent_of(db_session, contact.id)
+    assert consent is not None and consent.marketing_opt_out_at is not None
+    assert consent.opt_out_source is OptOutSource.CUSTOMER
+    assert consent.accepts_marketing is False
 
 
 async def test_the_same_works_in_arabic(db_session: AsyncSession) -> None:
@@ -105,7 +107,7 @@ async def test_the_same_works_in_arabic(db_session: AsyncSession) -> None:
     await db_session.flush()
 
     contact = await _contact(db_session, account)
-    assert contact is not None and contact.accepts_campaigns is False
+    assert await opted_out_at(db_session, contact.id) is not None
 
 
 async def test_an_ordinary_message_changes_nothing(db_session: AsyncSession) -> None:
@@ -118,7 +120,7 @@ async def test_an_ordinary_message_changes_nothing(db_session: AsyncSession) -> 
 
     assert outcome.opt_outs == 0
     contact = await _contact(db_session, account)
-    assert contact is not None and contact.accepts_campaigns is True
+    assert await opted_out_at(db_session, contact.id) is None
 
 
 async def test_saying_stop_twice_does_not_move_the_timestamp(db_session: AsyncSession) -> None:
@@ -130,7 +132,8 @@ async def test_saying_stop_twice_does_not_move_the_timestamp(db_session: AsyncSe
     await db_session.flush()
     contact = await _contact(db_session, account)
     assert contact is not None
-    first = contact.marketing_opt_out_at
+    first = await opted_out_at(db_session, contact.id)
+    assert first is not None
 
     second = await WhatsAppIngestionService(session=db_session).ingest(
         _inbound(text="stop", message_id="wamid.two")
@@ -138,7 +141,7 @@ async def test_saying_stop_twice_does_not_move_the_timestamp(db_session: AsyncSe
     await db_session.flush()
 
     assert second.opt_outs == 0
-    assert contact.marketing_opt_out_at == first
+    assert await opted_out_at(db_session, contact.id) == first
 
 
 async def test_a_stop_still_produces_a_message_and_an_agent_job(db_session: AsyncSession) -> None:
@@ -150,4 +153,4 @@ async def test_a_stop_still_produces_a_message_and_an_agent_job(db_session: Asyn
 
     assert outcome.stored == 1
     contact = await _contact(db_session, account)
-    assert contact is not None and contact.accepts_campaigns is False
+    assert await opted_out_at(db_session, contact.id) is not None

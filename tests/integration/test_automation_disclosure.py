@@ -40,6 +40,7 @@ from app.services.inbox_service import InboxService
 from app.services.messaging_service import MessagingService
 from app.workers.queue import AgentQueue
 from tests.channel_fakes import BYTE_LIMIT, SyntheticAdapter, synthetic_payload
+from tests.channel_plans import plan_with_channels, subscribe
 from tests.integration.ai_harness import (
     FakeProviders,
     TurnRunner,
@@ -71,12 +72,14 @@ async def _page(ai_turns: TurnRunner) -> Page:
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.MESSENGER: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     async with ai_turns.database.session() as session:
         tenant = Tenant(name="Disclosure", slug=f"disclosure-{uuid.uuid4().hex[:10]}")
         session.add(tenant)
         await session.flush()
+        # The AI answers on Messenger only under a plan that includes it (ENT-16).
+        plan = await plan_with_channels(session)
+        await subscribe(session, tenant.id, plan)
         connection = ChannelConnection(
             id=uuid.uuid4(),
             tenant_id=tenant.id,
@@ -102,6 +105,7 @@ async def _page(ai_turns: TurnRunner) -> Page:
             phone_number_id=connection.external_account_id,
         )
     ai_turns.tenants.append(workspace.tenant_id)
+    ai_turns.plans.append(plan.code)
     return Page(workspace=workspace, connection=connection, adapter=adapter, registry=registry)
 
 

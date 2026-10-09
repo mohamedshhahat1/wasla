@@ -20,6 +20,7 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, Select, func, select
 
+from app.db.models.channel import Channel
 from app.db.models.usage import UsageEvent, UsageEventType, UsageUnit, unit_for
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
@@ -83,6 +84,8 @@ class UsageEventRepository(TenantScopedRepository[UsageEvent]):
         quantity: int = 1,
         occurred_at: datetime | None = None,
         meta: dict[str, Any] | None = None,
+        channel: Channel | None = None,
+        connection_id: uuid.UUID | None = None,
     ) -> UsageEvent:
         """Stage one metered occurrence.
 
@@ -100,6 +103,8 @@ class UsageEventRepository(TenantScopedRepository[UsageEvent]):
             unit=unit_for(event_type),
             occurred_at=occurred_at if occurred_at is not None else datetime.now(UTC),
             meta=meta,
+            channel=channel,
+            connection_id=connection_id,
         )
         return self.add(event)
 

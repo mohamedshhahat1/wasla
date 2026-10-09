@@ -55,7 +55,7 @@ from sqlalchemy import (
     event,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.db.base import Base, RevisionedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -86,6 +86,10 @@ MAX_PLAN_PRICE: Final = Decimal("1000000.00")
 # and sums that are 64-bit in PostgreSQL; anything bigger than this is a typo
 # rather than a pricing decision, and "unlimited" is spelled `null`.
 MAX_LIMIT_VALUE: Final = 10**15
+# A `channel_kind` label as an allowed-channel-types element (ENT-09). The
+# labels are short words; the bound is a ceiling, and a trigger checks each
+# element is a label the vocabulary knows.
+MAX_CHANNEL_LABEL_LENGTH: Final = 32
 
 
 class LimitKey(StrEnum):
@@ -110,9 +114,16 @@ class LimitKey(StrEnum):
     "how much has this workspace ever stored" and cannot answer "how much is it
     holding". A capacity limit needs the second question, so it is a `SUM` over
     the rows that still name an object (ADR-091).
+
+    `CHANNEL_CONNECTIONS` replaced `whatsapp_numbers` (ENT-05, ADR-131): every
+    active connection on any channel takes one slot, a WhatsApp number among
+    them. The retired key is not a member - a new plan version, custom plan or
+    top-up naming it is refused as an unknown key - and the versions published
+    before the change are read through `app.services.entitlement_terms`, the
+    one place that still knows the old name.
     """
 
-    WHATSAPP_NUMBERS = "whatsapp_numbers"
+    CHANNEL_CONNECTIONS = "channel_connections"
     AGENTS = "agents"
     # How many live workspaces one *account* may own. The only key here that is
     # not a property of a workspace, which is why it needs its own category
@@ -143,7 +154,7 @@ class LimitKey(StrEnum):
 # a behavioural distinction that decides which query runs.
 RESOURCE_LIMITS: Final[frozenset[LimitKey]] = frozenset(
     {
-        LimitKey.WHATSAPP_NUMBERS,
+        LimitKey.CHANNEL_CONNECTIONS,
         LimitKey.AGENTS,
         LimitKey.TEAM_MEMBERS,
         LimitKey.KNOWLEDGE_DOCUMENTS,
@@ -163,17 +174,23 @@ PERIOD_LIMITS: Final[frozenset[LimitKey]] = frozenset(LimitKey) - RESOURCE_LIMIT
 # Written out rather than derived: which limits are sold as add-ons is a product
 # decision, and `AGENTS` and `OWNED_WORKSPACES` are deliberately not among them.
 # The period keys reset with the billing period; the rest are capacities.
+# `CHANNEL_CONNECTIONS` took `whatsapp_numbers`' place (ENT-05, ADR-131).
 TOPUP_LIMITS: Final[frozenset[LimitKey]] = frozenset(
     {
         LimitKey.PERIOD_MESSAGES,
         LimitKey.PERIOD_AI_TURNS,
         LimitKey.PERIOD_CAMPAIGN_MESSAGES,
         LimitKey.STORAGE_BYTES,
-        LimitKey.WHATSAPP_NUMBERS,
+        LimitKey.CHANNEL_CONNECTIONS,
         LimitKey.TEAM_MEMBERS,
         LimitKey.KNOWLEDGE_DOCUMENTS,
     }
 )
+
+# The key `CHANNEL_CONNECTIONS` replaced (ENT-05). Spelled here once so a guard
+# can refuse it on new rows; reading it is `app.services.entitlement_terms`'
+# job alone.
+RETIRED_LIMIT_KEY: Final = "whatsapp_numbers"
 
 # The one key a plan names and nothing refuses: an inbound customer message is
 # never turned away for a business's billing (ADR-030). A top-up raises the
@@ -408,6 +425,12 @@ class Plan(Base, UUIDPrimaryKeyMixin, TimestampMixin, RevisionedMixin):
     # Display order on a pricing page. Stored because "cheapest first" stops
     # being right the moment a plan is priced by usage rather than by month.
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The channel types of the most recently published version, mirrored like
+    # `limits` (ENT-09). Null on a row nothing has published since the field
+    # existed; a version materialised from such a row takes the legacy set.
+    allowed_channel_types: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String(MAX_CHANNEL_LABEL_LENGTH)), nullable=True
+    )
     # Who this plan may be sold to - see `PlanScope`. Derived for the
     # catalogue's older reader: `is_public` is true exactly when this is PUBLIC.
     scope: Mapped[PlanScope] = mapped_column(
@@ -526,6 +549,14 @@ class PlanVersion(Base, UUIDPrimaryKeyMixin):
     interval: Mapped[BillingInterval] = mapped_column(BILLING_INTERVAL_TYPE, nullable=False)
     trial_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     limits: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # The channel types a workspace on this version may connect and automate
+    # (ENT-09) - a set of `Channel` labels, separate from capacity and never a
+    # top-up target. Required on every version published since the field
+    # existed (a trigger refuses NULL); NULL only on versions published before
+    # it, which are read as the legacy set, WhatsApp alone - never as "all".
+    allowed_channel_types: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String(MAX_CHANNEL_LABEL_LENGTH)), nullable=True
+    )
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # Who published it. SET NULL, because the record of the terms outlives the
@@ -663,6 +694,59 @@ _PLAN_VERSION_IMMUTABLE_TRIGGER = DDL(  # type: ignore[no-untyped-call]
 )
 event.listen(PlanVersion.__table__, "after_create", _PLAN_VERSION_IMMUTABLE_FUNCTION)
 event.listen(PlanVersion.__table__, "after_create", _PLAN_VERSION_IMMUTABLE_TRIGGER)
+
+# **A version published since ADR-131 states its channel types and never names
+# the retired key** (ENT-05, ENT-09). INSERT only: rows published before the
+# field existed keep NULL, read as WhatsApp alone, and the immutability trigger
+# above already refuses every UPDATE - so neither is ever rewritten and neither
+# trigger is ever disabled. Each element must be a `channel_kind` label, listed
+# once; an empty set is an explicit "no channel". Restated verbatim by 0093.
+PLAN_VERSION_ENTITLEMENT_TERMS_FUNCTION_SQL: Final = """
+    CREATE OR REPLACE FUNCTION plan_versions_entitlement_terms() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = public, pg_catalog
+    AS $$
+    DECLARE
+        label text;
+    BEGIN
+        IF NEW.allowed_channel_types IS NULL THEN
+            RAISE EXCEPTION 'a plan version states the channel types it allows'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF NEW.limits ? 'whatsapp_numbers' THEN
+            RAISE EXCEPTION 'whatsapp_numbers is retired; publish channel_connections instead'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        IF array_position(NEW.allowed_channel_types, NULL) IS NOT NULL
+           OR cardinality(NEW.allowed_channel_types)
+              <> (SELECT count(DISTINCT element) FROM unnest(NEW.allowed_channel_types) element)
+        THEN
+            RAISE EXCEPTION 'each allowed channel type is named once'
+                USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+        FOREACH label IN ARRAY NEW.allowed_channel_types LOOP
+            IF NOT label = ANY (enum_range(NULL::channel_kind)::text[]) THEN
+                RAISE EXCEPTION 'unknown channel type in a plan version: %', label
+                    USING ERRCODE = 'integrity_constraint_violation';
+            END IF;
+        END LOOP;
+        RETURN NEW;
+    END;
+    $$
+    """
+PLAN_VERSION_ENTITLEMENT_TERMS_TRIGGER_SQL: Final = (
+    "CREATE TRIGGER plan_versions_entitlement_terms BEFORE INSERT ON plan_versions "
+    "FOR EACH ROW EXECUTE FUNCTION plan_versions_entitlement_terms()"
+)
+event.listen(
+    PlanVersion.__table__,
+    "after_create",
+    # `DDL` formats its text with `%`, so the RAISE placeholder is doubled.
+    DDL(PLAN_VERSION_ENTITLEMENT_TERMS_FUNCTION_SQL.replace("%", "%%")),  # type: ignore[no-untyped-call]
+)
+event.listen(
+    PlanVersion.__table__, "after_create", DDL(PLAN_VERSION_ENTITLEMENT_TERMS_TRIGGER_SQL)  # type: ignore[no-untyped-call]
+)
 
 # **A priced version is published with its price** (ADR-116). The terms a
 # version is inserted with become its first `plan_prices` row in the same

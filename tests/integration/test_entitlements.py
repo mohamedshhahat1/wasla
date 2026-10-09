@@ -155,7 +155,7 @@ async def test_refusing_says_what_to_do_about_it(db_session: AsyncSession) -> No
 async def test_a_disabled_number_frees_its_slot(db_session: AsyncSession) -> None:
     """It is connected to nothing, and charging for it would charge for nothing."""
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, {LimitKey.WHATSAPP_NUMBERS: 1})
+    plan = await _plan(db_session, {LimitKey.CHANNEL_CONNECTIONS: 1})
     await _subscribe(db_session, tenant, plan)
     db_session.add(
         WhatsAppAccount(
@@ -168,7 +168,7 @@ async def test_a_disabled_number_frees_its_slot(db_session: AsyncSession) -> Non
     )
     await db_session.flush()
 
-    assert (await _service(db_session, tenant).check(LimitKey.WHATSAPP_NUMBERS)).used == 0
+    assert (await _service(db_session, tenant).check(LimitKey.CHANNEL_CONNECTIONS)).used == 0
 
 
 async def test_a_draft_agent_still_occupies_a_slot(db_session: AsyncSession) -> None:
@@ -411,7 +411,7 @@ async def test_a_released_number_frees_its_slot(db_session: AsyncSession) -> Non
     would make handing a number back a permanent charge.
     """
     tenant = await _tenant(db_session)
-    plan = await _plan(db_session, {LimitKey.WHATSAPP_NUMBERS: 1})
+    plan = await _plan(db_session, {LimitKey.CHANNEL_CONNECTIONS: 1})
     await _subscribe(db_session, tenant, plan)
     db_session.add(
         WhatsAppAccount(
@@ -425,7 +425,7 @@ async def test_a_released_number_frees_its_slot(db_session: AsyncSession) -> Non
     )
     await db_session.flush()
 
-    assert (await _service(db_session, tenant).check(LimitKey.WHATSAPP_NUMBERS)).used == 0
+    assert (await _service(db_session, tenant).check(LimitKey.CHANNEL_CONNECTIONS)).used == 0
 
 
 async def test_a_revoked_member_frees_their_seat(db_session: AsyncSession) -> None:

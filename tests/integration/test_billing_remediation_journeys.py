@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
 from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
+from app.db.models.channel import Channel
 from app.db.models.enums import TenantStatus
 from app.db.models.invoice import (
     CollectionState,
@@ -514,6 +515,7 @@ async def test_a_checkout_settles_on_the_terms_it_was_opened_at(db_session: Asyn
             price=Decimal("149.00"),
             currency="EGP",
             interval="monthly",
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 3},
             expected_version=latest,
             reason="Repriced while a customer's page was open.",
@@ -793,6 +795,7 @@ async def test_a_price_change_reaches_new_customers_and_not_existing_ones(
             price=Decimal("149.00"),
             currency="EGP",
             interval="monthly",
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 3},
             expected_version=latest,
             reason="New price for new customers.",
@@ -851,6 +854,7 @@ async def test_a_scheduled_migration_moves_a_subscriber_only_when_the_renewal_is
             price=Decimal("149.00"),
             currency="EGP",
             interval="monthly",
+            allowed_channel_types=[Channel.WHATSAPP],
             limits={"agents": 8},
             expected_version=versions[0].version,
             reason="Repricing.",

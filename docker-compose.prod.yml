@@ -323,6 +323,8 @@ services:
       # about it from whichever process starts first.
       BILLING_PAST_DUE_DAYS: ${BILLING_PAST_DUE_DAYS:-7}
       BILLING_SUSPEND_AFTER_DAYS: ${BILLING_SUSPEND_AFTER_DAYS:-30}
+      AI_TURN_HOLD_TTL_SECONDS: ${AI_TURN_HOLD_TTL_SECONDS:-900}
+      CHANNEL_CAPACITY_GRACE_DAYS: ${CHANNEL_CAPACITY_GRACE_DAYS:-7}
     volumes:
       # Shared with the worker: one writes the file, the other serves it back.
       # This is a single-host arrangement, and it is the constraint ADR-023
@@ -521,6 +523,8 @@ services:
       # Dunning (ADR-061). This is the process that acts on them.
       BILLING_PAST_DUE_DAYS: ${BILLING_PAST_DUE_DAYS:-7}
       BILLING_SUSPEND_AFTER_DAYS: ${BILLING_SUSPEND_AFTER_DAYS:-30}
+      AI_TURN_HOLD_TTL_SECONDS: ${AI_TURN_HOLD_TTL_SECONDS:-900}
+      CHANNEL_CAPACITY_GRACE_DAYS: ${CHANNEL_CAPACITY_GRACE_DAYS:-7}
     volumes:
       - media-data:${MEDIA_STORAGE_PATH:-/var/lib/wasla/media}
     depends_on:

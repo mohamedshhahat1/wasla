@@ -79,7 +79,6 @@ async def _sent(
             Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter()),
             Channel.MESSENGER: cast(ChannelAdapter, adapter),
         },
-        unmetered=True,
     )
     message = await MessagingService(
         session=session, settings=settings, tenant_id=tenant.id, channels=registry

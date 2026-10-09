@@ -10,6 +10,7 @@ quietly drops one of them fails immediately rather than in production.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 from sqlalchemy import Index, Table
 
@@ -25,7 +26,8 @@ from app.db.models.campaign import (
     OptOutSource,
     RecipientStatus,
 )
-from app.db.models.conversation import Contact
+from app.db.models.channel import Channel
+from app.db.models.consent import ContactChannelConsent
 
 CAMPAIGNS = Base.metadata.tables["campaigns"]
 RECIPIENTS = Base.metadata.tables["campaign_recipients"]
@@ -91,10 +93,18 @@ def test_a_campaign_must_name_a_template() -> None:
     assert CAMPAIGNS.c.template_id.nullable is False
 
 
-def test_a_contact_records_when_it_opted_out_not_merely_that_it_did() -> None:
-    assert "marketing_opt_out_at" in CONTACTS.c
-    assert CONTACTS.c.marketing_opt_out_at.nullable is True
-    assert "opt_out_source" in CONTACTS.c
+def test_a_consent_records_when_it_opted_out_not_merely_that_it_did() -> None:
+    """Per channel (ENT-19): the contact holds no opt-out of its own."""
+    consents = cast(Table, ContactChannelConsent.__table__)
+    assert "marketing_opt_out_at" in consents.c
+    assert consents.c.marketing_opt_out_at.nullable is True
+    assert "opt_out_source" in consents.c
+    assert [column.name for column in consents.primary_key.columns] == [
+        "tenant_id",
+        "contact_id",
+        "channel",
+    ]
+    assert "marketing_opt_out_at" not in CONTACTS.c
 
 
 # -------------------------------------------------------------- the vocabulary
@@ -139,15 +149,15 @@ def test_a_recipient_gives_up_after_a_few_attempts() -> None:
     assert recipient.is_exhausted is True
 
 
-def test_a_contact_that_has_not_opted_out_accepts_campaigns() -> None:
-    assert Contact(wa_id="201000000001").accepts_campaigns is True
+def test_a_consent_with_no_opt_out_accepts_marketing() -> None:
+    assert ContactChannelConsent(channel=Channel.WHATSAPP).accepts_marketing is True
 
 
-def test_a_contact_that_opted_out_does_not() -> None:
-    contact = Contact(
-        wa_id="201000000001",
+def test_a_consent_that_opted_out_does_not() -> None:
+    consent = ContactChannelConsent(
+        channel=Channel.WHATSAPP,
         marketing_opt_out_at=datetime.now(UTC),
         opt_out_source=OptOutSource.CUSTOMER,
     )
 
-    assert contact.accepts_campaigns is False
+    assert consent.accepts_marketing is False

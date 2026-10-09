@@ -42,6 +42,7 @@ from app.db.models.agent_turn import AgentTurn
 from app.db.models.analytics import AnalyticsEvent
 from app.db.models.audit import AuditLog
 from app.db.models.billing import BillingInterval, Plan
+from app.db.models.channel import Channel
 from app.db.models.conversation import Conversation, Message, MessageDirection
 from app.db.models.follow_up import FollowUp
 from app.db.models.lead import Lead
@@ -399,8 +400,15 @@ class TurnRunner:
         self.tenants.append(workspace.tenant_id)
         return workspace
 
-    async def plan(self, limits: dict[str, int]) -> str:
-        """A catalogue row of this test's own, used as the default plan."""
+    async def plan(
+        self, limits: dict[str, int], *, channels: Sequence[Channel] | None = None
+    ) -> str:
+        """A catalogue row of this test's own, used as the default plan.
+
+        `channels` are the types it allows; unstated, WhatsApp alone, as any
+        version published before ADR-131 is read (ENT-09). A test that answers
+        on a second channel names it, as that channel's customer's plan would.
+        """
         code = f"ai-{uuid.uuid4().hex[:10]}"
         async with self.database.session() as session:
             session.add(
@@ -411,6 +419,9 @@ class TurnRunner:
                     currency="EGP",
                     interval=BillingInterval.MONTHLY,
                     limits=limits,
+                    allowed_channel_types=(
+                        [channel.value for channel in channels] if channels is not None else None
+                    ),
                 )
             )
         self.plans.append(code)

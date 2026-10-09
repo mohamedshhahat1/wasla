@@ -24,12 +24,15 @@ ends the loop rather than taking another round.
 
 **What a customer's plan pays for is a turn, not a provider call** (AI-02). One
 turn is a sentiment classification and one to three inference rounds. The
-allowance is `PERIOD_AI_TURNS`, reserved exactly once, in the same transaction
-that engages the turn - so a duplicate job that lost the claim spends nothing,
-and a reservation that could not engage is rolled back rather than charged for a
-turn somebody else is running. Every provider call is still recorded as
-`AI_REQUEST` with its tokens, because that is what the platform pays for; it is
-cost accounting and nothing checks it against a limit.
+allowance is `PERIOD_AI_TURNS`, one per workspace whatever the channel
+(ENT-01), and a turn is charged only for a usable outcome (ENT-02): it takes a
+**hold** on one unit in the same transaction that engages it - so a duplicate
+job that lost the claim holds nothing, and concurrent turns cannot all see "one
+left" - and settles it once the provider has answered: one `AI_TURN` charge for
+a reply or an executed handoff, the hold given back for an empty answer, an
+escalation or a provider failure (ADR-131). Every provider call is still
+recorded as `AI_REQUEST` with its tokens, because that is what the platform pays
+for; it is cost accounting and nothing checks it against a limit.
 
 **Why this queue retries less than the others.** An agent turn is not
 idempotent. It reserves an allowance, it may call tools that write rows, and
@@ -51,28 +54,33 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.disclosure import compose, disclosure_due, disclosure_for
 from app.agents.lifecycle import refusal_now
-from app.agents.orchestrator import AgentOrchestrator, plan_turn
+from app.agents.orchestrator import AgentOrchestrator, AgentOutcome, plan_turn
 from app.agents.registry import ToolRegistry
 from app.agents.reply import fallback_reply, prepare_channel_reply
 from app.channels.policy import ChannelCapabilities
 from app.channels.registry import ChannelRegistry, default_registry
 from app.core.config import Settings
+from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
-from app.core.telemetry import record_agent_turn_outcome
+from app.core.telemetry import (
+    record_agent_turn_outcome,
+    record_ai_turn_charge,
+    record_entitlement_refusal,
+)
 from app.core.tracing import JOB_OUTCOME
+from app.db.errors import is_retryable, sqlstate
 from app.db.models.agent import Agent
-from app.db.models.agent_turn import TurnOutcome
+from app.db.models.agent_turn import AITurnReleaseReason, TurnOutcome
 from app.db.models.analytics import AnalyticsSource
-from app.db.models.billing import LimitKey
 from app.db.models.conversation import Message, MessageDeliveryState, MessageOrigin
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.models.tenant import Tenant
-from app.db.models.usage import UsageEventType
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient, build_http_client
 from app.integrations.openai.embeddings import EMBED_QUERY, EmbeddingsClient
@@ -82,6 +90,7 @@ from app.repositories.agent_turn_repository import (
     TriggerNotAnswerableError,
 )
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
+from app.services.ai_turn_charge import AITurnCharge, SettleResult, record_settlement
 from app.services.entitlement_service import EntitlementService
 from app.services.inbox_service import InboxService
 from app.services.messaging_service import MessagingService
@@ -165,14 +174,14 @@ AGENT_RETRY = RetryPolicy(
 
 
 class _Reservation(StrEnum):
-    """What taking a turn's allowance concluded."""
+    """What taking a turn's hold on the allowance concluded."""
 
-    #: Charged, and the turn is engaged. The provider may now be called.
+    #: Held, and the turn is engaged. The provider may now be called.
     RESERVED = "reserved"
-    #: The plan has no turn left. Nothing was charged and nothing engaged.
+    #: The plan has no turn left. Nothing was held and nothing engaged.
     REFUSED = "refused"
-    #: Charged and then rolled back, because the turn was no longer ours to
-    #: engage. Somebody else is running it; this attempt does nothing.
+    #: The turn was no longer ours to engage, so it holds nothing. Somebody
+    #: else is running it; this attempt does nothing.
     LOST = "lost"
 
 
@@ -353,8 +362,8 @@ class AgentWorker:
         """Record one provider request, in a transaction of its own, before it is made.
 
         Cost accounting and not entitlement (AI-02): nothing here can refuse,
-        because the customer's allowance was one turn and it was reserved
-        before the turn engaged. A transaction of its own because the turn's
+        because the customer's allowance was one turn and it was held before
+        the turn engaged. A transaction of its own because the turn's
         session has just handed its connection back for the inference, and a
         write on it would check one straight out again (ADR-080).
 
@@ -444,39 +453,65 @@ class AgentWorker:
             )
         return turn_id
 
-    async def _reserve_turn(self, job: AgentJob) -> _Reservation:
-        """Charge this turn to the plan and engage it, as one transaction.
+    async def _reserve_turn(self, job: AgentJob, trigger_message_id: uuid.UUID) -> _Reservation:
+        """Hold one unit of the plan's AI allowance and engage the turn, as one transaction.
 
-        One transaction because the two facts must not disagree (AI-02). A
-        charge without the engagement is a customer billed for a turn that
-        another attempt will run and bill again; an engagement without the
-        charge is a turn the plan never paid for. Together, the point of no
-        return and the charge are the same commit.
+        One transaction because the two facts must not disagree (ENT-03). A hold
+        without the engagement is allowance spoken for by a turn that will
+        never run; an engagement without the hold is a turn a concurrent one
+        could not see when it counted. Together, the point of no return and the
+        hold are the same commit.
 
-        The allowance is taken under `consume`'s advisory lock, so N workers
-        racing an allowance of N get exactly N reservations - and the lock is
-        released when this short transaction ends, not held across an
-        inference. A turn that turns out not to be ours to engage rolls its
-        charge back; a trigger-less legacy job has no turn row to engage and
-        is charged on its own.
+        The decision is taken under the workspace's `period_ai_turns` advisory
+        lock, counting charges and open holds together, so N workers racing an
+        allowance of N hold exactly N - and the lock is released when this
+        short transaction ends, never held across an inference (ADR-080). A
+        turn that turns out not to be ours to engage writes no hold: the
+        conditional engage matches no row, and the transaction is rolled back.
+        Nothing is charged here; the turn is charged when it settles.
+
+        Contention outlasting even the hold's own lock wait - a burst of turns
+        on one workspace - is retried rather than lost (ENT-03): nothing has
+        engaged and nothing is held, so the claim is given back and the job
+        fails as a dependency that is unavailable, which the queue retries
+        before engagement. A turn refused for contention is not a customer's
+        message to dead-letter.
         """
+        try:
+            return await self._hold_and_engage(job, trigger_message_id)
+        except DBAPIError as error:
+            if not is_retryable(error):
+                raise
+            async with self._database.session() as giving_back:
+                await AgentTurnRepository(giving_back, tenant_id=job.tenant_id).release_claim(
+                    trigger_message_id=trigger_message_id, worker_id=self._queue.worker_id
+                )
+            logger.warning(
+                "agent.turn_hold_contended",
+                extra={
+                    "event": "agent.turn_hold_contended",
+                    "conversation_id": str(job.conversation_id),
+                    "sqlstate": sqlstate(error),
+                },
+            )
+            raise DependencyUnavailableError(
+                "The workspace's AI allowance is busy; the turn will be retried."
+            ) from error
+
+    async def _hold_and_engage(self, job: AgentJob, trigger_message_id: uuid.UUID) -> _Reservation:
+        """The reservation itself: hold under the workspace's lock, then engage, one commit."""
         async with self._database.session() as reservation:
             entitlements = EntitlementService(
                 reservation,
                 tenant_id=job.tenant_id,
                 default_plan_code=self._settings.default_plan_code,
+                ai_turn_hold_ttl=timedelta(seconds=self._settings.ai_turn_hold_ttl_seconds),
             )
-            allowance = await entitlements.consume(
-                LimitKey.PERIOD_AI_TURNS,
-                event_type=UsageEventType.AI_TURN,
-                meta={"conversation_id": str(job.conversation_id)},
-            )
+            allowance = await entitlements.hold_ai_turn()
             if not allowance.allowed:
                 return _Reservation.REFUSED
-            if job.trigger_message_id is None:
-                return _Reservation.RESERVED
             engaged = await AgentTurnRepository(reservation, tenant_id=job.tenant_id).engage(
-                trigger_message_id=job.trigger_message_id
+                trigger_message_id=trigger_message_id, hold=True
             )
             if not engaged:
                 await reservation.rollback()
@@ -485,11 +520,54 @@ class AgentWorker:
                     extra={
                         "event": "agent.turn_engaged_elsewhere",
                         "conversation_id": str(job.conversation_id),
-                        "trigger_message_id": str(job.trigger_message_id),
+                        "trigger_message_id": str(trigger_message_id),
                     },
                 )
                 return _Reservation.LOST
             return _Reservation.RESERVED
+
+    async def _release_hold(self, job: AgentJob, turn_id: uuid.UUID) -> None:
+        """Give a failed turn's hold back, in a transaction of its own (ENT-02).
+
+        The turn raised before it produced an outcome - a provider error or
+        timeout past its retries, or anything else on the way - so it is not
+        charged. A transaction of its own, because the turn's session may be
+        the thing that failed. If this fails too, the hold stops counting at
+        its TTL and the billing sweep releases it.
+        """
+        try:
+            async with self._database.session() as releasing:
+                settled = await AITurnCharge(releasing, tenant_id=job.tenant_id).settle(
+                    agent_turn_id=turn_id,
+                    chargeable=False,
+                    reason=AITurnReleaseReason.GENERATION_FAILED,
+                )
+            await record_settlement(settled)
+        except Exception as error:
+            logger.error(
+                "agent.turn_hold_release_failed",
+                extra={
+                    "event": "agent.turn_hold_release_failed",
+                    "conversation_id": str(job.conversation_id),
+                    "reason": type(error).__name__,
+                },
+            )
+
+    @staticmethod
+    async def _settle_turn(
+        session: AsyncSession, job: AgentJob, turn_id: uuid.UUID, outcome: AgentOutcome
+    ) -> SettleResult:
+        """Charge the turn for a usable outcome, or give its hold back (ENT-02).
+
+        Staged on the turn's session and committed with its token meter,
+        before anything about the reply can fail: a reply that was generated
+        is charged whether or not it is then delivered, withheld by a re-read
+        or refused by the channel - the generation happened.
+        """
+        return await AITurnCharge(session, tenant_id=job.tenant_id).settle(
+            agent_turn_id=turn_id,
+            chargeable=outcome.chargeable,
+        )
 
     async def _quota_blocked(self, job: AgentJob) -> None:
         """Hand a turn the plan will not pay for to a person, and finish it.
@@ -630,13 +708,15 @@ class AgentWorker:
             # The workspace, the conversation's status and the number, read as
             # columns before anything is charged or called (AI-06). A suspended
             # workspace, or a deleted one for however long retention keeps its
-            # data, gets no provider call, no tool and no message.
+            # data, gets no provider call, no tool and no message - nor does a
+            # conversation on a channel the plan in force excludes (ENT-16).
             refusal = await refusal_now(
                 session,
                 tenant_id=job.tenant_id,
                 conversation_id=job.conversation_id,
                 agent_id=plan.agent.id,
                 channels=self._channels,
+                default_plan_code=self._settings.default_plan_code,
             )
             if refusal is not None:
                 await self._complete_turn(job, refusal)
@@ -646,70 +726,35 @@ class AgentWorker:
             # connection back first means the turn never needs two at once from
             # a pool that may only have one (ADR-080).
             await session.commit()
-            reservation = await self._reserve_turn(job)
+            if job.trigger_message_id is None:  # pragma: no cover - `_claim_turn` refused it
+                raise UnidentifiedTurnError("This agent job carries no trigger message.")
+            reservation = await self._reserve_turn(job, job.trigger_message_id)
             if reservation is _Reservation.LOST:
                 return
             if reservation is _Reservation.REFUSED:
+                await record_entitlement_refusal("period_ai_turns", "quota_exhausted")
                 await self._quota_blocked(job)
                 return
+            await record_ai_turn_charge("held")
 
-            # Past this line the turn is charged and engaged: it can call the
-            # provider, run tools and send a customer a message, none of which
-            # a second attempt could tell had already happened. Awaited rather
-            # than assigned because it also persists the fact on the queue, so
-            # a worker that dies after this point is not mistaken for one that
-            # died before it.
+            # Past this line the turn holds its allowance and is engaged: it
+            # can call the provider, run tools and send a customer a message,
+            # none of which a second attempt could tell had already happened.
+            # Awaited rather than assigned because it also persists the fact on
+            # the queue, so a worker that dies after this point is not mistaken
+            # for one that died before it.
             await progress.engage()
-            async with build_http_client() as http:
-                api_key = self._settings.openai_api_key or ""
-                client = ResponsesClient(http=http, api_key=api_key)
-                # Shares the turn's HTTP client: a knowledge search happens
-                # inside the tool loop, so it belongs to the same request.
-                embeddings = EmbeddingsClient(
-                    http=http,
-                    api_key=api_key,
-                    model=self._settings.openai_embedding_model,
-                    dimensions=EMBEDDING_DIMENSIONS,
-                    operation=EMBED_QUERY,
-                )
-                # Shares the turn's client too. One small classification call
-                # runs before the agent composes anything, which is the only
-                # order in which an escalation can stop a reply rather than
-                # follow one.
-                sentiment = SentimentService(
-                    session=session,
-                    tenant_id=job.tenant_id,
-                    analyzer=SentimentAnalyzer(
-                        responses=client,
-                        model=self._settings.openai_sentiment_model,
-                    ),
-                )
-                orchestrator = AgentOrchestrator(
-                    session=session,
-                    tenant_id=job.tenant_id,
-                    client=client,
-                    registry=self._registry,
-                    meter_round=self._round_meter(job),
-                    output_ceiling=self._settings.openai_max_output_tokens,
-                    embeddings=embeddings,
-                    sentiment=sentiment,
-                    # Which turn is asking, so every tool call it makes is
-                    # recoverable from the customer's message afterwards
-                    # (TOOL-12).
-                    agent_turn_id=turn_id,
-                    trigger_message_id=job.trigger_message_id,
-                    # A way to open a clean transaction if the turn's own is
-                    # lost, so a terminal tool outcome is still written down.
-                    unit_of_work=self._database.session,
-                    # The worker's own channels, so a turn is answered under
-                    # the registry that admitted it.
-                    channels=self._channels,
-                )
-                outcome = await orchestrator.answer(
-                    conversation_id=job.conversation_id,
-                    agent=plan.agent,
-                )
+            try:
+                outcome = await self._generate(session, job, plan.agent, turn_id)
+            except Exception:
+                # No outcome, so no charge: the hold goes back before the job
+                # is dead-lettered (ENT-02).
+                await self._release_hold(job, turn_id)
+                raise
 
+            # The charge, or the hold given back, commits with the tokens the
+            # turn spent (ENT-02).
+            settled = await self._settle_turn(session, job, turn_id, outcome)
             # Metered before the reply is sent, and outside the branch that
             # returns early. A turn that ended in a handoff or in silence still
             # called the provider, and a meter that only counted turns which
@@ -735,6 +780,7 @@ class AgentWorker:
             # them into the send's own transaction meant a send refused before
             # it began - an over-long body, once - rolled them back unmetered.
             await session.commit()
+            await record_settlement(settled)
 
             reply = outcome.reply
             ending = outcome.effective_outcome
@@ -759,6 +805,7 @@ class AgentWorker:
                 # does not say: a reply is never checked against no agent at all.
                 agent_id=outcome.agent_id or plan.agent.id,
                 channels=self._channels,
+                default_plan_code=self._settings.default_plan_code,
             )
             if refusal is not None:
                 logger.info(
@@ -803,6 +850,61 @@ class AgentWorker:
                 await self._answer_emptiness(messaging, session, job)
                 final = TurnOutcome.EMPTY_RESPONSE
         await self._complete_turn(job, final, response_id=outcome.response_id)
+
+    async def _generate(
+        self, session: AsyncSession, job: AgentJob, agent: Agent, turn_id: uuid.UUID
+    ) -> AgentOutcome:
+        """Run the turn against the provider: the classifier, then the agent's rounds.
+
+        Everything that can raise for want of an outcome is in here, so the
+        caller has one place to give the hold back from.
+        """
+        async with build_http_client() as http:
+            api_key = self._settings.openai_api_key or ""
+            client = ResponsesClient(http=http, api_key=api_key)
+            # Shares the turn's HTTP client: a knowledge search happens
+            # inside the tool loop, so it belongs to the same request.
+            embeddings = EmbeddingsClient(
+                http=http,
+                api_key=api_key,
+                model=self._settings.openai_embedding_model,
+                dimensions=EMBEDDING_DIMENSIONS,
+                operation=EMBED_QUERY,
+            )
+            # Shares the turn's client too. One small classification call
+            # runs before the agent composes anything, which is the only
+            # order in which an escalation can stop a reply rather than
+            # follow one.
+            sentiment = SentimentService(
+                session=session,
+                tenant_id=job.tenant_id,
+                analyzer=SentimentAnalyzer(
+                    responses=client,
+                    model=self._settings.openai_sentiment_model,
+                ),
+            )
+            orchestrator = AgentOrchestrator(
+                session=session,
+                tenant_id=job.tenant_id,
+                client=client,
+                registry=self._registry,
+                meter_round=self._round_meter(job),
+                output_ceiling=self._settings.openai_max_output_tokens,
+                embeddings=embeddings,
+                sentiment=sentiment,
+                # Which turn is asking, so every tool call it makes is
+                # recoverable from the customer's message afterwards
+                # (TOOL-12).
+                agent_turn_id=turn_id,
+                trigger_message_id=job.trigger_message_id,
+                # A way to open a clean transaction if the turn's own is
+                # lost, so a terminal tool outcome is still written down.
+                unit_of_work=self._database.session,
+                # The worker's own channels, so a turn is answered under
+                # the registry that admitted it.
+                channels=self._channels,
+            )
+            return await orchestrator.answer(conversation_id=job.conversation_id, agent=agent)
 
     async def _with_disclosure(
         self,

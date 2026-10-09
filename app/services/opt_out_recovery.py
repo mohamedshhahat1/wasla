@@ -41,6 +41,7 @@ from app.db.models.channel import Channel
 from app.db.models.channel_event import ChannelEvent, ChannelEventKind
 from app.db.models.conversation import Contact, Conversation, MessageDirection, MessageOrigin
 from app.integrations.whatsapp.payload import reply_action
+from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import MessageRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services.opt_out import is_stop_request, record_opt_out
@@ -168,14 +169,26 @@ async def _replay(
 
     counts.candidates += 1
     tapped_at = message.sent_at or event.received_at or datetime.now(UTC)
-    if contact.marketing_opt_out_at is not None or contact.id in report._counted:
+    # The tap was on WhatsApp, so it is WhatsApp's consent it speaks for (ENT-19).
+    consent = await ContactConsentRepository(session, tenant_id=event.tenant_id).get(
+        contact.id, Channel.WHATSAPP
+    )
+    if (
+        consent is not None and consent.marketing_opt_out_at is not None
+    ) or contact.id in report._counted:
         counts.already_opted_out += 1
         return
-    if contact.marketing_resumed_at is not None and contact.marketing_resumed_at >= tapped_at:
+    if consent is not None and consent.resumed_at is not None and consent.resumed_at >= tapped_at:
         counts.skipped_newer_resume += 1
         return
-    if apply and record_opt_out(
-        contact, source=OptOutSource.CUSTOMER, via=OptOutVia.REPLAY, at=tapped_at
+    if apply and await record_opt_out(
+        session,
+        tenant_id=event.tenant_id,
+        contact_id=contact.id,
+        channel=Channel.WHATSAPP,
+        source=OptOutSource.CUSTOMER,
+        via=OptOutVia.REPLAY,
+        at=tapped_at,
     ):
         counts.applied += 1
     elif not apply:

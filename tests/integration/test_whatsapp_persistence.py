@@ -29,6 +29,7 @@ from app.repositories import (
     WhatsAppAccountRepository,
     WhatsAppEventRepository,
 )
+from tests.channel_slots import whatsapp_slot
 
 pytestmark = pytest.mark.integration
 
@@ -50,6 +51,7 @@ async def _account(
     session: AsyncSession, *, tenant: Tenant, phone_number_id: str
 ) -> WhatsAppAccount:
     account = await WhatsAppAccountRepository(session, tenant_id=tenant.id).connect(
+        slot=await whatsapp_slot(session, tenant.id),
         phone_number_id=phone_number_id,
         waba_id=WABA_ID,
         display_phone_number=DISPLAY_NUMBER,
@@ -62,6 +64,7 @@ async def test_connect_persists_an_active_account(db_session: AsyncSession) -> N
     tenant = await _tenant(db_session, slug="acme")
 
     account = await WhatsAppAccountRepository(db_session, tenant_id=tenant.id).connect(
+        slot=await whatsapp_slot(db_session, tenant.id),
         phone_number_id=PHONE_NUMBER_ID,
         waba_id=WABA_ID,
         display_phone_number=DISPLAY_NUMBER,
@@ -86,6 +89,7 @@ async def test_a_number_cannot_be_claimed_by_two_workspaces(db_session: AsyncSes
 
     with pytest.raises(ConflictError):
         await WhatsAppAccountRepository(db_session, tenant_id=second.id).connect(
+            slot=await whatsapp_slot(db_session, second.id),
             phone_number_id=PHONE_NUMBER_ID,
             waba_id=WABA_ID,
             display_phone_number=DISPLAY_NUMBER,

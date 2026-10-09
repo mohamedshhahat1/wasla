@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import ColumnElement, and_, func, or_, select
 
 from app.db.models.billing import (
+    SERVING_STATUSES,
     BillingAdjustment,
     BillingAdjustmentKind,
     Plan,
@@ -172,6 +173,18 @@ class PlatformSubscriptionRepository(BaseRepository[Subscription]):
         order = list(SubscriptionStatus)
         rows = sorted(result.all(), key=lambda row: order.index(row[0]))
         return [SubscriptionCount(status=row[0], count=int(row[1])) for row in rows]
+
+    async def with_scheduled_change(self, *, limit: int) -> list[Subscription]:
+        """Serving subscriptions with a plan change scheduled, for the owners' notices."""
+        return await self._all(
+            self._select()
+            .where(
+                Subscription.scheduled_plan_version_id.is_not(None),
+                Subscription.status.in_([status.value for status in SERVING_STATUSES]),
+            )
+            .order_by(Subscription.current_period_end, Subscription.id)
+            .limit(limit)
+        )
 
     async def get_by_id(self, subscription_id: uuid.UUID | None) -> Subscription | None:
         """One subscription by its own id, across every workspace.

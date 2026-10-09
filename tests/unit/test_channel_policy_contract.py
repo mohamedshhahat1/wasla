@@ -27,7 +27,9 @@ import pytest
 
 from app.agents.orchestrator import _reply_instructions
 from app.agents.reply import prepare_channel_reply
+from app.channels import registry as registry_module
 from app.channels.adapter import ChannelAdapter
+from app.channels.metering import RECEIVED, SENT, message_meters
 from app.channels.policy import (
     ChannelCapabilities,
     FollowUpAction,
@@ -46,6 +48,7 @@ from app.channels.registry import ChannelRegistry, ChannelUnavailableError, defa
 from app.core.exceptions import ValidationError
 from app.db.models.channel import Channel
 from app.db.models.conversation import Conversation, MessageOrigin
+from app.db.models.usage import UsageEventType
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.integrations.whatsapp.policy import (
     AGENT_INSTRUCTIONS,
@@ -313,19 +316,46 @@ def test_an_adapter_cannot_be_registered_under_another_channel() -> None:
         ChannelRegistry({Channel.INSTAGRAM: cast(ChannelAdapter, WhatsAppAdapter())})
 
 
-def test_a_channel_without_a_decided_meter_cannot_be_registered() -> None:
-    """ADR-122: what an Instagram message costs a workspace is a product
-    decision nobody has made, so the registry refuses to operate the channel
-    rather than metering it as a WhatsApp message by default."""
+def test_every_channel_in_the_vocabulary_has_its_meters_decided() -> None:
+    """ENT-22: one received and one sent meter per channel. WhatsApp keeps its
+    own two, the neutral meters' WhatsApp instance; every other channel writes
+    the neutral two. No channel is metered as WhatsApp."""
+    for channel in Channel:
+        meters = message_meters(channel)
+        assert meters is not None, channel
+        whatsapp = channel is Channel.WHATSAPP
+        assert (meters.received is UsageEventType.WHATSAPP_MESSAGE_RECEIVED) is whatsapp
+        assert (meters.sent is UsageEventType.WHATSAPP_MESSAGE_SENT) is whatsapp
+        assert meters.received in RECEIVED and meters.sent in SENT
+
+
+def test_a_decided_meter_registers_a_second_channel_but_does_not_operate_it() -> None:
+    """A test registry may operate the synthetic channel; the application's own
+    registry still operates WhatsApp alone - a meter is not an adapter."""
+    registry = ChannelRegistry({Channel.INSTAGRAM: cast(ChannelAdapter, SyntheticAdapter())})
+
+    assert isinstance(registry.policy_for(Channel.INSTAGRAM), ByteBoundedPolicy)
+    with pytest.raises(ChannelUnavailableError):
+        registry.policy_for(Channel.WHATSAPP)
+    assert default_registry().channels == frozenset({Channel.WHATSAPP})
+
+
+def test_a_channel_without_a_decided_meter_cannot_be_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-E31's killer. A label added to the vocabulary with no meter must not
+    go live uncounted: the registry refuses its adapter."""
+    decided = message_meters
+    monkeypatch.setattr(
+        registry_module,
+        "message_meters",
+        lambda channel: None if channel is Channel.INSTAGRAM else decided(channel),
+    )
     adapter = cast(ChannelAdapter, SyntheticAdapter())
 
     with pytest.raises(ValueError, match="no decided usage meter"):
         ChannelRegistry({Channel.INSTAGRAM: adapter})
-
-    registry = ChannelRegistry({Channel.INSTAGRAM: adapter}, unmetered=True)
-    assert isinstance(registry.policy_for(Channel.INSTAGRAM), ByteBoundedPolicy)
-    with pytest.raises(ChannelUnavailableError):
-        registry.policy_for(Channel.WHATSAPP)
+    ChannelRegistry({Channel.WHATSAPP: cast(ChannelAdapter, WhatsAppAdapter())})
 
 
 # ------------------------------------------- a character channel that is not WhatsApp

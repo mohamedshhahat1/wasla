@@ -35,7 +35,7 @@ from app.core.exceptions import ConflictError
 from app.core.logging import get_logger
 from app.core.telemetry import record_topup_grant, record_topup_purchase
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.billing import Subscription
+from app.db.models.billing import LimitKey, Subscription
 from app.db.models.billing_incident import BillingIncidentKind
 from app.db.models.invoice import Invoice, Payment
 from app.db.models.topup import (
@@ -50,6 +50,7 @@ from app.repositories.topup_repository import TopupPurchaseRepository
 from app.services.audit_service import AuditTrail
 from app.services.billing_calendar import current_usage_period
 from app.services.billing_incident_service import raise_incident
+from app.services.capacity_reduction import ChannelCapacityReductions
 from app.services.entitlement_service import EntitlementService, hold_limit_lock
 
 logger = get_logger(__name__)
@@ -71,7 +72,7 @@ def validity_window(
       annual customer who buys AI turns on 15 October has them until the
       cycle ends on 1 November, not until the year ends - usage allowances
       reset monthly, and a top-up adds to one month's allowance. No carry-over.
-    - **Capacity** (`storage_bytes`, `whatsapp_numbers`, `team_members`,
+    - **Capacity** (`storage_bytes`, `channel_connections`, `team_members`,
       `knowledge_documents`): the current *billing term*, unchanged from
       ADR-113 - a month on a monthly price, the whole paid year on a yearly
       one. Expiry deletes nothing; the workspace is over its limit and new
@@ -220,6 +221,12 @@ class TopupLedger:
         move(purchase, TopupStatus.GRANTED)
         purchase.granted_at = now
         await self._session.flush()
+        if purchase.limit_key is LimitKey.CHANNEL_CONNECTIONS:
+            # Slots bought or granted during a grace may make everything fit
+            # again: the reduction closes and nothing is disabled (ENT-15).
+            await ChannelCapacityReductions(
+                self._session, tenant_id=self._tenant_id
+            ).capacity_returned(now=now)
         if purchase.source is TopupSource.PURCHASE:
             self._audit.record(
                 AuditAction.BILLING_TOPUP_GRANTED,

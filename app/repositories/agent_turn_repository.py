@@ -18,7 +18,13 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
-from app.db.models.agent_turn import AgentTurn, AgentTurnState, TurnOutcome
+from app.db.models.agent_turn import (
+    AgentTurn,
+    AgentTurnState,
+    AITurnChargeState,
+    AITurnReleaseReason,
+    TurnOutcome,
+)
 from app.db.models.conversation import Message, MessageDirection, MessageOrigin
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
@@ -288,7 +294,43 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
             )
         return adopted
 
-    async def engage(self, *, trigger_message_id: uuid.UUID, now: datetime | None = None) -> bool:
+    async def release_claim(
+        self,
+        *,
+        trigger_message_id: uuid.UUID,
+        worker_id: str | None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Give back a claim this worker holds and never engaged, so a retry adopts it now.
+
+        For an attempt that stops before engaging and will be retried: nothing
+        has left the process, so the turn is free to repeat - but its lease
+        would refuse the retry until it lapsed, and a retry refused as "owned"
+        ends the job with the customer unanswered. Lapsing the lease here is
+        the same hand-on a dead worker's expiry makes, made at once. Only a
+        `CLAIMED` turn held by `worker_id` is touched.
+        """
+        moment = now or datetime.now(UTC)
+        statement = (
+            update(AgentTurn)
+            .where(
+                AgentTurn.tenant_id == self._tenant_id,
+                AgentTurn.trigger_message_id == trigger_message_id,
+                AgentTurn.state == AgentTurnState.CLAIMED,
+                AgentTurn.claimed_by == worker_id,
+            )
+            .values(claim_expires_at=moment)
+        )
+        result = cast("CursorResult[Any]", await self._session.execute(statement))
+        return bool(result.rowcount)
+
+    async def engage(
+        self,
+        *,
+        trigger_message_id: uuid.UUID,
+        now: datetime | None = None,
+        hold: bool = False,
+    ) -> bool:
         """Record that this turn is about to call somebody else's API.
 
         The point of no return, and the reason the lease is cleared rather than
@@ -298,8 +340,23 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
 
         Conditional on the turn still being `CLAIMED`, so this cannot drag a
         turn somebody else has already finished back into flight.
+
+        `hold` writes the turn's hold on the AI allowance in the same statement
+        (ENT-03): the caller has just been allowed one under the workspace's
+        advisory lock (`EntitlementService.hold_ai_turn`), and the hold must be
+        visible to the next count before that lock is released - which it is,
+        because both commit together. A turn that lost the claim matches no row
+        here and so never holds.
         """
         moment = now or datetime.now(UTC)
+        values: dict[str, Any] = {
+            "state": AgentTurnState.ENGAGED,
+            "engaged_at": moment,
+            "claim_expires_at": None,
+        }
+        if hold:
+            values["charge_state"] = AITurnChargeState.HELD
+            values["held_at"] = moment
         statement = (
             update(AgentTurn)
             .where(
@@ -307,11 +364,7 @@ class AgentTurnRepository(TenantScopedRepository[AgentTurn]):
                 AgentTurn.trigger_message_id == trigger_message_id,
                 AgentTurn.state == AgentTurnState.CLAIMED,
             )
-            .values(
-                state=AgentTurnState.ENGAGED,
-                engaged_at=moment,
-                claim_expires_at=None,
-            )
+            .values(**values)
         )
         result = cast("CursorResult[Any]", await self._session.execute(statement))
         return bool(result.rowcount)
@@ -388,6 +441,78 @@ class EngagedTurnSweep(BaseRepository[AgentTurn]):
         return int(count), max((datetime.now(UTC) - oldest).total_seconds(), 0.0)
 
 
+class ExpiredHoldSweep(BaseRepository[AgentTurn]):
+    """AI turn holds nobody settled within the TTL, across the deployment (ENT-03).
+
+    Unscoped, like `EngagedTurnSweep`: the caller is the billing worker's sweep
+    and the metrics exposition, both platform-wide.
+
+    A hold past its TTL has already stopped counting - the allowance check
+    reads `held_at` against the clock - so releasing it is bookkeeping, and the
+    sweep running late never takes an allowance away from anybody. It is what
+    makes the hold say what happened: the worker that held it died, or never
+    settled, and nothing was charged. A settle arriving afterwards still
+    charges (`AITurnCharge.settle`): usage that happened is never refused.
+    """
+
+    model = AgentTurn
+
+    async def release_expired(
+        self, *, held_before: datetime, now: datetime, limit: int = 200
+    ) -> list[uuid.UUID]:
+        """Release one batch of holds taken at or before `held_before`; their workspaces.
+
+        `SKIP LOCKED`: a hold a settle has locked is the settle's to decide,
+        and it will - so the sweep never waits on a turn that is finishing.
+        Released in the caller's transaction, conditional on the hold still
+        being one, so a settle that committed between the claim and the update
+        is left as it decided.
+        """
+        claimed = list(
+            await self._session.scalars(
+                select(AgentTurn.id)
+                .where(
+                    AgentTurn.charge_state == AITurnChargeState.HELD,
+                    AgentTurn.held_at <= held_before,
+                )
+                .order_by(AgentTurn.held_at, AgentTurn.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        if not claimed:
+            return []
+        released = await self._session.scalars(
+            update(AgentTurn)
+            .where(
+                AgentTurn.id.in_(claimed),
+                AgentTurn.charge_state == AITurnChargeState.HELD,
+            )
+            .values(
+                charge_state=AITurnChargeState.RELEASED,
+                released_at=now,
+                charge_release_reason=AITurnReleaseReason.HOLD_EXPIRED,
+            )
+            .returning(AgentTurn.tenant_id)
+        )
+        return list(released)
+
+    async def open_holds(self, *, now: datetime, ttl: timedelta) -> tuple[int, int]:
+        """How many holds are open, and how many of them are past the TTL.
+
+        What the open-holds gauge and the stuck-holds alert read (ENT-03). A
+        hold past its TTL that is still open is a sweep that is not running.
+        """
+        rows = await self._session.execute(
+            select(
+                func.count(AgentTurn.id),
+                func.count(AgentTurn.id).filter(AgentTurn.held_at <= now - ttl),
+            ).where(AgentTurn.charge_state == AITurnChargeState.HELD)
+        )
+        total, stale = rows.one()
+        return int(total or 0), int(stale or 0)
+
+
 class OwedReleaseSweep(BaseRepository[AgentTurn]):
     """Turns the media release owed that no agent worker has taken up.
 
@@ -459,5 +584,6 @@ __all__ = [
     "STRANDED_TURN_AFTER",
     "AgentTurnRepository",
     "EngagedTurnSweep",
+    "ExpiredHoldSweep",
     "OwedReleaseSweep",
 ]

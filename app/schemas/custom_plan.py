@@ -5,10 +5,10 @@ A custom plan is an ordinary `Plan` with `scope = tenant` and ordinary immutable
 one-screen operator flow ("Company -> Billing -> Create Custom Plan"): preview,
 then create and optionally assign.
 
-**Every one of the seven limits is required.** `null` means unlimited and `0`
-means none - both are deliberate choices, so neither is allowed to happen by
-leaving a field out. Storage is integer bytes (1 GiB = 1024**3); a client that
-shows GiB converts before sending.
+**Every one of the seven limits is required**, and so are the allowed channel
+types (ENT-09). `null` means unlimited and `0` means none - both are deliberate
+choices, so neither is allowed to happen by leaving a field out. Storage is
+integer bytes (1 GiB = 1024**3); a client that shows GiB converts before sending.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from app.db.models.billing import (
     LimitKey,
     PlanScope,
 )
+from app.db.models.channel import Channel
 from app.db.models.enums import TenantStatus
 from app.schemas.platform_billing import (
     FinancialBasis,
@@ -39,6 +40,7 @@ from app.schemas.platform_billing import (
     PlatformPlanRead,
     PlatformSubscriptionRead,
     PriceSpec,
+    validate_channel_types,
 )
 from app.schemas.text import StorableText
 
@@ -48,7 +50,7 @@ CUSTOM_PLAN_KEYS: tuple[LimitKey, ...] = (
     LimitKey.PERIOD_AI_TURNS,
     LimitKey.PERIOD_CAMPAIGN_MESSAGES,
     LimitKey.STORAGE_BYTES,
-    LimitKey.WHATSAPP_NUMBERS,
+    LimitKey.CHANNEL_CONNECTIONS,
     LimitKey.TEAM_MEMBERS,
     LimitKey.KNOWLEDGE_DOCUMENTS,
 )
@@ -104,9 +106,14 @@ class CustomPlanTerms(BaseModel):
     period_ai_turns: int | None = Limit
     period_campaign_messages: int | None = Limit
     storage_bytes: int | None = Limit
-    whatsapp_numbers: int | None = Limit
+    # Every channel's connections, a WhatsApp number among them (ENT-05). The
+    # retired `whatsapp_numbers` is refused as an unknown field.
+    channel_connections: int | None = Limit
     team_members: int | None = Limit
     knowledge_documents: int | None = Limit
+    # Required like the seven limits (ENT-09): the channel types this
+    # workspace may connect and automate. No wildcard; an empty list is "none".
+    allowed_channel_types: list[Channel] = Field(max_length=len(Channel))
 
     effective_at: datetime | None = None
     assignment_mode: AssignmentMode = AssignmentMode.NEXT_RENEWAL
@@ -118,6 +125,11 @@ class CustomPlanTerms(BaseModel):
         if upper not in SUPPORTED_CURRENCIES:
             raise ValueError(f"Only {', '.join(sorted(SUPPORTED_CURRENCIES))} is supported.")
         return upper
+
+    @field_validator("allowed_channel_types")
+    @classmethod
+    def _channel_types(cls, value: list[Channel]) -> list[Channel]:
+        return validate_channel_types(value)
 
     def limits(self) -> dict[str, int | None]:
         """The seven limits, keyed as a plan version stores them."""
@@ -305,6 +317,11 @@ class CustomPlanPreview(BaseModel):
     # the plan the workspace holds so a custom plan never silently makes them
     # unlimited.
     inherited_limits: dict[str, int | None]
+    # The channel types now and as proposed (ENT-09), and the workspace's
+    # active connections of a type the proposal leaves out.
+    current_channel_types: list[Channel] | None = None
+    proposed_channel_types: list[Channel] = Field(default_factory=list)
+    connections_of_removed_types: int = 0
     effective_mode: AssignmentMode
     effective_at: datetime | None
     estimated_next_charge: EstimatedCharge | None
@@ -379,6 +396,8 @@ class CustomPlanOfferRead(BaseModel):
     currency: str
     interval: BillingInterval
     limits: list[OfferLimitRead]
+    # The channel types the offered version includes (ENT-09).
+    allowed_channel_types: list[Channel] = Field(default_factory=list)
     # Limits the custom plan does not set (agents, owned workspaces), as the
     # version holds them.
     other_limits: dict[str, int | None]

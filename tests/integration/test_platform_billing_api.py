@@ -321,7 +321,8 @@ def _plan_body(**overrides: Any) -> dict[str, Any]:
         "price": "149.00",
         "currency": "EGP",
         "interval": "monthly",
-        "limits": {"agents": 7, "whatsapp_numbers": None},
+        "limits": {"agents": 7, "channel_connections": None},
+        "allowed_channel_types": ["whatsapp"],
         "reason": "A new tier.",
     }
     body.update(overrides)
@@ -351,6 +352,42 @@ async def test_an_invalid_plan_is_refused(
     assert response.status_code == 422, response.text
 
 
+async def test_the_retired_number_key_is_refused_by_name_on_a_plan_and_a_version(
+    db_session: AsyncSession, app: FastAPI, http: AsyncClient
+) -> None:
+    """ENT-05: `whatsapp_numbers` is retired, and the API says what replaced it.
+
+    M-E30's killer. Refused by the schema with a 422 naming `channel_connections`
+    - not as an unknown key, and not left for the database trigger to turn into
+    a conflict - and nothing reaches the catalogue: no plan, no version.
+    """
+    _act_as(app, await _user(db_session, role=PlatformRole.PLATFORM_ADMIN))
+    code = f"retired-{uuid.uuid4().hex[:6]}"
+    refused = await http.post(
+        f"{BASE}/plans", json=_plan_body(code=code, limits={"whatsapp_numbers": 2})
+    )
+    assert refused.status_code == 422, refused.text
+    assert "channel_connections" in refused.text
+    listed = await http.get(f"{BASE}/plans", params={"code": code, "limit": 10})
+    assert listed.json()["total"] == 0
+
+    created = (await http.post(f"{BASE}/plans", json=_plan_body())).json()
+    version = {
+        "price": "149.00",
+        "currency": "EGP",
+        "interval": "monthly",
+        "limits": {"whatsapp_numbers": 3},
+        "allowed_channel_types": ["whatsapp"],
+        "expected_version": 1,
+        "reason": "Numbers again.",
+    }
+    published = await http.post(f"{BASE}/plans/{created['id']}/versions", json=version)
+    assert published.status_code == 422, published.text
+    assert "channel_connections" in published.text
+    versions = (await http.get(f"{BASE}/plans/{created['id']}/versions")).json()
+    assert [item["version"] for item in versions] == [1]
+
+
 async def test_a_duplicate_plan_code_is_a_conflict(
     db_session: AsyncSession, app: FastAPI, http: AsyncClient
 ) -> None:
@@ -371,7 +408,7 @@ async def test_the_catalogue_lifecycle_is_versioned_serialised_and_audited(
     assert created["current_version"]["version"] == 1
     assert created["current_version"]["price"] == "149.00"
     limits = {item["key"]: item["limit"] for item in created["current_version"]["limits"]}
-    assert limits["agents"] == 7 and limits["whatsapp_numbers"] is None
+    assert limits["agents"] == 7 and limits["channel_connections"] is None
 
     listed = await http.get(f"{BASE}/plans", params={"code": "growth", "limit": 10})
     assert listed.status_code == 200 and listed.json()["total"] == 1
@@ -381,6 +418,7 @@ async def test_the_catalogue_lifecycle_is_versioned_serialised_and_audited(
         "currency": "EGP",
         "interval": "monthly",
         "limits": {"agents": 9},
+        "allowed_channel_types": ["whatsapp"],
         "expected_version": 1,
         "reason": "Price rise.",
     }
@@ -391,7 +429,13 @@ async def test_the_catalogue_lifecycle_is_versioned_serialised_and_audited(
 
     preview = await http.post(
         f"{BASE}/plans/{plan_id}/versions/preview",
-        json={"price": "249.00", "currency": "EGP", "interval": "monthly", "limits": {"agents": 2}},
+        json={
+            "price": "249.00",
+            "currency": "EGP",
+            "interval": "monthly",
+            "limits": {"agents": 2},
+            "allowed_channel_types": ["whatsapp"],
+        },
     )
     assert preview.status_code == 200
     assert preview.json()["current_version"] == 2
@@ -469,11 +513,21 @@ async def test_the_feature_catalogue_names_only_real_keys(
 
     _act_as(app, await _user(db_session, role=PlatformRole.PLATFORM_ADMIN))
     features = (await http.get(f"{BASE}/features")).json()
-    assert {item["key"] for item in features} == {key.value for key in LimitKey}
+    # Every limit key, the channel policy (a set, not a number) and the retired
+    # number key, so an operator reading an old version knows what replaced it.
+    assert {item["key"] for item in features} == {key.value for key in LimitKey} | {
+        "allowed_channel_types",
+        "whatsapp_numbers",
+    }
     by_key = {item["key"]: item for item in features}
     assert by_key["period_messages"]["kind"] == "meter_only"
     assert by_key["agents"]["concurrency_safe"] is True
-    assert {item["unlimited"] for item in features} == {"null"}
+    assert by_key["channel_connections"]["kind"] == "hard_limit"
+    assert "409" in by_key["channel_connections"]["enforcement"]
+    assert by_key["allowed_channel_types"]["kind"] == "channel_policy"
+    assert by_key["whatsapp_numbers"]["kind"] == "retired"
+    assert by_key["whatsapp_numbers"]["replaced_by"] == "channel_connections"
+    assert {item["unlimited"] for item in features if item["kind"] != "channel_policy"} == {"null"}
 
 
 # -------------------------------------------------------------- operations

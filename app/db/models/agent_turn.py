@@ -54,6 +54,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
     Index,
@@ -111,9 +112,56 @@ class TurnOutcome(StrEnum):
     SUPPRESSED_CLOSED = "suppressed_closed"
     #: The WhatsApp number cannot send - disabled or released.
     SUPPRESSED_CHANNEL = "suppressed_channel"
+    #: The plan in force does not include this conversation's channel type
+    #: (ENT-16): inbound is kept and a person may reply, but no AI turn runs and
+    #: nothing is charged.
+    CHANNEL_NOT_IN_PLAN = "channel_not_in_plan"
 
 
 AGENT_TURN_OUTCOME_TYPE = _enum_type(TurnOutcome, name="agent_turn_outcome")
+
+
+class AITurnChargeState(StrEnum):
+    """Where one turn stands against the workspace's AI allowance (ENT-02, ENT-03).
+
+    Null on a turn that never held anything - suppressed, refused for quota or
+    lost to another attempt before engaging - and on every turn engaged before
+    ADR-131, which was charged at engagement.
+
+    ``HELD``
+        Engaged and holding one unit of the allowance: not usage yet, but
+        spoken for, so a concurrent turn counts it and cannot oversell. Taken
+        under the workspace's advisory lock in the transaction that engages.
+    ``CHARGED``
+        The provider produced a usable outcome; exactly one `ai_turn` usage
+        event names this turn (a unique index makes it so).
+    ``RELEASED``
+        No usable outcome - a provider failure, an empty answer, an escalation
+        before any composition - or a hold that outlived its TTL and was swept.
+        Nothing recorded. A late settle of a swept hold still charges: usage
+        that happened is never refused afterwards.
+    """
+
+    HELD = "held"
+    CHARGED = "charged"
+    RELEASED = "released"
+
+
+class AITurnReleaseReason(StrEnum):
+    """Why a hold was released rather than charged."""
+
+    #: The turn ended without a usable outcome (ENT-02's "not charged" list).
+    NOT_CHARGEABLE = "not_chargeable"
+    #: The turn raised before it produced an outcome - a provider error or a
+    #: timeout past the turn's own retries, or any other failure on the way.
+    #: No outcome, no charge.
+    GENERATION_FAILED = "generation_failed"
+    #: Nobody settled it within `AI_TURN_HOLD_TTL_SECONDS`; the sweep released it.
+    HOLD_EXPIRED = "hold_expired"
+
+
+AI_TURN_CHARGE_STATE_TYPE = _enum_type(AITurnChargeState, name="ai_turn_charge_state")
+AI_TURN_RELEASE_REASON_TYPE = _enum_type(AITurnReleaseReason, name="ai_turn_release_reason")
 
 #: States from which no second attempt may ever proceed. `CLAIMED` is absent
 #: deliberately: it means nothing has left the process, so a worker that died
@@ -159,6 +207,30 @@ class AgentTurn(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "engaged_at",
             postgresql_where=text("state = 'engaged'"),
         ),
+        # Open holds, which every hold decision counts under the workspace's
+        # lock (ENT-03). Partial: a handful of rows in flight, never history.
+        Index(
+            "ix_agent_turns_held",
+            "tenant_id",
+            "held_at",
+            postgresql_where=text("charge_state = 'held'"),
+        ),
+        # The charge columns move together (ENT-02, ENT-03): a hold has a
+        # moment, a charge or a release says when, and a release says why. A
+        # charged turn keeps its earlier release only when that release was the
+        # sweep's - the late charge of a hold that outlived its TTL.
+        CheckConstraint(
+            "(charge_state IS NULL AND held_at IS NULL AND charged_at IS NULL"
+            " AND released_at IS NULL AND charge_release_reason IS NULL)"
+            " OR (charge_state = 'held' AND held_at IS NOT NULL AND charged_at IS NULL"
+            " AND released_at IS NULL AND charge_release_reason IS NULL)"
+            " OR (charge_state = 'released' AND held_at IS NOT NULL AND charged_at IS NULL"
+            " AND released_at IS NOT NULL AND charge_release_reason IS NOT NULL)"
+            " OR (charge_state = 'charged' AND held_at IS NOT NULL AND charged_at IS NOT NULL"
+            " AND ((released_at IS NULL AND charge_release_reason IS NULL)"
+            " OR (released_at IS NOT NULL AND charge_release_reason = 'hold_expired')))",
+            name="charge_state_consistent",
+        ),
         # A turn belongs to a conversation in its own workspace (ADR-100).
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"],
@@ -198,6 +270,16 @@ class AgentTurn(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # question with the provider's own records (AI-12). An id, never a body: no
     # prompt and no reply text is stored here.
     provider_response_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # The turn's hold on the AI allowance and how it settled (ENT-02, ENT-03).
+    charge_state: Mapped[AITurnChargeState | None] = mapped_column(
+        AI_TURN_CHARGE_STATE_TYPE, nullable=True
+    )
+    held_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    charged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    charge_release_reason: Mapped[AITurnReleaseReason | None] = mapped_column(
+        AI_TURN_RELEASE_REASON_TYPE, nullable=True
+    )
 
     @property
     def finished(self) -> bool:
@@ -208,7 +290,11 @@ class AgentTurn(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
 __all__ = [
     "AGENT_TURN_OUTCOME_TYPE",
     "AGENT_TURN_STATE_TYPE",
+    "AI_TURN_CHARGE_STATE_TYPE",
+    "AI_TURN_RELEASE_REASON_TYPE",
     "TERMINAL_AGENT_TURN_STATES",
+    "AITurnChargeState",
+    "AITurnReleaseReason",
     "AgentTurn",
     "AgentTurnState",
     "TurnOutcome",

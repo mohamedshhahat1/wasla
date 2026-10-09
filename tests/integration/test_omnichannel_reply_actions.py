@@ -39,7 +39,9 @@ from app.core.dependencies import get_session
 from app.core.security import create_access_token
 from app.db.models import Membership, TenantRole, User
 from app.db.models.campaign import OptOutSource, OptOutVia
+from app.db.models.channel import Channel
 from app.db.models.channel_event import ChannelEvent, ChannelEventState
+from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import Contact, Message, ReplyActionSource
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
@@ -49,6 +51,7 @@ from app.schemas.conversation import MessageRead
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.queue import AgentJob, AgentQueue
 from tests.conftest import AllowingEntitlements, FakeDependency
+from tests.consent import consent_of, opted_out_at
 
 pytestmark = pytest.mark.integration
 
@@ -155,6 +158,15 @@ async def _contact(session: AsyncSession, account: WhatsAppAccount) -> Contact:
     return contact
 
 
+async def _consent(session: AsyncSession, account: WhatsAppAccount) -> ContactChannelConsent | None:
+    """The customer's WhatsApp consent - the channel the tap was on (ENT-19)."""
+    return await consent_of(session, (await _contact(session, account)).id)
+
+
+async def _opted_out_at(session: AsyncSession, account: WhatsAppAccount) -> datetime | None:
+    return await opted_out_at(session, (await _contact(session, account)).id)
+
+
 async def _messages(session: AsyncSession, account: WhatsAppAccount) -> list[Message]:
     return list(
         (
@@ -206,10 +218,10 @@ async def test_a_stop_promotions_tap_is_an_opt_out_and_is_not_answered(
         "STOP-1",
         "Stop promotions",
     )
-    contact = await _contact(db_session, account)
-    assert contact.marketing_opt_out_at is not None
-    assert contact.opt_out_source is OptOutSource.CUSTOMER
-    assert contact.opt_out_via is OptOutVia.REPLY_ACTION
+    consent = await _consent(db_session, account)
+    assert consent is not None and consent.marketing_opt_out_at is not None
+    assert consent.opt_out_source is OptOutSource.CUSTOMER
+    assert consent.opt_out_via is OptOutVia.REPLY_ACTION
     assert outcome.opt_outs == 1
     # Honoured, and not answered: the only reply an agent has is the sale.
     assert queue.jobs == []
@@ -227,9 +239,9 @@ async def test_a_payload_the_workspace_marked_opts_out_whatever_the_words(
 
     outcome, queue = await _ingest(db_session, account, _button("No thanks", "MKT_OPT_OUT"))
 
-    contact = await _contact(db_session, account)
-    assert contact.marketing_opt_out_at is not None
-    assert contact.opt_out_via is OptOutVia.REPLY_ACTION
+    consent = await _consent(db_session, account)
+    assert consent is not None and consent.marketing_opt_out_at is not None
+    assert consent.opt_out_via is OptOutVia.REPLY_ACTION
     assert outcome.opt_outs == 1
     assert queue.jobs == []
 
@@ -250,7 +262,7 @@ async def test_a_payload_marked_on_another_number_means_nothing_here(
 
     _, queue = await _ingest(db_session, account, _button("No thanks", "MKT_OPT_OUT"))
 
-    assert (await _contact(db_session, account)).marketing_opt_out_at is None
+    assert await _opted_out_at(db_session, account) is None
     assert len(queue.jobs) == 1
 
 
@@ -266,7 +278,7 @@ async def test_an_ordinary_tap_is_answered_and_the_model_reads_what_was_tapped(
     assert message.action_source is ReplyActionSource.BUTTON_REPLY
     assert message.action_payload == "book-yes"
     assert _model_sees(message) == "[tapped: Yes, book it]"
-    assert (await _contact(db_session, account)).marketing_opt_out_at is None
+    assert await _opted_out_at(db_session, account) is None
     assert outcome.opt_outs == 0
     (job,) = queue.jobs
     assert job.trigger_message_id == message.id
@@ -313,9 +325,9 @@ async def test_a_typed_stop_is_unchanged_honoured_and_still_answered(
 
     (message,) = await _messages(db_session, account)
     assert message.action_source is None
-    contact = await _contact(db_session, account)
-    assert contact.marketing_opt_out_at is not None
-    assert contact.opt_out_via is OptOutVia.MESSAGE
+    consent = await _consent(db_session, account)
+    assert consent is not None and consent.marketing_opt_out_at is not None
+    assert consent.opt_out_via is OptOutVia.MESSAGE
     assert outcome.opt_outs == 1
     assert len(queue.jobs) == 1
 
@@ -362,8 +374,10 @@ async def test_the_numbers_every_stop_tap_is_recorded_none_answered_none_unreada
 
     messages = await _messages(db_session, account)
     opted_out = await db_session.scalars(
-        select(Contact).where(
-            Contact.tenant_id == account.tenant_id, Contact.marketing_opt_out_at.is_not(None)
+        select(ContactChannelConsent).where(
+            ContactChannelConsent.tenant_id == account.tenant_id,
+            ContactChannelConsent.channel == Channel.WHATSAPP,
+            ContactChannelConsent.marketing_opt_out_at.is_not(None),
         )
     )
     assert sum(outcome.opt_outs for outcome, _ in outcomes) == other_customer_taps
@@ -375,12 +389,12 @@ async def test_the_numbers_every_stop_tap_is_recorded_none_answered_none_unreada
 async def test_tapping_stop_twice_does_not_move_the_timestamp(db_session: AsyncSession) -> None:
     account = await _number(db_session)
     await _ingest(db_session, account, _button("Stop promotions", "STOP-1"))
-    first = (await _contact(db_session, account)).marketing_opt_out_at
+    first = await _opted_out_at(db_session, account)
 
     outcome, queue = await _ingest(db_session, account, _button("Stop promotions", "STOP-1"))
 
     assert outcome.opt_outs == 0
-    assert (await _contact(db_session, account)).marketing_opt_out_at == first
+    assert await _opted_out_at(db_session, account) == first
     assert queue.jobs == []
 
 

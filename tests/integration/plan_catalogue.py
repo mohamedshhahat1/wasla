@@ -36,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.billing import BillingInterval, Plan, PlanVersion
+from app.services.entitlement_terms import LEGACY_CHANNEL_TYPES, ordered
 from app.services.plan_catalog import ORIGINAL_TERMS_EFFECTIVE_AT
 
 #: What a plan is when the caller did not say. Matches the model defaults rather
@@ -48,6 +49,9 @@ DEFAULTS: dict[str, Any] = {
     "interval": BillingInterval.MONTHLY,
     "trial_days": 0,
     "limits": {},
+    # Unstated, as a fixture written before ADR-131 left it: the version
+    # published from the row takes the legacy set, WhatsApp alone (ENT-09).
+    "allowed_channel_types": None,
     "is_public": True,
     "is_active": True,
     "sort_order": 0,
@@ -102,12 +106,18 @@ async def _publish_matching_version(session: AsyncSession, plan: Plan) -> None:
     ).scalar_one_or_none()
     if latest is None:
         return
+    types = (
+        list(plan.allowed_channel_types)
+        if plan.allowed_channel_types is not None
+        else [channel.value for channel in ordered(LEGACY_CHANNEL_TYPES)]
+    )
     same = (
         latest.price == plan.price
         and latest.currency == plan.currency
         and latest.interval == plan.interval
         and latest.trial_days == plan.trial_days
         and dict(latest.limits or {}) == dict(plan.limits or {})
+        and latest.allowed_channel_types == types
     )
     if same:
         return
@@ -121,6 +131,8 @@ async def _publish_matching_version(session: AsyncSession, plan: Plan) -> None:
             interval=plan.interval,
             trial_days=plan.trial_days,
             limits=dict(plan.limits or {}),
+            # A version always states its channel types (ADR-131).
+            allowed_channel_types=types,
             effective_at=ORIGINAL_TERMS_EFFECTIVE_AT,
             created_at=datetime.now(UTC),
             reason="Test fixture terms.",

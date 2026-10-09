@@ -62,6 +62,7 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.channel import Channel
 from app.db.models.enums import PlatformRole
 from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.tenant import Tenant
@@ -329,6 +330,7 @@ async def offer_with_two_pages(maker: async_sessionmaker[AsyncSession]) -> World
                 price=PRICE,
                 currency="EGP",
                 interval=BillingInterval.MONTHLY,
+                allowed_channel_types=[Channel.WHATSAPP],
                 limits={"agents": 9},
                 scope=PlanScope.TENANT,
                 tenant_id=world.tenant_id,

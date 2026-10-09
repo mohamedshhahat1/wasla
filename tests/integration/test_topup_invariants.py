@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models.billing import TOPUP_LIMITS, BillingInterval, LimitKey, PlanScope
+from app.db.models.channel import Channel
 from app.db.models.enums import PlatformRole
 from app.db.models.topup import TopupEntitlement, TopupPurchase, TopupStatus
 from app.db.models.user import User
@@ -205,13 +206,14 @@ async def test_every_invariant_holds_over_a_populated_ledger(db_session: AsyncSe
                 price=Decimal("0.00") if tenant is beta else Decimal("500.00"),
                 currency="EGP",
                 interval=BillingInterval.MONTHLY,
+                allowed_channel_types=[Channel.WHATSAPP],
                 limits={
                     "agents": 5,
                     "period_messages": 10_000,
                     "period_ai_turns": 7_000,
                     "period_campaign_messages": 1_000,
                     "storage_bytes": 10 * 1024**3,
-                    "whatsapp_numbers": 2,
+                    "channel_connections": 2,
                     "team_members": 10,
                     "knowledge_documents": 500,
                 },

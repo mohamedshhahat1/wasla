@@ -41,6 +41,7 @@ from app.repositories.billing_repository import (
     PlanRepository,
     PlanVersionRepository,
 )
+from app.services.entitlement_terms import LEGACY_CHANNEL_TYPES, ordered
 
 logger = get_logger(__name__)
 
@@ -326,6 +327,15 @@ class PlanCatalog:
             interval=plan.interval,
             trial_days=plan.trial_days,
             limits=dict(plan.limits or {}),
+            # A version is always published stating its channel types (ENT-09);
+            # a plan row that never stated any materialises the legacy set,
+            # never every channel. A row still naming the retired number key is
+            # refused by the version trigger - it must say channel_connections.
+            allowed_channel_types=(
+                list(plan.allowed_channel_types)
+                if plan.allowed_channel_types is not None
+                else [channel.value for channel in ordered(LEGACY_CHANNEL_TYPES)]
+            ),
             # The terms this plan always had - see ORIGINAL_TERMS_EFFECTIVE_AT.
             effective_at=ORIGINAL_TERMS_EFFECTIVE_AT,
             created_at=datetime.now(UTC),

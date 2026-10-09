@@ -182,6 +182,9 @@ def get_whatsapp_account_service(
         session=session,
         ownership=MetaOwnershipVerifier(api_version=settings.meta_api_version),
         credentials=CredentialService(settings),
+        # The channel capacity guard resolves a workspace without a serving
+        # subscription to this plan (ENT-08); from settings, never a request.
+        default_plan_code=settings.default_plan_code,
     )
 
 
@@ -689,9 +692,15 @@ def get_topup_service(
     session: SessionDep,
     workspace: ActiveWorkspaceDep,
     checkout: CheckoutServiceDep,
+    settings: SettingsDep,
 ) -> TopupService:
     """Workspace-scoped top-ups (ADR-113), buying through the one checkout path."""
-    return TopupService(session, tenant_id=workspace.tenant.id, checkout=checkout)
+    return TopupService(
+        session,
+        tenant_id=workspace.tenant.id,
+        checkout=checkout,
+        default_plan_code=settings.default_plan_code,
+    )
 
 
 TopupServiceDep = Annotated[TopupService, Depends(get_topup_service)]
@@ -821,7 +830,11 @@ def require_entitlement(
 
 
 AgentSlotDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.AGENTS))]
-NumberSlotDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.WHATSAPP_NUMBERS))]
+# There is no number slot dependency any more (ENT-05, ENT-08): a channel slot
+# depends on which channel is being connected, so `ChannelCapacityGuard` runs
+# inside the services that activate a connection - before any provider is
+# asked, and again under the lock in the activating transaction - and a scan of
+# every activation writer refuses one that sidesteps it.
 SeatDep = Annotated[Entitlement, Depends(require_entitlement(LimitKey.TEAM_MEMBERS))]
 DocumentSlotDep = Annotated[
     Entitlement,

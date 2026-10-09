@@ -55,6 +55,25 @@ CONTEXTS: dict[EmailTemplate, dict[str, str]] = {
         "amount_due": "99.00",
         "currency": "EGP",
     },
+    # The capacity-reduction notices (ENT-14): how many slots, how many in
+    # use, and the dates - never which connections, which the page shows.
+    EmailTemplate.CHANNEL_CAPACITY_SCHEDULED: {
+        "workspace_name": "Acme",
+        "effective_at": "2026-11-01",
+        "capacity": "3",
+        "active": "7",
+        "grace_days": "7",
+    },
+    EmailTemplate.CHANNEL_CAPACITY_REDUCTION_STARTED: {
+        "workspace_name": "Acme",
+        "grace_ends_at": "2026-11-08",
+        "capacity": "3",
+        "active": "7",
+    },
+    EmailTemplate.CHANNEL_CAPACITY_REDUCTION_WARNING: {
+        "workspace_name": "Acme",
+        "grace_ends_at": "2026-11-08",
+    },
 }
 
 
@@ -95,6 +114,9 @@ def test_no_subject_carries_a_control_character(template: EmailTemplate) -> None
         EmailTemplate.WORKSPACE_INVITATION,
         EmailTemplate.TRIAL_EXPIRED,
         EmailTemplate.SUBSCRIPTION_CANCELLED,
+        EmailTemplate.CHANNEL_CAPACITY_SCHEDULED,
+        EmailTemplate.CHANNEL_CAPACITY_REDUCTION_STARTED,
+        EmailTemplate.CHANNEL_CAPACITY_REDUCTION_WARNING,
     ],
 )
 def test_a_workspace_name_is_escaped_into_the_html(template: EmailTemplate) -> None:

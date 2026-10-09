@@ -338,12 +338,29 @@ async def test_the_retry_names_the_same_workspace_and_conversation() -> None:
 # ------------------------------------------------- where the marker actually is
 
 
-def _handle_body() -> ast.AsyncFunctionDef:
-    source = inspect.getsource(AgentWorker._handle)
+def _body(method: object) -> ast.AsyncFunctionDef:
+    source = inspect.getsource(method)  # type: ignore[arg-type]
     module = ast.parse(textwrap.dedent(source))
     function = module.body[0]
     assert isinstance(function, ast.AsyncFunctionDef)
     return function
+
+
+def _handle_body() -> ast.AsyncFunctionDef:
+    return _body(AgentWorker._handle)
+
+
+def _calls(body: ast.AST, name: str) -> list[ast.Call]:
+    """Calls of a plain function `name(...)` or a method `<anything>.name(...)`."""
+    return [
+        node
+        for node in ast.walk(body)
+        if isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == name)
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == name)
+        )
+    ]
 
 
 def _line_of(node: ast.AST) -> int:
@@ -364,6 +381,12 @@ def test_the_turn_is_marked_engaged_before_anything_leaves_the_process() -> None
     client that carries it to OpenAI and to Meta is built. Everything before
     that point is a transaction that rolls back; everything after it may have
     reserved an allowance, called a provider or sent a customer a message.
+
+    The client is built in `_generate` (ADR-131 split the provider work out so
+    a failure has one place to give the turn's hold back from), so the
+    invariant is read across the two: `_handle` marks the turn engaged before
+    it calls `_generate`, builds no client itself, and `_generate` - called
+    from nowhere else - is where the client is built.
     """
     body = _handle_body()
 
@@ -379,19 +402,19 @@ def test_the_turn_is_marked_engaged_before_anything_leaves_the_process() -> None
     ]
     assert marks, "`_handle` never marks the turn engaged"
 
-    clients = [
-        node
-        for node in ast.walk(body)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "build_http_client"
-    ]
-    assert clients, "`_handle` no longer builds the turn's HTTP client here"
-
-    assert min(_line_of(node) for node in marks) < min(_line_of(node) for node in clients), (
-        "the turn must be marked engaged *before* the HTTP client is built; "
+    generation = _calls(body, "_generate")
+    assert generation, "`_handle` no longer runs the provider work through `_generate`"
+    assert not _calls(body, "build_http_client"), "`_handle` builds an HTTP client itself"
+    assert min(_line_of(node) for node in marks) < min(_line_of(node) for node in generation), (
+        "the turn must be marked engaged *before* the provider work begins; "
         "after that line a retry can bill a second inference or send a second reply"
     )
+
+    worker = ast.parse(textwrap.dedent(inspect.getsource(AgentWorker)))
+    assert len(_calls(worker, "_generate")) == 1, "`_generate` is called from one place only"
+    assert _calls(
+        _body(AgentWorker._generate), "build_http_client"
+    ), "`_generate` no longer builds the turn's HTTP client"
 
 
 def test_the_conversation_is_looked_up_before_the_turn_is_marked_engaged() -> None:

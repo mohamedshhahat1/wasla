@@ -15,7 +15,7 @@ that a good API.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
@@ -34,16 +34,19 @@ from app.api.dependencies import (
     TopupServiceDep,
 )
 from app.api.route import CommittingRoute
+from app.core.config import Settings
 from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import PaymentRequiredError
 from app.db.models.billing import TOPUP_LIMITS, LimitKey, Plan, Subscription
 from app.db.models.invoice import Payment
 from app.db.models.topup import TopupEntitlement, TopupPurchase
 from app.integrations.billing import build_checkout_provider
+from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.invoice_repository import InvoiceRepository
 from app.repositories.payment_method_repository import PaymentMethodRepository
 from app.schemas.billing import (
     CancellationRequest,
+    ChannelCapacityBreakdown,
     CheckoutRequestPayload,
     CheckoutStarted,
     EntitlementRead,
@@ -51,6 +54,15 @@ from app.schemas.billing import (
     PlanSelectionRequest,
     SubscriptionRead,
     SubscriptionStateRead,
+    entitlement_reads,
+)
+from app.schemas.channel_capacity import (
+    CapacityReductionRead,
+    ChannelCapacityRead,
+    ChannelCapacitySelection,
+    ChannelCapacitySelectionResult,
+    FallbackPreviewRead,
+    scheduled_read,
 )
 from app.schemas.custom_plan import (
     CustomPlanOfferAccept,
@@ -74,6 +86,7 @@ from app.schemas.topup import (
     TopupPurchaseRead,
 )
 from app.services.billing_calendar import current_usage_period
+from app.services.capacity_reduction import ChannelCapacityReductions, needs_reduction
 from app.services.custom_plan_offer_service import offer_read
 from app.services.entitlement_service import EntitlementService
 from app.services.subscription_service import SubscriptionService
@@ -368,8 +381,123 @@ async def read_entitlements(
     Open to any member, unlike usage: "you have three agents left" is something
     the person about to create the fourth one needs to see, whoever pays.
     """
-    snapshot = await entitlements.snapshot()
-    return [EntitlementRead.from_entitlement(item) for item in snapshot]
+    return await entitlement_reads(entitlements)
+
+
+# --------------------------------------------------------- channel capacity
+
+
+def _reductions(
+    session: AsyncSession, tenant_id: uuid.UUID, settings: Settings, now: datetime
+) -> ChannelCapacityReductions:
+    return ChannelCapacityReductions(
+        session,
+        tenant_id=tenant_id,
+        default_plan_code=settings.default_plan_code,
+        grace=timedelta(days=settings.channel_capacity_grace_days),
+        clock=lambda: now,
+    )
+
+
+async def _channel_capacity(
+    session: AsyncSession, tenant_id: uuid.UUID, settings: Settings
+) -> ChannelCapacityRead:
+    """The capacity view, read fresh - after a selection, its disables included."""
+    now = datetime.now(UTC)
+    entitlements = EntitlementService(
+        session,
+        tenant_id=tenant_id,
+        default_plan_code=settings.default_plan_code,
+        clock=lambda: now,
+    )
+    state = await entitlements.check(LimitKey.CHANNEL_CONNECTIONS, additional=0)
+    capacity = await entitlements.channel_capacity(at=now)
+    reductions = _reductions(session, tenant_id, settings, now)
+    open_reduction = await reductions.open_reduction()
+    subscription = await SubscriptionRepository(session, tenant_id=tenant_id).get()
+    ahead = await entitlements.scheduled_channel_capacity()
+    preview = await reductions.fallback_preview(now=now)
+    return ChannelCapacityRead(
+        effective_limit=state.limit,
+        base_limit=state.base_limit,
+        topup_limit=state.topup_limit,
+        platform_grant_limit=state.grant_limit,
+        active=capacity.active_total,
+        remaining=state.remaining,
+        over_limit=state.over_limit,
+        breakdown=ChannelCapacityBreakdown.from_capacity(capacity),
+        scheduled=(
+            scheduled_read(
+                ahead,
+                effective_at=subscription.current_period_end,
+                fits=not needs_reduction(ahead, capacity.active),
+            )
+            if ahead is not None and subscription is not None
+            else None
+        ),
+        reduction=(
+            CapacityReductionRead.from_model(open_reduction) if open_reduction is not None else None
+        ),
+        automatic_fallback=(
+            FallbackPreviewRead(
+                keep=[connection.id for connection in preview.keep],
+                disable=[connection.id for connection in preview.disable],
+            )
+            if preview is not None
+            else None
+        ),
+        preselected=await reductions.preselected(),
+        selection_revision=(
+            open_reduction.revision
+            if open_reduction is not None
+            else subscription.revision if subscription is not None else None
+        ),
+    )
+
+
+@router.get("/channel-capacity", response_model=ChannelCapacityRead)
+async def read_channel_capacity(
+    workspace: ActiveWorkspaceDep, session: SessionDep, settings: SettingsDep
+) -> ChannelCapacityRead:
+    """Channel slots in force, what takes them, and where capacity is heading (ENT-14).
+
+    Open to any member, like the entitlements: the person about to connect a
+    channel needs to see whether it fits. Includes the capacity a scheduled
+    change leaves, an open reduction and its grace, what the automatic
+    fallback would keep and disable, and the revision a selection names.
+    """
+    return await _channel_capacity(session, workspace.tenant.id, settings)
+
+
+@router.post(
+    "/channel-capacity/selection",
+    response_model=ChannelCapacitySelectionResult,
+    summary="Choose which channel connections to keep",
+)
+async def select_channel_connections(
+    payload: ChannelCapacitySelection,
+    workspace: TenantOwnerDep,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> ChannelCapacitySelectionResult:
+    """Keep these connections; disable the rest of the active ones. Owners only (ENT-14).
+
+    While a reduction is open the others are disabled now - never released,
+    never deleted, re-enabled later when a slot is free. Before a capacity
+    boundary the choice is saved and applied there, if it still fits. 404 for
+    a connection that is not this workspace's; 422 for a selection that does
+    not fit or keeps a channel the plan does not include; 409 for a stale
+    `expected_revision` or when there is nothing to choose.
+    """
+    outcome = await _reductions(session, workspace.tenant.id, settings, datetime.now(UTC)).select(
+        payload.keep, expected_revision=payload.expected_revision, actor=workspace.user
+    )
+    return ChannelCapacitySelectionResult(
+        applied=outcome.applied,
+        kept=list(outcome.kept),
+        disabled=list(outcome.disabled),
+        capacity=await _channel_capacity(session, workspace.tenant.id, settings),
+    )
 
 
 @router.get(
@@ -461,7 +589,9 @@ async def list_topups(
     """Top-ups this workspace may buy: active global ones and its own.
 
     Open to any member, like the plan catalogue. Another workspace's own
-    products never appear.
+    products never appear, nor one not offered to this workspace's plan
+    (ENT-13), nor a channel slot typed for a channel the plan does not include
+    (ENT-12).
     """
     return [
         TopupProductRead.from_model(product)
@@ -502,6 +632,7 @@ async def start_topup_checkout(
         entitlement_key=started.entitlement_key,
         quantity=started.quantity,
         expires_at=started.expires_at,
+        channel_type=started.channel_type,
     )
 
 

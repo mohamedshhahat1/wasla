@@ -37,31 +37,41 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.core.telemetry import record_payment_reconciliation, record_topup_purchase
+from app.core.telemetry import (
+    record_ai_turn_charge,
+    record_payment_reconciliation,
+    record_topup_purchase,
+)
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import (
+    LimitKey,
     PlanPrice,
     PlanVersion,
     ScheduledChangeSource,
     Subscription,
     SubscriptionStatus,
 )
-from app.db.models.topup import TopupStatus
+from app.db.models.channel_capacity import CapacityReductionCause
+from app.db.models.topup import TopupSource, TopupStatus
 from app.db.session import Database
 from app.integrations.billing import build_checkout_provider
 from app.integrations.billing.checkout import RecurringProvider
 from app.platform.custom_plan_offers import PlatformCustomPlanOffers
+from app.repositories.agent_turn_repository import ExpiredHoldSweep
 from app.repositories.billing_repository import (
     PlanVersionMigrationRepository,
     PlatformSubscriptionRepository,
 )
+from app.repositories.channel_capacity_repository import PlatformCapacityReductionRepository
 from app.repositories.invoice_repository import PlatformInvoiceRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.topup_repository import PlatformTopupPurchaseRepository
 from app.services.audit_service import AuditTrail
 from app.services.billing_calendar import current_usage_period
+from app.services.capacity_reduction import ChannelCapacityReductions, needs_reduction
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
+from app.services.entitlement_service import EntitlementService
 from app.services.invoice_service import InvoiceService
 from app.services.payment_reconciliation_service import PaymentReconciler
 from app.services.payment_token_service import PaymentTokenProtector
@@ -103,6 +113,9 @@ class _Batch(Protocol):
     def __call__(self, *, now: datetime) -> Awaitable[int]: ...
 
 
+# How far ahead of an automatic fallback its owners are warned (ENT-14).
+CAPACITY_WARNING_AHEAD: Final = timedelta(hours=48)
+
 # Both dunning thresholds are configuration (ADR-061). These names survive as
 # the defaults a caller gets when it constructs the worker without settings,
 # which is what the older tests do; `runner.py` builds it from `Settings`, so a
@@ -138,6 +151,8 @@ class BillingWorker:
             if suspend_after_days is not None
             else settings.billing_suspend_after_days
         )
+        # How long a workspace has to choose its connections (ENT-14).
+        self._grace = timedelta(days=settings.channel_capacity_grace_days)
         self._running = False
         # Set by stop(), so shutdown does not wait out a ten-minute interval.
         self._stopping = asyncio.Event()
@@ -187,6 +202,10 @@ class BillingWorker:
         # opens the new term's first cycle itself, and this phase only ever
         # touches cycles strictly inside a term that is still running.
         handled += await self._advance_usage(now=moment)
+        # Release the AI turn holds nobody settled within their TTL (ENT-03).
+        # Bookkeeping too: a hold past its TTL stopped counting by the clock,
+        # so this phase running late never keeps an allowance from anybody.
+        handled += await self._drain(self._release_expired_holds, now=moment)
         # Record the top-ups whose period has ended (ADR-113). Bookkeeping, not
         # enforcement: the limit arithmetic already ignores an expired top-up
         # by its clock, so this phase running late never extends an allowance.
@@ -195,6 +214,11 @@ class BillingWorker:
         # Also bookkeeping: acceptance checks the clock itself, and a page
         # opened in time is still honoured when its money arrives.
         handled += await self._drain(self._expire_offers, now=moment)
+        # Capacity reductions whose grace has ended get the automatic fallback
+        # (ENT-14) - after the expiries above, which may have opened some, and
+        # each in its own transaction under the workspace's capacity lock.
+        handled += await self._drain(self._resolve_reductions, now=moment)
+        handled += await self._notify_capacity(now=moment)
         # Reconcile before collecting, and the order is the point. An attempt
         # whose answer never arrived makes its invoice uncollectible, so
         # resolving it first is what lets the same pass go on to charge - and
@@ -360,6 +384,8 @@ class BillingWorker:
 
             previous = subscription.status
             ended_start = subscription.current_period_start
+            # Read before the change is applied, which clears it.
+            change_source = subscription.scheduled_change_source
             switch_now, bill_at = await self._next_terms(
                 session, subscription, current=current, current_price=current_price
             )
@@ -380,6 +406,17 @@ class BillingWorker:
                 if switch_now is not None:
                     self._record_applied_change(
                         session, subscription, version=switch_now[0], price=switch_now[1]
+                    )
+                    # A change that takes capacity or channel types away is a
+                    # capacity boundary (ENT-14): fit, apply the owner's
+                    # pre-selection, or open the grace.
+                    await self._reductions(session, subscription.tenant_id).boundary(
+                        cause=(
+                            CapacityReductionCause.DOWNGRADE
+                            if change_source is ScheduledChangeSource.DOWNGRADE
+                            else CapacityReductionCause.MIGRATION
+                        ),
+                        now=now,
                     )
                 # Billed *after* the roll and for the term that has just
                 # opened: advance billing (BILL-03). The bounds now describe the
@@ -414,6 +451,26 @@ class BillingWorker:
             )
             return 1
 
+    async def _release_expired_holds(self, *, now: datetime) -> int:
+        """Release one batch of AI turn holds older than the TTL; nothing is charged.
+
+        A hold this old belongs to a turn whose worker died or never settled.
+        A settle that arrives later still charges - usage that happened is
+        never refused afterwards - and is counted as a late charge.
+        """
+        ttl = timedelta(seconds=self._settings.ai_turn_hold_ttl_seconds)
+        async with self._database.session() as session:
+            released = await ExpiredHoldSweep(session).release_expired(
+                held_before=now - ttl, now=now, limit=self._claim_limit
+            )
+        if released:
+            logger.warning(
+                "billing.ai_turn_holds_expired",
+                extra={"event": "billing.ai_turn_holds_expired", "count": len(released)},
+            )
+            await record_ai_turn_charge("hold_expired", amount=len(released))
+        return len(released)
+
     async def _expire_topups(self, *, now: datetime) -> int:
         """Mark one batch of granted top-ups past `expires_at` as expired.
 
@@ -421,12 +478,17 @@ class BillingWorker:
         is that worker's to record. Deletes nothing - a capacity the workspace
         still uses beyond its plan simply leaves it over its limit. Also counts
         paid-but-ungranted purchases older than an hour, for the stuck alert.
+
+        A channel slot under refund review keeps its status - the operator's
+        decision is still owed - and only its end is recorded, so its
+        workspace's capacity boundary is judged like any other's (ENT-15).
         """
         async with self._database.session() as session:
             purchases = PlatformTopupPurchaseRepository(session)
             expired = await purchases.claim_expired(now=now, limit=self._claim_limit)
             for purchase in expired:
-                move_topup(purchase, TopupStatus.EXPIRED)
+                if purchase.status is not TopupStatus.REFUND_REVIEW:
+                    move_topup(purchase, TopupStatus.EXPIRED)
                 purchase.ended_at = purchase.expires_at
                 AuditTrail(session, tenant_id=purchase.tenant_id).record(
                     AuditAction.BILLING_TOPUP_EXPIRED,
@@ -440,12 +502,29 @@ class BillingWorker:
                         "quantity": purchase.quantity,
                         "source": purchase.source.value,
                         "expires_at": purchase.expires_at.isoformat(),
+                        "status": purchase.status.value,
                     },
                 )
             keys = [purchase.entitlement_key.value for purchase in expired]
+            # Channel slots ending are a capacity boundary for their workspace
+            # (ENT-15), judged once the expiry has committed.
+            boundaries: dict[uuid.UUID, CapacityReductionCause] = {}
+            for purchase in expired:
+                if purchase.entitlement_key.limit_key is LimitKey.CHANNEL_CONNECTIONS:
+                    boundaries.setdefault(
+                        purchase.tenant_id,
+                        (
+                            CapacityReductionCause.GRANT_EXPIRED
+                            if purchase.source is TopupSource.PLATFORM_GRANT
+                            else CapacityReductionCause.TOPUP_EXPIRED
+                        ),
+                    )
             stuck = (
                 await purchases.stuck(paid_before=now - TOPUP_STUCK_AFTER) if not expired else {}
             )
+        for tenant_id, cause in boundaries.items():
+            async with self._database.session() as session:
+                await self._reductions(session, tenant_id).boundary(cause=cause, now=now)
         for key in keys:
             await record_topup_purchase(key, "expired")
         for entitlement, count in stuck.items():
@@ -456,6 +535,127 @@ class BillingWorker:
                 extra={"event": "billing.topups_expired", "count": len(keys)},
             )
         return len(keys)
+
+    def _reductions(self, session: AsyncSession, tenant_id: uuid.UUID) -> ChannelCapacityReductions:
+        return ChannelCapacityReductions(
+            session,
+            tenant_id=tenant_id,
+            default_plan_code=self._settings.default_plan_code,
+            grace=self._grace,
+        )
+
+    async def _resolve_reductions(self, *, now: datetime) -> int:
+        """Apply the automatic fallback to reductions whose grace has ended (ENT-14).
+
+        One transaction per reduction, under the workspace's capacity lock and
+        a `SKIP LOCKED` claim of the row, so two workers produce one set of
+        disables. A reduction whose workspace is not served is left open until
+        it is (ENT-16).
+        """
+        async with self._database.session() as session:
+            due = await PlatformCapacityReductionRepository(session).due(
+                now=now, limit=self._claim_limit
+            )
+        handled = 0
+        for reduction_id, tenant_id in due:
+            async with self._database.session() as session:
+                resolved = await self._reductions(session, tenant_id).resolve_automatically(
+                    reduction_id, now=now
+                )
+            if resolved is not None:
+                handled += 1
+        return handled
+
+    async def _notify_capacity(self, *, now: datetime) -> int:
+        """Tell owners about capacity coming down: ahead, at the boundary, and 48 h before.
+
+        Through the email outbox, once per event and owner whatever the number
+        of passes: a scheduled change their connections will not fit, a grace
+        that began, and the warning before the automatic fallback (ENT-14).
+        """
+        sent = 0
+        async with self._database.session() as session:
+            outbox = EmailOutbox(session, self._settings)
+            reductions = PlatformCapacityReductionRepository(session)
+            tenants = TenantRepository(session)
+            for reduction in await reductions.claim_unnotified(limit=self._claim_limit):
+                tenant = await tenants.get_by_id(reduction.tenant_id)
+                await outbox.enqueue_for_tenant_owners(
+                    tenant_id=reduction.tenant_id,
+                    template=EmailTemplate.CHANNEL_CAPACITY_REDUCTION_STARTED,
+                    idempotency_prefix=f"capacity-reduction-started:{reduction.id}",
+                    context={
+                        "workspace_name": tenant.name if tenant is not None else "your workspace",
+                        "grace_ends_at": reduction.grace_ends_at.date().isoformat(),
+                        "capacity": str(
+                            reduction.target_general + sum(reduction.target_typed.values())
+                        ),
+                        "active": str(
+                            sum(
+                                (
+                                    await EntitlementService(
+                                        session, tenant_id=reduction.tenant_id
+                                    ).active_connections()
+                                ).values()
+                            )
+                        ),
+                    },
+                )
+                reduction.notified_at = now
+                sent += 1
+            for reduction in await reductions.claim_unwarned(
+                now=now, ahead=CAPACITY_WARNING_AHEAD, limit=self._claim_limit
+            ):
+                tenant = await tenants.get_by_id(reduction.tenant_id)
+                await outbox.enqueue_for_tenant_owners(
+                    tenant_id=reduction.tenant_id,
+                    template=EmailTemplate.CHANNEL_CAPACITY_REDUCTION_WARNING,
+                    idempotency_prefix=f"capacity-reduction-warning:{reduction.id}",
+                    context={
+                        "workspace_name": tenant.name if tenant is not None else "your workspace",
+                        "grace_ends_at": reduction.grace_ends_at.date().isoformat(),
+                    },
+                )
+                reduction.warned_at = now
+                sent += 1
+            sent += await self._notify_scheduled_misfits(session, outbox, tenants)
+        return sent
+
+    async def _notify_scheduled_misfits(
+        self, session: AsyncSession, outbox: EmailOutbox, tenants: TenantRepository
+    ) -> int:
+        """Owners whose scheduled change will not hold their connections, told once per change."""
+        sent = 0
+        scheduled = await PlatformSubscriptionRepository(session).with_scheduled_change(
+            limit=self._claim_limit
+        )
+        for subscription in scheduled:
+            entitlements = EntitlementService(
+                session,
+                tenant_id=subscription.tenant_id,
+                default_plan_code=self._settings.default_plan_code,
+            )
+            ahead = await entitlements.scheduled_channel_capacity()
+            active = await entitlements.active_connections()
+            if ahead is None or not needs_reduction(ahead, active):
+                continue
+            tenant = await tenants.get_by_id(subscription.tenant_id)
+            queued = await outbox.enqueue_for_tenant_owners(
+                tenant_id=subscription.tenant_id,
+                template=EmailTemplate.CHANNEL_CAPACITY_SCHEDULED,
+                idempotency_prefix=(
+                    f"capacity-scheduled:{subscription.id}:{subscription.scheduled_plan_version_id}"
+                ),
+                context={
+                    "workspace_name": tenant.name if tenant is not None else "your workspace",
+                    "effective_at": subscription.current_period_end.date().isoformat(),
+                    "capacity": str(ahead.total) if ahead.total is not None else "unlimited",
+                    "active": str(sum(active.values())),
+                    "grace_days": str(self._grace.days),
+                },
+            )
+            sent += 1 if queued else 0
+        return sent
 
     async def _expire_offers(self, *, now: datetime) -> int:
         """Mark one batch of open custom plan offers past `expires_at` as expired."""
@@ -1041,7 +1241,7 @@ class BillingWorker:
                 if created and invoice.status.value == "paid":
                     await InvoiceSettlement(
                         session, tenant_id=subscription.tenant_id
-                    ).adopt_renewal_version(invoice, subscription=subscription)
+                    ).adopt_renewal_version(invoice, subscription=subscription, now=now)
         except Exception:
             logger.exception(
                 "billing.invoice_failed",

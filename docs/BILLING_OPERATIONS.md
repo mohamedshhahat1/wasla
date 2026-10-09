@@ -30,10 +30,10 @@ and the endpoint list is in [API.md](API.md#platform-billing).
 
 | Task | Call | Notes |
 | --- | --- | --- |
-| See what can be limited | `GET /features` | Each key, its unit, whether it is enforced, and whether it is safe under concurrency. `period_messages` is a meter only. |
-| Create a plan | `POST /plans` | `code` is permanent. The terms become version 1. `trial_days` must be 0. The only currency is EGP. |
+| See what can be limited | `GET /features` | Each key, its unit, whether it is enforced, and whether it is safe under concurrency. `period_messages` is a meter only; `allowed_channel_types` is channel policy; `whatsapp_numbers` is listed as retired (ADR-131). |
+| Create a plan | `POST /plans` | `code` is permanent. The terms become version 1, and must state `allowed_channel_types` - the channel types a workspace on it may connect and automate, named, no wildcard (an empty list is none). `channel_connections` is the connection limit; `whatsapp_numbers` is refused. `trial_days` must be 0. The only currency is EGP. |
 | Rename, reorder, show or hide it | `PATCH /plans/{id}` | Presentation only. A price or limit cannot be changed here. |
-| Change price, interval or limits | `POST /plans/{id}/versions/preview`, then `POST /plans/{id}/versions` | Preview writes nothing. It tells you how many subscribers are on each version, and for each limit how many workspaces are already above the new value. Publishing affects **new checkouts only**, from `effective_at`. |
+| Change price, interval or limits | `POST /plans/{id}/versions/preview`, then `POST /plans/{id}/versions` | Preview writes nothing. It tells you how many subscribers are on each version, for each limit how many workspaces are already above the new value, and for the channel types how many workspaces hold a connection of a type the new version removes. Publishing affects **new checkouts only**, from `effective_at`. |
 | Move existing subscribers to the new terms | `POST /plans/{id}/migrations` with `confirm: false`, then `confirm: true` | The first call only counts the subscribers. The second records one migration. Each subscriber moves at their own next renewal: a cheaper version is applied at the boundary, and a pricier one is invoiced at the boundary and adopted only after that invoice is paid. |
 | Stop selling a plan | `POST /plans/{id}/deactivate` | Existing subscribers keep it and keep renewing on it. |
 | Delete a plan | `DELETE /plans/{id}` (owner only) | Refused with `409` if any subscription, invoice, scheduled change or migration has ever referenced it. Deactivate it instead. |
@@ -72,7 +72,7 @@ flow for creating one.
 | --- | --- | --- |
 | See the company first | `GET /tenants/{tenant_id}/summary` | Plan, version, price, period, next renewal, the seven limits with usage, live top-ups and grants, recent invoices, payments, incidents and timeline. |
 | Preview the terms | `POST /tenants/{tenant_id}/custom-plan/preview` | Writes nothing. Shows current versus proposed for each of the seven keys, what is in use, which proposals are already below usage, the limits inherited from the current plan (`agents`, `owned_workspaces`), when it would take effect and the next charge. |
-| Create it | `POST /tenants/{tenant_id}/custom-plan` | `code`, `name`, `price`, `currency` (EGP), `billing_interval` and **all seven limits** are required. `null` is unlimited, `0` is none, and leaving a key out is refused. Storage is in bytes (GiB x 1024^3). |
+| Create it | `POST /tenants/{tenant_id}/custom-plan` | `code`, `name`, `price`, `currency` (EGP), `billing_interval`, **all seven limits** and `allowed_channel_types` are required. `null` is unlimited, `0` is none, and leaving a key out is refused. Storage is in bytes (GiB x 1024^3). |
 | Offer it to the company (the normal way to sell it) | the same, with `financial_basis: "customer_checkout"` and optionally `offer_expires_at` | Creates the plan and an **offer** (ADR-114). Nothing is assigned; the owner sees the terms, clicks Accept & Pay, and the plan applies when Paymob confirms the payment. |
 | Create and assign at renewal | the same, with `assign_to_tenant: true`, `assignment_mode: "next_renewal"` and `expected_subscription_revision` | **Free custom plans only.** A priced custom plan the company does not already hold is refused here (422): it would be billed, possibly to a saved card, at a price the customer never accepted. Offer it instead. |
 | Create and assign now | `assignment_mode: "now"` | A free custom plan applies at once. A priced one needs `financial_basis`: `customer_checkout` (nothing is assigned: it makes an **offer** the owner accepts and pays; ADR-114), `manual_payment` (with the payment details you have seen) or `complimentary` (with `complimentary_until`). |
@@ -110,8 +110,9 @@ never renews.
 | Task | Call | Notes |
 | --- | --- | --- |
 | List products | `GET /topups?scope=…&tenant_id=…&entitlement_key=…&active=…` | |
-| Create a product | `POST /topups` | `code` (permanent), `name`, `entitlement_key` (one of the seven), `quantity` (> 0; storage in bytes), `price`, `currency` (EGP), `scope` (`global`, or `tenant` with `tenant_id`), `is_public`, `reason`. A `tenant` product is visible, purchasable and grantable to that company only. |
-| Change price, quantity, name or visibility | `PATCH /topups/{id}` with `expected_revision` | For new purchases only. Every existing purchase keeps what it was bought at. |
+| Create a product | `POST /topups` | `code` (permanent), `name`, `entitlement_key` (one of the seven), `quantity` (> 0; storage in bytes), `price`, `currency` (EGP), `scope` (`global`, or `tenant` with `tenant_id`), `is_public`, `reason`. A `tenant` product is visible, purchasable and grantable to that company only. For `channel_connections`: `channel_type` (omit for a general slot any allowed type may use) and `eligible_plan_codes` (omit or `[]` for every plan). |
+| Price a placeholder | `PATCH /topups/{id}` with `price`, then `POST /topups/{id}/activate` | Migration 0098 seeds six channel products - `channel-connection-1` (general) and `whatsapp-`, `instagram-`, `messenger-`, `telegram-`, `tiktok-connection-1` - each +1, inactive and **unpriced**. Activating one with no price is refused (409, and a database check). Wasla invents no price. |
+| Change price, quantity, name, visibility, channel type or eligible plans | `PATCH /topups/{id}` with `expected_revision` | For new purchases only. Every existing purchase keeps what it was bought at, its channel type included. |
 | Stop selling it | `POST /topups/{id}/deactivate` | Existing purchases and grants are untouched. |
 | Delete it | `DELETE /topups/{id}` (owner only) | Refused with `409` once anybody has bought it. Deactivate instead. |
 
@@ -120,13 +121,57 @@ never renews.
 | Task | Call | Notes |
 | --- | --- | --- |
 | Find purchases | `GET /topup-purchases?tenant_id=…&status=…&source=…&entitlement_key=…` | `status=paid` lists money taken and not granted - each has an incident and needs a refund. |
-| Give allowance without payment | `POST /tenants/{tenant_id}/topups/grant` | `entitlement_key`, `quantity`, `valid_until: "current_period_end"`, `reason`, `expected_subscription_revision`. Recorded as `source: platform_grant` with no invoice, payment or price. Refused for a key the plan leaves unlimited. |
+| Give allowance without payment | `POST /tenants/{tenant_id}/topups/grant` | `entitlement_key`, `quantity`, `valid_until: "current_period_end"`, `reason`, `expected_subscription_revision`, and for channel slots optionally `channel_type`. Recorded as `source: platform_grant` with no invoice, payment or price. Refused for a key the plan leaves unlimited, and for a channel type the company's plan does not allow (422). |
 | Decide a refunded top-up | `POST /topup-purchases/{id}/refund-review` | Only for `status: refund_review`. `decision: keep` leaves the allowance; `withdraw` removes it from the limit from now on. Withdrawing deletes nothing and never makes usage negative - the company is just over its limit until it fits again. |
 
 To refund a top-up, refund its payment with `POST /payments/{id}/refund` as
 usual. Nothing is withdrawn automatically: before the grant a full refund cancels
 the purchase, after it the purchase waits in `refund_review` for your decision.
 A top-up refund never changes the plan and never starts dunning.
+
+### Channel slots (ADR-131)
+
+A channel top-up is sold and granted exactly like any capacity top-up. What is
+particular to it:
+
+- **Typed or general.** A general slot (`channel_type` omitted) serves any
+  channel type the company's plan allows; a typed slot serves only its own. A
+  top-up never opens a channel type: a typed product for a type the company's
+  plan does not include is not listed to it, its checkout answers 422, and so
+  does a grant.
+- **Eligible plans.** A product with `eligible_plan_codes` is invisible to a
+  company on any other plan (404 at checkout). Starter may buy one if you make
+  it eligible.
+- **Valid until the billing term ends** - a year on a yearly price - like every
+  capacity top-up.
+
+## Channel capacity reductions (ADR-131)
+
+When a company's channel capacity falls below its active connections - a
+downgrade or migration taking effect, a channel top-up or grant expiring, a
+refund you withdrew - a **reduction** opens. Read it on
+`GET /tenants/{tenant_id}/summary`: the `channel_connections` entitlement carries
+the slots in force (general and typed) and the active connections by channel, and
+`channel_capacity_reduction` the latest reduction with its cause, status and
+grace end.
+
+What to tell the customer during the grace (`CHANNEL_CAPACITY_GRACE_DAYS`, 7):
+
+- Every connection keeps working - messages in and out, the AI, campaigns.
+- No new connection can be made and none re-enabled until they fit.
+- An owner chooses which connections to keep on the billing page
+  (`POST /billing/channel-capacity/selection`); the others are disabled, not
+  deleted: history, conversations, contacts and the number's claim stay, and
+  any of them can be enabled again once there is a free slot.
+- With no choice by the end of the grace, connections of a type their plan no
+  longer allows are disabled first, then the newest; the oldest are kept.
+- Buying more slots, or an upgrade, during the grace ends it with nothing
+  disabled.
+
+You do not disable connections by hand, and nothing on the platform API
+bypasses the capacity guard. A suspended, cancelled or expired company never
+gets a reduction: it keeps every connection, reads over its limit, and its
+automation on a channel the default plan lacks stops until it pays.
 
 ## Subscribers
 
@@ -229,6 +274,9 @@ The rules are in the `wasla-billing` and `wasla-billing-topups` groups of
 | `BillingTopupCallbackMismatchSpike` | warning | Mismatched callback incidents on top-up payments |
 | `BillingTopupReconciliationStuck` | warning | `GET /topup-purchases?status=paid` |
 | `BillingCustomPlanFailureSpike` | warning | API error logs for `/tenants/*/custom-plan` |
+| `AITurnHoldsStuck` | warning | AI turn holds past their TTL are not being released: is the billing worker running? (`docs/RUNBOOK.md`) |
+| `ChannelCapacityAutoDisableSpike` | warning | Many connections disabled by expired graces in an hour: which reductions resolved automatically, and why owners did not choose |
+| `AITurnLateChargeSpike` | warning | Holds released by the sweep and charged later: `AI_TURN_HOLD_TTL_SECONDS` is shorter than real turns take |
 
 ## Configuration you may need
 
@@ -239,6 +287,8 @@ The rules are in the `wasla-billing` and `wasla-billing-topups` groups of
 | `PAYMOB_MOTO_INTEGRATION_ID` | Needed for saved-card renewals. |
 | `PAYMOB_API_KEY` | Needed for transaction inquiry and Card Token Inquiry. Without it, lost callbacks are never recovered. |
 | `BILLING_HOSTED_RECONCILIATION_MAX_AGE_SECONDS` | How long a pending checkout is still looked up. |
+| `AI_TURN_HOLD_TTL_SECONDS` | How long an AI turn's hold counts before the sweep releases it (900). Keep it above the longest a turn takes. |
+| `CHANNEL_CAPACITY_GRACE_DAYS` | How long a company keeps every connection while it chooses which to keep (7). |
 
 A test key (`sk_test_…`) produces payments marked `test`, and a live key
 produces payments marked `live`. A callback whose mode does not match its

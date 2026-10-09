@@ -100,6 +100,7 @@ from app.db.models.follow_up import (
 )
 from app.db.models.lead import ActorKind
 from app.db.models.tenant import Tenant
+from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -108,6 +109,10 @@ from app.repositories.follow_up_repository import FollowUpRepository
 from app.repositories.lead_repository import LeadRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
+from app.services.entitlement_service import (
+    CHANNEL_NOT_IN_PLAN_DETAIL,
+    EntitlementService,
+)
 from app.services.messaging_service import MessagingService
 from app.services.template_service import refusal_reason_for
 
@@ -129,6 +134,10 @@ DISPATCH_IN_PROGRESS: Final = "dispatch_in_progress"
 #: `cancelled_reason` for the reminders of a colleague removed from the
 #: workspace (PD-CRM-8).
 MEMBER_REVOKED_REASON: Final = "member_revoked"
+
+#: `cancelled_reason` for the nudges of a connection that was disabled - by a
+#: person or by a capacity reduction (ENT-14).
+CONNECTION_DISABLED_REASON: Final = "connection_disabled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,6 +570,42 @@ class FollowUpService:
             self._cancel(follow_up, reason=reason)
         return len(pending)
 
+    async def cancel_for_connection(
+        self,
+        *,
+        connection_id: uuid.UUID,
+        reason: str = CONNECTION_DISABLED_REASON,
+    ) -> int:
+        """Cancel the nudges waiting on a connection being disabled. Returns how many.
+
+        Inside the disable's transaction, whoever disabled it - a person, or a
+        capacity reduction (ENT-14). A disabled connection sends nothing, so a
+        nudge left pending would only fail at dispatch and sit there; it is
+        cancelled instead, whoever scheduled it. A send already committed is
+        left to finish: it cannot be recalled.
+        """
+        pending = [
+            follow_up
+            for follow_up in await self._follow_ups.lock_pending_on_connection(connection_id)
+            if not follow_up.is_in_flight
+        ]
+        for follow_up in pending:
+            self._cancel(follow_up, reason=reason)
+        if pending:
+            # Flushed with the disable that caused it, so nothing read later in
+            # the transaction can see the connection disabled and its nudges
+            # still waiting.
+            await self._session.flush()
+            logger.info(
+                "follow_up.cancelled_on_disable",
+                extra={
+                    "event": "follow_up.cancelled_on_disable",
+                    "tenant_id": str(self._tenant_id),
+                    "cancelled": len(pending),
+                },
+            )
+        return len(pending)
+
     async def cancel_member_follow_ups(self, *, user_id: uuid.UUID) -> int:
         """Cancel the waiting reminders of a colleague who is leaving. Returns how many.
 
@@ -751,11 +796,24 @@ class FollowUpService:
             follow_up.cancelled_reason = MEMBER_REVOKED_REASON
             return DispatchOutcome(follow_up, FollowUpStatus.CANCELLED, MEMBER_REVOKED_REASON)
 
-        contact = await self._contacts.require_by_id(conversation.contact_id)
-        if not contact.accepts_campaigns:
+        if not await EntitlementService(
+            self._session,
+            tenant_id=self._tenant_id,
+            default_plan_code=(
+                self._settings.default_plan_code if self._settings is not None else None
+            ),
+        ).channel_in_plan(conversation.channel):
+            # ENT-16: nothing automated runs on a channel the plan in force
+            # does not include. Terminal, like every policy refusal here.
+            return self._skip(follow_up, CHANNEL_NOT_IN_PLAN_DETAIL)
+
+        if not await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).accepts_marketing(conversation.contact_id, conversation.channel):
             # Re-read here rather than trusted from scheduling, exactly as the
             # campaign sweep does: somebody who says STOP after the nudge was
-            # scheduled must not receive it (MSG-06).
+            # scheduled must not receive it (MSG-06) - on this conversation's
+            # channel, where the nudge would go (ENT-19).
             return self._skip(
                 follow_up,
                 "The customer has opted out of automated messages.",

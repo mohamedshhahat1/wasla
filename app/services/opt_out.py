@@ -23,12 +23,16 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import uuid
 from datetime import datetime
 from typing import Final
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.logging import get_logger
 from app.db.models.campaign import OptOutSource, OptOutVia
-from app.db.models.conversation import Contact
+from app.db.models.channel import Channel
+from app.repositories.consent_repository import ContactConsentRepository
 
 logger = get_logger(__name__)
 
@@ -93,31 +97,38 @@ def is_stop_request(text: str | None) -> bool:
     return normalised(text) in STOP_WORDS
 
 
-def record_opt_out(
-    contact: Contact,
+async def record_opt_out(
+    session: AsyncSession,
     *,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    channel: Channel,
     source: OptOutSource,
     via: OptOutVia,
     at: datetime,
 ) -> bool:
-    """Record that this person wants no campaigns. Returns whether anything changed.
+    """Record that this person wants no marketing on `channel`. Returns whether anything changed.
 
     The one writer of an opt-out, whichever way it arrived - a stop word, a
-    tapped button, the provider's own preference record, a replay of retained
-    evidence, a colleague (OMNI-030, OMNI-046). Idempotent, and it never moves
-    the timestamp: the first refusal is the one a dispute about a marketing
-    message turns on. `source` is who decided; `via` is by which evidence.
+    tapped button, the provider's own preference record or refusal, a replay of
+    retained evidence, a colleague (OMNI-030, OMNI-046). Per channel (ENT-19):
+    a STOP on WhatsApp covers every WhatsApp number of the workspace and no
+    other channel. Idempotent, and it never moves the timestamp: the first
+    refusal is the one a dispute about a marketing message turns on. `source`
+    is who decided; `via` is by which evidence.
     """
-    if contact.marketing_opt_out_at is not None:
+    consent = await ContactConsentRepository(session, tenant_id=tenant_id).lock(contact_id, channel)
+    if consent.marketing_opt_out_at is not None:
         return False
-    contact.marketing_opt_out_at = at
-    contact.opt_out_source = source
-    contact.opt_out_via = via
+    consent.marketing_opt_out_at = at
+    consent.opt_out_source = source
+    consent.opt_out_via = via
     logger.info(
         "campaign.opt_out_recorded",
         extra={
             "event": "campaign.opt_out_recorded",
-            "contact_id": str(contact.id),
+            "contact_id": str(contact_id),
+            "channel": channel.value,
             "source": source.value,
             "via": via.value,
         },
@@ -125,4 +136,55 @@ def record_opt_out(
     return True
 
 
-__all__ = ["MAX_STOP_LENGTH", "STOP_WORDS", "is_stop_request", "normalised", "record_opt_out"]
+async def record_resume(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    channel: Channel,
+    source: OptOutSource,
+    via: OptOutVia,
+    at: datetime,
+    lifts: frozenset[OptOutVia] | None = None,
+) -> bool:
+    """Record a re-admission to marketing on `channel`. Returns whether an opt-out was lifted.
+
+    The resume is always recorded, if newer than the last one: it is the
+    evidence that stops a replay of older opt-out evidence from undoing it
+    (OMNI-030). The opt-out on that channel - and only that channel (ENT-19) -
+    is lifted when `lifts` is None (a colleague's deliberate clear) or names
+    the evidence it was recorded by: the provider's own resume undoes only what
+    the provider's own stop recorded, never a stop word the customer sent.
+    """
+    consent = await ContactConsentRepository(session, tenant_id=tenant_id).lock(contact_id, channel)
+    if consent.resumed_at is None or consent.resumed_at < at:
+        consent.resumed_at = at
+        consent.resume_source = source
+        consent.resume_via = via
+    if consent.marketing_opt_out_at is None:
+        return False
+    if lifts is not None and consent.opt_out_via not in lifts:
+        return False
+    consent.marketing_opt_out_at = None
+    consent.opt_out_source = None
+    consent.opt_out_via = None
+    logger.info(
+        "campaign.opt_out_cleared",
+        extra={
+            "event": "campaign.opt_out_cleared",
+            "contact_id": str(contact_id),
+            "channel": channel.value,
+            "via": via.value,
+        },
+    )
+    return True
+
+
+__all__ = [
+    "MAX_STOP_LENGTH",
+    "STOP_WORDS",
+    "is_stop_request",
+    "normalised",
+    "record_opt_out",
+    "record_resume",
+]

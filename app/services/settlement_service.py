@@ -83,6 +83,7 @@ from app.db.models.billing import (
     SubscriptionStatus,
 )
 from app.db.models.billing_incident import BillingIncidentKind
+from app.db.models.channel_capacity import CapacityReductionCause
 from app.db.models.invoice import (
     UNRESOLVED_COLLECTION_STATES,
     Invoice,
@@ -101,6 +102,7 @@ from app.repositories.billing_repository import (
 from app.repositories.invoice_repository import InvoiceRepository, PaymentRepository
 from app.services.audit_service import AuditTrail
 from app.services.billing_incident_service import raise_incident
+from app.services.capacity_reduction import ChannelCapacityReductions
 from app.services.custom_plan_offer_ledger import CustomPlanOfferLedger
 from app.services.plan_catalog import PlanCatalog
 from app.services.subscription_service import SubscriptionService
@@ -608,9 +610,11 @@ class InvoiceSettlement:
                     "from_status": previous.value,
                 },
             )
-        await self.adopt_renewal_version(invoice, subscription=subscription)
+        await self.adopt_renewal_version(invoice, subscription=subscription, now=now)
 
-    async def adopt_renewal_version(self, invoice: Invoice, *, subscription: Subscription) -> None:
+    async def adopt_renewal_version(
+        self, invoice: Invoice, *, subscription: Subscription, now: datetime
+    ) -> None:
         """Move the subscription onto the version and price its current renewal paid for.
 
         A renewal billed at other terms than the subscription holds - a cohort
@@ -618,6 +622,10 @@ class InvoiceSettlement:
         is adopted only now that it is paid (spec: scheduled version migration).
         The term the renewal paid for is already the subscription's current
         one: the sweep billed it for exactly that window.
+
+        The capacity boundary is judged at `now`, the settlement's own moment,
+        like every other boundary: a grace dated by the wall clock instead would
+        start - and could end - at a moment the sweep that settled it never saw.
         """
         if (
             invoice.plan_version_id is None
@@ -656,6 +664,11 @@ class InvoiceSettlement:
                 "invoice_id": str(invoice.id),
                 "source": ScheduledChangeSource.MIGRATION.value,
             },
+        )
+        # Adopting other terms is a capacity boundary (ENT-15): a migration to
+        # a smaller version opens the grace, a larger one closes any open.
+        await ChannelCapacityReductions(self._session, tenant_id=self._tenant_id).boundary(
+            cause=CapacityReductionCause.MIGRATION, now=now
         )
 
     # ------------------------------------------------------------ void

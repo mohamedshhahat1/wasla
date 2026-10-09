@@ -51,7 +51,7 @@ KEYS = (
     LimitKey.PERIOD_AI_TURNS,
     LimitKey.PERIOD_MESSAGES,
     LimitKey.PERIOD_CAMPAIGN_MESSAGES,
-    LimitKey.WHATSAPP_NUMBERS,
+    LimitKey.CHANNEL_CONNECTIONS,
     LimitKey.TEAM_MEMBERS,
     LimitKey.STORAGE_BYTES,
 )
@@ -65,7 +65,7 @@ STATUSES = (
     SubscriptionStatus.SUSPENDED,
 )
 LIMITS = (
-    {"period_ai_turns": 500, "period_messages": 2_000, "whatsapp_numbers": 2},
+    {"period_ai_turns": 500, "period_messages": 2_000, "channel_connections": 2},
     {"period_ai_turns": 0, "period_campaign_messages": 0, "team_members": 3},
     {"period_messages": 10_000},  # AI turns unlimited
     {"period_ai_turns": 25_000, "storage_bytes": 10**9, "team_members": 10},
@@ -166,7 +166,7 @@ async def _population(session: AsyncSession, rng: random.Random) -> list[dict[st
         await session.flush()
         for entitlement in (
             TopupEntitlement.PERIOD_AI_TURNS,
-            TopupEntitlement.WHATSAPP_NUMBERS,
+            TopupEntitlement.CHANNEL_CONNECTIONS,
             TopupEntitlement.PERIOD_MESSAGES,
         ):
             state = rng.choice(["live", "expired", "future", "review", "cancelled"])
@@ -174,7 +174,7 @@ async def _population(session: AsyncSession, rng: random.Random) -> list[dict[st
             if state == "future":
                 granted = end - timedelta(days=2)
             # A usage grant lasts at most its month; a capacity one may be longer.
-            longest = 400 if entitlement is TopupEntitlement.WHATSAPP_NUMBERS else 30
+            longest = 400 if entitlement is TopupEntitlement.CHANNEL_CONNECTIONS else 30
             expires = granted + timedelta(days=rng.randint(5, longest))
             if state == "expired":
                 expires = granted + timedelta(days=1)

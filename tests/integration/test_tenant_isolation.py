@@ -407,8 +407,18 @@ def _attacks(target: Workspace) -> list[Attack]:
             None,
         ),
         # --- contacts
-        ("POST", f"{API}/contacts/{target.contact.id}/opt-out", {}, None),
-        ("DELETE", f"{API}/contacts/{target.contact.id}/opt-out", None, None),
+        (
+            "POST",
+            f"{API}/contacts/{target.contact.id}/opt-out",
+            {"channel": "whatsapp"},
+            None,
+        ),
+        (
+            "DELETE",
+            f"{API}/contacts/{target.contact.id}/opt-out?channel=whatsapp",
+            None,
+            None,
+        ),
         # --- leads
         ("GET", f"{API}/leads/{lead}", None, None),
         ("POST", f"{API}/leads/{lead}/status", {"status": "won"}, None),

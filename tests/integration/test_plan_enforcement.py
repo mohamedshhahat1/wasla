@@ -24,10 +24,12 @@ from app.api.dependencies import (
     ActiveWorkspace,
     get_active_workspace,
     get_entitlement_service,
+    get_whatsapp_account_service,
 )
 from app.core.exceptions import PlanLimitExceededError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.billing import LimitKey
+from app.services.channel_capacity import ChannelCapacityExceededError
 from app.services.entitlement_service import Entitlement
 
 pytestmark = pytest.mark.integration
@@ -111,20 +113,38 @@ async def test_the_refusal_says_what_to_do_about_it(
     assert "Upgrade" in response.json()["error"]["message"]
 
 
-async def test_a_full_plan_refuses_another_number(
+class FullChannels:
+    """A WhatsApp service whose channel capacity guard refuses, as a full plan's does."""
+
+    async def connect(self, **_kwargs: object) -> object:
+        raise ChannelCapacityExceededError(
+            details={"effective_limit": 1, "active": 1, "channel": "whatsapp"}
+        )
+
+
+async def test_a_full_plan_refuses_another_number_with_a_409(
     client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
 ) -> None:
+    """Channel capacity is 409, not 402, and is the service's own guard (ENT-08).
+
+    There is no per-key dependency on the connect route any more: which channel
+    is being connected decides whether a typed slot can take it, so the guard
+    runs inside the service, before Meta and again under the lock. The real
+    refusal, against real rows and a fake Meta, is in `test_channel_capacity.py`.
+    """
+    app.dependency_overrides[get_whatsapp_account_service] = FullChannels
     response = await client.post(
         "/api/v1/whatsapp/accounts",
         json={
             "phone_number_id": "109876543210",
             "waba_id": "555000111",
-            "display_phone_number": "+201000000000",
+            "access_token": "EAAG-test-token",
         },
     )
 
-    assert response.status_code == 402
-    assert exhausted.asked == [LimitKey.WHATSAPP_NUMBERS]
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "channel_capacity_exceeded"
+    assert exhausted.asked == []
 
 
 async def test_a_full_plan_refuses_another_colleague(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ColumnElement
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +28,9 @@ from app.repositories.channel_event_repository import (
     InboundEventSweep,
     WebhookPayloadRetention,
 )
+
+if TYPE_CHECKING:
+    from app.services.channel_capacity import ChannelSlot
 
 logger = get_logger(__name__)
 
@@ -224,11 +227,16 @@ class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
         phone_number_id: str,
         waba_id: str,
         display_phone_number: str,
+        slot: ChannelSlot,
         display_name: str | None = None,
         verified_name: str | None = None,
         ownership_verified_at: datetime | None = None,
     ) -> WhatsAppAccount:
         """Claim a phone number for this workspace.
+
+        `slot` is the channel capacity guard's answer for this workspace, taken
+        in this transaction (ENT-08): the row is written active, so it takes a
+        slot, and only the guard may say there is one.
 
         Two claims on the same number, and why both checks are here:
 
@@ -248,6 +256,8 @@ class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
         surrounding transaction. Without it the request could not go on to
         produce a response body at all.
         """
+        if slot.tenant_id != self.tenant_id or slot.channel is not Channel.WHATSAPP:
+            raise ValueError("A WhatsApp number takes a WhatsApp slot of its own workspace.")
         directory = WhatsAppAccountDirectory(self.session)
         if await directory.get_by_phone_number_id(phone_number_id) is not None:
             # The uniqueness is platform-wide, so the conflict may be with a

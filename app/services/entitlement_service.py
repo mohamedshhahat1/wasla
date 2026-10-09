@@ -7,10 +7,14 @@ is paying for, and nobody will notice until they complain.
 
 Two kinds of question, answered by two different queries:
 
-- **Resource limits** count rows that exist now - connected numbers, agents,
+- **Resource limits** count rows that exist now - channel connections, agents,
   colleagues, documents. A workspace over one stays over it until something is
   deleted, which is the correct behaviour: downgrading a plan does not delete
-  anybody's work, it stops them adding more.
+  anybody's work, it stops them adding more. (Channel capacity alone has a
+  resolution beyond that - the owner's selection or, after a week, the oldest
+  kept and the rest disabled, never deleted: ENT-14, `channel_capacity_lifecycle`.)
+- **Channel policy** - which channel types the plan allows (ENT-09) - is a set,
+  not a number, and is read here too.
 - **Period limits** count what was consumed in the current *usage cycle*, read
   from `usage_events`. The cycle is always one calendar month - on a yearly
   price as on a monthly one (ADR-116) - so "100,000 messages" on an annual plan
@@ -43,15 +47,16 @@ import hashlib
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PlanLimitExceededError
 from app.core.logging import get_logger
 from app.db.models.agent import Agent
+from app.db.models.agent_turn import AgentTurn, AITurnChargeState
 from app.db.models.billing import (
     ACCOUNT_LIMITS,
     RESOURCE_LIMITS,
@@ -61,31 +66,60 @@ from app.db.models.billing import (
     PlanVersion,
     Subscription,
 )
+from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
 from app.db.models.enums import InvitationStatus, MembershipStatus
 from app.db.models.invitation import TenantInvitation
 from app.db.models.knowledge import Document
 from app.db.models.media import OCCUPYING_STORAGE_STATES, MessageMedia
 from app.db.models.membership import Membership
 from app.db.models.topup import TopupSource
-from app.db.models.usage import UsageEventType
-from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
+from app.db.models.usage import UsageEvent, UsageEventType
 from app.repositories.billing_repository import PlanRepository, SubscriptionRepository
-from app.repositories.topup_repository import TopupPurchaseRepository
+from app.repositories.topup_repository import ActiveTotal, TopupPurchaseRepository
 from app.repositories.usage_repository import UsageEventRepository
 from app.services.billing_calendar import current_usage_period
+from app.services.channel_fit import ChannelCapacity
+from app.services.entitlement_terms import (
+    LEGACY_CHANNEL_TYPES,
+    term_channel_types,
+    term_limit,
+    topup_slot_channel,
+)
 from app.services.plan_catalog import PlanCatalog
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
+
+#: The reason an automated send records when the plan in force excludes its
+#: channel (ENT-16). Led by a fixed code, so it can be filtered without parsing.
+CHANNEL_NOT_IN_PLAN_DETAIL: Final = (
+    "channel_not_in_plan: the plan in force does not include this conversation's channel."
+)
+
+#: How long an AI turn's hold counts when the caller names no TTL (ENT-03):
+#: the deployment's `AI_TURN_HOLD_TTL_SECONDS`, whose default this matches.
+DEFAULT_AI_TURN_HOLD_TTL: Final = timedelta(seconds=900)
+
+#: How long a turn waits for its workspace's allowance lock (ENT-03), in place
+#: of the session's `DATABASE_LOCK_TIMEOUT_MS`. The lock guards a few
+#: milliseconds of counting and is never held across an inference, so a burst
+#: of turns on one workspace queues behind it: waiting is cheap, and a turn
+#: that gave up at five seconds was a customer's message lost to the dead-letter
+#: list. Below the statement timeout, so the lock wait is what ends first.
+AI_TURN_HOLD_LOCK_WAIT: Final = timedelta(seconds=20)
 
 # Which meters each period limit adds up. Messages count in both directions:
 # a conversation is two-sided, every WhatsApp platform prices it that way, and
 # counting only what the business sends would let a workspace be billed nothing
 # for a hundred thousand inbound messages it still had to store and process.
 PERIOD_METERS: Final[dict[LimitKey, tuple[UsageEventType, ...]]] = {
+    # Every channel's (ENT-22): WhatsApp's own two meters and the neutral two,
+    # each message counted under exactly one of them.
     LimitKey.PERIOD_MESSAGES: (
         UsageEventType.WHATSAPP_MESSAGE_SENT,
         UsageEventType.WHATSAPP_MESSAGE_RECEIVED,
+        UsageEventType.MESSAGE_SENT,
+        UsageEventType.MESSAGE_RECEIVED,
     ),
     # Turns, never provider requests (AI-02). `AI_REQUEST` is still recorded for
     # every call a turn makes - sentiment, each inference round - because that
@@ -112,6 +146,15 @@ class Entitlement:
     `base_limit` is the pinned plan version's; `topup_limit` what live paid
     top-ups add; `grant_limit` what live platform grants add. An unlimited base
     stays unlimited - a top-up cannot make unlimited more unlimited.
+
+    `channel_connections` also carries its `capacity` (ENT-05): `limit` is then
+    every slot, general and typed, `used` every active connection, and
+    `remaining` the general slots left for the next connection of a type with
+    no typed slot of its own - which is what a person about to connect one
+    needs to know.
+
+    `held` is AI turns engaged and not yet settled (ENT-03): they are not usage
+    yet, but they are spoken for, so `remaining` leaves them out.
     """
 
     key: LimitKey
@@ -124,6 +167,8 @@ class Entitlement:
     grant_limit: int = 0
     period_start: datetime | None = None
     period_end: datetime | None = None
+    capacity: ChannelCapacity | None = None
+    held: int = 0
 
     @property
     def is_unlimited(self) -> bool:
@@ -133,7 +178,9 @@ class Entitlement:
     def remaining(self) -> int | None:
         if self.limit is None:
             return None
-        return max(self.limit - self.used, 0)
+        if self.capacity is not None:
+            return self.capacity.general_remaining
+        return max(self.limit - self.used - self.held, 0)
 
     @property
     def over_limit(self) -> bool:
@@ -141,8 +188,11 @@ class Entitlement:
 
         The state a capacity reaches when a top-up expires or a plan shrinks:
         nothing is deleted, `remaining` reads zero rather than a negative
-        number, and adding more is refused until usage fits again.
+        number, and adding more is refused until usage fits again. For channel
+        capacity it is the fit rule's answer, typed slots included.
         """
+        if self.capacity is not None:
+            return self.capacity.over_limit
         return self.limit is not None and self.used > self.limit
 
 
@@ -207,10 +257,14 @@ class EntitlementService:
         tenant_id: uuid.UUID,
         default_plan_code: str | None = None,
         clock: Callable[[], datetime] | None = None,
+        ai_turn_hold_ttl: timedelta | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._default_plan_code = default_plan_code
+        # Past this age an AI turn's hold stops counting (ENT-03): its worker
+        # died, and the billing sweep will release it.
+        self._hold_ttl = ai_turn_hold_ttl or DEFAULT_AI_TURN_HOLD_TTL
         # What "now" is for top-up expiry. Injected only by tests that need to
         # stand either side of a period boundary; production reads the clock.
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
@@ -228,6 +282,11 @@ class EntitlementService:
         """The plan version this workspace is enforced against right now."""
         await self._resolve()
         return self._terms
+
+    async def plan(self) -> Plan | None:
+        """The plan in force: the serving subscription's, else the default; None if unenforced."""
+        plan, _ = await self._resolve()
+        return plan
 
     async def _resolve(self) -> tuple[Plan | None, Subscription | None]:
         if self._resolved is not None:
@@ -292,16 +351,22 @@ class EntitlementService:
         if plan is None:
             # Unenforced, and already logged in `_resolve`.
             return Entitlement(key=key, limit=None, used=0, allowed=True)
+        if key is LimitKey.CHANNEL_CONNECTIONS:
+            return await self._channel_entitlement(plan, additional=additional)
 
         terms = self._terms
-        base = terms.limit_for(key) if terms is not None else plan.limit_for(key)
+        # Through the one reader of plan terms, which knows the retired keys.
+        base = term_limit(terms if terms is not None else plan, key)
         purchased, granted = await self._topped_up(key)
         # The effective limit (ADR-113). Unlimited stays unlimited; otherwise
         # the plan's figure plus whatever live top-ups and grants add. Nothing
         # here writes to the plan version - a top-up is an addition beside it.
         limit = None if base is None else base + purchased + granted
-        used = await self._used(key, subscription=subscription)
-        allowed = limit is None or used + max(additional, 0) <= limit
+        used, held = await self._used_and_held(key, subscription=subscription)
+        # Holds are spoken for (ENT-03): a turn engaged and still generating
+        # has not been charged yet, and a concurrent turn that ignored it would
+        # oversell the allowance by every turn in flight.
+        allowed = limit is None or used + held + max(additional, 0) <= limit
         since, until = _period(subscription, self._clock())
         return Entitlement(
             key=key,
@@ -314,7 +379,95 @@ class EntitlementService:
             grant_limit=granted,
             period_start=since if key not in RESOURCE_LIMITS else None,
             period_end=until if key not in RESOURCE_LIMITS else None,
+            held=held,
         )
+
+    # ------------------------------------------------------------- AI turns
+
+    async def hold_ai_turn(self) -> Entitlement:
+        """Decide, under the workspace's lock, whether one more AI turn may hold a unit.
+
+        ENT-03. Taken in the transaction that engages the turn, which is what
+        writes the hold (`AgentTurnRepository.engage(hold=True)`): the lock is
+        held until that transaction commits, so the next turn's count sees this
+        one's hold, and N turns racing an allowance of N leave at most N holds.
+        The lock is released at that commit - never held across an inference
+        (ADR-080). `allowed` false means no hold: no provider is called, and the
+        conversation goes to a person (ENT-04).
+
+        `used + held + 1 <= limit`, where `used` is the cycle's `ai_turn` charges
+        and `held` the turns engaged and not yet settled, taken in one statement
+        so a settle committing between two reads can never be counted in
+        neither.
+        """
+        wait_ms = int(AI_TURN_HOLD_LOCK_WAIT.total_seconds() * 1000)
+        await self._session.execute(text(f"SET LOCAL lock_timeout = {wait_ms}"))
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(_lock_id(self._tenant_id, LimitKey.PERIOD_AI_TURNS)))
+        )
+        entitlement = await self.check(LimitKey.PERIOD_AI_TURNS, additional=1)
+        if not entitlement.allowed:
+            logger.info(
+                "billing.ai_turn_hold_refused",
+                extra={
+                    "event": "billing.ai_turn_hold_refused",
+                    "tenant_id": str(self._tenant_id),
+                    "used": entitlement.used,
+                    "held": entitlement.held,
+                },
+            )
+        return entitlement
+
+    async def ai_turns_by_channel(self) -> dict[Channel | None, int]:
+        """This cycle's AI turn charges, by the channel each was taken on (ENT-01).
+
+        For display only. The allowance is one per workspace, and no code path
+        compares a channel's figure with a limit. Charges recorded before the
+        channel dimension existed are under None.
+        """
+        _, subscription = await self._resolve()
+        since, until = _period(subscription, self._clock())
+        rows = await self._session.execute(
+            select(UsageEvent.channel, func.coalesce(func.sum(UsageEvent.quantity), 0))
+            .where(UsageEvent.tenant_id == self._tenant_id)
+            .where(UsageEvent.event_type == UsageEventType.AI_TURN)
+            .where(UsageEvent.occurred_at >= since)
+            .where(UsageEvent.occurred_at < until)
+            .group_by(UsageEvent.channel)
+        )
+        return {channel: int(total) for channel, total in rows.all()}
+
+    async def _used_and_held(
+        self, key: LimitKey, *, subscription: Subscription | None
+    ) -> tuple[int, int]:
+        """Usage against `key`, and for AI turns the open holds, in one snapshot."""
+        if key is not LimitKey.PERIOD_AI_TURNS:
+            return await self._used(key, subscription=subscription), 0
+        now = self._clock()
+        since, until = _period(subscription, now)
+        used = (
+            select(func.coalesce(func.sum(UsageEvent.quantity), 0))
+            .where(UsageEvent.tenant_id == self._tenant_id)
+            .where(UsageEvent.event_type == UsageEventType.AI_TURN)
+            .where(UsageEvent.occurred_at >= since)
+            .where(UsageEvent.occurred_at < until)
+            .scalar_subquery()
+        )
+        # A hold counts only inside the usage cycle it was taken in, and only
+        # until its TTL: a hold whose worker died stops counting by the clock,
+        # not when the sweep gets round to it.
+        held = (
+            select(func.count())
+            .select_from(AgentTurn)
+            .where(AgentTurn.tenant_id == self._tenant_id)
+            .where(AgentTurn.charge_state == AITurnChargeState.HELD)
+            .where(AgentTurn.held_at >= since)
+            .where(AgentTurn.held_at < until)
+            .where(AgentTurn.held_at > now - self._hold_ttl)
+            .scalar_subquery()
+        )
+        row = (await self._session.execute(select(used, held))).one()
+        return int(row[0]), int(row[1])
 
     async def _topped_up(self, key: LimitKey) -> tuple[int, int]:
         """What live top-ups add to `key`: (purchased, granted by the platform).
@@ -335,6 +488,147 @@ class EntitlementService:
             else:
                 purchased += total.quantity
         return purchased, granted
+
+    # ------------------------------------------------------ channel capacity
+
+    async def _channel_entitlement(self, plan: Plan, *, additional: int) -> Entitlement:
+        """`channel_connections` as an `Entitlement`, with its capacity attached.
+
+        `allowed` answers "may `additional` more connections of a type with no
+        typed slot be added" - the generic question. Connecting one particular
+        channel is the guard's question (`ChannelCapacityGuard`), which asks
+        the capacity itself with that channel's typed slots in view.
+        """
+        capacity = await self.channel_capacity()
+        general = capacity.general
+        allowed = general is None or capacity.overflow() + max(additional, 0) <= general
+        return Entitlement(
+            key=LimitKey.CHANNEL_CONNECTIONS,
+            limit=capacity.total,
+            used=capacity.active_total,
+            allowed=allowed,
+            plan_code=plan.code,
+            base_limit=capacity.base,
+            topup_limit=capacity.purchased,
+            grant_limit=capacity.granted,
+            capacity=capacity,
+        )
+
+    async def channel_capacity(self, *, at: datetime | None = None) -> ChannelCapacity:
+        """This workspace's channel slots and what occupies them (ENT-05, ENT-11).
+
+        General slots = the pinned version's `channel_connections` plus live
+        general channel top-ups and platform grants; typed slots by channel from
+        live typed top-ups and grants. Read fresh, like every limit: the guard
+        asks this under the workspace's advisory lock. With no plan at all,
+        capacity is unenforced (ADR-029) and the channel types are the legacy
+        set - unenforced never opens every channel (ENT-09).
+        """
+        plan, _ = await self._resolve()
+        if plan is None:
+            return ChannelCapacity(
+                base=None,
+                active=await self.active_connections(),
+                allowed=LEGACY_CHANNEL_TYPES,
+            )
+        terms: PlanVersion | Plan = self._terms if self._terms is not None else plan
+        return await self._capacity(terms, at=at if at is not None else self._clock())
+
+    async def scheduled_channel_capacity(self) -> ChannelCapacity | None:
+        """The capacity a scheduled plan change leaves at its boundary (ENT-14).
+
+        None without one. Top-ups and grants count only if they are still live
+        at the boundary - capacity ones end with the billing term, which is the
+        boundary - so this is what the workspace will hold once the change
+        applies, and a new connection must fit it too.
+        """
+        plan, subscription = await self._resolve()
+        if plan is None or subscription is None or subscription.scheduled_plan_version_id is None:
+            return None
+        version = await self._catalog.get_version(subscription.scheduled_plan_version_id)
+        if version is None:  # pragma: no cover - RESTRICT keeps a scheduled version
+            return None
+        return await self._capacity(version, at=subscription.current_period_end)
+
+    async def next_term_channel_capacity(self) -> ChannelCapacity | None:
+        """The capacity the next billing term opens with (ENT-14, ENT-15).
+
+        The scheduled version's if a change is scheduled, else the current
+        terms', with only the top-ups and grants still live at the boundary -
+        capacity ones end with the term - so this is what the workspace holds
+        once the term rolls if nothing more is bought. None without a serving
+        subscription: there is no term ahead to judge.
+        """
+        plan, subscription = await self._resolve()
+        if plan is None or subscription is None:
+            return None
+        terms: PlanVersion | Plan = self._terms if self._terms is not None else plan
+        if subscription.scheduled_plan_version_id is not None:
+            scheduled = await self._catalog.get_version(subscription.scheduled_plan_version_id)
+            if scheduled is not None:
+                terms = scheduled
+        return await self._capacity(terms, at=subscription.current_period_end)
+
+    async def channel_in_plan(self, channel: Channel) -> bool:
+        """Whether the plan in force includes `channel` (ENT-16).
+
+        The question every automated send asks before it runs - an AI turn, a
+        campaign copy, a follow-up. A workspace whose subscription is not served
+        falls back to the default plan, so a channel a paid plan included may
+        not be one it includes now: inbound is still stored and a person may
+        still reply, but nothing automated runs on it until it is again.
+        """
+        return channel in await self.allowed_channel_types()
+
+    async def allowed_channel_types(self) -> frozenset[Channel]:
+        """The channel types the plan in force allows (ENT-09); WhatsApp alone if unstated."""
+        plan, _ = await self._resolve()
+        if plan is None:
+            return LEGACY_CHANNEL_TYPES
+        return term_channel_types(self._terms if self._terms is not None else plan)
+
+    async def active_connections(self) -> dict[Channel, int]:
+        """The connections that take a slot, by channel: active and unreleased (ENT-07).
+
+        Disabled and released connections free their slot; a connection being
+        connected (no row yet) takes none. Every channel weighs one (ENT-06).
+        """
+        rows = await self._session.execute(
+            select(ChannelConnection.channel, func.count())
+            .where(ChannelConnection.tenant_id == self._tenant_id)
+            .where(ChannelConnection.status == ConnectionStatus.ACTIVE)
+            .where(ChannelConnection.released_at.is_(None))
+            .group_by(ChannelConnection.channel)
+        )
+        return {channel: int(count) for channel, count in rows.all()}
+
+    async def _capacity(self, terms: PlanVersion | Plan, *, at: datetime) -> ChannelCapacity:
+        general_purchased = general_granted = 0
+        typed_purchased: dict[Channel, int] = {}
+        typed_granted: dict[Channel, int] = {}
+        totals: list[ActiveTotal] = await self._topups.active_totals(at=at)
+        for total in totals:
+            if total.entitlement.limit_key is not LimitKey.CHANNEL_CONNECTIONS:
+                continue
+            granted = total.source is TopupSource.PLATFORM_GRANT
+            slot = topup_slot_channel(total.entitlement, total.channel_type)
+            if slot is None:
+                if granted:
+                    general_granted += total.quantity
+                else:
+                    general_purchased += total.quantity
+                continue
+            bucket = typed_granted if granted else typed_purchased
+            bucket[slot] = bucket.get(slot, 0) + total.quantity
+        return ChannelCapacity(
+            base=term_limit(terms, LimitKey.CHANNEL_CONNECTIONS),
+            general_purchased=general_purchased,
+            general_granted=general_granted,
+            typed_purchased=typed_purchased,
+            typed_granted=typed_granted,
+            active=await self.active_connections(),
+            allowed=term_channel_types(terms),
+        )
 
     async def require(self, key: LimitKey, *, additional: int = 1) -> Entitlement:
         """Refuse the action if the plan does not allow it.
@@ -396,9 +690,11 @@ class EntitlementService:
 
         **Hold it briefly.** The lock lives until this transaction ends, so a
         caller must not keep the transaction open across slow work. The agent
-        worker reserves in a short transaction of its own for exactly this
-        reason: holding a workspace's lock across an inference would serialise
-        every conversation that workspace is having.
+        worker takes its AI turns' holds in a short transaction of its own
+        (`hold_ai_turn`) for exactly this reason: holding a workspace's lock
+        across an inference would serialise every conversation that workspace
+        is having. Agent turns are held and settled rather than consumed: one
+        is charged only when it produces a usable outcome (ENT-02).
 
         Returns the entitlement. When `allowed` is false nothing was recorded
         and the caller must not proceed; usage is append-only, so there is no
@@ -472,6 +768,11 @@ class EntitlementService:
             # it without recording anything would grant an allowance nobody
             # spent. Those callers want `consume`.
             raise ValueError(f"{key.value} is a period limit; use consume()")
+        if key is LimitKey.CHANNEL_CONNECTIONS:
+            # Which channel is being connected decides whether a typed slot can
+            # take it, and its type must be allowed - a question only the guard
+            # asks, under this same lock (ENT-08).
+            raise ValueError("Channel capacity is reserved by ChannelCapacityGuard.")
         if additional <= 0:
             return await self.check(key, additional=0)
 
@@ -567,13 +868,9 @@ class EntitlementService:
         """How many of this resource the workspace has right now.
 
         The rule is "does this still occupy something?", not "does a row
-        exist". Three cases where those differ:
-
-        A **disabled number** is connected to nothing, and a **released** one
-        has been handed back to the platform (ADR-037) - the row survives only
-        because a customer's conversations hang off it. Charging for either
-        would be charging for nothing, and counting a released number would
-        make giving a number up cost a slot forever.
+        exist". Two cases where those differ (channel connections, the third,
+        are counted by `active_connections`: a disabled or released one frees
+        its slot, ENT-07):
 
         A **revoked membership** is somebody who no longer has access
         (ADR-038). Counting it would mean a workspace on a two-seat plan that
@@ -588,17 +885,8 @@ class EntitlementService:
         """
         statement: Select[tuple[int]]
         match key:
-            case LimitKey.WHATSAPP_NUMBERS:
-                statement = (
-                    select(func.count())
-                    .select_from(WhatsAppAccount)
-                    .where(WhatsAppAccount.tenant_id == self._tenant_id)
-                    .where(WhatsAppAccount.status != WhatsAppAccountStatus.DISABLED)
-                    # Belt and braces with the status check above: `released_at`
-                    # is what the uniqueness index reads, so it is the column
-                    # that decides whether the number is actually held.
-                    .where(WhatsAppAccount.released_at.is_(None))
-                )
+            case LimitKey.CHANNEL_CONNECTIONS:
+                return sum((await self.active_connections()).values())
             case LimitKey.AGENTS:
                 statement = (
                     select(func.count())

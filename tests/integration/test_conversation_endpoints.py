@@ -443,7 +443,8 @@ async def test_the_channel_and_connection_filters_reach_the_service(
 async def test_a_channel_that_is_not_one_of_ours_is_refused(
     client: AsyncClient, inbox: StubInbox
 ) -> None:
-    response = await client.get(PATH, params={"channel": "telegram"})
+    # Telegram and TikTok are vocabulary now (ENT-21); this is not.
+    response = await client.get(PATH, params={"channel": "fax"})
 
     assert response.status_code == 422
     assert inbox.conversation_calls == []

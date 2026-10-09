@@ -61,6 +61,7 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.channel import Channel
 from app.db.models.enums import PlatformRole, TenantRole
 from app.db.models.invoice import (
     Invoice,
@@ -121,7 +122,7 @@ SEVEN_PRO: dict[str, int] = {
     "period_ai_turns": 5_000,
     "period_campaign_messages": 1_000,
     "storage_bytes": 10 * GIB,
-    "whatsapp_numbers": 1,
+    "channel_connections": 1,
     "team_members": 10,
     "knowledge_documents": 500,
 }
@@ -131,7 +132,7 @@ SEVEN_BUSINESS: dict[str, int] = {
     "period_ai_turns": 25_000,
     "period_campaign_messages": 50_000,
     "storage_bytes": 100 * GIB,
-    "whatsapp_numbers": 5,
+    "channel_connections": 5,
     "team_members": 10,
     "knowledge_documents": 3_000,
 }
@@ -162,7 +163,7 @@ async def _catalogue(session: AsyncSession, staff: User) -> dict[str, PlanPrice]
         session,
         code="starter",
         price=Decimal("0.00"),
-        limits={"agents": 1, "period_ai_turns": 100, "whatsapp_numbers": 1},
+        limits={"agents": 1, "period_ai_turns": 100, "channel_connections": 1},
     )
     await own_plan(session, code="pro", price=PRO_MONTHLY, limits=SEVEN_PRO)
     await own_plan(session, code="business", price=BUSINESS_MONTHLY, limits=SEVEN_BUSINESS)
@@ -437,6 +438,7 @@ async def test_a_superseded_version_cannot_be_given_a_new_price(db_session: Asyn
         pro.id,
         PlanVersionCreate(
             prices=[PriceSpec(billing_interval=BillingInterval.MONTHLY, amount=Decimal("109"))],
+            allowed_channel_types=[Channel.WHATSAPP],
             limits=SEVEN_PRO,
             expected_version=latest.version,
             reason="Pro v-next.",
@@ -505,7 +507,12 @@ def _plan_create(code: str, *, prices: list[PriceSpec]) -> Any:
     from app.schemas.platform_billing import PlanCreate
 
     return PlanCreate(
-        code=code, name=code.title(), prices=prices, limits=SEVEN_PRO, reason="Test plan."
+        code=code,
+        name=code.title(),
+        prices=prices,
+        limits=SEVEN_PRO,
+        allowed_channel_types=[Channel.WHATSAPP],
+        reason="Test plan.",
     )
 
 
@@ -1306,6 +1313,7 @@ async def test_a_migration_keeps_each_subscriber_on_their_billing_term(
         pro.id,
         PlanVersionCreate(
             prices=[PriceSpec(billing_interval=BillingInterval.MONTHLY, amount=Decimal("109"))],
+            allowed_channel_types=[Channel.WHATSAPP],
             limits=SEVEN_PRO,
             expected_version=source.version,
             reason="Monthly only.",
@@ -1331,6 +1339,7 @@ async def test_a_migration_keeps_each_subscriber_on_their_billing_term(
                 PriceSpec(billing_interval=BillingInterval.MONTHLY, amount=Decimal("119")),
                 PriceSpec(billing_interval=BillingInterval.YEARLY, amount=Decimal("1190")),
             ],
+            allowed_channel_types=[Channel.WHATSAPP],
             limits=SEVEN_PRO,
             expected_version=monthly_only.version,
             reason="Both terms.",
@@ -1424,7 +1433,7 @@ async def test_a_capacity_top_up_on_an_annual_plan_lasts_the_year_and_deletes_no
         db_session, tenant, owner, paymob, prices["pro_yearly"], now=T0, transaction=16_100_001
     )
     subscription = await _subscription(db_session, tenant)
-    item = await product(db_session, entitlement=TopupEntitlement.WHATSAPP_NUMBERS, quantity=1)
+    item = await product(db_session, entitlement=TopupEntitlement.CHANNEL_CONNECTIONS, quantity=1)
     bought_at = T0 + timedelta(days=40)
     checkout = CheckoutService(db_session, tenant_id=tenant.id, provider=paymob.provider())
     started = await TopupService(db_session, tenant_id=tenant.id, checkout=checkout).start_checkout(
@@ -1451,7 +1460,7 @@ async def test_a_capacity_top_up_on_an_annual_plan_lasts_the_year_and_deletes_no
         )
     await db_session.flush()
     mid = await (await _entitlements(db_session, tenant, T0 + timedelta(days=200))).check(
-        LimitKey.WHATSAPP_NUMBERS, additional=0
+        LimitKey.CHANNEL_CONNECTIONS, additional=0
     )
     assert (mid.limit, mid.used, mid.over_limit) == (2, 2, False), "valid all year"
     # The year ends: the top-up expires, both numbers stay, and a third is refused.
@@ -1468,7 +1477,7 @@ async def test_a_capacity_top_up_on_an_annual_plan_lasts_the_year_and_deletes_no
     )
     assert held == 2, "nothing is deleted when a capacity top-up expires"
     state = await (await _entitlements(db_session, tenant, after)).check(
-        LimitKey.WHATSAPP_NUMBERS, additional=1
+        LimitKey.CHANNEL_CONNECTIONS, additional=1
     )
     assert (state.limit, state.over_limit, state.allowed) == (1, True, False)
     await _clean(db_session, tenant)
@@ -1494,7 +1503,8 @@ async def _custom_both(
             period_ai_turns=40_000,
             period_campaign_messages=50_000,
             storage_bytes=100 * GIB,
-            whatsapp_numbers=5,
+            channel_connections=5,
+            allowed_channel_types=[Channel.WHATSAPP],
             team_members=30,
             knowledge_documents=3_000,
             financial_basis=CustomPlanBasis.CUSTOMER_CHECKOUT,

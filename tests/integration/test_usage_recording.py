@@ -736,8 +736,9 @@ async def test_an_agent_turn_meters_its_provider_calls_and_tokens(
     # The *request* meter is not written here: it is recorded per round by the
     # meter the orchestrator calls before each provider call, and this stub makes
     # no provider calls. What the worker does write is the one customer turn it
-    # charged before engaging (AI-02). Per-call accounting against the real
-    # orchestrator is pinned in `test_ai_metering.py`.
+    # held before engaging and charged when the reply was generated (ENT-02).
+    # Per-call accounting against the real orchestrator is pinned in
+    # `test_ai_metering.py`.
     assert UsageEventType.AI_REQUEST not in totals
     assert totals[UsageEventType.AI_TURN] == 1
 

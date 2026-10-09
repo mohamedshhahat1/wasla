@@ -30,6 +30,7 @@ from app.db.models.conversation import Contact, MessageOrigin, MessageStatus
 from app.services import messaging_service as messaging_module
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.consent import consent_of, seed_opt_out
 from tests.integration.test_omnichannel_operations import _customer, _number, _tenant
 
 pytestmark = pytest.mark.integration
@@ -88,8 +89,8 @@ async def test_a_stop_in_whatsapp_opts_the_contact_out(db_session: AsyncSession)
 
     assert outcome.refused == {}
     assert outcome.opt_outs == 1
-    stopped = await _contact(db_session, contact.id)
-    assert stopped.marketing_opt_out_at == at
+    stopped = await consent_of(db_session, contact.id)
+    assert stopped is not None and stopped.marketing_opt_out_at == at
     assert stopped.opt_out_source is OptOutSource.CUSTOMER
     assert stopped.opt_out_via is OptOutVia.PROVIDER_PREFERENCE
     event = await db_session.scalar(select(ChannelEvent).where(ChannelEvent.tenant_id == tenant.id))
@@ -111,9 +112,13 @@ async def test_a_resume_lifts_only_the_providers_own_opt_out(db_session: AsyncSe
     )
     await db_session.flush()
 
-    resumed = await _contact(db_session, contact.id)
-    assert resumed.marketing_opt_out_at is None
-    assert resumed.marketing_resumed_at is not None
+    resumed = await consent_of(db_session, contact.id)
+    assert resumed is not None and resumed.marketing_opt_out_at is None
+    assert resumed.resumed_at is not None
+    assert (resumed.resume_source, resumed.resume_via) == (
+        OptOutSource.CUSTOMER,
+        OptOutVia.PROVIDER_PREFERENCE,
+    )
 
 
 async def test_a_resume_never_undoes_the_customers_own_stop_word(
@@ -122,19 +127,22 @@ async def test_a_resume_never_undoes_the_customers_own_stop_word(
     tenant = await _tenant(db_session)
     account = await _number(db_session, tenant)
     contact, _ = await _customer(db_session, tenant, account, PHONE)
-    contact.marketing_opt_out_at = datetime.now(UTC) - timedelta(days=1)
-    contact.opt_out_source = OptOutSource.CUSTOMER
-    contact.opt_out_via = OptOutVia.MESSAGE
-    await db_session.flush()
+    await seed_opt_out(
+        db_session,
+        tenant_id=tenant.id,
+        contact_id=contact.id,
+        via=OptOutVia.MESSAGE,
+        at=datetime.now(UTC) - timedelta(days=1),
+    )
 
     await WhatsAppIngestionService(session=db_session).ingest(
         _preferences(account, _preference("resume", datetime.now(UTC)))
     )
     await db_session.flush()
 
-    kept = await _contact(db_session, contact.id)
-    assert kept.marketing_opt_out_at is not None
-    assert kept.marketing_resumed_at is not None
+    kept = await consent_of(db_session, contact.id)
+    assert kept is not None and kept.marketing_opt_out_at is not None
+    assert kept.resumed_at is not None
 
 
 async def test_a_preference_from_somebody_who_never_wrote_changes_nothing(
@@ -178,6 +186,6 @@ async def test_a_131050_refusal_records_the_opt_out(
     )
 
     assert message.status is MessageStatus.FAILED
-    refused = await _contact(db_session, contact.id)
-    assert refused.marketing_opt_out_at is not None
+    refused = await consent_of(db_session, contact.id)
+    assert refused is not None and refused.marketing_opt_out_at is not None
     assert refused.opt_out_via is OptOutVia.PROVIDER_REFUSAL

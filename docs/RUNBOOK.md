@@ -508,10 +508,13 @@ decides whether one *should* run again.
 
 ```
 GET /api/v1/billing/entitlements     # every limit, used and remaining
+GET /api/v1/billing/channel-capacity # channel slots, active connections, any reduction
 GET /api/v1/usage                    # the meters behind the period limits
 ```
 
-Resource limits (numbers, agents, colleagues, documents) count rows that exist now; period limits (messages, AI turns, campaign messages) count the current billing period. Nothing on the *inbound* path is ever refused for a limit ([ADR-030](../DECISIONS.md)), so a workspace over its message allowance still receives its customers' messages — it is charged for the overage rather than cut off.
+Resource limits (agents, colleagues, documents) count rows that exist now; period limits (messages, AI turns, campaign messages) count the current usage cycle.
+
+**409 `channel_capacity_exceeded`** and **409 `channel_type_not_allowed`** are the channel entitlements (ADR-131), refused by the capacity guard before Wasla calls any provider. The first means every slot is taken - by an active connection of any channel; the second that the plan in force does not include that channel type, whatever slots are free. The details carry the figures (`effective_limit`, `active`, `typed_capacity`, `allowed_channel_types`). A disabled or released connection holds no slot; a company in a capacity reduction's grace, or not served (suspended, cancelled, expired), cannot connect or re-enable anything until it fits. See *Entitlements and channel capacity (0092-0098)*. Nothing on the *inbound* path is ever refused for a limit ([ADR-030](../DECISIONS.md)), so a workspace over its message allowance still receives its customers' messages — it is charged for the overage rather than cut off.
 
 **403** is a role problem, not a plan problem. **429** is the rate limiter.
 
@@ -534,13 +537,14 @@ SELECT t.outcome, t.state, t.engaged_at, t.completed_at, t.provider_response_id,
 | --- | --- | --- |
 | `replied` | A reply was sent | Check delivery: see *A send WhatsApp never confirmed* |
 | `handed_off` / `escalated` | The agent's handoff tool, or the sentiment classifier, gave it to a person | Nothing — `handoff_reason` says why |
-| `quota_blocked` | The plan has no AI turns left this period (`handoff_reason` starts `AI_QUOTA_EXHAUSTED`) | Commercial: upgrade the plan or wait for the period to roll over |
+| `quota_blocked` | The workspace's one AI allowance is spent this usage cycle, counting the turns generating right now (their holds) on every channel (`handoff_reason` starts `AI_QUOTA_EXHAUSTED`) | Commercial: an upgrade, a top-up or a platform grant, or the next usage cycle. A failed generation never spent a turn (ADR-131) |
 | `empty_response` | The provider answered with no words; the customer was told a colleague will follow up and the conversation was handed over (`AI_EMPTY_RESPONSE`) | If it recurs, `AgentEmptyResponses` fires — check the model and the provider |
 | `suppressed_workspace` | The workspace is suspended or deleted | Intended. A deleted workspace is not served during retention |
 | `suppressed_agent` | No active default agent, or it was disabled mid-turn | Activate an agent |
 | `suppressed_closed` | The conversation was closed, before or during the turn | Intended: an old turn never reopens a closed conversation |
 | `suppressed_human` | A person owns the conversation | Nothing |
-| `suppressed_channel` | The WhatsApp number is disabled or released | Reconnect the number |
+| `suppressed_channel` | The connection is disabled, released or paused. `disabled_reason` says who disabled it: `manual`, `capacity_reduction` (an owner kept others) or `capacity_reduction_automatic` (a grace ended) | Re-enable it when there is a free slot, or reconnect |
+| `channel_not_in_plan` | The plan in force does not include this channel - usually a suspended, cancelled or expired workspace on the default plan (ENT-16). Never charged | Commercial: pay the overdue invoice, or a plan that includes the channel |
 | *no row, or `state = 'engaged'` with no `completed_at`* | See *An agent turn engaged and never finished* | |
 
 If there is no turn at all, the job never reached the worker: `grep agent.enqueue_failed`, and see *Inbound stored but never answered*.
@@ -549,15 +553,24 @@ If there is no turn at all, the job never reached the worker: `grep agent.enqueu
 
 **Alert:** `AgentTurnsStranded`. **Metric:** `wasla_agent_turns_engaged_unfinished`.
 
-A turn becomes `engaged` in the same transaction that charges the customer's AI
-turn, immediately before the provider is called. If anything then fails — the
-provider past its retries (`OpenAIUnavailable` will usually be firing too), an
-unexpected exception, a worker killed mid-turn — the turn stays `engaged` for
-ever. That is deliberate: the reply may already be on the customer's phone, so
-nothing retries it, and the job is dead-lettered rather than replayed.
+A turn becomes `engaged` in the same transaction that holds a unit of the
+workspace's AI allowance, immediately before the provider is called. If anything
+then fails — the provider past its retries (`OpenAIUnavailable` will usually be
+firing too), an unexpected exception, a worker killed mid-turn — the turn stays
+`engaged` for ever. That is deliberate: the reply may already be on the
+customer's phone, so nothing retries it, and the job is dead-lettered rather
+than replayed.
+
+Its `charge_state` says how far it got (ADR-131). `held`: it died before its
+outcome was settled, and the reply is sent only after the settle commits, so
+nothing went to the customer; the hold stops counting after
+`AI_TURN_HOLD_TTL_SECONDS` and the billing sweep releases it (`hold_expired`) -
+the customer is not charged. `released`: the provider failed and the hold was
+given back. `charged`: the provider answered and the turn was charged; a reply
+may be on the customer's phone.
 
 ```sql
-SELECT t.tenant_id, t.conversation_id, t.trigger_message_id, t.engaged_at
+SELECT t.tenant_id, t.conversation_id, t.trigger_message_id, t.engaged_at, t.charge_state
   FROM agent_turns t
  WHERE t.state = 'engaged'
    AND t.engaged_at < now() - interval '15 minutes'
@@ -1726,6 +1739,196 @@ until O8 (OMNI-047). Restoring a dropped unique later uses
 `CREATE UNIQUE INDEX CONCURRENTLY`, which fails loudly if a collision was stored
 meanwhile.
 
+### Entitlements and channel capacity (0092-0098)
+
+ADR-131 (ENT-01..ENT-24): one AI allowance per workspace, held at engagement and
+charged on a usable outcome; channel capacity instead of a WhatsApp number limit,
+with typed and general slots; channel types per plan; the capacity-reduction
+grace; per-channel marketing consent; channel-neutral meters; the placeholder
+catalogue. Every migration is additive and online:
+
+| Migration | What it does | Locks |
+| --- | --- | --- |
+| 0092 | `channel_kind` gains `telegram` and `tiktok` - vocabulary, not support | `ALTER TYPE ... ADD VALUE` in its own autocommit block, first |
+| 0093 | `topup_entitlement` gains `channel_connections` (autocommit, first); `plan_versions.allowed_channel_types` and the `plans` mirror; `topup_products/purchases.channel_type`; `topup_product_plans`; `channel_connections.disabled_reason/at/by`; triggers refusing the retired `whatsapp_numbers` on new versions, products and purchases. Existing number products become `channel_connections` slots typed `whatsapp`; no stored version or purchase is rewritten | Metadata-only `ADD COLUMN`s on small tables; CHECKs `NOT VALID` then validated; 15 s `lock_timeout` |
+| 0094 | `agent_turn_outcome` gains `channel_not_in_plan` (autocommit, first); `agent_turns.charge_state/held_at/charged_at/released_at/charge_release_reason`; `usage_events.channel/connection_id/agent_turn_id`; `ix_agent_turns_held` and `uq_usage_events_tenant_id_agent_turn_id`, `CONCURRENTLY` | Metadata-only `ADD COLUMN`s on `agent_turns` and `usage_events`; validation and index builds in a final autocommit block, holding nothing that blocks writes |
+| 0095 | `audit_action` gains three labels (autocommit, first); `channel_capacity_reductions`, `channel_capacity_preselections` | Two new, empty tables |
+| 0096 | `usage_event_type` gains `message_received` and `message_sent` (autocommit, first); a CHECK that a neutral message row names its channel, validated in a final autocommit block | No rewrite |
+| 0097 | `contact_channel_consents`; every person-level opt-out and resume moved to the contact's WhatsApp row; `contacts` **drops** `marketing_opt_out_at`, `opt_out_source`, `opt_out_via`, `marketing_resumed_at` | One `INSERT ... SELECT`; catalogue-only `DROP COLUMN`s |
+| 0098 | `topup_products.price` nullable with `ck_topup_products_priced_when_active`; new versions of `starter`, `pro`, `business`, `enterprise` with channel capacity and channel types; six channel top-ups, inactive and unpriced | Catalogue tables only |
+
+**The previous image cannot run on this schema.** 0093 writes
+`channel_connections` into `topup_products.entitlement_key`, a label the older
+code cannot read, and 0097 drops the person-level opt-out columns every older
+read of a contact selects. Stop the API and the workers before `migrate` for
+this release, then start the new image - do not let the old processes serve
+between the two. For the same reason a rollback past this release is not
+"deploy the previous digest": it is a deliberate downgrade (below), or a fix
+forward.
+
+**0097 refuses, changing nothing,** while a contact holds an opt-out with no
+`opt_out_source`: the consent row must say who decided, and inventing it would
+falsify the record. Find them with
+`SELECT id FROM contacts WHERE marketing_opt_out_at IS NOT NULL AND opt_out_source IS NULL;`,
+establish the source from the audit trail and the conversation, and re-run.
+
+**Downgrades refuse rather than lose data**, each naming what it found:
+
+| Downgrade | Refused while any exist |
+| --- | --- |
+| 0098 → 0097 | a subscription, scheduled change, invoice, offer, plan migration, later version or price change on a placeholder version; a purchase of a placeholder product, or an operator's price, activation or eligibility on one; any other product without a price |
+| 0097 → 0096 | a consent on a channel other than WhatsApp, or carrying a resume's provenance |
+| 0096 → 0095 | a usage row under `message_received` or `message_sent` |
+| 0095 → 0094 | a capacity reduction or pre-selection, or an audit entry of one |
+| 0094 → 0093 | a turn holding the allowance (`charge_state = 'held'`), or a turn that ended `channel_not_in_plan` |
+| 0093 → 0092 | a version stating channel types, a channel purchase, a typed product other than a converted WhatsApp one, plan eligibility, a recorded disable, an audit entry of a neutral connection action |
+| 0092 → 0091 | a connection, identity, conversation or event on `telegram` or `tiktok` |
+
+No downgrade in 0092-0098 commits part-way: a refusal anywhere in a run from
+head to 0091 rolls the whole run back, and the database is still at head.
+**An enum label cannot be dropped**, so a successful downgrade leaves the
+labels in their types, where a re-upgrade finds them (`IF NOT EXISTS`).
+
+**If a migration stops half-way.** 0092, 0093, 0094, 0095 and 0096 add their
+labels in an autocommit block that runs *first*: a failure there leaves nothing
+else applied - rerun normally. 0094 and 0096 also end with one (validation, and
+0094's indexes); a failure inside that last block is the *A migration stopped
+half-way* case below - confirm the revision's objects, `alembic stamp` it, and
+`upgrade head`.
+
+**After deploying:**
+
+```
+python -m scripts.db_preflight verify
+python -m scripts.omnichannel_invariants verify
+```
+
+`verify` runs the entitlement ledger E01-E15 with the omnichannel invariants;
+every one must read 0. It reads the clock, `DEFAULT_PLAN_CODE` and
+`AI_TURN_HOLD_TTL_SECONDS` from the environment it runs in, so run it with the
+deployment's values. E01 and E02 (connections over capacity, or of a type the
+plan excludes) are explained, and not counted, while a reduction awaits a
+selection, while the subscription is not served, or for one sweep interval
+after a channel top-up expires (the sweep has not opened its reduction yet).
+
+The six channel top-ups 0098 seeds are inactive and unpriced; nothing sells
+them until staff set a price and activate them (`docs/BILLING_OPERATIONS.md`,
+*Channel slots*). The placeholder plan values are staff's to confirm or replace
+through the platform API.
+
+#### A downgrade that crosses 0091 is not all-or-nothing
+
+0091 (the omnichannel inbox index, before this release) drops its index
+`CONCURRENTLY` in an autocommit block, which commits every downgrade above it.
+So a downgrade from head to below 0091 that an older migration then refuses -
+0090 with a connection carrying its own sending allowance, 0081 with a price it
+cannot keep - stops with the database **stamped `0091`, without 0091's index**,
+0092-0098 already downgraded, and the refusal still saying "Nothing has been
+changed" about its own step. A plain `alembic upgrade head` from there reaches
+head *without* the index, and `db_preflight verify` does not notice; the inbox's
+channel filter is then correct but slow. Measured on a migration-built database
+(2026-10-08):
+
+| After the refused downgrade | `alembic_version` | `ix_conversations_tenant_id_channel_last_message_at` |
+| --- | --- | --- |
+| as it stops | 0091 | absent |
+| then `alembic upgrade head` | 0098 | **absent** |
+| instead `alembic stamp 0090`, then `alembic upgrade head` | 0098 | present |
+
+Either remove what the refusal names and run the same downgrade again (0091's
+drop is `IF EXISTS`), or go back up with `alembic stamp 0090` followed by
+`alembic upgrade head` - the schema at "0091 without its index" is exactly
+0090's. If `upgrade head` already ran, build the index by hand with the
+statement in `20261002_0091_channel_inbox_index.py` (`CREATE INDEX CONCURRENTLY
+IF NOT EXISTS ...`).
+
+#### AI turn holds are not being released
+
+**Alert:** `AITurnHoldsStuck`. **Metric:** `wasla_ai_turn_holds_past_ttl`.
+
+A hold older than `AI_TURN_HOLD_TTL_SECONDS` (900) already stopped counting
+against the allowance by the clock, so no customer is being refused because of
+it; what has stopped is the billing sweep that marks it released. The sweep runs
+in the billing worker: check the worker is up and completing passes
+(`billing.sweep_completed`, `billing.ai_turn_holds_expired`) - if it is not,
+renewals, top-up expiry and reductions have stopped too, which matters more.
+
+```sql
+SELECT tenant_id, count(*), min(held_at)
+  FROM agent_turns
+ WHERE charge_state = 'held' AND held_at < now() - interval '15 minutes'
+ GROUP BY tenant_id;
+```
+
+Do not release holds by hand: the sweep does it idempotently, under the turn's
+row lock, recording `hold_expired`.
+
+#### AI turns are being charged late
+
+**Alert:** `AITurnLateChargeSpike`. A turn settled after the sweep had released
+its hold: it is still charged (`late_charge`), because usage that happened is
+never refused afterwards, and the workspace may end the cycle over its
+allowance. A handful means turns are taking longer than
+`AI_TURN_HOLD_TTL_SECONDS` - raise it above the longest a turn really takes
+(provider latency times the turn's rounds). No customer is harmed; the
+allowance is briefly undercounted.
+
+`agent.turn_hold_contended` in the AI worker's log is something else: a turn
+waited 20 s for its workspace's allowance lock and was put back to be retried
+before engagement - nothing was held, charged or sent. Occasional under a burst
+of one workspace's customers; sustained, it means the database is slow (*The
+database is struggling*).
+
+#### Many connections were disabled automatically
+
+**Alert:** `ChannelCapacityAutoDisableSpike` (more than twenty in an hour).
+**Metrics:** `wasla_channel_capacity_reduction_disables_total{actor="system"}`,
+`wasla_channel_capacity_reductions_total{cause,resolution}`.
+
+Each was a connection whose company let a capacity reduction's grace
+(`CHANNEL_CAPACITY_GRACE_DAYS`, 7) run out without choosing which to keep; the
+fallback disabled channel types the plan no longer allows first, then the
+newest. Many at once is usually one cause applied to many companies - a plan
+migration, a withdrawn product, an expiring grant:
+
+```sql
+SELECT cause, status, count(*), min(effective_at), max(resolved_at)
+  FROM channel_capacity_reductions
+ WHERE resolved_at > now() - interval '2 hours'
+ GROUP BY cause, status;
+```
+
+Nothing was released or deleted: history, conversations, contacts, credentials
+and each number's claim are kept, and an owner re-enables a connection as soon
+as there is a slot. If the capacity change itself was the mistake, restore the
+capacity (a platform grant, or the right plan) and tell the owners they can
+re-enable; there is no platform action that re-enables a connection or bypasses
+the guard. Owners were told through the email outbox when a downgrade that
+would not hold their connections was scheduled, at the boundary, and 48 hours
+before the fallback - check *Email is not being delivered* if they say they
+were not.
+
+#### Reading a company's channel capacity
+
+`GET /api/v1/platform/billing/tenants/{tenant_id}/summary` gives the slots in
+force (general and typed, with what each came from), the active connections by
+channel, the AI turns used, held and by channel, and the latest capacity
+reduction with its cause, status and grace end. By hand:
+
+```sql
+SELECT channel, status, disabled_reason, ownership_started_at
+  FROM channel_connections
+ WHERE tenant_id = '<tenant id>' AND released_at IS NULL
+ ORDER BY ownership_started_at;
+SELECT cause, status, target_general, target_typed, target_allowed_types,
+       effective_at, grace_ends_at, resolved_at
+  FROM channel_capacity_reductions
+ WHERE tenant_id = '<tenant id>' ORDER BY created_at DESC LIMIT 3;
+```
+
+What to tell a customer during a grace is in `docs/BILLING_OPERATIONS.md`
+(*Channel capacity reductions*).
+
 ### Downgrading past the billing migrations
 
 0071, 0072 and 0073 hold commercial records their downgrades would drop with
@@ -1750,8 +1953,8 @@ records first, delete them deliberately, and then downgrade.
 ### A migration stopped half-way
 
 Migrations that add enum labels (0059, 0063, 0064, 0067, 0068, 0071, 0072,
-0073) or build indexes concurrently (0039, 0040, 0075, 0077, 0078, 0079) end
-with an `autocommit_block()`. **Alembic commits the migration's DDL before that
+0073) or build indexes concurrently (0039, 0040, 0075, 0077, 0078, 0079, 0094)
+end with an `autocommit_block()`; 0096 ends with one that validates a CHECK. **Alembic commits the migration's DDL before that
 block and records the version after it**, because `ALTER TYPE ... ADD VALUE`
 and `CREATE INDEX CONCURRENTLY` cannot run inside a transaction. A failure
 inside the block - a lost connection, a lock timeout, a killed container -
@@ -1839,6 +2042,12 @@ that are more specific than a counter can be.
 | `agent.turn_already_answered` | A duplicate job found the turn already owned, and did nothing | Informational — this is WQ-01's guard working |
 | `follow_up.cancelled_on_handoff` | A colleague took a conversation over, so its nudge was cancelled | Informational |
 | `billing.ai_allowance_exhausted` | A workspace is out of AI turns; the conversation was handed to a person (`AI_QUOTA_EXHAUSTED`) | Commercial, not operational |
+| `agent.turn_hold_contended` | A turn waited past `AI_TURN_HOLD_LOCK_WAIT` for its workspace's allowance lock and was put back before engagement; nothing was held or sent | Low alone, Medium as a rate |
+| `agent.turn_hold_release_failed` | A failed turn could not give its hold back; the sweep releases it at its TTL | Medium |
+| `billing.ai_turn_holds_expired` | The sweep released holds past their TTL - a worker died mid-turn. `AITurnHoldsStuck` if they are not being released | Low |
+| `billing.channel_activation_refused` | A connect or enable was refused: capacity or channel type | Commercial, not operational |
+| `billing.channel_capacity_reduction_opened` | A company's channel capacity fell below its active connections; its grace started | Informational |
+| `billing.channel_capacity_reduction_resolved` | A reduction ended - by the owner, automatically, or no longer needed | Informational; Medium as an automatic rate (`ChannelCapacityAutoDisableSpike`) |
 | `agent.turn_outcome` | How every turn ended, with `outcome`. Counted by `wasla_agent_turn_outcomes_total` | Informational |
 | `agent.reply_suppressed` | A reply was ready and not sent, because the workspace, agent, conversation or number changed while the model was composing | Informational; Medium if sudden |
 | `agent.empty_response` | The provider answered with no words; the customer was told a colleague will follow up. `AgentEmptyResponses` | Medium, High as a rate |

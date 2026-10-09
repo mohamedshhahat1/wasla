@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Query, status
 from app.api.dependencies import PlatformAccessAuditDep, PlatformOwnerDep, PlatformStaffDep
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep, SettingsDep
+from app.db.models.channel import Channel
 from app.db.models.topup import TopupEntitlement, TopupScope, TopupSource, TopupStatus
 from app.platform.custom_plan_admin import CustomPlanAdmin
 from app.platform.custom_plan_offers import PlatformCustomPlanOffers
@@ -217,6 +218,7 @@ async def list_topup_products(
     scope: TopupScope | None = None,
     tenant_id: uuid.UUID | None = None,
     entitlement_key: TopupEntitlement | None = None,
+    channel_type: Channel | None = None,
     active: bool | None = None,
     limit: LimitQuery = 50,
     offset: OffsetQuery = 0,
@@ -228,6 +230,7 @@ async def list_topup_products(
         active=active,
         limit=limit,
         offset=offset,
+        channel_type=channel_type,
     )
     result: Page[PlatformTopupProductRead] = Page(
         items=page.items, total=page.total, limit=limit, offset=offset
