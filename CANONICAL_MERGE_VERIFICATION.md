@@ -699,3 +699,54 @@ every test green, every customer's data intact and every channel still connected
 | Secrets | upgrade: 12 over 502,328 bytes, 0 found; E2E: 9 over 117,965 bytes, 0 found |
 | Untracked files | 11 before, 11 after, identical hashes |
 | origin | before `354db53`; after: see §17 |
+
+## Correction (2026-10-09, after the push): the first GitHub Actions run
+
+The push succeeded (`354db53..8a4adc2`, fast-forward; origin then equal to local
+and containing `aa11098`). The first CI run on `8a4adc2` (run `37962949965`) was
+**red**, contradicting §21's claim that every CI job would be green.
+
+| Job | Result |
+|---|---|
+| Lint, format, types | success |
+| Alert rules and receivers | success |
+| Docker build | success |
+| Tests and migrations | **failure**: 6 failed, 6,798 passed, 15 skipped |
+| Migration-built schema | **failure**: the same 6; the kept-data sweep step was skipped |
+
+The 6 failures were in `test_media_parser_containment.py` and
+`test_media_reader.py`: the `KeyError`, `TypeError` and `IndexError` cases of the
+poison-PDF tests.
+
+**Cause.** `pyproject.toml` allows `pypdf>=5.1,<7`.
+
+| Where | `pypdf` |
+|---|---|
+| CI test jobs, this run | 6.20.0 |
+| last green run (2026-09-28) | 6.19.0 |
+| every local run of this verification | 6.15.0, the existing install |
+
+Under 6.20.0 the audit's fuzz files no longer make the parser raise; the
+`KeyError` file reads cleanly. Checked side by side with 6.19.0, which raises
+every class. The application behaved correctly: a PDF the parser can read is
+`READY`. The tests depended on parser bugs.
+
+**What this verification missed.** It ran CI's commands but not CI's dependency
+resolution, and never compared installed versions with what a fresh
+`pip install -e ".[dev]"` would resolve. That was a gap in method, not a gap in
+the code under review.
+
+**Fix:** `4b0d1d1` changes tests only.
+
+- **Containment tests:** they run the real `pdf_extract_child` with `pypdf`'s page
+  extraction made to raise each class (`tests/pdf_fixtures.failing_parser_child`).
+- **The audit's files:** kept as a version-tolerant check, refused or read and
+  never stranding the conversation.
+- **Both `pypdf` versions:** 39 / 39 on 6.15.0 and 39 / 39 on 6.20.0.
+- **Mutants:**
+  - fault injection disabled → 11 failed;
+  - a crashed child read as empty text → 6 failed;
+  - both restored.
+
+The result of the GitHub run on the pushed fix is recorded in the push that
+carries it, not here.
