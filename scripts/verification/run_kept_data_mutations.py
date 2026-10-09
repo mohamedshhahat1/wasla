@@ -136,7 +136,13 @@ MUTANTS: tuple[Mutant, ...] = (
     Mutant(
         "M-K04",
         "F-1a explains every open hold (A3 always true)",
-        (Edit(AI_INVARIANTS, "     WHERE (t.charge_state = 'held'\n", "     WHERE false AND (\n"),),
+        (
+            Edit(
+                AI_INVARIANTS,
+                "     WHERE (t.charge_state = 'held'\n",
+                "     WHERE false AND (t.charge_state = 'held'\n",
+            ),
+        ),
         (f"{AI_INVARIANTS}::test_a_hold_nothing_settled_released_or_expired_is_counted",),
     ),
     Mutant(
