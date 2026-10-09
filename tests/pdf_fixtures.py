@@ -111,4 +111,47 @@ POISON_PDF_CLASSES = ("AttributeError", "AssertionError", "KeyError", "TypeError
 
 
 def poison_pdf(escape_class: str) -> bytes:
+    """One of the audit's fuzz files.
+
+    Each made the `pypdf` of its day raise `escape_class`, but whether a given
+    release still does is `pypdf`'s business: 6.20 reads the `KeyError` file
+    cleanly. So these prove only that hostile bytes are refused or read and never
+    strand anything. That an escape is contained is proven by
+    `failing_parser_child`, which does not depend on a parser bug.
+    """
     return (POISON_PDF_DIRECTORY / f"{escape_class}.pdf").read_bytes()
+
+
+def failing_parser_child(directory: Path, escape_class: str) -> Path:
+    """A stand-in for `extraction.CHILD_SCRIPT` whose parser raises `escape_class`.
+
+    It runs the real `pdf_extract_child` - its resource limits, its catch list,
+    its answer - with `pypdf`'s page text extraction replaced by a raise, so any
+    PDF that has a page reaches the failure inside the child whatever `pypdf`
+    release is installed. Patch it in with
+    `monkeypatch.setattr(extraction, "CHILD_SCRIPT", ...)`.
+    """
+    from app.services import extraction
+
+    script = directory / f"failing_pdf_child_{escape_class}.py"
+    child_path = str(extraction.CHILD_SCRIPT)
+    script.write_text(
+        "import builtins\n"
+        "import importlib.util\n"
+        "import sys\n"
+        "\n"
+        "import pypdf\n"
+        "\n"
+        "\n"
+        "def _fail(*_args, **_kwargs):\n"
+        f"    raise getattr(builtins, {escape_class!r})('raised by the test suite')\n"
+        "\n"
+        "\n"
+        "pypdf.PageObject.extract_text = _fail\n"
+        f"spec = importlib.util.spec_from_file_location('pdf_extract_child', {child_path!r})\n"
+        "child = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(child)\n"
+        "sys.exit(child.main(sys.argv))\n",
+        encoding="utf-8",
+    )
+    return script

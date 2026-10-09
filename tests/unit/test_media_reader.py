@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -20,15 +21,23 @@ import pytest
 from app.core.exceptions import ExternalServiceError
 from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.transcription import TranscriptionClient
+from app.services import extraction
 from app.services.extraction import UnreadableDocumentError
 from app.services.knowledge_limits import MAX_PDF_BYTES
 from app.services.media_reader import (
     DocumentBeyondLimitsError,
     MediaReader,
+    ReadResult,
     ScannedDocumentError,
     SilentRecordingError,
 )
-from tests.pdf_fixtures import POISON_PDF_CLASSES, amplifying_pdf, poison_pdf
+from tests.pdf_fixtures import (
+    POISON_PDF_CLASSES,
+    amplifying_pdf,
+    failing_parser_child,
+    paged_pdf,
+    poison_pdf,
+)
 
 PIXEL = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -222,17 +231,38 @@ def test_can_read_matches_what_read_accepts() -> None:
 
 
 @pytest.mark.parametrize("escape_class", POISON_PDF_CLASSES)
-async def test_a_poison_pdf_is_unreadable_and_its_exception_never_reaches_this_process(
-    escape_class: str,
+async def test_a_parser_exception_is_unreadable_and_never_reaches_this_process(
+    escape_class: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The five classes that escaped the old in-process catch list. In the
-    child they crash the child; here they are one fixed refusal."""
+    """The five classes that escaped the old in-process catch list, raised by
+    the parser inside the real child. Some the child catches and some crash
+    it; here every one is the same fixed refusal."""
+    monkeypatch.setattr(extraction, "CHILD_SCRIPT", failing_parser_child(tmp_path, escape_class))
+
     with pytest.raises(UnreadableDocumentError) as raised:
-        await MediaReader().read(content=poison_pdf(escape_class), mime_type="application/pdf")
+        await MediaReader().read(content=paged_pdf(1), mime_type="application/pdf")
 
     assert escape_class not in str(raised.value)
     # Nothing chained: the parent was told "no answer", never what was raised.
     assert raised.value.__cause__ is None
+
+
+@pytest.mark.parametrize("escape_class", POISON_PDF_CLASSES)
+async def test_an_audit_poison_pdf_is_refused_or_read_and_nothing_else(
+    escape_class: str,
+) -> None:
+    """The audit's fuzz files against the installed `pypdf`. A release that
+    has fixed the bug reads the file; one that has not refuses it. Either way
+    no exception but the refusal reaches this process."""
+    try:
+        result = await MediaReader().read(
+            content=poison_pdf(escape_class), mime_type="application/pdf"
+        )
+    except UnreadableDocumentError as refused:
+        assert escape_class not in str(refused)
+        assert refused.__cause__ is None
+    else:
+        assert isinstance(result, ReadResult)
 
 
 async def test_a_pdf_past_the_byte_limit_is_a_decision_without_starting_a_parser(

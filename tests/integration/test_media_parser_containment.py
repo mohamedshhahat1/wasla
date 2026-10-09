@@ -25,11 +25,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models.conversation import MessageKind
 from app.db.models.media import MediaStatus
+from app.services import extraction
 from app.services.knowledge_limits import EXTRACTION_TIMEOUT_SECONDS
 from app.services.media_reader import DocumentBeyondLimitsError, ReadResult
 from app.services.media_service import READER_FAILED
 from tests import media_harness as h
-from tests.pdf_fixtures import POISON_PDF_CLASSES, amplifying_pdf, poison_pdf
+from tests.pdf_fixtures import (
+    POISON_PDF_CLASSES,
+    amplifying_pdf,
+    failing_parser_child,
+    paged_pdf,
+    poison_pdf,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -47,16 +54,22 @@ def _resident_bytes() -> int | None:
 
 
 @pytest.mark.parametrize("escape_class", POISON_PDF_CLASSES)
-async def test_a_poison_pdf_is_skipped_and_the_conversation_is_answered(
-    db_session: AsyncSession, tmp_path: Path, settings: Settings, escape_class: str
+async def test_a_parser_exception_skips_the_pdf_and_the_conversation_is_answered(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    escape_class: str,
 ) -> None:
-    """P2-01, reversed, for each class that escaped. Before: `downloading` for
-    ever, dead-lettered, zero turns. After: skipped, one turn."""
+    """P2-01, reversed, for each class that escaped, raised by the parser
+    inside the real child. Before: `downloading` for ever, dead-lettered, zero
+    turns. After: skipped, one turn."""
+    monkeypatch.setattr(extraction, "CHILD_SCRIPT", failing_parser_child(tmp_path, escape_class))
     where = await h.scene(db_session)
     media = await h.attachment(
         db_session, where, mime_type="application/pdf", kind=MessageKind.DOCUMENT
     )
-    whatsapp = h.StubWhatsApp(content=poison_pdf(escape_class), mime_type="application/pdf")
+    whatsapp = h.StubWhatsApp(content=paged_pdf(1), mime_type="application/pdf")
     worker = h.worker(db_session, tmp_path, settings, whatsapp=whatsapp)
 
     job = await h.run(worker, media)
@@ -69,12 +82,41 @@ async def test_a_poison_pdf_is_skipped_and_the_conversation_is_answered(
     assert len(h.released(worker)) == 1
 
 
-async def test_a_later_attachment_still_gets_its_turn_after_a_poison_pdf(
-    db_session: AsyncSession, tmp_path: Path, settings: Settings
+@pytest.mark.parametrize("escape_class", POISON_PDF_CLASSES)
+async def test_an_audit_poison_pdf_is_refused_or_read_and_the_conversation_is_answered(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings, escape_class: str
+) -> None:
+    """The audit's fuzz files against the installed `pypdf`. A release that
+    fixed the bug reads the file; one that did not refuses it. Either way the
+    row is terminal and the conversation gets its one turn."""
+    where = await h.scene(db_session)
+    media = await h.attachment(
+        db_session, where, mime_type="application/pdf", kind=MessageKind.DOCUMENT
+    )
+    whatsapp = h.StubWhatsApp(content=poison_pdf(escape_class), mime_type="application/pdf")
+    worker = h.worker(db_session, tmp_path, settings, whatsapp=whatsapp)
+
+    job = await h.run(worker, media)
+
+    await db_session.refresh(media)
+    assert media.status in (MediaStatus.SKIPPED, MediaStatus.READY)
+    if media.status is MediaStatus.SKIPPED:
+        assert media.last_error == "This document could not be read."
+    assert escape_class not in (media.last_error or "")
+    assert job is not None
+    assert len(h.released(worker)) == 1
+
+
+async def test_a_later_attachment_still_gets_its_turn_after_an_unreadable_pdf(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The conversation-wide half of MEDIA-03: one bad file used to block every
     later attachment in the conversation, because release waits for none to be
     unresolved."""
+    monkeypatch.setattr(extraction, "CHILD_SCRIPT", failing_parser_child(tmp_path, "KeyError"))
     where = await h.scene(db_session)
     poison = await h.attachment(
         db_session, where, mime_type="application/pdf", kind=MessageKind.DOCUMENT
@@ -84,10 +126,12 @@ async def test_a_later_attachment_still_gets_its_turn_after_a_poison_pdf(
             db_session,
             tmp_path,
             settings,
-            whatsapp=h.StubWhatsApp(content=poison_pdf("KeyError"), mime_type="application/pdf"),
+            whatsapp=h.StubWhatsApp(content=paged_pdf(1), mime_type="application/pdf"),
         ),
         poison,
     )
+    await db_session.refresh(poison)
+    assert poison.status is MediaStatus.SKIPPED
 
     readable = await h.attachment(
         db_session, where, mime_type="text/plain", kind=MessageKind.DOCUMENT
