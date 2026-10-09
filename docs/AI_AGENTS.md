@@ -199,6 +199,8 @@ A settle is idempotent and a unique index allows one `ai_turn` per turn. A hold 
 
 **What the lock does not do.** It is held only for the hold's own short transaction — never across an inference, which would serialise every conversation a busy workspace is having (ADR-080). The hold is what makes that safe: a turn still generating is counted by the next decision without anybody waiting for it.
 
+**What the kept-data sweep holds the allowance to** (ADR-131 amended 2026-10-09). After every AI-harness suite has run with its data kept, `tests/integration/test_ai_invariants.py` checks that every turn's charge agrees with what else was written: a `charged` turn has exactly one `ai_turn` event and no release reason but the sweep's (B1, B4); a turn not charged has none (B2); a release says why (B3); `replied` and `handed_off` are charged (B5); `escalated`, `empty_response`, `nothing_to_answer`, `quota_blocked`, `channel_not_in_plan` and a turn with no outcome — a provider failure — are not (B6); every charge names a turn of its own workspace (B7). And no hold stays open past the TTL plus one billing sweep plus a minute (A). For an operator the same reading is the runbook's: a turn charged without an outcome is a failure that was charged, or a worker that died after charging; a hold open that long is a sweep that is not running.
+
 ## What leaves Wasla (ADR-055)
 
 Every AI feature calls OpenAI. This is the complete list of what is sent, and it is written from the request builders rather than from intent.

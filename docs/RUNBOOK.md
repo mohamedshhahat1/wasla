@@ -1328,6 +1328,44 @@ must not become undeletable by owning a workspace. If the workspace should keep
 running, promote somebody there *first* — otherwise expect to run the ownership
 repair above afterwards.
 
+### The kept-data sweep (CI's last migration-parity step) failed
+
+CI's `migration-parity` job ends by running every integration suite built on
+the AI harness with `WASLA_TEST_KEEP_AI_DATA=1` - nothing they write is deleted
+- and then `test_ai_invariants.py` and `test_tool_invariants.py` over all of it.
+Run the same thing locally before pushing (ADR-133):
+
+```bash
+export TEST_DATABASE_URL=postgresql+asyncpg://wasla:wasla@localhost:5432/wasla_kept   # disposable: its schema is dropped
+export WASLA_TEST_REDIS_HOST=redis://localhost:6390 WASLA_TEST_REDIS_URL=redis://localhost:6390/15
+python -m scripts.kept_data_sweep            # --list prints the selection only
+```
+
+It prints the files (CI's selection, proven equal by
+`tests/unit/test_kept_data_sweep.py`), then `collected / passed / failed /
+skipped`. A skip fails it, as it fails the job. Never point it at a database
+anybody uses, and never run it beside another full lane on the same PostgreSQL:
+Docker Desktop's port proxy has failed fixture setup under that load
+(`WinError 121`), which is an infrastructure error, not a result.
+
+A failing AI-allowance check prints the rows it counted as `rule workspace
+row`. What each rule means and where to look:
+
+| Rule | Counted | Look at |
+| --- | --- | --- |
+| A | a hold open past TTL + sweep interval + 60 s, or an engaged turn that wrote no hold | the suite that wrote it: a dead worker's hold must be released the way the billing sweep would (`_expire_like_the_sweep`); in production, *AI turn holds are not being released* above |
+| B1 | a `charged` turn with 0 or 2+ `ai_turn` events | `AITurnCharge.settle` and `uq_usage_events_tenant_id_agent_turn_id` |
+| B2 | an `ai_turn` event on a turn that is not `charged` | something wrote usage outside `AITurnCharge` |
+| B3 | a `released` turn with no reason | `charge_state_consistent` was lifted somewhere |
+| B4 | a `charged` turn with a release reason other than `hold_expired` | the same |
+| B5 | `replied` / `handed_off` not charged | the worker's settle (`AgentOutcome.chargeable`) |
+| B6 | a never-charged ending, or no ending, charged | the same; a turn with no outcome is a provider failure charged, or a test that settled without completing the turn (`_complete_like_the_worker`) |
+| B7 | an `ai_turn` event naming no turn of its workspace | a turn deleted while its conversation stayed, or a cross-workspace write |
+
+The old names were "engaged turns stranded past any healthy turn's length"
+(now rule A) and "customer turns charged other than once per engaged turn"
+(now B1..B7); both counted states ENT-02 makes legal (F-1).
+
 ### CRM relational invariants (before and after deploying 0068)
 
 Migration 0068 adds tenant-agreed keys to the CRM relations and refuses to run
