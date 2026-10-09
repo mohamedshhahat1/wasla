@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,18 +38,25 @@ from app.db.models.conversation import (
     Message,
     MessageDirection,
     MessageOrigin,
+    MessageStatus,
 )
 from app.db.models.media import MediaLocatorKind
 from app.db.models.usage import UsageEventType
 from app.repositories.conversation_repository import (
     ConversationRepository,
     MessageRepository,
+    provider_reported_failure,
 )
 from app.repositories.media_repository import MediaRepository
 from app.services.contact_identity_service import SenderResolution
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
+
+
+#: How far Wasla's send clock may run ahead of a provider's for a message the
+#: provider never timestamped (OMNI-042); `WATERMARK_CLOCK_TOLERANCE_SECONDS`.
+DEFAULT_WATERMARK_TOLERANCE = timedelta(seconds=5)
 
 
 class ProjectionOutcome(StrEnum):
@@ -75,12 +82,34 @@ class ProjectedMessage:
         return self.outcome is ProjectionOutcome.STORED
 
 
+class EchoKind(StrEnum):
+    """What an echo turned out to be (OMNI-037)."""
+
+    OWN = "own"
+    EXTERNAL = "external"
+    ORPHAN = "orphan"
+
+
+@dataclass(frozen=True, slots=True)
+class EchoOutcome:
+    kind: EchoKind
+    message: Message | None = None
+    conversation: Conversation | None = None
+
+
 class ConversationProjectionService:
     """Turns one stored event into conversation and message rows, in one workspace."""
 
-    def __init__(self, *, session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        watermark_tolerance: timedelta = DEFAULT_WATERMARK_TOLERANCE,
+    ) -> None:
         self._session = session
         self._tenant_id = tenant_id
+        self._watermark_tolerance = watermark_tolerance
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
@@ -158,6 +187,7 @@ class ConversationProjectionService:
             # recorded separately and never merged into the customer's words.
             body=event.text,
             sent_at=occurred_at,
+            action=event.action,
         )
         # Only now, for a message that is new and the customer's: this is what
         # reopens a closed conversation and opens the reply window.
@@ -196,6 +226,54 @@ class ConversationProjectionService:
                 )
         return ProjectedMessage(ProjectionOutcome.STORED, message=stored, conversation=conversation)
 
+    async def project_echo(
+        self,
+        *,
+        connection: ChannelConnection,
+        event: InboundEvent,
+        conversation: Conversation | None,
+    ) -> EchoOutcome:
+        """What an echo is: Wasla's own send, or a reply typed outside Wasla (OMNI-037, ADR-129).
+
+        - **Wasla's own** - its provider id names an outbound message on this
+          connection, or a send of the same words is still in flight there:
+          confirmed, and nothing changes.
+        - **External** - a person answered from the provider's own app: the
+          reply is projected as an outbound message with origin `external`, the
+          inbox order moves, and the caller hands the conversation to a person.
+          The window never moves: only the customer opens it.
+        - **Orphan** - it names no conversation Wasla holds: kept as evidence.
+        """
+        if event.message_id is None:  # pragma: no cover - the event type refuses it
+            return EchoOutcome(EchoKind.ORPHAN)
+        existing = await self._messages.find_provider_message(
+            connection_id=connection.id, provider_message_id=event.message_id
+        )
+        if existing is not None:
+            if existing.direction is MessageDirection.OUTBOUND:
+                # Wasla's own send: the echo carries the provider's own time
+                # for it, which a read watermark is compared with (OMNI-042).
+                if existing.provider_sent_at is None and event.occurred_at is not None:
+                    existing.provider_sent_at = event.occurred_at
+                return EchoOutcome(EchoKind.OWN, message=existing)
+            return EchoOutcome(EchoKind.ORPHAN)
+        if conversation is None:
+            return EchoOutcome(EchoKind.ORPHAN)
+        if await self._messages.requested_with_body(conversation.id, event.text):
+            # Wasla's send, echoed before its response named it.
+            return EchoOutcome(EchoKind.OWN)
+        at = event.occurred_at or datetime.now(UTC)
+        message = self._messages.record_external(
+            conversation_id=conversation.id,
+            connection_id=connection.id,
+            provider_message_id=event.message_id,
+            kind=event.message_kind,
+            body=event.text,
+            sent_at=at,
+        )
+        await self._conversations.touch_outbound(conversation, at=at)
+        return EchoOutcome(EchoKind.EXTERNAL, message=message, conversation=conversation)
+
     async def project_status(
         self,
         *,
@@ -219,14 +297,27 @@ class ConversationProjectionService:
             return None
 
         at = event.occurred_at or datetime.now(UTC)
-        if message is not None:
-            return self._messages.advance_status(message, status=update.status, at=at)
-        if update.message_id is not None:
+        if message is None and update.message_id is not None:
             found = await self._messages.find_provider_message(
                 connection_id=connection.id, provider_message_id=update.message_id
             )
             if found is not None and found.direction is MessageDirection.OUTBOUND:
-                return self._messages.advance_status(found, status=update.status, at=at)
+                message = found
+        if message is not None:
+            if (
+                update.status is MessageStatus.SENT
+                and message.provider_sent_at is None
+                and event.occurred_at is not None
+            ):
+                # The provider's own time for the send (OMNI-042).
+                message.provider_sent_at = event.occurred_at
+            return self._messages.advance_status(
+                message,
+                status=update.status,
+                at=at,
+                failure_text=provider_reported_failure(connection.channel),
+            )
+        if update.message_id is not None:
             logger.info(
                 "channel.status_for_unknown_message",
                 extra={"event": "channel.status_for_unknown_message"},
@@ -249,6 +340,7 @@ class ConversationProjectionService:
             connection_id=connection.id,
             status=update.status,
             watermark=update.watermark,
+            tolerance=self._watermark_tolerance,
         )
 
     def _collision(self, connection: ChannelConnection, existing: Message) -> ProjectedMessage:
@@ -264,4 +356,10 @@ class ConversationProjectionService:
         return ProjectedMessage(ProjectionOutcome.COLLISION, message=existing)
 
 
-__all__ = ["ConversationProjectionService", "ProjectedMessage", "ProjectionOutcome"]
+__all__ = [
+    "ConversationProjectionService",
+    "EchoKind",
+    "EchoOutcome",
+    "ProjectedMessage",
+    "ProjectionOutcome",
+]

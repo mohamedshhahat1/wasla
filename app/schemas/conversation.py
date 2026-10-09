@@ -16,7 +16,14 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.channels.policy import OutOfWindow, ReplyPolicy, TextUnit
+from app.channels.policy import (
+    REQUEST_TEXT_CEILING,
+    ChannelState,
+    OutOfWindow,
+    ReplyPolicy,
+    SendMechanism,
+    TextUnit,
+)
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
 from app.db.models.conversation import (
     Conversation,
@@ -27,18 +34,17 @@ from app.db.models.conversation import (
     MessageKind,
     MessageOrigin,
     MessageStatus,
+    ReplyActionSource,
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
 from app.schemas.text import StorableText
-from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
 
-# Meta's own limit for a text body, taken from the service that enforces it
-# rather than restated here. Two copies of a provider's limit drift, and the
-# copy that drifts is the one nobody is testing: the schema rejects early and
-# politely, `MessagingService.send_text` is the guarantee, and they have to be
-# the same number for the first to mean anything (MSG-25).
-MAX_TEXT_LENGTH = WHATSAPP_TEXT_MAX_CHARS
+# The largest text any supported channel accepts, before the conversation's
+# channel is known (OMNI-044). The schema rejects early and politely;
+# `MessagingService.send_text` applies the channel's own limit, in its own unit,
+# and is the guarantee (MSG-25). A test holds every adapter within this.
+MAX_TEXT_LENGTH = REQUEST_TEXT_CEILING
 
 
 class SendTextRequest(BaseModel):
@@ -123,6 +129,14 @@ class CursorPage[ItemT](BaseModel):
     next_cursor: str | None = None
 
 
+class ReplyActionRead(BaseModel):
+    """What a customer tapped (OMNI-030): the provider's id or payload, and its words."""
+
+    id_or_payload: str | None
+    title: str | None
+    source: ReplyActionSource
+
+
 class MessageRead(BaseModel):
     id: uuid.UUID
     conversation_id: uuid.UUID
@@ -142,6 +156,10 @@ class MessageRead(BaseModel):
     # campaigns and follow-ups wrong (MSG-16).
     origin: MessageOrigin
     body: str | None
+    # Set when the customer tapped a button or a list row rather than typing:
+    # `body` carries its words, this carries the payload a client routes on.
+    # Null on everything else. Additive (OMNI-030).
+    action: ReplyActionRead | None = None
     # Set on template messages only, so a client can render which template went
     # out in place of the text it has no copy of.
     template_name: str | None
@@ -165,6 +183,15 @@ class MessageRead(BaseModel):
             status=message.status,
             origin=message.origin,
             body=message.body,
+            action=(
+                ReplyActionRead(
+                    id_or_payload=message.action_payload,
+                    title=message.action_title,
+                    source=message.action_source,
+                )
+                if message.action_source is not None
+                else None
+            ),
             template_name=message.template_name,
             template_language=message.template_language,
             sent_by_id=message.sent_by_id,
@@ -208,6 +235,17 @@ class ReplyPolicyRead(BaseModel):
     templates: bool
     text_limit: int
     text_limit_unit: TextUnit
+    # `operational`, or `paused` / `unavailable` when Wasla cannot act on the
+    # channel: then nothing is sendable, whatever the window (OMNI-031).
+    # Additive; a client that ignores it still reads `free_text_allowed` and
+    # `templates` as false.
+    state: ChannelState = ChannelState.OPERATIONAL
+    # Per origin (OMNI-033), additive. How a person's free text would go now -
+    # `standard_window`, or `human_agent_tag` after the window on a channel
+    # that has one - and whether an agent's may go at all, which a human-agent
+    # tag never allows.
+    free_text_mechanism: SendMechanism | None = None
+    agent_free_text_allowed: bool = False
 
     @classmethod
     def from_policy(cls, policy: ReplyPolicy) -> Self:
@@ -218,6 +256,9 @@ class ReplyPolicyRead(BaseModel):
             templates=policy.templates,
             text_limit=policy.text_limit,
             text_limit_unit=policy.text_limit_unit,
+            state=policy.state,
+            free_text_mechanism=policy.free_text_mechanism,
+            agent_free_text_allowed=policy.agent_free_text_allowed,
         )
 
 

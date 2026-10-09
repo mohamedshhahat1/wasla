@@ -326,8 +326,9 @@ class WorkspaceService:
         actor_role: TenantRole,
         name: str | None = None,
         slug: str | None = None,
+        automation_disclosure: dict[str, str] | None = None,
     ) -> Tenant:
-        """Change a workspace's name, and - for an owner only - its address.
+        """Change a workspace's name, its disclosure wording, and - for an owner only - its address.
 
         The two fields are split by authority rather than lumped together, and
         the split is the point. A name is a label: an administrator renaming the
@@ -339,8 +340,12 @@ class WorkspaceService:
         """
         if actor_role not in (TenantRole.TENANT_OWNER, TenantRole.TENANT_ADMIN):
             raise PermissionDeniedError("This action requires a different role in this workspace.")
-        if name is None and slug is None:
+        if name is None and slug is None and automation_disclosure is None:
             raise ValidationError("Nothing to update.")
+
+        if automation_disclosure is not None:
+            # Only the wording, by language; `{}` restores Wasla's (OMNI-041).
+            tenant.automation_disclosure = dict(automation_disclosure) or None
 
         changed: dict[str, str] = {}
         if name is not None:

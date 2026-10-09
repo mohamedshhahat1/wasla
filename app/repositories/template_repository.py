@@ -89,6 +89,23 @@ class WhatsAppTemplateRepository(TenantScopedRepository[WhatsAppTemplate]):
     async def list_for_account(self, account_id: uuid.UUID) -> list[WhatsAppTemplate]:
         return await self._all(self._select().where(WhatsAppTemplate.account_id == account_id))
 
+    async def marks_opt_out_payload(self, *, account_id: uuid.UUID, payload: str) -> bool:
+        """Whether a template on this number marks `payload` as the marketing opt-out (OMNI-030).
+
+        JSONB containment against the workspace's own marks, on the number the
+        tap arrived on: a payload another number's template uses means nothing
+        here.
+        """
+        found = await self._first(
+            self._select()
+            .where(
+                WhatsAppTemplate.account_id == account_id,
+                WhatsAppTemplate.opt_out_payloads.contains([payload]),
+            )
+            .limit(1)
+        )
+        return found is not None
+
     def create(
         self,
         *,

@@ -55,6 +55,14 @@ NOT_PAYMOB_IDS: set[tuple[str, str]] = {
     ("app/integrations/whatsapp/client.py", "132001"),
     ("app/integrations/whatsapp/client.py", "132015"),
     ("app/integrations/whatsapp/client.py", "132016"),
+    # Meta's documented error codes (OMNI-035): throttling and connection-level.
+    ("app/integrations/whatsapp/client.py", "131050"),
+    ("app/integrations/meta/errors.py", "130429"),
+    ("app/integrations/meta/errors.py", "131056"),
+    ("app/integrations/meta/errors.py", "131057"),
+    ("app/integrations/meta/errors.py", "131005"),
+    ("app/integrations/meta/errors.py", "131031"),
+    ("app/integrations/meta/errors.py", "133010"),
 }
 
 BASE = {

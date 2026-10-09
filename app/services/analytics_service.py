@@ -26,6 +26,7 @@ from app.db.models.analytics import AnalyticsEvent, AnalyticsEventType, Analytic
 from app.repositories.analytics_repository import AnalyticsEventRepository, EventCount
 from app.repositories.metrics_repository import (
     CampaignMetrics,
+    ChannelMetrics,
     ConversationMetrics,
     LeadMetrics,
     MessageMetrics,
@@ -113,6 +114,7 @@ class TenantAnalytics:
     sentiment: SentimentMetrics
     campaigns: CampaignMetrics
     handoffs: tuple[EventCount, ...] = ()
+    channels: tuple[ChannelMetrics, ...] = ()
 
 
 class AnalyticsService:
@@ -144,6 +146,7 @@ class AnalyticsService:
             leads=await self._metrics.leads(**bounds),
             sentiment=await self._metrics.sentiment(**bounds),
             campaigns=await self._metrics.campaigns(**bounds),
+            channels=tuple(await self._metrics.channels(**bounds)),
             handoffs=tuple(
                 await self._events.counts(
                     since=window.since,

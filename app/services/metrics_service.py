@@ -32,6 +32,8 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.pool import QueuePool
 
+from app.channels.policy import ChannelState
+from app.channels.registry import default_registry
 from app.core.config import Settings
 from app.core.embedding_space import EmbeddingSpace
 from app.core.logging import get_logger
@@ -47,6 +49,7 @@ from app.core.telemetry import (
     read_redis_counters,
     read_redis_histograms,
 )
+from app.db.models.channel import Channel
 from app.db.session import Database
 from app.repositories.agent_turn_repository import (
     STRANDED_TURN_AFTER,
@@ -444,6 +447,24 @@ class MetricsService:
                 [
                     ({"channel": channel, "status": status, "health": health}, float(count))
                     for channel, status, health, count in connections
+                ],
+            )
+        )
+        # Whether each channel the model knows is operational, paused or has no
+        # adapter (OMNI-031): a pause is configuration, and an operator should
+        # see it without reading the environment. One series per channel.
+        registry = default_registry()
+        lines.extend(
+            render_gauge_lines(
+                "wasla_channel_state",
+                "Whether each channel is operational, paused or unavailable (1 = current state).",
+                [
+                    (
+                        {"channel": channel.value, "state": state.value},
+                        float(registry.state_for(channel) is state),
+                    )
+                    for channel in Channel
+                    for state in ChannelState
                 ],
             )
         )

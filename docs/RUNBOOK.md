@@ -1606,6 +1606,126 @@ per-connection allowance shared by every sender (ADR-123). When set, a campaign
 or follow-up over it waits for the next minute without spending an attempt
 (`channel.connection_throttled` in the log); replies are never refused.
 
+### Omnichannel final remediation (0085-0091)
+
+The final omnichannel audit's remediation (ADR-120/121/123 amended, ADR-124 to
+ADR-130). Every migration is additive and online:
+
+| Migration | What it does | Locks |
+| --- | --- | --- |
+| 0085 | `messages.action_source/action_payload/action_title`, `contacts.opt_out_via` and `marketing_resumed_at`, template opt-out payloads; two new enum types | Metadata-only `ADD COLUMN`s, 15 s `lock_timeout` |
+| 0086 | `conversations.automation_disclosed_at`, `ai_resumed_at`; `tenants.automation_disclosure` | Metadata-only |
+| 0087 | `message_origin` gains `external` | `ALTER TYPE ... ADD VALUE` in its own autocommit block |
+| 0088 | `messages.provider_sent_at` | Metadata-only |
+| 0089 | `whatsapp_event_kind` gains `preference` | Autocommit block |
+| 0090 | `channel_connections.sends_per_minute` and its CHECK (`NOT VALID`, then `VALIDATE`) | SHARE UPDATE EXCLUSIVE while validating |
+| 0091 | `ix_conversations_tenant_id_channel_last_message_at`, `CONCURRENTLY`; an INVALID leftover of a failed build is dropped and rebuilt | None blocking writes |
+
+**Downgrades refuse rather than lose data**: 0085, 0086, 0088 and 0090 while any
+row holds what they added; 0087 and 0089 while a row carries the new label -
+**an enum label cannot be dropped**, so those two downgrades leave the label in
+the type. 0091's downgrade drops the index concurrently.
+
+**After deploying:**
+
+```
+python -m scripts.omnichannel_invariants verify
+INVARIANTS_DATABASE_URL=<replica> python -m scripts.omnichannel_invariants census
+```
+
+`verify` gained `window_anchor_older_than_newest_inbound` (OMNI-036),
+`inbound_tap_without_its_words` (OMNI-030),
+`message_event_without_its_projected_message` (OMNI-032),
+`collision_evidence_not_failed` (OMNI-043) and
+`ai_reply_on_a_disclosure_channel_never_disclosed` (OMNI-041). A non-zero
+`window_anchor_older_than_newest_inbound` on the first run measures conversations
+the old code already moved backwards; they correct themselves at the customer's
+next message. `census` gained `q5_inbound_interactive_without_text`,
+`q6_retained_stop_taps_without_opt_out` and `collision_evidence_events`.
+
+#### Recover opt-out taps the old code missed (time-bound)
+
+Before 0085 a customer tapping "Stop promotions" was not opted out. The raw
+deliveries are kept for 30 days after processing (DB-011) and then redacted, so
+**run this within 30 days of deploying 0085, or the evidence is gone**:
+
+```
+python -m scripts.omnichannel_invariants recover-button-opt-outs --dry-run
+python -m scripts.omnichannel_invariants recover-button-opt-outs --apply
+```
+
+The dry run (the default) is read-only and prints counts per workspace id -
+candidates, would apply, skipped because the contact resumed later - and nothing
+else: no phone, business-scoped id or message text. `--apply` records each
+opt-out through the normal writer with provenance `replay`, dated by the tap. A
+second `--apply` changes nothing; a contact re-admitted after the tap is never
+opted out again. `q6_retained_stop_taps_without_opt_out` in the census should
+read 0 afterwards.
+
+#### Pause a channel (rollback without a deploy of code)
+
+```
+PAUSED_CHANNELS=instagram
+```
+
+and restart the API and workers. A paused channel's inbound is still stored and
+shown in the inbox; sends, agent turns, tool calls and file fetches on it are
+refused before anything is staged; follow-ups and campaigns wait (rechecked every
+15 minutes) without spending an attempt. Every other channel is untouched.
+`wasla_channel_state{state="paused"}` shows it, and `ChannelPausedForADay`
+reminds you after a day. To remove a channel for good, remove its adapter from
+the registry: its conversations still render, with `reply_policy.state =
+"unavailable"`. Never pause by deleting connections.
+
+#### A connection reads permission_missing or rate_limited
+
+`ChannelConnectionUnusable`. Meta's error **code** decides (ADR-130):
+`permission_missing` follows codes 3, 10, 200-299, 131005, 368, 131031 or
+133010 - re-grant the permission or fix the number in Meta Business Manager;
+`rate_limited` follows 4, 80007, 130429, 131056 or 131057 - campaigns wait on
+their own, a lasting one needs the number's limit raised. The next successful
+send clears either. A connection's own allowance can be set with
+`UPDATE channel_connections SET sends_per_minute = <n> WHERE id = <id>`
+(null returns it to `CONNECTION_SENDS_PER_MINUTE`).
+
+#### Webhook delivery horizons and signing secrets
+
+Meta retries a failed WhatsApp delivery for **up to 7 days**; the Graph webhooks
+of Messenger and Instagram retry for about **36 hours** (OMNI-050). An outage
+longer than that loses those channels' events for good, so treat a paused or
+failing Instagram/Messenger webhook as same-day work. Each product's signature
+is verified with `META_INSTAGRAM_APP_SECRET` / `META_MESSENGER_APP_SECRET` where
+set, else `META_APP_SECRET`; which secret signs an Instagram-Login app's
+webhooks must be confirmed against a real delivery before that channel ships.
+`WEBHOOK_MAX_REQUEST_BYTES` is 3 MiB, Meta's documented maximum; any refusal
+fires `WebhookBodyTooLarge`.
+
+#### Graph API version (deadline 2027-01-21)
+
+`META_API_VERSION` defaults to `v21.0`, which Meta serves until **2027-01-21**
+(OMNI-055; start-up warns from `META_API_SUNSETS`). Plan: by 2026-12-01 set
+`META_API_VERSION=v24.0` (served until 2028-02-18) on staging and re-verify, with
+recorded payloads, the contracts the final audit read on 2026-10-02 - the
+messages and statuses webhook shapes (including `button`, `interactive`,
+`user_preferences`), the send response, media upload and download, template
+send and the error envelope and codes ADR-130 classifies - then change the
+default in code and deploy before 2027-01-21.
+
+#### O8 - removing the WhatsApp compatibility layer (not applied)
+
+Drops `uq_messages_tenant_id_wa_message_id` and
+`uq_whatsapp_events_tenant_id_event_id` (`DROP INDEX CONCURRENTLY`), the mirror
+and phone-identity triggers, `contacts.wa_id` and `message_media.wa_media_id`,
+and moves lifecycle writes to `channel_connections`. **Only when all hold**: one
+release has run on the neutral path; `omnichannel_invariants verify` is 0 on
+production; no API client reads `wa_message_id`, `account_id` or
+`ContactOptOutRead.wa_id`; and a point-in-time restore has been rehearsed.
+Until then, colliding events are kept as failed evidence (ADR-120) and the
+`contacts.wa_id` trigger records `source = provider` for any writer - accepted
+until O8 (OMNI-047). Restoring a dropped unique later uses
+`CREATE UNIQUE INDEX CONCURRENTLY`, which fails loudly if a collision was stored
+meanwhile.
+
 ### Downgrading past the billing migrations
 
 0071, 0072 and 0073 hold commercial records their downgrades would drop with

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.attributes import set_committed_value
 
-from app.core.exceptions import ConflictError
+from app.channels.inbound import ReplyAction
+from app.channels.policy import CHANNEL_DISPLAY_NAMES
 from app.core.pagination import Cursor
-from app.db.models.channel import Channel
+from app.db.models.channel import Channel, ChannelConnection
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -66,61 +69,54 @@ class OutboundMessageDirectory(BaseRepository[Message]):
     nothing, and every message the previous workspace had in flight stays
     unreconciled for ever (MSG-04).
 
-    Unscoped, and therefore fenced three ways. The candidate workspaces are
-    supplied by the caller and come from `WhatsAppAccountDirectory.holders_of`,
-    so they are exactly the workspaces that have held the number Meta is
+    Unscoped, and therefore fenced three ways. The candidate claims are
+    supplied by the caller and come from `ConnectionDirectory.holders_of`, so
+    they are exactly the claims that have held the connection the provider is
     reporting about. An empty candidate set returns nothing rather than
     searching the platform. And no API route reaches this class: it is
-    constructed by the ingestion service and by the inbound sweeper, both of
-    which are answering Meta rather than a person.
+    constructed by the ingestion service, which is answering a provider rather
+    than a person.
     """
 
     model = Message
-
-    async def find_by_wa_message_id(
-        self,
-        wa_message_id: str,
-        *,
-        tenant_ids: Sequence[uuid.UUID],
-    ) -> Message | None:
-        """The outbound message this provider id names, among these workspaces.
-
-        `UNIQUE(tenant_id, wa_message_id)` makes at most one row match per
-        workspace, and a provider id belongs to one workspace because a number
-        resolves to one live claim at a time - so this is a single row or none.
-        """
-        if not tenant_ids:
-            return None
-        return await self._first(
-            self._select().where(
-                Message.wa_message_id == wa_message_id,
-                Message.tenant_id.in_(tenant_ids),
-                Message.direction == MessageDirection.OUTBOUND,
-            )
-        )
 
     async def find_by_provider_message_id(
         self,
         provider_message_id: str,
         *,
-        connection_ids: Sequence[uuid.UUID],
+        holders: Sequence[ChannelConnection],
     ) -> Message | None:
-        """The outbound message a status names, among these connections' messages.
+        """The outbound message a status names, among the messages of these claims.
 
-        The neutral form of the lookup above, and stricter: a provider id is
-        unique per connection (ADR-120), so the candidates are the claims the
-        connection the status arrived on has carried - across workspaces
-        (MSG-04) - and a message on any other connection cannot match,
-        whoever owns it.
+        A provider id is unique per connection (ADR-120), so the candidates are
+        the claims the connection the status arrived on has carried - across
+        workspaces (MSG-04) - and a message on any other connection cannot
+        match, whoever owns it.
+
+        **The workspaces are in the predicate as well as the connections**
+        (OMNI-029). Every status webhook takes this path - WhatsApp reports
+        sent, delivered and read separately, three per message - and with only
+        `connection_id IN (...)` no index served it: the plan was a parallel
+        sequential scan of `messages`, whose cost grew with the whole
+        platform's traffic. Each claim belongs to one workspace, so naming the
+        claims' workspaces changes no answer and lets
+        `uq_messages_tenant_id_connection_id_wa_message_id` serve an index seek
+        (`tests/integration/test_status_lookup_plan.py`).
         """
-        if not connection_ids:
+        if not holders:
             return None
-        return await self._first(
-            self._select().where(
-                Message.wa_message_id == provider_message_id,
-                Message.connection_id.in_(connection_ids),
-                Message.direction == MessageDirection.OUTBOUND,
-            )
+        return await self._first(self.provider_message_lookup(provider_message_id, holders=holders))
+
+    @staticmethod
+    def provider_message_lookup(
+        provider_message_id: str, *, holders: Sequence[ChannelConnection]
+    ) -> Select[tuple[Message]]:
+        """The statement the lookup issues - built here so its plan can be tested as issued."""
+        return select(Message).where(
+            Message.tenant_id.in_(sorted({holder.tenant_id for holder in holders})),
+            Message.connection_id.in_([holder.id for holder in holders]),
+            Message.wa_message_id == provider_message_id,
+            Message.direction == MessageDirection.OUTBOUND,
         )
 
 
@@ -193,87 +189,11 @@ class ContactRepository(TenantScopedRepository[Contact]):
     def _tenant_filter(self) -> ColumnElement[bool]:
         return Contact.tenant_id == self.tenant_id
 
-    async def get_by_wa_id(self, wa_id: str) -> Contact | None:
-        return await self._first(self._select().where(Contact.wa_id == wa_id))
-
     async def get_by_id(self, contact_id: uuid.UUID) -> Contact | None:
         return await self._first(self._select().where(Contact.id == contact_id))
 
     async def require_by_id(self, contact_id: uuid.UUID) -> Contact:
         return await self._require(self._select().where(Contact.id == contact_id))
-
-    async def upsert(
-        self,
-        *,
-        wa_id: str,
-        display_name: str | None = None,
-        last_seen_at: datetime | None = None,
-    ) -> Contact:
-        """Find or create the contact, refreshing what Meta told us.
-
-        Meta sends the profile name with inbound traffic and customers change
-        it, so the stored name is refreshed when a newer one arrives. An absent
-        name never erases a known one.
-
-        The read is the fast path; `UNIQUE(tenant_id, wa_id)` is the guarantee.
-        A customer's first two messages can arrive in one burst, and before
-        this handler both deliveries missed the read, both inserted, and the
-        loser's `IntegrityError` became a 500 (MSG-09). The savepoint is what
-        makes the loss recoverable: without it the failed insert poisons the
-        surrounding transaction and the request cannot even answer.
-        """
-        contact = await self.get_by_wa_id(wa_id)
-        if contact is None:
-            contact = await self._insert_contact(
-                wa_id=wa_id,
-                display_name=display_name,
-                last_seen_at=last_seen_at,
-            )
-            if contact is not None:
-                return contact
-            # Somebody else created it between the read and the insert. Their
-            # row is the one that exists, so fall through and refresh it as if
-            # the read had found it - which for this customer it now has.
-            contact = await self.get_by_wa_id(wa_id)
-            if contact is None:  # pragma: no cover - the conflict proves a row
-                raise ConflictError("That contact could not be stored.")
-
-        if display_name is not None:
-            contact.display_name = display_name
-        if last_seen_at is not None and (
-            contact.last_seen_at is None or last_seen_at > contact.last_seen_at
-        ):
-            contact.last_seen_at = last_seen_at
-        return contact
-
-    async def _insert_contact(
-        self,
-        *,
-        wa_id: str,
-        display_name: str | None,
-        last_seen_at: datetime | None,
-    ) -> Contact | None:
-        """Insert, or None if another delivery got there first.
-
-        The savepoint scopes the failure to this statement. Any integrity
-        failure that is not the identity constraint is re-raised, because a
-        duplicate `wa_id` is a race and anything else here is a bug.
-        """
-        contact = Contact(
-            tenant_id=self.tenant_id,
-            wa_id=wa_id,
-            display_name=display_name,
-            last_seen_at=last_seen_at,
-        )
-        try:
-            async with self.session.begin_nested():
-                self.session.add(contact)
-                await self.session.flush()
-        except IntegrityError as error:
-            if CONTACT_IDENTITY_CONSTRAINT not in str(error.orig):
-                raise
-            return None
-        return contact
 
 
 class ConversationRepository(TenantScopedRepository[Conversation]):
@@ -476,11 +396,78 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
 
         A closed conversation reopens: a customer writing again is a live
         conversation whatever an agent previously decided.
+
+        **The anchors only ever move forward** (OMNI-036). `at` is the
+        provider's timestamp, and providers retry and reorder: Meta retries a
+        refused delivery for up to seven days. Assigning it unconditionally let
+        a late, older message move `last_inbound_at` backwards - closing a
+        service window the provider still held open, so every free-text reply
+        was refused until the customer wrote again - and moved the inbox order
+        back with it. `GREATEST` in one statement, not a read-modify-write, so
+        two concurrent deliveries cannot regress it either.
         """
-        conversation.last_inbound_at = at
-        conversation.last_message_at = at
-        if conversation.status is ConversationStatus.CLOSED:
-            conversation.status = ConversationStatus.OPEN
+        await self._advance(conversation, at=at, inbound=True)
+
+    async def disclosure_marks(
+        self, conversation_id: uuid.UUID
+    ) -> tuple[datetime | None, datetime | None]:
+        """When automation was last disclosed, and when the AI last took over again (OMNI-041).
+
+        Columns read now, not the attributes of an object loaded before a long
+        inference: a colleague handing the conversation back mid-turn is what
+        this must see.
+        """
+        row = (
+            await self.session.execute(
+                select(Conversation.automation_disclosed_at, Conversation.ai_resumed_at).where(
+                    self._tenant_filter(), Conversation.id == conversation_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None, None
+        return row[0], row[1]
+
+    async def record_disclosure(self, conversation_id: uuid.UUID, *, at: datetime) -> None:
+        """Record a delivered disclosure. Forward only, so a late write never moves it back."""
+        await self.session.execute(
+            update(Conversation)
+            .where(self._tenant_filter(), Conversation.id == conversation_id)
+            .values(automation_disclosed_at=func.greatest(Conversation.automation_disclosed_at, at))
+            .execution_options(synchronize_session=False)
+        )
+
+    async def touch_outbound(self, conversation: Conversation, *, at: datetime) -> None:
+        """Record that the business sent something: the inbox order, never the window."""
+        await self._advance(conversation, at=at, inbound=False)
+
+    async def _advance(self, conversation: Conversation, *, at: datetime, inbound: bool) -> None:
+        values: dict[str, Any] = {
+            "last_message_at": func.greatest(Conversation.last_message_at, at),
+        }
+        returning: list[Any] = [Conversation.last_message_at]
+        if inbound:
+            values["last_inbound_at"] = func.greatest(Conversation.last_inbound_at, at)
+            values["status"] = case(
+                (Conversation.status == ConversationStatus.CLOSED, ConversationStatus.OPEN),
+                else_=Conversation.status,
+            )
+            returning += [Conversation.last_inbound_at, Conversation.status]
+        row = (
+            await self.session.execute(
+                update(Conversation)
+                .where(self._tenant_filter(), Conversation.id == conversation.id)
+                .values(**values)
+                .returning(*returning)
+                .execution_options(synchronize_session=False)
+            )
+        ).one()
+        # The row's own answer, written back without marking the object dirty,
+        # so a later flush cannot write a stale in-memory value over it.
+        set_committed_value(conversation, "last_message_at", row[0])
+        if inbound:
+            set_committed_value(conversation, "last_inbound_at", row[1])
+            set_committed_value(conversation, "status", row[2])
 
 
 class MessageRepository(TenantScopedRepository[Message]):
@@ -573,6 +560,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         kind: MessageKind,
         body: str | None,
         sent_at: datetime,
+        action: ReplyAction | None = None,
     ) -> Message:
         """Stage a customer message the caller has established is new.
 
@@ -601,8 +589,65 @@ class MessageRepository(TenantScopedRepository[Message]):
             body=body,
             sent_at=sent_at,
             origin=MessageOrigin.CUSTOMER,
+            # What the customer tapped, kept beside the words (OMNI-030).
+            action_source=action.source if action is not None else None,
+            action_payload=action.id_or_payload if action is not None else None,
+            action_title=action.title if action is not None else None,
         )
         return self.add(message)
+
+    def record_external(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        connection_id: uuid.UUID,
+        provider_message_id: str,
+        kind: MessageKind,
+        body: str | None,
+        sent_at: datetime,
+    ) -> Message:
+        """Stage a reply the business sent from outside Wasla, reported back as an echo (OMNI-037).
+
+        Its time is the provider's - the echo's own timestamp (OMNI-042).
+
+        Outbound and already sent - the provider delivered it - so it carries
+        the sent state and its provider id, and never a delivery protocol of
+        Wasla's own: nothing here may send it again.
+        """
+        message = Message(
+            id=uuid.uuid4(),
+            tenant_id=self.tenant_id,
+            conversation_id=conversation_id,
+            connection_id=connection_id,
+            wa_message_id=provider_message_id,
+            direction=MessageDirection.OUTBOUND,
+            kind=kind,
+            status=MessageStatus.SENT,
+            delivery_state=MessageDeliveryState.SENT,
+            body=body,
+            sent_at=sent_at,
+            provider_sent_at=sent_at,
+            origin=MessageOrigin.EXTERNAL,
+        )
+        return self.add(message)
+
+    async def requested_with_body(self, conversation_id: uuid.UUID, body: str | None) -> bool:
+        """Whether a send of this body is in flight on this conversation (OMNI-037).
+
+        A provider can echo Wasla's own send before the send's response has
+        named it, so an echo that matches no provider id may still be ours.
+        """
+        if body is None:
+            return False
+        found = await self._first(
+            self._select().where(
+                Message.conversation_id == conversation_id,
+                Message.direction == MessageDirection.OUTBOUND,
+                Message.delivery_state == MessageDeliveryState.REQUESTED,
+                Message.body == body,
+            )
+        )
+        return found is not None
 
     async def advance_to_watermark(
         self,
@@ -611,8 +656,17 @@ class MessageRepository(TenantScopedRepository[Message]):
         connection_id: uuid.UUID,
         status: MessageStatus,
         watermark: datetime,
+        tolerance: timedelta = timedelta(0),
     ) -> int:
         """Advance every outbound message sent at or before `watermark` - and nothing else.
+
+        **Compared on the provider's clock** (OMNI-042). Messenger's watermark
+        is "all messages sent before or at this timestamp", in Meta's time;
+        `sent_at` is Wasla's, taken after the Send API answered, so the newest
+        message - the one a person actually just read - sat a round trip after
+        the watermark and was never marked read. `provider_sent_at` is the
+        comparison where the provider gave one; otherwise `sent_at` less a
+        small, bounded `tolerance`.
 
         A provider that reports receipts as a watermark ("everything sent before
         this instant was read") names no message (OMNI-011). Only this
@@ -628,7 +682,16 @@ class MessageRepository(TenantScopedRepository[Message]):
                 Message.connection_id == connection_id,
                 Message.direction == MessageDirection.OUTBOUND,
                 Message.sent_at.is_not(None),
-                Message.sent_at <= watermark,
+                or_(
+                    and_(
+                        Message.provider_sent_at.is_not(None),
+                        Message.provider_sent_at <= watermark,
+                    ),
+                    and_(
+                        Message.provider_sent_at.is_(None),
+                        Message.sent_at <= watermark + tolerance,
+                    ),
+                ),
             )
         )
         advanced = 0
@@ -751,10 +814,12 @@ class MessageRepository(TenantScopedRepository[Message]):
         *,
         wa_message_id: str,
         sent_at: datetime,
+        provider_sent_at: datetime | None = None,
     ) -> Message:
         message.wa_message_id = wa_message_id
         message.status = MessageStatus.SENT
         message.sent_at = sent_at
+        message.provider_sent_at = provider_sent_at
         message.delivery_state = MessageDeliveryState.SENT
         return message
 
@@ -797,6 +862,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         *,
         status: MessageStatus,
         at: datetime,
+        failure_text: str | None = None,
     ) -> Message:
         """Move a message forward, and never backwards.
 
@@ -822,7 +888,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         elif status is MessageStatus.READ and message.read_at is None:
             message.read_at = at
         elif status is MessageStatus.FAILED and message.failure_reason is None:
-            message.failure_reason = PROVIDER_REPORTED_FAILURE
+            message.failure_reason = failure_text or PROVIDER_REPORTED_FAILURE
 
         if _STATUS_ORDER[status] > _STATUS_ORDER[message.status]:
             message.status = status
@@ -830,9 +896,18 @@ class MessageRepository(TenantScopedRepository[Message]):
 
 
 # What a provider `failed` status records when it cannot claim the message.
-# A fixed sentence rather than Meta's own error text: that text can echo
-# fragments of the request, and this column is read back by an API.
-PROVIDER_REPORTED_FAILURE = "WhatsApp reported this message as failed."
+# A fixed sentence rather than the provider's own error text: that text can echo
+# fragments of the request, and this column is read back by an API. Named for
+# the channel where the caller knows it (OMNI-044) - WhatsApp's wording is
+# unchanged - and neutral where it does not.
+PROVIDER_REPORTED_FAILURE = "The provider reported this message as failed."
+
+
+def provider_reported_failure(channel: Channel) -> str:
+    """The failure sentence for a `failed` status on this channel."""
+    name = CHANNEL_DISPLAY_NAMES.get(channel)
+    return f"{name} reported this message as failed." if name else PROVIDER_REPORTED_FAILURE
+
 
 # Only the outbound progression is ordered; the rest share the floor so an
 # unexpected status can never appear to advance a message.

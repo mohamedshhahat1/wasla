@@ -332,7 +332,8 @@ async def test_no_write_path_breaks_an_invariant(
         campaign_id=campaign.id, filters=AudienceFilter()
     )
 
-    # A second channel: several files on one message, and an echo of our own.
+    # A second channel: several files on one message, and an echo of a reply a
+    # colleague typed in the provider's own app - projected as `external` (OMNI-037).
     adapter = SyntheticAdapter(Channel.INSTAGRAM)
     registry = ChannelRegistry(
         {
@@ -393,7 +394,9 @@ async def test_no_write_path_breaks_an_invariant(
         ),
         {"acme": acme.id, "rival": rival.id},
     )
-    assert outbound == len(conversations) + 1
+    # A reply to every conversation, the reply on the second channel, and the
+    # external reply its echo projected.
+    assert outbound == len(conversations) + 2
 
 
 async def test_the_identity_partition_is_exactly_what_providers_asserted(

@@ -26,7 +26,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast
 
 import httpx
@@ -41,8 +41,10 @@ from app.channels.adapter import (
     IdentityScopeRef,
     MediaContent,
     OutboundContent,
+    PreparedContent,
     ProviderReceipt,
     Recipient,
+    SendContext,
     TemplateContent,
     TextContent,
 )
@@ -51,15 +53,19 @@ from app.channels.inbound import (
     Identifier,
     InboundEvent,
     InboundKind,
+    MarketingPreference,
     ParsedDelivery,
+    ReplyAction,
     StatusUpdate,
 )
 from app.channels.media import MalformedMediaDescriptorError, locator_expired
-from app.channels.policy import ChannelPolicy
+from app.channels.outcomes import SendNotAttemptedError
+from app.channels.policy import ChannelPolicy, SendMechanism
 from app.core.config import Settings
 from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import ValidationError
 from app.core.logging import get_logger
+from app.core.storage import MediaUrlGrant
 from app.db.models.channel import (
     Channel,
     ChannelConnection,
@@ -71,8 +77,14 @@ from app.db.models.conversation import MessageKind, MessageStatus
 from app.db.models.media import MediaLocatorKind
 from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import WhatsAppClient, build_http_client
-from app.integrations.whatsapp.payload import DeliveryStatus, InboundMessage, parse_webhook
-from app.integrations.whatsapp.policy import WhatsAppChannelPolicy
+from app.integrations.whatsapp.payload import (
+    DeliveryStatus,
+    InboundMessage,
+    UserPreference,
+    parse_webhook,
+)
+from app.integrations.whatsapp.policy import INBOUND_MEDIA_LIFETIME, WhatsAppChannelPolicy
+from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.credential_service import CredentialService, ResolvedCredential
 
@@ -140,6 +152,11 @@ def message_event(message: InboundMessage) -> InboundEvent:
                 filename=message.media.filename,
                 is_voice=message.media.is_voice,
                 sha256=message.media.sha256,
+                # Meta keeps an inbound media id for seven days (M16). Counted
+                # from when it reached Wasla, so a valid handle is never
+                # refused early; the fetch refuses an expired one before
+                # asking Meta (OMNI-045).
+                expires_at=datetime.now(UTC) + INBOUND_MEDIA_LIFETIME,
             ),
         )
     return InboundEvent(
@@ -154,6 +171,7 @@ def message_event(message: InboundMessage) -> InboundEvent:
         text=message.text,
         attachments=attachments,
         reply_to=message.context_id,
+        action=message.action,
         profile_name=message.profile_name,
         raw=message.raw,
     )
@@ -182,29 +200,64 @@ def status_event(status: DeliveryStatus) -> InboundEvent:
     )
 
 
+def preference_event(preference: UserPreference) -> InboundEvent:
+    """A marketing stop or resume made in WhatsApp itself, as a neutral event (OMNI-046)."""
+    sender: list[Identifier] = []
+    if preference.from_number is not None:
+        sender.append(Identifier(kind=IdentityKind.PHONE, value=preference.from_number))
+    if preference.from_user_id is not None:
+        sender.append(Identifier(kind=IdentityKind.BSUID, value=preference.from_user_id))
+    return InboundEvent(
+        channel=Channel.WHATSAPP,
+        connection_key=preference.phone_number_id,
+        kind=InboundKind.PREFERENCE,
+        event_id=preference.event_id,
+        occurred_at=preference.timestamp,
+        sender=tuple(sender),
+        preference=MarketingPreference(value=preference.value, category=preference.category),
+        raw=preference.raw,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class WhatsAppSender:
     """One send's session: the number's client and the number to send from."""
 
     client: WhatsAppClient
     phone_number_id: str
-    uploaded: list[str]
 
-    async def prepare(self, content: OutboundContent) -> None:
-        """Upload a file to Meta. Creates a handle for one message; delivers nothing."""
+    async def prepare(
+        self, content: OutboundContent, *, media_url: MediaUrlGrant | None = None
+    ) -> PreparedContent:
+        """Upload a file to Meta. Creates a handle for one message; delivers nothing.
+
+        WhatsApp is sent files by upload, always (OMNI-040): a URL grant, if a
+        caller had one, is never used - no link to a stored object leaves for
+        a provider that does not need one.
+        """
         if not isinstance(content, MediaContent):
-            return
-        self.uploaded.append(
-            await self.client.upload_media(
-                phone_number_id=self.phone_number_id,
-                content=content.content,
-                mime_type=content.mime_type,
-                filename=content.filename,
-            )
+            return PreparedContent(content=content)
+        upload_id = await self.client.upload_media(
+            phone_number_id=self.phone_number_id,
+            content=content.content,
+            mime_type=content.mime_type,
+            filename=content.filename,
         )
+        return PreparedContent(content=content, reference=upload_id, reference_kind="upload")
 
-    async def send(self, recipient: Recipient, content: OutboundContent) -> ProviderReceipt:
+    async def send(
+        self, recipient: Recipient, prepared: PreparedContent, context: SendContext
+    ) -> ProviderReceipt:
+        """One WhatsApp message. Its mechanism is implicit in the content (OMNI-033).
+
+        The standard window carries free text and files; outside it, only an
+        approved template - and WhatsApp has no human-agent tag, so a policy
+        that asked for one is refused rather than sent as free text.
+        """
+        if context.mechanism is SendMechanism.HUMAN_AGENT_TAG:
+            raise SendNotAttemptedError("WhatsApp has no human-agent tag.")
         address = _address_arguments(recipient)
+        content = prepared.content
         if isinstance(content, TextContent):
             sent = await self.client.send_text(
                 phone_number_id=self.phone_number_id,
@@ -221,12 +274,16 @@ class WhatsAppSender:
                 **address,
             )
         else:
-            if content.family not in _MEDIA_FAMILIES or not self.uploaded:
+            if (
+                content.family not in _MEDIA_FAMILIES
+                or prepared.reference_kind != "upload"
+                or prepared.reference is None
+            ):
                 raise ValidationError("This file cannot be sent over WhatsApp.")
             sent = await self.client.send_media(
                 phone_number_id=self.phone_number_id,
                 kind=cast("Any", content.family),
-                media_id=self.uploaded[0],
+                media_id=prepared.reference,
                 caption=content.caption,
                 filename=content.filename,
                 **address,
@@ -283,6 +340,7 @@ class WhatsAppAdapter:
         envelope = parse_webhook(payload)
         events = [message_event(message) for message in envelope.messages]
         events.extend(status_event(status) for status in envelope.statuses)
+        events.extend(preference_event(preference) for preference in envelope.preferences)
         return ParsedDelivery(events=tuple(events), refused=envelope.refused)
 
     async def identity_scope(
@@ -310,6 +368,20 @@ class WhatsAppAdapter:
         ):
             raise IdentityNotAddressableError()
         return Recipient(identity_id=identity.id, kind=identity.kind.value, value=identity.value)
+
+    async def marks_opt_out(
+        self,
+        session: AsyncSession,
+        connection: ChannelConnection,
+        action: ReplyAction,
+    ) -> bool:
+        """Whether a template on this number marks the tap's payload as the opt-out."""
+        if action.id_or_payload is None or connection.channel is not Channel.WHATSAPP:
+            return False
+        templates = WhatsAppTemplateRepository(session, tenant_id=connection.tenant_id)
+        return await templates.marks_opt_out_payload(
+            account_id=connection.id, payload=action.id_or_payload
+        )
 
     @staticmethod
     async def account(session: AsyncSession, connection: ChannelConnection) -> WhatsAppAccount:
@@ -355,14 +427,12 @@ class WhatsAppAdapter:
             yield WhatsAppSender(
                 client=WhatsAppClient(http=http, access_token=token, api_version=version),
                 phone_number_id=account.phone_number_id,
-                uploaded=[],
             )
             return
         async with build_http_client() as owned:
             yield WhatsAppSender(
                 client=WhatsAppClient(http=owned, access_token=token, api_version=version),
                 phone_number_id=account.phone_number_id,
-                uploaded=[],
             )
 
     async def media_fetcher(
@@ -429,5 +499,6 @@ __all__ = [
     "WhatsAppMediaFetcher",
     "WhatsAppSender",
     "message_event",
+    "preference_event",
     "status_event",
 ]

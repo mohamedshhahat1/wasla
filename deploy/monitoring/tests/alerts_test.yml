@@ -490,6 +490,44 @@ tests:
                 A Meta webhook subscription - Instagram, a Page, or another app product - points at this channel's callback URL. Its deliveries are refused rather than misread. Check the App Dashboard's webhook subscriptions: each product needs its own callback, and Wasla operates only the channels it has an adapter for.
               runbook: docs/RUNBOOK.md
 
+  # ------------------------------------------ webhook body cap (OMNI-034)
+  - interval: 30s
+    name: one refused webhook delivery alerts at once
+    input_series:
+      - series: 'wasla_http_body_too_large_total{job="wasla-api", route_group="webhook"}'
+        values: "0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WebhookBodyTooLarge
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: WebhookBodyTooLarge
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: messaging
+            exp_annotations:
+              summary: "A webhook delivery was refused as too large"
+              description: >-
+                The request size limit refused a provider's webhook delivery before it reached the route. Meta will retry it unchanged and refuse it unchanged, so its messages are lost unless the cap is raised to cover it. Compare WEBHOOK_MAX_REQUEST_BYTES with Meta's documented maximum and the request.body_too_large log line's declared size.
+              runbook: docs/RUNBOOK.md
+      # Quiet again once no refusal is inside the window.
+      - eval_time: 30m
+        alertname: WebhookBodyTooLarge
+        exp_alerts: []
+
+  - interval: 30s
+    name: no refusal and an oversized api request do not alert
+    input_series:
+      - series: 'wasla_http_body_too_large_total{job="wasla-api", route_group="webhook"}'
+        values: "0+0x60"
+      - series: 'wasla_http_body_too_large_total{job="wasla-api", route_group="api"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WebhookBodyTooLarge
+        exp_alerts: []
+
   # ---------------------------------------- connection health (OMNI-012)
   - interval: 30s
     name: a disabled connection with a refused credential is not an alert
@@ -1880,3 +1918,83 @@ tests:
               description: >-
                 Autovacuum is not keeping up with conversations. Check last_autovacuum in pg_stat_user_tables and whether a long transaction is holding it back.
               runbook: docs/RUNBOOK.md
+
+  # ------------------------- channel-neutral signals (OMNI-031, OMNI-035)
+  - interval: 1m
+    name: a channel that had traffic and stopped alerts; the busy one does not
+    input_series:
+    - series: wasla_inbound_events_total{job="wasla-api", channel="instagram", outcome="stored"}
+      values: 0+10x120 1200+0x200
+    - series: wasla_inbound_events_total{job="wasla-api", channel="whatsapp", outcome="stored"}
+      values: 0+10x320
+    alert_rule_test:
+    - eval_time: 150m
+      alertname: ChannelInboundStopped
+      exp_alerts: []
+    - eval_time: 200m
+      alertname: ChannelInboundStopped
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          component: messaging
+          channel: instagram
+        exp_annotations:
+          summary: No instagram events have arrived for 30 minutes
+          description: Ingestion has counted nothing on this channel for half an hour, on a deployment that received its events today. Check the provider's webhook subscription, the callback URL and certificate, and that the reverse proxy forwards the channel's webhook route; check WebhookBodyTooLarge and the signature-failure alerts too.
+          runbook: docs/RUNBOOK.md
+  - interval: 1m
+    name: a channel that never had traffic does not alert
+    input_series:
+    - series: wasla_inbound_events_total{job="wasla-api", channel="messenger", outcome="stored"}
+      values: 0+0x300
+    alert_rule_test:
+    - eval_time: 280m
+      alertname: ChannelInboundStopped
+      exp_alerts: []
+  - interval: 1m
+    name: an active connection that cannot send alerts; a healthy or disabled one does not
+    input_series:
+    - series: wasla_channel_connections{job="wasla-api", channel="whatsapp", status="active", health="permission_missing"}
+      values: 0+0x10 1+0x100
+    - series: wasla_channel_connections{job="wasla-api", channel="whatsapp", status="disabled", health="rate_limited"}
+      values: 1+0x110
+    - series: wasla_channel_connections{job="wasla-api", channel="whatsapp", status="active", health="ok"}
+      values: 4+0x110
+    alert_rule_test:
+    - eval_time: 30m
+      alertname: ChannelConnectionUnusable
+      exp_alerts: []
+    - eval_time: 60m
+      alertname: ChannelConnectionUnusable
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: messaging
+          channel: whatsapp
+          health: permission_missing
+        exp_annotations:
+          summary: A whatsapp connection reads permission_missing
+          description: At least one active connection's last send was refused for the connection as a whole, so campaigns and follow-ups on it have stopped (permission_missing) or keep waiting (rate_limited). Find it by its health column; the send log carries the error class, never Meta's text. A permission must be re-granted in the provider's business settings; a lasting throttle needs the number's messaging limit or throughput raised.
+          runbook: docs/RUNBOOK.md
+  - interval: 5m
+    name: a channel paused for a day alerts; an operational one does not
+    input_series:
+    - series: wasla_channel_state{job="wasla-api", channel="instagram", state="paused"}
+      values: 1+0x400
+    - series: wasla_channel_state{job="wasla-api", channel="whatsapp", state="paused"}
+      values: 0+0x400
+    alert_rule_test:
+    - eval_time: 12h
+      alertname: ChannelPausedForADay
+      exp_alerts: []
+    - eval_time: 25h
+      alertname: ChannelPausedForADay
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: messaging
+          channel: instagram
+        exp_annotations:
+          summary: The instagram channel has been paused for a day
+          description: Customers on this channel can still write and their messages are stored, but no reply, AI turn or campaign can go out. Resume it by removing it from PAUSED_CHANNELS, or remove its adapter if the rollback is permanent.
+          runbook: docs/RUNBOOK.md

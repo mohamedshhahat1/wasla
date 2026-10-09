@@ -57,9 +57,20 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.outcomes import ProviderAuthError
-from app.channels.policy import FollowUpAction
-from app.channels.registry import ChannelRegistry, default_registry
+from app.channels.outcomes import ProviderConnectionRefusedError
+from app.channels.policy import (
+    FollowUpAction,
+    OutOfWindow,
+    PolicyRefusalError,
+    require_sendable_text,
+)
+from app.channels.registry import (
+    PAUSED_RECHECK,
+    ChannelPausedError,
+    ChannelRegistry,
+    ChannelUnavailableError,
+    default_registry,
+)
 from app.channels.throughput import ConnectionThrottledError
 from app.core.config import Settings
 from app.core.exceptions import (
@@ -72,6 +83,7 @@ from app.core.exceptions import (
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.db.models.conversation import (
+    Conversation,
     ConversationMode,
     ConversationStatus,
     Message,
@@ -268,6 +280,11 @@ class FollowUpService:
             raise ValidationError(
                 "A follow-up needs a message to send, an approved template, or both."
             )
+
+        # Judged against the channel it will be sent on, now, while a person
+        # (or the model) is present to fix it - not refused hours later
+        # against nobody (OMNI-039).
+        self._require_sendable_on_channel(conversation, text=text, template=name, when=when)
 
         if name is not None:
             refusal = await self._template_refusal(name, str(language))
@@ -563,6 +580,46 @@ class FollowUpService:
             self._cancel(follow_up, reason=MEMBER_REVOKED_REASON)
         return len(pending)
 
+    def _require_sendable_on_channel(
+        self,
+        conversation: Conversation,
+        *,
+        text: str | None,
+        template: str | None,
+        when: datetime,
+    ) -> None:
+        """Refuse a follow-up its conversation's channel could never deliver (OMNI-039).
+
+        Three questions, each WhatsApp's answer until now: is the body within
+        the channel's limit in the channel's own unit (Instagram counts bytes);
+        does the channel have templates at all; and, on a channel with no
+        automated way out of its window (a human-agent tag is a person's, not a
+        follow-up's), will the window still be open when the nudge falls due.
+        A paused channel is judged by its rules all the same - its follow-ups
+        wait for it.
+        """
+        try:
+            policy = self._channels.policy_for(conversation.channel)
+        except ChannelPausedError:
+            known = self._channels.known_policy(conversation.channel)
+            if known is None:  # pragma: no cover - paused implies registered
+                raise
+            policy = known
+        except ChannelUnavailableError:
+            raise ValidationError("Wasla cannot operate this conversation's channel.") from None
+        capabilities = policy.capabilities
+        if text is not None:
+            require_sendable_text(text, policy)
+        if template is not None and not capabilities.templates:
+            raise ValidationError(f"{policy.display_name} has no message templates.")
+        if capabilities.out_of_window is not OutOfWindow.TEMPLATE and not (
+            policy.standard_window_open(conversation, now=when)
+        ):
+            raise ValidationError(
+                f"This follow-up would fall due after the {policy.display_name} reply window "
+                "closes, and nothing automated may be sent after that. Schedule it sooner."
+            )
+
     async def _template_refusal(self, name: str, language: str) -> str | None:
         """Whether the registry knows a reason this template must not be sent.
 
@@ -704,7 +761,19 @@ class FollowUpService:
                 "The customer has opted out of automated messages.",
             )
 
-        decision = self._channels.policy_for(conversation.channel).follow_up(
+        try:
+            channel_policy = self._channels.policy_for(conversation.channel)
+        except ChannelPausedError:
+            # Paused deliberately (OMNI-031): nothing is staged, no attempt is
+            # spent, and the nudge waits for the channel to come back.
+            return self._defer(
+                follow_up,
+                datetime.now(UTC) + PAUSED_RECHECK,
+                detail="The channel is paused.",
+            )
+        except ChannelUnavailableError:
+            return self._skip(follow_up, "Wasla cannot operate this conversation's channel.")
+        decision = channel_policy.follow_up(
             conversation,
             has_text=bool(follow_up.body),
             has_template=follow_up.has_template,
@@ -759,18 +828,25 @@ class FollowUpService:
 
         try:
             message = await send
-        except ProviderAuthError:
+        except ProviderConnectionRefusedError:
             # Let out rather than recorded against this nudge. The number's
-            # credential is refused, so every other follow-up queued for this
-            # workspace fails the same way; the worker stops sweeping them for
-            # the rest of the pass instead of discovering it one at a time
-            # (MSG-18).
+            # credential - or the connection itself (OMNI-035) - is refused, so
+            # every other follow-up queued for this workspace fails the same
+            # way; the worker stops sweeping them for the rest of the pass
+            # instead of discovering it one at a time (MSG-18).
             raise
         except ConnectionThrottledError as error:
-            # The number's shared allowance is spent (ADR-123). Nothing was
-            # staged, so this is a wait, not a failed attempt.
+            # The number's shared allowance is spent (ADR-123), or the provider
+            # throttled it (OMNI-035): nothing reached the customer either way,
+            # so this is a wait, not a failed attempt.
             retry_at = error.retry_at
             return await self._settle(follow_up, claim, lambda row: self._defer(row, retry_at))
+        except PolicyRefusalError as error:
+            # The channel's policy refused it - a body over its limit, a window
+            # with no way out. Deterministic, refused before anything was
+            # staged, and no retry would change it: terminal (OMNI-039).
+            refusal = str(error)
+            return await self._settle(follow_up, claim, lambda row: self._skip(row, refusal))
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             detail = str(error)
             return await self._settle(follow_up, claim, lambda row: self._fail(row, detail))
@@ -980,21 +1056,28 @@ class FollowUpService:
         )
         return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
 
-    def _defer(self, follow_up: FollowUp, until: datetime) -> DispatchOutcome:
-        """Wait for the connection's allowance to reopen, spending no attempt (ADR-123).
+    def _defer(
+        self,
+        follow_up: FollowUp,
+        until: datetime,
+        *,
+        detail: str = "The number's sending allowance is spent.",
+    ) -> DispatchOutcome:
+        """Wait for the allowance (ADR-123) or a paused channel, spending no attempt.
 
-        Nothing was staged - the allowance refuses before a message exists - so
-        this nudge is exactly as it was, only later.
+        Nothing reached the customer - the allowance and the pause refuse before
+        a message exists, and a provider throttle is recorded undelivered - so
+        this nudge is exactly as it was, only later, and any message an attempt
+        staged is unlinked as the finished undelivered send it is.
         """
         _release_claim(follow_up)
+        follow_up.message_id = None
         follow_up.scheduled_at = until
         logger.info(
-            "follow_up.deferred_by_connection_allowance",
-            extra={"follow_up_id": str(follow_up.id)},
+            "follow_up.deferred",
+            extra={"follow_up_id": str(follow_up.id), "detail": detail},
         )
-        return DispatchOutcome(
-            follow_up, FollowUpStatus.PENDING, "The number's sending allowance is spent."
-        )
+        return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
 
 
 def _release_claim(follow_up: FollowUp) -> None:

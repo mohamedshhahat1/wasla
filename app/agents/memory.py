@@ -201,6 +201,14 @@ def _text(message: Message, files: Sequence[MessageMedia]) -> str:
     Several files are described one per line, in the order they were sent:
     the second photograph of three is not left out because the first was read.
     """
+    if message.action_source is not None:
+        # A tap reads as what was tapped (OMNI-030). It used to read as
+        # "[interactive]", so the model was billed to answer a placeholder.
+        # Marked as a tap rather than passed as typed text, because "Yes" on a
+        # button the business wrote is not the customer composing a sentence.
+        title = message.action_title or message.body
+        if title:
+            return f"[tapped: {title}]"
     caption = message.body or ""
     described = "\n".join(line for line in (_described(message, file) for file in files) if line)
 

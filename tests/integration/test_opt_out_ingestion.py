@@ -21,8 +21,8 @@ from app.db.models.campaign import OptOutSource
 from app.db.models.conversation import Contact
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
-from app.repositories.conversation_repository import ContactRepository
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.integration.identity_lookup import contact_by_phone
 
 pytestmark = pytest.mark.integration
 
@@ -79,7 +79,7 @@ def _inbound(*, text: str, message_id: str = "wamid.one") -> dict[str, Any]:
 
 
 async def _contact(session: AsyncSession, account: WhatsAppAccount) -> Contact:
-    found = await ContactRepository(session, tenant_id=account.tenant_id).get_by_wa_id(CUSTOMER)
+    found = await contact_by_phone(session, account.tenant_id, CUSTOMER)
     assert found is not None
     return found
 

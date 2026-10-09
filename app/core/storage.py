@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 from app.core.config import Settings
 from app.core.exceptions import WaslaError
@@ -105,6 +105,63 @@ class MediaStorage(Protocol):
         upload in flight during it (ADR-087).
         """
         ...
+
+
+#: The longest a signed media URL may live, whatever is configured (OMNI-040).
+MAX_SIGNED_URL_TTL: Final = timedelta(hours=1)
+#: How long one lives by default: long enough for a provider to fetch it.
+DEFAULT_SIGNED_URL_TTL: Final = timedelta(minutes=10)
+
+
+@runtime_checkable
+class SignedUrlStorage(MediaStorage, Protocol):
+    """A store that can issue a short-lived URL for one object (OMNI-040, ADR-128).
+
+    A capability, not part of `MediaStorage`: the local store cannot, and a
+    deployment on it simply cannot offer a URL-only provider outbound files.
+    """
+
+    async def signed_url(self, key: str, *, ttl: timedelta) -> str:
+        """A GET for exactly this object, valid for `ttl`."""
+        ...
+
+
+class MediaUrlGrant:
+    """The one object a send may expose by URL: its own message's, in its own workspace.
+
+    Built from the stored file of the outbound message being sent, never from
+    a key a caller names. Refuses a key outside the workspace's prefix or of
+    the wrong shape before the store is asked, and holds the TTL to the
+    configured value under `MAX_SIGNED_URL_TTL`. The URL it issues is returned
+    to the adapter and nowhere else: never logged, never stored on a message or
+    an event - for its lifetime it is a bearer credential to one file.
+    """
+
+    def __init__(
+        self,
+        storage: SignedUrlStorage,
+        *,
+        tenant_id: uuid.UUID,
+        key: str,
+        ttl: timedelta = DEFAULT_SIGNED_URL_TTL,
+    ) -> None:
+        if not SAFE_KEY.match(key) or not key.startswith(f"{tenant_id}/"):
+            logger.warning("media.url_grant_refused", extra={"event": "media.url_grant_refused"})
+            raise StorageError()
+        self._storage = storage
+        self._key = key
+        self._ttl = min(ttl, MAX_SIGNED_URL_TTL)
+
+    @classmethod
+    def for_settings(
+        cls, storage: SignedUrlStorage, settings: Settings, *, tenant_id: uuid.UUID, key: str
+    ) -> MediaUrlGrant:
+        """A grant living as long as `MEDIA_SIGNED_URL_TTL_SECONDS` says."""
+        ttl = timedelta(seconds=settings.media_signed_url_ttl_seconds)
+        return cls(storage, tenant_id=tenant_id, key=key, ttl=ttl)
+
+    async def issue(self) -> str:
+        return await self._storage.signed_url(self._key, ttl=self._ttl)
 
 
 def build_key(*, tenant_id: uuid.UUID, mime_type: str | None = None) -> str:

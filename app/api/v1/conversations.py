@@ -25,6 +25,7 @@ from app.api.dependencies import (
     SentimentServiceDep,
 )
 from app.api.route import CommittingRoute
+from app.channels.policy import REQUEST_CAPTION_CEILING, REQUEST_UPLOAD_CEILING_BYTES
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
@@ -76,12 +77,14 @@ LimitQuery = Annotated[int, Query(ge=1, le=100)]
 # before any decoding is attempted.
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
 
-# WhatsApp's own caption limit.
-MAX_CAPTION_LENGTH = 1024
+# The largest caption any supported channel accepts (OMNI-044); each channel's
+# own limit is applied by the send.
+MAX_CAPTION_LENGTH = REQUEST_CAPTION_CEILING
 # Bounded here as well as in the media settings, because this limit protects the
 # API process rather than the store: the whole upload is held in memory to be
-# handed to Meta, and an unbounded one is a way to exhaust it.
-MAX_UPLOAD_BYTES = 16 * 1024 * 1024
+# handed to the provider, and an unbounded one is a way to exhaust it. The
+# provider's own per-type limits are applied before anything is staged.
+MAX_UPLOAD_BYTES = REQUEST_UPLOAD_CEILING_BYTES
 
 # How much is read from an upload at a time. Small enough that the check below
 # stops an oversized file within a chunk of the limit rather than after it.

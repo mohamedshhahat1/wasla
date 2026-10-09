@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from app.channels.adapter import ChannelAdapter, IdentityNotAddressableError
-from app.channels.inbound import InboundKind, RefusalReason
+from app.channels.inbound import InboundEvent, InboundKind, RefusalReason
 from app.db.models.channel import (
     Channel,
     ContactIdentity,
@@ -32,7 +32,7 @@ from app.db.models.channel import (
     IdentityScope,
     IdentitySource,
 )
-from app.db.models.conversation import MessageStatus
+from app.db.models.conversation import MessageStatus, ReplyActionSource
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 
@@ -320,3 +320,172 @@ def test_a_message_type_nobody_maps_is_kept_not_dropped(message_type: str) -> No
     assert event.kind is InboundKind.MESSAGE
     assert event.message_kind.value == "unsupported"
     assert delivery.refused_total == 0
+
+
+# ---------------------------------------------------------- reply actions (OMNI-030)
+
+
+def _whatsapp_tap(message: dict[str, Any]) -> dict[str, Any]:
+    """Meta's messages webhook reference, re-read 2026-10-02: a tap replaces the text."""
+    payload = _whatsapp_message()
+    original = payload["entry"][0]["changes"][0]["value"]["messages"][0]
+    original.pop("text")
+    original.update(message)
+    return payload
+
+
+WHATSAPP_TAPS: list[tuple[str, dict[str, Any], ReplyActionSource, str, str]] = [
+    (
+        "template_quick_reply",
+        {
+            "type": "button",
+            "button": {"payload": "STOP-PAYLOAD", "text": "Stop promotions"},
+            "context": {"from": "201000000000", "id": "wamid.template"},
+        },
+        ReplyActionSource.BUTTON,
+        "STOP-PAYLOAD",
+        "Stop promotions",
+    ),
+    (
+        "interactive_button_reply",
+        {
+            "type": "interactive",
+            "interactive": {
+                "type": "button_reply",
+                "button_reply": {"id": "book-yes", "title": "Yes, book it"},
+            },
+            "context": {"from": "201000000000", "id": "wamid.buttons"},
+        },
+        ReplyActionSource.BUTTON_REPLY,
+        "book-yes",
+        "Yes, book it",
+    ),
+    (
+        "interactive_list_reply",
+        {
+            "type": "interactive",
+            "interactive": {
+                "type": "list_reply",
+                "list_reply": {"id": "plan-2", "title": "Pro plan", "description": "Monthly"},
+            },
+            "context": {"from": "201000000000", "id": "wamid.list"},
+        },
+        ReplyActionSource.LIST_REPLY,
+        "plan-2",
+        "Pro plan",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "message", "source", "payload", "title"),
+    WHATSAPP_TAPS,
+    ids=[tap[0] for tap in WHATSAPP_TAPS],
+)
+def test_a_whatsapp_tap_keeps_its_words_and_its_payload(
+    name: str, message: dict[str, Any], source: ReplyActionSource, payload: str, title: str
+) -> None:
+    """The words become the text; the payload is kept beside them; the context survives."""
+    event, _ = WhatsAppAdapter().parse(_whatsapp_tap(message)).events
+
+    assert event.text == title
+    assert event.action is not None
+    assert (event.action.source, event.action.id_or_payload, event.action.title) == (
+        source,
+        payload,
+        title,
+    )
+    assert event.message_kind.value == "interactive"
+    assert event.reply_to == message["context"]["id"]
+
+
+def test_a_reply_action_survives_normalisation_on_another_channel() -> None:
+    """The carrier is the seam's, not WhatsApp's: a Messenger-shaped quick reply keeps it."""
+    adapter = SyntheticAdapter()
+    payload = synthetic_payload(
+        "syn-account",
+        {
+            "type": "message",
+            "id": "syn.m.tap",
+            "from": IGSID,
+            "at": 1790000000,
+            "quick_reply": {"payload": "SIZE_M", "title": "Medium"},
+        },
+    )
+
+    (event,) = adapter.parse(payload).events
+
+    assert event.text == "Medium"
+    assert event.action is not None
+    assert (event.action.source, event.action.id_or_payload) == (
+        ReplyActionSource.QUICK_REPLY,
+        "SIZE_M",
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"type": "button", "button": {"payload": "x" * 1001, "text": "y" * 300}},
+        {"type": "interactive", "interactive": {"type": "nfm_reply", "nfm_reply": {}}},
+        {"type": "interactive", "interactive": {"type": ["list"]}},
+        {"type": "button", "button": "not an object"},
+    ],
+    ids=["over_long", "unknown_reply_type", "unhashable_type", "malformed"],
+)
+def test_a_tap_meta_did_not_issue_is_kept_without_an_action(message: dict[str, Any]) -> None:
+    """Over-long ids are dropped, not cut; unknown shapes keep the message, with no action."""
+    delivery = WhatsAppAdapter().parse(_whatsapp_tap(message))
+
+    event, _ = delivery.events
+    assert event.action is None
+    assert event.text is None
+    assert delivery.refused_total == 0
+
+
+# ------------------------------------------------- event identity (OMNI-032)
+
+
+@pytest.mark.parametrize("kind", [InboundKind.MESSAGE, InboundKind.ECHO])
+def test_a_message_event_with_a_composed_id_is_refused_at_construction(kind: InboundKind) -> None:
+    """Recovery finds the stored message by the event id: they must be one value."""
+    with pytest.raises(ValueError, match="message id as its event id"):
+        InboundEvent(
+            channel=Channel.INSTAGRAM,
+            connection_key="syn-account",
+            kind=kind,
+            event_id="evt.mid-1",
+            message_id="mid-1",
+            occurred_at=None,
+        )
+    with pytest.raises(ValueError):
+        InboundEvent(
+            channel=Channel.INSTAGRAM,
+            connection_key="syn-account",
+            kind=kind,
+            event_id="mid-1",
+            message_id=None,
+            occurred_at=None,
+        )
+
+
+def test_a_status_keeps_its_composed_id() -> None:
+    """`{message_id}:{status}` is how three statuses of one message stay three events."""
+    event = InboundEvent(
+        channel=Channel.WHATSAPP,
+        connection_key="PN",
+        kind=InboundKind.STATUS,
+        event_id="wamid.out:delivered",
+        message_id="wamid.out",
+        occurred_at=None,
+    )
+
+    assert event.event_id != event.message_id
+
+
+def test_every_message_an_adapter_produces_is_identified_by_its_message_id(case: Case) -> None:
+    adapter = case.build()
+
+    for event in adapter.parse(case.valid()).events:
+        if event.kind in (InboundKind.MESSAGE, InboundKind.ECHO):
+            assert event.event_id == event.message_id

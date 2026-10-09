@@ -8,6 +8,7 @@ The distinctions are ADR-093's and they decide what may happen next:
 | Type | Delivered? | May the caller send again? |
 | --- | --- | --- |
 | `SendNotAttemptedError` | provably not | yes, as a new message |
+| `ProviderConnectionRefusedError` | provably not | not until the connection is fixed |
 | `ProviderAuthError` | provably not | not until the credential is fixed |
 | `UncertainDeliveryError` | unknown | **never** on its own initiative |
 | `RateLimitedError` (core) | provably not | later |
@@ -36,6 +37,17 @@ class SendNotAttemptedError(ExternalServiceError):
     """
 
 
+class RecipientOptedOutError(SendNotAttemptedError):
+    """The provider refused the send because the person stopped marketing messages.
+
+    WhatsApp's 131050 ("chosen to stop receiving marketing messages ... Don't
+    retry"). Nothing was delivered; and it is consent evidence the contact's
+    record should carry, so the next campaign does not try again (OMNI-046).
+    """
+
+    message = "The customer has stopped receiving marketing messages."
+
+
 class UncertainDeliveryError(ExternalServiceError):
     """The provider may or may not have accepted the request, and nobody can tell.
 
@@ -47,7 +59,26 @@ class UncertainDeliveryError(ExternalServiceError):
     """
 
 
-class ProviderAuthError(SendNotAttemptedError):
+class ProviderConnectionRefusedError(SendNotAttemptedError):
+    """The provider refused the connection, not this message (OMNI-035).
+
+    A permission revoked, an account restricted, a number not registered: every
+    other recipient fails identically until somebody fixes the connection, so a
+    sweep stops rather than spending each recipient's attempts discovering it,
+    and the connection's health records which it was. `health` is a
+    `ConnectionHealth` value; `reason` a bounded token (`meta_code_10`), never
+    provider text.
+    """
+
+    message = "The provider refused to send through this connection."
+    health = "permission_missing"
+
+    def __init__(self, message: str | None = None, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class ProviderAuthError(ProviderConnectionRefusedError):
     """The provider refused the credential, so nothing was sent and nothing will be.
 
     A subclass of `SendNotAttemptedError` because that is the truth about this
@@ -55,16 +86,20 @@ class ProviderAuthError(SendNotAttemptedError):
     own because the truth about the *connection* is different: every other
     recipient fails identically until somebody reconnects it, so a sweep lets
     this one out rather than discovering it once per person (MSG-18), and the
-    connection's health records it (OMNI-012).
+    connection's health records it (OMNI-012). The credential case of
+    `ProviderConnectionRefusedError`.
 
     Carries no credential material, here or in its message.
     """
 
     message = "The provider refused this connection's credentials."
+    health = "auth_failed"
 
 
 __all__ = [
     "ProviderAuthError",
+    "ProviderConnectionRefusedError",
+    "RecipientOptedOutError",
     "SendNotAttemptedError",
     "UncertainDeliveryError",
 ]

@@ -221,7 +221,6 @@ class _DoubleClientAdapter(WhatsAppAdapter):
         yield WhatsAppSender(
             client=cast(WhatsAppClient, self._provider),
             phone_number_id=account.phone_number_id,
-            uploaded=[],
         )
 
 

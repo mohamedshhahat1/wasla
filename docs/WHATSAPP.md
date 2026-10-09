@@ -161,7 +161,7 @@ message rather than being merged.
 
 ## Parsing
 
-The parser never raises. A payload is WhatsApp's only if it says so: the top-level `object` must be `whatsapp_business_account` and each change's `field` must be `messages`; another product's delivery (`page`, `instagram`) and every other field (template updates, `user_id_update`, the Coexistence fields `history`, `smb_app_state_sync`, `smb_message_echoes`) are refused, never parsed by coincidence (OMNI-010). Meta adds fields and message types continuously, so entries that cannot be understood are counted - by a closed reason in `wasla_inbound_entries_refused_total` and in the webhook's log line - rather than rejected, a message type nobody maps is stored as `unsupported`, and the raw payload of every stored event is kept whole while it can still matter: until the event is processed, and for `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30 by default) after that, so it can be reinterpreted after new support ships. Then the retention worker clears it (DB-011): the payload repeats customer text and phone numbers already held in `messages`, and nothing reads it once an event is handled. The event row itself is kept — its id, event id, state and timestamps — because that is what deduplicates Meta's retries and what recovery reads; `payload_redacted_at` says when the payload went, and a CHECK refuses a missing payload without it. A received or failed event keeps its payload however old it is. `wasla_webhook_payload_retention_total{outcome="pending"}` above zero across passes is a sweep that is not keeping up.
+The parser never raises. A payload is WhatsApp's only if it says so: the top-level `object` must be `whatsapp_business_account` and each change's `field` must be `messages` or `user_preferences` (a customer stopping or resuming marketing messages in WhatsApp itself, OMNI-046); another product's delivery (`page`, `instagram`) and every other field (template updates, `user_id_update`, the Coexistence fields `history`, `smb_app_state_sync`, `smb_message_echoes`) are refused, never parsed by coincidence (OMNI-010). Meta adds fields and message types continuously, so entries that cannot be understood are counted - by a closed reason in `wasla_inbound_entries_refused_total` and in the webhook's log line - rather than rejected, a message type nobody maps is stored as `unsupported`, and the raw payload of every stored event is kept whole while it can still matter: until the event is processed, and for `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30 by default) after that, so it can be reinterpreted after new support ships. Then the retention worker clears it (DB-011): the payload repeats customer text and phone numbers already held in `messages`, and nothing reads it once an event is handled. The event row itself is kept — its id, event id, state and timestamps — because that is what deduplicates Meta's retries and what recovery reads; `payload_redacted_at` says when the payload went, and a CHECK refuses a missing payload without it. A received or failed event keeps its payload however old it is. `wasla_webhook_payload_retention_total{outcome="pending"}` above zero across passes is a sweep that is not keeping up.
 
 ## Idempotency
 
@@ -201,7 +201,7 @@ and `wasla_unprocessed_inbound_events` alerts on it.
 
 `WhatsAppClient` has methods for text, media (by uploaded id — Wasla never sends by link), templates, read receipts, location, reply buttons, lists, and the two-step media fetch for inbound files.
 
-**Client support is not product support**, and the difference matters when reading that list. Text, media and templates are shipped: there are routes, services and agent paths that reach them. `send_location`, `send_buttons` and `send_list` are called by nothing — no route, no service, no agent tool — so interactive messaging is not a capability this product has, and the inbound side matches: a button or list reply is stored as an `interactive` message whose reply id is kept only in the raw event. Building it out means carrying `interactive.*_reply.id` — never the title, which is display text a customer never chose — into a column of its own. See *Not supported* below. Reads take the opposite retry policy to sends: fetching a file twice costs a request and changes nothing anyone can see, so timeouts and 5xx are retried there where a send must never retry them. An outbound template is stored as a `template` message carrying the name and language it was sent with and no body, since Meta renders the wording from its approved copy and Wasla never sees it. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
+**Client support is not product support**, and the difference matters when reading that list. Text, media and templates are shipped: there are routes, services and agent paths that reach them. `send_location`, `send_buttons` and `send_list` are called by nothing — no route, no service, no agent tool — so sending interactive messages is not a capability this product has. The inbound side is: a tapped button or list row is kept whole (see *Taps and quick replies* below). See *Not supported* below. Reads take the opposite retry policy to sends: fetching a file twice costs a request and changes nothing anyone can see, so timeouts and 5xx are retried there where a send must never retry them. An outbound template is stored as a `template` message carrying the name and language it was sent with and no body, since Meta renders the wording from its approved copy and Wasla never sees it. The HTTP client, sleep function and attempt budget are injected, so retry behaviour is tested against `httpx.MockTransport` with no network and no real waiting.
 
 ### Retry policy
 
@@ -209,11 +209,15 @@ The Cloud API send endpoint accepts **no idempotency key**, so a retry can dupli
 
 | Failure | Retried in the client | Raises | May a caller send again? |
 | --- | --- | --- | --- |
-| `429` | Yes, with backoff | `RateLimitedError` | Yes — rejected outright, nothing was sent |
+| `429`, or a throttling code (4, 80007, 130429, 131056, 131057) at any status | Yes, with backoff | `RateLimitedError` | Yes — rejected outright, nothing was sent; the connection reads `rate_limited` and sweeps wait |
 | Connection error | Yes, with backoff | `SendNotAttemptedError` | Yes — no connection, so no request arrived |
-| `401`/`403`/Meta `code 190` | No | `ProviderAuthError` | Yes for this message — but the credential is refused for the whole number |
+| `401`, or Meta `code` 0 or 190 | No | `ProviderAuthError` | Yes for this message — but the credential is refused for the whole number |
+| A connection-level code (3, 10, 200-299, 131005, 368, 131031, 133010) at any status | No | `ProviderConnectionRefusedError` | Yes for this message — the number cannot send at all: it reads `permission_missing` and sweeps stop |
+| `131050` (the customer stopped marketing messages) | No | `RecipientOptedOutError` | No — the contact is opted out (`provider_refusal`) |
 | Meta template codes | No | `TemplateWithdrawnError` | Yes for this message — the template is marked `paused` locally |
 | Other `4xx` | No | `SendNotAttemptedError` | Yes — Meta read it and declined; nothing was delivered |
+
+The class is decided by Meta's error **code** first and the HTTP status only when the body names none (ADR-130, `app/integrations/meta/errors.py`): Meta documents its throttling and connection codes without promising a status, and a `130429` arriving as a `400` used to fail every campaign recipient. `wasla_provider_errors_total{provider, class}` counts each class.
 | `5xx` | No | `UncertainDeliveryError` | **No** — may have been accepted |
 | Read timeout | No | `UncertainDeliveryError` | **No** — the request may have landed |
 | Transport failure (reset, protocol) | No | `UncertainDeliveryError` | **No** — the request left; no answer came back |
@@ -294,22 +298,32 @@ Nothing else carries a key. A campaign recipient and a follow-up are protected b
 
 ## Message origin
 
-`messages.origin` records what produced each line of the transcript: `customer`, `human`, `agent`, `campaign`, `follow_up`, `system`. It exists because inferring it from `sent_by_id` is wrong twice — a campaign carries its creator, so every broadcast read as that person's reply, and a follow-up carries nobody, so every nudge read as an AI reply. Both were recoverable by joining `campaign_recipients` or `follow_ups`, and neither was recoverable by reading the transcript, which is what an auditor, an analytics query and a colleague all actually do.
+`messages.origin` records what produced each line of the transcript: `customer`, `human`, `agent`, `campaign`, `follow_up`, `system`, and `external` — a reply a person typed in the provider's own app, known from its echo (ADR-129). It exists because inferring it from `sent_by_id` is wrong twice — a campaign carries its creator, so every broadcast read as that person's reply, and a follow-up carries nobody, so every nudge read as an AI reply. Both were recoverable by joining `campaign_recipients` or `follow_ups`, and neither was recoverable by reading the transcript, which is what an auditor, an analytics query and a colleague all actually do.
 
 Set explicitly at every creation site rather than defaulted: a default is what an unlabelled send would silently inherit, and inheriting the wrong attribution is the defect the column removes.
 
-The set is open at the end on purpose. WhatsApp Coexistence lets the Business App originate messages on a number Wasla also holds, and those are neither `human` nor `agent`; a `business_app` member slots in beside these when that work happens. Having the column at all is the part worth doing now — adding a label later is an `ALTER TYPE`.
+An unmatched echo is projected with origin `external` and hands the conversation to a person, so the AI never talks over them; an echo of Wasla's own send changes nothing, and no echo opens or moves the service window. WhatsApp delivers such echoes only under Coexistence (`smb_message_echoes`), which is still refused; Instagram and Messenger echo every business message.
 
 ## Not supported
 
 Stated here so a reader does not infer a capability from a client method:
 
-- **Interactive messaging.** `send_buttons`, `send_list` and `send_location` exist on the client and are called by nothing. Inbound button and list replies are stored as `interactive` messages and their reply ids survive only in the raw event.
+- **Sending interactive messages.** `send_buttons`, `send_list` and `send_location` exist on the client and are called by nothing. (Inbound taps are supported: *Taps and quick replies*.)
 - **Outbound chunking.** One logical message is one provider message. A reply over WhatsApp's 4096-character body limit is refused by `MessagingService.send_text` rather than truncated (which puts words in a business's mouth) or split (which reintroduces chunk ordering, partial failure and duplicate chunks). Agents are told the limit in their instructions, which reduces how often a reply runs long without pretending a token budget can bound a character count. An agent's reply never reaches the refusal: `app/agents/reply.py` shortens an over-long reply at a sentence, with an offer to continue, before it is sent — still one message (AI-05).
 - **Message edit, delete and revoke.**
 - **Reactions as first-class.** A reaction is stored as an `unsupported` message and deliberately does not trigger an agent turn: it has no content to answer, and doing so cost one billed inference and possibly one reply to nothing.
 - **Coexistence.** See *Message origin* for the groundwork in place; the Coexistence webhook fields are refused and counted, and an `echo` event kind exists so app-sent messages can be stored without ever being read as a customer's.
 - **BSUID rotation.** `user_id_update` is refused as an unsupported field; see *Who sent it*.
+
+## Taps and quick replies
+
+Meta delivers a tap on a template's quick-reply button as `"type": "button"` with `{payload, text}`, and a tap on an interactive reply button or list row as `"type": "interactive"` with `button_reply` or `list_reply` `{id, title}`. Each is stored as an `interactive` message whose text is the title, with the tap as a reply action: `messages.action_source` (`button`, `button_reply`, `list_reply`), `action_payload` and `action_title`, exposed as `MessageRead.action` (ADR-124). An id or payload longer than Meta issues is dropped, never cut. The AI reads a tap as `[tapped: <title>]`.
+
+A tap opts the customer out of marketing when its words are a stop phrase, or when its payload is one a template on that number marks as its opt-out (`PUT /api/v1/templates/{id}/opt-out-payloads`, admins only) — so a translated or edited button label still works. An opt-out tap is recorded through the same writer as a typed stop word, with `opt_out_via = reply_action`, and **queues no agent turn**; a typed stop word is still answered. A `user_preferences` stop records `provider_preference`, and a send refused with `131050` records `provider_refusal`; a `user_preferences` resume lifts only an opt-out the provider's own preference record made. Taps that arrived before this existed can be replayed from retained payloads within 30 days (`recover-button-opt-outs`, [RUNBOOK.md](RUNBOOK.md)).
+
+## Webhook size
+
+`WEBHOOK_MAX_REQUEST_BYTES` is 3 MiB, Meta's documented maximum payload, applied before the signature is checked. A refused delivery is refused identically on every one of Meta's retries, so any refusal is counted (`wasla_http_body_too_large_total{route_group="webhook"}`) and alerts (`WebhookBodyTooLarge`).
 
 ## Graph API version
 
@@ -317,7 +331,7 @@ Stated here so a reader does not infer a capability from a client method:
 
 **Maintaining it by hand is the design.** Fetching the changelog at boot would make starting the application depend on a third party's website being up and parseable, which is a worse failure than the one being prevented. So: when a version is added or retired, update `META_API_SUNSETS`. A version the table has never heard of warns too, because silence would make a typo look like an endorsement.
 
-Moving version is planned work rather than a config change: re-verify the send payloads, the media fetch and the error envelope against the new version before deploying it.
+Moving version is planned work rather than a config change: re-verify the send payloads, the media fetch and the error envelope against the new version before deploying it. The plan and its date are in [RUNBOOK.md](RUNBOOK.md) (*Graph API version*, OMNI-055).
 
 ## What the webhook does not do
 

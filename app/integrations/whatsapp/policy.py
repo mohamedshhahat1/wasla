@@ -21,6 +21,7 @@ from app.channels.policy import (
     ChannelCapabilities,
     FollowUpAction,
     FollowUpDecision,
+    MediaLimit,
     OutOfWindow,
     ReceiptModel,
     TextUnit,
@@ -51,6 +52,10 @@ FOLLOW_UP_WINDOW_CLOSED: Final = (
     "The 24-hour service window has closed and no approved template is configured."
 )
 
+MB: Final = 1024 * 1024
+# How long Meta keeps an inbound media id fetchable: seven days (M16).
+INBOUND_MEDIA_LIFETIME: Final = timedelta(days=7)
+
 WHATSAPP_CAPABILITIES: Final = ChannelCapabilities(
     text_limit=WHATSAPP_TEXT_MAX_CHARS,
     text_unit=TextUnit.CHARACTERS,
@@ -69,6 +74,17 @@ WHATSAPP_CAPABILITIES: Final = ChannelCapabilities(
     templates=True,
     out_of_window=OutOfWindow.TEMPLATE,
     message_id_scope="connection",
+    # Meta's outbound limits (WhatsApp Cloud API "Media", read 2026-10-02;
+    # the final audit's M18), checked before anything is staged (OMNI-045).
+    media_limits={
+        "image": MediaLimit(5 * MB, frozenset({"image/jpeg", "image/png"})),
+        "video": MediaLimit(16 * MB, frozenset({"video/mp4", "video/3gpp"})),
+        "audio": MediaLimit(
+            16 * MB,
+            frozenset({"audio/aac", "audio/amr", "audio/mpeg", "audio/mp4", "audio/ogg"}),
+        ),
+        "document": MediaLimit(100 * MB),
+    },
 )
 
 # What every agent is told about the channel it is answering on, appended to

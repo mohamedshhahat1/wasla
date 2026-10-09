@@ -149,6 +149,11 @@ class WhatsAppTemplate(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMi
     # resynced into usefulness later.
     components: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     variable_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Quick-reply payloads this workspace has marked as the marketing opt-out
+    # (OMNI-030). A tap carrying one opts the customer out whatever its words
+    # say - the payload is what the template's author controls, the words are
+    # translated. The workspace's own marks, so a sync never overwrites them.
+    opt_out_payloads: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
     quality_rating: Mapped[str | None] = mapped_column(String(16), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)

@@ -176,6 +176,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       META_APP_SECRET: ${META_APP_SECRET:?META_APP_SECRET is required to verify webhook signatures}
+      # Per-product webhook secrets (OMNI-050); each falls back to META_APP_SECRET.
+      META_INSTAGRAM_APP_SECRET: ${META_INSTAGRAM_APP_SECRET:-}
+      META_MESSENGER_APP_SECRET: ${META_MESSENGER_APP_SECRET:-}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
       # The API sends too, and this was missing. `POST /conversations/{id}/text`
       # is a colleague replying by hand from the inbox, and it resolves the same

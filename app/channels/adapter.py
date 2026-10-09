@@ -20,15 +20,17 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.inbound import AttachmentLocator, Identifier, ParsedDelivery
-from app.channels.policy import ChannelPolicy
+from app.channels.inbound import AttachmentLocator, Identifier, ParsedDelivery, ReplyAction
+from app.channels.policy import ChannelPolicy, SendMechanism
 from app.core.config import Settings
 from app.core.exceptions import ValidationError
+from app.core.storage import MediaUrlGrant
 from app.db.models.channel import Channel, ChannelConnection, ContactIdentity, IdentityScope
+from app.db.models.conversation import MessageOrigin
 
 
 class IdentityNotAddressableError(ValidationError):
@@ -80,11 +82,45 @@ OutboundContent = TextContent | TemplateContent | MediaContent
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedContent:
+    """Content ready to send, with the provider reference a file needs (OMNI-040).
+
+    `prepare` used to stash an upload id on the sender; it now returns it. A
+    file is referenced either by an id the provider issued for an upload
+    (WhatsApp, Messenger's Attachment Upload API) or by a URL the provider
+    fetches (Instagram's video, audio and files): `reference_kind` says which.
+    Held in memory for one send only - a URL here is a short-lived bearer
+    credential, and nothing stores or logs this object.
+    """
+
+    content: OutboundContent
+    reference: str | None = None
+    reference_kind: Literal["upload", "url"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SendContext:
+    """Who is sending and by which mechanism - the policy's decision, carried to the wire.
+
+    OMNI-033. The adapter used to receive only a recipient and content, so a
+    Messenger or Instagram adapter could not know that a person, not the AI,
+    was replying on day three and must send under `HUMAN_AGENT` - nor refuse
+    to let an agent do so. The mechanism is the policy's; the adapter renders
+    it and never chooses it.
+    """
+
+    origin: MessageOrigin
+    mechanism: SendMechanism
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderReceipt:
     """The provider's acknowledgement of one accepted message."""
 
     message_id: str
     raw: Mapping[str, Any] = field(default_factory=dict)
+    #: When the provider says it sent the message, if its answer says (OMNI-042).
+    sent_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,9 +141,13 @@ class ChannelSender(Protocol):
     (`app.channels.outcomes`), `RateLimitedError` and `ExternalServiceError`.
     """
 
-    async def prepare(self, content: OutboundContent) -> None: ...
+    async def prepare(
+        self, content: OutboundContent, *, media_url: MediaUrlGrant | None = None
+    ) -> PreparedContent: ...
 
-    async def send(self, recipient: Recipient, content: OutboundContent) -> ProviderReceipt: ...
+    async def send(
+        self, recipient: Recipient, prepared: PreparedContent, context: SendContext
+    ) -> ProviderReceipt: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +213,20 @@ class ChannelAdapter(Protocol):
         """The recipient for a conversation pinned to `identity`, or a refusal."""
         ...
 
+    async def marks_opt_out(
+        self,
+        session: AsyncSession,
+        connection: ChannelConnection,
+        action: ReplyAction,
+    ) -> bool:
+        """Whether this tap's payload is one the workspace marked as its opt-out (OMNI-030).
+
+        The stop-phrase match on the tap's words is shared and done by the core;
+        this is the part only a provider can answer - on WhatsApp, a payload a
+        template on this number is marked with.
+        """
+        ...
+
     def sender(
         self,
         *,
@@ -217,8 +271,10 @@ __all__ = [
     "IdentityScopeRef",
     "MediaContent",
     "OutboundContent",
+    "PreparedContent",
     "ProviderReceipt",
     "Recipient",
+    "SendContext",
     "TemplateContent",
     "TextContent",
 ]

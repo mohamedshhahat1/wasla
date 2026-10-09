@@ -30,7 +30,13 @@ from types import MappingProxyType
 from typing import Any
 
 from app.db.models.channel import Channel, IdentityKind
-from app.db.models.conversation import MessageKind, MessageStatus
+from app.db.models.conversation import (
+    MAX_ACTION_PAYLOAD_LENGTH,
+    MAX_ACTION_TITLE_LENGTH,
+    MessageKind,
+    MessageStatus,
+    ReplyActionSource,
+)
 from app.db.models.media import MediaLocatorKind
 
 
@@ -45,6 +51,19 @@ class InboundKind(StrEnum):
     #: and Instagram `is_echo`, WhatsApp Coexistence app sends. Evidence, never
     #: a customer's turn.
     ECHO = "echo"
+    #: The person changed their marketing preference through the provider
+    #: (WhatsApp `user_preferences`, OMNI-046). Never a turn.
+    PREFERENCE = "preference"
+
+
+@dataclass(frozen=True, slots=True)
+class MarketingPreference:
+    """A person's marketing preference, as the provider recorded it (OMNI-046)."""
+
+    #: `stop` or `resume`.
+    value: str
+    #: The provider's category, `marketing_messages` for WhatsApp.
+    category: str
 
 
 class RefusalReason(StrEnum):
@@ -86,6 +105,20 @@ MESSAGE_LOSS_REASONS: frozenset[RefusalReason] = frozenset(
         RefusalReason.MALFORMED,
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyAction:
+    """What a customer tapped: the provider's id or payload, and the words on it.
+
+    Kept apart from the event's text so that routing never has to read display
+    text where a payload exists - a button's title is translated and edited by
+    whoever wrote the template, its payload is not (OMNI-030).
+    """
+
+    source: ReplyActionSource
+    id_or_payload: str | None
+    title: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,11 +193,36 @@ class InboundEvent:
     attachments: tuple[AttachmentLocator, ...] = ()
     #: The provider's id of the message this one replies to.
     reply_to: str | None = None
+    #: The control the customer tapped, when this message is a tap (OMNI-030).
+    #: `text` then carries its title, so a reader of the transcript sees words.
+    action: ReplyAction | None = None
     status: StatusUpdate | None = None
+    #: A marketing stop or resume, for a `PREFERENCE` event (OMNI-046).
+    preference: MarketingPreference | None = None
     profile_name: str | None = None
     #: The provider's own record of this event, stored as evidence and
     #: redacted on the retention schedule (DB-011).
     raw: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """A message or an echo is identified by the provider's message id (OMNI-032, ADR-120).
+
+        Ingestion stores the message under `message_id`; inbound recovery and
+        the stranded-media sweep find it again from the stored event by
+        `event_id`. Those are one value for every Meta product - a message id
+        is the event's identity - and the contract used to say so nowhere: an
+        adapter that composed its event ids (as WhatsApp does for statuses)
+        would have had every message that missed the queue abandoned as
+        `projection_missing` and never answered. Refused at construction, so
+        such an adapter fails its contract suite rather than a customer.
+        Statuses are not messages and keep composed ids.
+        """
+        if self.kind in (InboundKind.MESSAGE, InboundKind.ECHO) and (
+            not self.message_id or self.event_id != self.message_id
+        ):
+            raise ValueError(
+                "a message or echo event must carry the provider's message id as its event id"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,13 +250,18 @@ def tally(reasons: Counter[RefusalReason]) -> Mapping[RefusalReason, int]:
 
 
 __all__ = [
+    "MAX_ACTION_PAYLOAD_LENGTH",
+    "MAX_ACTION_TITLE_LENGTH",
     "MESSAGE_LOSS_REASONS",
     "AttachmentLocator",
     "Identifier",
     "InboundEvent",
     "InboundKind",
+    "MarketingPreference",
     "ParsedDelivery",
     "RefusalReason",
+    "ReplyAction",
+    "ReplyActionSource",
     "StatusUpdate",
     "tally",
 ]

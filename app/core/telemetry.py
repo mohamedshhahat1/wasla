@@ -28,7 +28,7 @@ is where that raising stops.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import perf_counter, time_ns
@@ -438,6 +438,31 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Inbound events by channel and what ingestion made of them.",
         ("channel", "outcome"),
     ),
+    # Opt-outs recorded, by the evidence they arrived by (OMNI-030, OMNI-046):
+    # a stop word, a tapped button, the provider's preference record, a
+    # provider refusal, a replay of retained evidence, a colleague. Closed
+    # domain (`OptOutVia`); no contact, phone or workspace.
+    "wasla_opt_outs_total": (
+        "Marketing opt-outs recorded, by the evidence they arrived by.",
+        ("via",),
+    ),
+    # Request bodies refused by the size limit before any route saw them
+    # (OMNI-034). A 413 used to be a log line and nothing else, so a Meta
+    # delivery refused on every retry for seven days lost its messages with
+    # every alert green. `route_group` is closed - `webhook` or `api` - and is
+    # never a path, which a caller chooses.
+    # Refused provider requests by what they tell a sender to do (OMNI-035):
+    # throttled, a refused credential, a connection that cannot send, or one
+    # message declined. Classified by the provider's own code, the status only
+    # as a fallback. Both labels closed.
+    "wasla_provider_errors_total": (
+        "Refused provider requests by provider and error class.",
+        ("provider", "class"),
+    ),
+    "wasla_http_body_too_large_total": (
+        "Request bodies refused for size before reaching a route, by route group.",
+        ("route_group",),
+    ),
 }
 
 # Closed domains of the two inbound counters. `app.core` imports nothing from
@@ -461,12 +486,24 @@ INBOUND_OUTCOMES: Final = frozenset(
         "stored",
         "duplicate",
         "echo",
+        "external_echo",
         "collision",
         "unknown_connection",
         "inactive_connection",
         "unowned",
         "rejected",
         "identity_conflict",
+    }
+)
+# `OptOutVia`, restated for the same reason; a test holds them equal.
+OPT_OUT_VIAS: Final = frozenset(
+    {
+        "message",
+        "reply_action",
+        "provider_preference",
+        "provider_refusal",
+        "replay",
+        "team",
     }
 )
 
@@ -529,6 +566,21 @@ PENDING_PAYMENT_AGE_BUCKETS: Final[tuple[float, ...]] = (
     259_200.0,
 )
 
+# One indexed lookup on the database: a millisecond is normal, ten is a
+# warning, a hundred is the sequential scan OMNI-029 removed coming back.
+STATUS_RESOLUTION_BUCKETS: Final[tuple[float, ...]] = (
+    0.0005,
+    0.001,
+    0.0025,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    1.0,
+)
+
 # Passages per search, one bucket per possible count up to the top-k ceiling.
 RETRIEVED_PASSAGE_BUCKETS: Final[tuple[float, ...]] = (0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
 
@@ -571,6 +623,16 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
     # counter above, and crossing the two would multiply the series for a
     # question nobody asks. Provider-latency buckets, because the one tool that
     # calls anybody else dominates the distribution.
+    # How long resolving a delivery status to the message it names took
+    # (OMNI-029). Every status webhook takes this path - WhatsApp reports three
+    # per message - and it was a sequential scan of `messages` until the
+    # workspaces joined the predicate; this is how a regression would show.
+    # Labelled by channel alone, a closed domain.
+    "wasla_status_resolution_duration_seconds": (
+        "How long resolving a delivery status to its message took.",
+        ("channel",),
+        STATUS_RESOLUTION_BUCKETS,
+    ),
     "wasla_agent_tool_execution_duration_seconds": (
         "How long an agent tool call took, refusals included.",
         ("tool",),
@@ -966,6 +1028,56 @@ async def record_inbound_outcomes(channel: str, outcomes: Mapping[str, int]) -> 
             {"channel": label, "outcome": outcome if outcome in INBOUND_OUTCOMES else "other"},
             count,
         )
+
+
+async def record_status_resolutions(channel: str, durations: Sequence[float]) -> None:
+    """Observe one delivery's status lookups (OMNI-029). Best-effort."""
+    label = _inbound_channel(channel)
+    for seconds in durations:
+        await _observe(
+            "wasla_status_resolution_duration_seconds",
+            {"channel": label},
+            seconds,
+            STATUS_RESOLUTION_BUCKETS,
+        )
+
+
+async def record_opt_outs(by_via: Mapping[str, int]) -> None:
+    """Count opt-outs recorded, by the evidence they arrived by. Best-effort."""
+    for via, count in by_via.items():
+        if count <= 0:
+            continue
+        await _increment_by(
+            "wasla_opt_outs_total", {"via": via if via in OPT_OUT_VIAS else "other"}, count
+        )
+
+
+#: The closed domain of `wasla_provider_errors_total{class}` - `MetaErrorClass`,
+#: restated so `app.core` imports no integration; a test holds them equal.
+PROVIDER_ERROR_CLASSES: Final = frozenset({"throttled", "credential", "connection", "per_message"})
+
+
+async def record_provider_error(provider: Provider, error_class: str) -> None:
+    """One provider refusal, by the class its code puts it in (OMNI-035). Best-effort."""
+    await _increment(
+        "wasla_provider_errors_total",
+        {
+            "provider": str(provider),
+            "class": error_class if error_class in PROVIDER_ERROR_CLASSES else "other",
+        },
+    )
+
+
+#: The closed domain of `wasla_http_body_too_large_total{route_group}`.
+BODY_LIMIT_ROUTE_GROUPS: Final = frozenset({"webhook", "api"})
+
+
+async def record_body_too_large(route_group: str) -> None:
+    """One request body refused for size (OMNI-034). Best-effort."""
+    await _increment(
+        "wasla_http_body_too_large_total",
+        {"route_group": route_group if route_group in BODY_LIMIT_ROUTE_GROUPS else "other"},
+    )
 
 
 async def record_media_outcome(outcome: str) -> None:

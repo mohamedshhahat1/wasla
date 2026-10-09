@@ -61,8 +61,13 @@ customers.
 | `wasla_unprocessed_inbound_oldest_age_seconds` | gauge | — | Whether that backlog is being drained or is stuck. |
 | `wasla_unprocessed_inbound_events_by_channel` | gauge | `channel` | The same backlog split by channel, so one channel's outage is not hidden in another's traffic. |
 | `wasla_inbound_entries_refused_total` | counter | `channel`, `reason` | Webhook entries an adapter could not turn into an event (OMNI-021): `foreign_object`, `unsupported_field`, `missing_sender`, `identifier_too_long`, `missing_event_id`, `missing_status`, `missing_connection`, `malformed`. A delivery that became nothing is no longer a silent success. |
-| `wasla_inbound_events_total` | counter | `channel`, `outcome` | What ingestion made of accepted events: `stored`, `duplicate`, `echo`, `collision`, `unknown_connection`, `inactive_connection`, `unowned`, `rejected`, `identity_conflict`. |
-| `wasla_channel_connections` | gauge | `channel`, `status`, `health` | Connections by channel, lifecycle and what the provider last said about their credential (`ok`, `auth_failed`, ...). Closed labels only: never a connection id, page id or number. |
+| `wasla_inbound_events_total` | counter | `channel`, `outcome` | What ingestion made of accepted events: `stored`, `duplicate`, `echo`, `external_echo`, `collision`, `unknown_connection`, `inactive_connection`, `unowned`, `rejected`, `identity_conflict`. A collision is kept as failed evidence, never discarded (ADR-120). |
+| `wasla_status_resolution_duration_seconds` | histogram | `channel` | How long resolving a delivery status to its message took - three per WhatsApp message. An index seek is about a millisecond; the sequential scan OMNI-029 removed was tens (OMNI-029). |
+| `wasla_provider_errors_total` | counter | `provider`, `class` | Refused provider requests by what they tell a sender: `throttled`, `credential`, `connection`, `per_message`, classified by Meta's code first (ADR-130). |
+| `wasla_opt_outs_total` | counter | `via` | Marketing opt-outs by the evidence they arrived by: `message` (a typed stop word), `reply_action` (a tapped button), `provider_preference` (`user_preferences`), `provider_refusal` (`131050`), `replay` (the recovery command), `team`. |
+| `wasla_http_body_too_large_total` | counter | `route_group` | Request bodies refused for size before any route read them, `webhook` or `api` - never a path (OMNI-034). |
+| `wasla_channel_state` | gauge | `channel`, `state` | 1 for each channel's current state: `operational`, `paused` or `unavailable` (ADR-126). |
+| `wasla_channel_connections` | gauge | `channel`, `status`, `health` | Connections by channel, lifecycle and what the provider last said: `ok`, `auth_failed`, `permission_missing`, `rate_limited` (ADR-130). Closed labels only: never a connection id, page id or number. |
 | `wasla_unresolved_outbound_messages` | gauge | — | **A state invariant**: sends Meta may have delivered, whose outcome is unknown. |
 | `wasla_oldest_unresolved_outbound_age_seconds` | gauge | — | Whether the oldest is a send in flight or one that broke an hour ago. |
 | `wasla_media_outcomes_total` | counter | `outcome` | How inbound attachments ended: `ready` or one of the media reason tokens (closed vocabulary, MEDIA-15). Decisions and failures are both here; the alert reads only the failure subset. |
@@ -121,6 +126,10 @@ an oversight rather than a decision.
 | `InboundEntriesRefused` | An adapter refusing entries that may be customer messages (anything but `unsupported_field` and `foreign_object`) for 15m | warning |
 | `InboundForeignPayloads` | A channel's webhook receiving another Meta product's payloads for 15m | warning |
 | `ChannelConnectionCredentialRefused` | An active connection whose last send was refused as unauthorised, for 15m | warning |
+| `ChannelInboundStopped` | No events on a channel for 30m, on a deployment where that channel had traffic today - every channel, from ingestion's own count | critical |
+| `WebhookBodyTooLarge` | Any webhook delivery refused for size in 15m - Meta retries it unchanged, so it is lost | critical |
+| `ChannelConnectionUnusable` | An active connection reading `permission_missing` or `rate_limited` for 30m | warning |
+| `ChannelPausedForADay` | A channel held paused by `PAUSED_CHANNELS` for 24h | warning |
 | `QueueJobsStuck` | The oldest unclaimed job is over 15m old | warning |
 | `DeadLetterGrowth` | Jobs are being dead-lettered | warning |
 

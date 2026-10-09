@@ -23,7 +23,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import datetime
 from typing import Final
+
+from app.core.logging import get_logger
+from app.db.models.campaign import OptOutSource, OptOutVia
+from app.db.models.conversation import Contact
+
+logger = get_logger(__name__)
 
 # Anything that is punctuation or whitespace around the word itself. A customer
 # writing "stop." or "!!STOP!!" means what a customer writing "stop" means.
@@ -86,4 +93,36 @@ def is_stop_request(text: str | None) -> bool:
     return normalised(text) in STOP_WORDS
 
 
-__all__ = ["MAX_STOP_LENGTH", "STOP_WORDS", "is_stop_request", "normalised"]
+def record_opt_out(
+    contact: Contact,
+    *,
+    source: OptOutSource,
+    via: OptOutVia,
+    at: datetime,
+) -> bool:
+    """Record that this person wants no campaigns. Returns whether anything changed.
+
+    The one writer of an opt-out, whichever way it arrived - a stop word, a
+    tapped button, the provider's own preference record, a replay of retained
+    evidence, a colleague (OMNI-030, OMNI-046). Idempotent, and it never moves
+    the timestamp: the first refusal is the one a dispute about a marketing
+    message turns on. `source` is who decided; `via` is by which evidence.
+    """
+    if contact.marketing_opt_out_at is not None:
+        return False
+    contact.marketing_opt_out_at = at
+    contact.opt_out_source = source
+    contact.opt_out_via = via
+    logger.info(
+        "campaign.opt_out_recorded",
+        extra={
+            "event": "campaign.opt_out_recorded",
+            "contact_id": str(contact.id),
+            "source": source.value,
+            "via": via.value,
+        },
+    )
+    return True
+
+
+__all__ = ["MAX_STOP_LENGTH", "STOP_WORDS", "is_stop_request", "normalised", "record_opt_out"]

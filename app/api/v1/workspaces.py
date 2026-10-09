@@ -63,6 +63,7 @@ def _read(tenant: Tenant) -> WorkspaceRead:
         slug=tenant.slug,
         status=tenant.status,
         is_active=tenant.is_active,
+        automation_disclosure=tenant.automation_disclosure,
     )
 
 
@@ -162,6 +163,11 @@ async def update_workspace(
         actor_role=workspace.role,
         name=payload.name,
         slug=payload.slug,
+        automation_disclosure=(
+            payload.automation_disclosure.model_dump(exclude_none=True)
+            if payload.automation_disclosure is not None
+            else None
+        ),
     )
     return _read(tenant)
 

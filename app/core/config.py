@@ -364,6 +364,11 @@ DEFAULT_META_MEDIA_HOST_ROOTS: Final[tuple[str, ...]] = (
 VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
 
 
+#: Channel names `PAUSED_CHANNELS` accepts. Restated rather than imported, so
+#: configuration loads without the models; a test holds it equal to `Channel`.
+KNOWN_CHANNELS: Final[frozenset[str]] = frozenset({"whatsapp", "instagram", "messenger"})
+
+
 class Settings(BaseSettings):
     """Typed application settings loaded from the environment."""
 
@@ -572,6 +577,27 @@ class Settings(BaseSettings):
     # replies and people (OMNI-017, ADR-123). Unset, nothing is counted and a
     # campaign is spaced by its own `messages_per_minute` alone (ADR-026).
     connection_sends_per_minute: int | None = Field(default=None, ge=1)
+    # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
+    # is still stored and shown, and nothing is sent, fetched or answered by an
+    # agent on them. The rollback for a misbehaving channel - a flag and a
+    # restart, never removing its adapter, so no other channel's inbox breaks.
+    # Comma-separated channel names; empty means every channel with an adapter
+    # is operational.
+    paused_channels: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # How long an AI conversation may go quiet before the next automated reply
+    # discloses again that it is automated, on a channel whose policy requires
+    # the disclosure - Messenger and Instagram (OMNI-041). Meta's policy says
+    # "after significant lapses of time" without a number; a day is the default.
+    automation_disclosure_gap_hours: int = Field(default=24, ge=1, le=24 * 30)
+    # How long a signed URL for one outbound file lives, for a provider that
+    # fetches media by URL (OMNI-040, ADR-128). Long enough for the provider to
+    # fetch it; never more than an hour, whatever is set.
+    media_signed_url_ttl_seconds: int = Field(default=600, ge=1, le=3600)
+    # How far Wasla's own send clock may run ahead of a provider's when a read
+    # watermark is compared with a message the provider never timestamped
+    # (OMNI-042). Seconds, and bounded: a watermark is never taken to cover a
+    # message sent well after it.
+    watermark_clock_tolerance_seconds: int = Field(default=5, ge=0, le=60)
     # How long an upload intent must sit untouched before reconciliation treats
     # it as abandoned rather than in progress (ADR-087).
     #
@@ -643,11 +669,16 @@ class Settings(BaseSettings):
     # Comfortably above the media cap, so an attachment upload is bounded by the
     # rule that understands attachments rather than by this blunt one.
     max_request_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
-    # The webhook's own cap. Far smaller because a WhatsApp delivery is a few
-    # kilobytes of JSON, and it is the one endpoint an unauthenticated caller
-    # can reach - the 32 MB above exists for media uploads by signed-in
-    # colleagues, which is not what arrives here.
-    webhook_max_request_bytes: int = Field(default=1024 * 1024, gt=0)
+    # The webhook's own cap: Meta's documented maximum and no more (OMNI-034).
+    # "Webhook payloads can be up to 3 MB", and Meta batches up to a thousand
+    # updates into one delivery; a burst of long Arabic replies - two bytes a
+    # character - passed the old 1 MiB cap at 1.47 MB. A refused delivery is
+    # refused identically on every retry for seven days, so a cap below Meta's
+    # maximum is message loss, not protection. Still far below the 32 MB above,
+    # which exists for media uploads by signed-in colleagues: this is the one
+    # endpoint an unauthenticated caller can reach, and the signature is only
+    # checked once the body has been read.
+    webhook_max_request_bytes: int = Field(default=3 * 1024 * 1024, gt=0)
     # What a caller with no verifiable access token may send to any route
     # (SEC-02). JSON is parsed in full - at about nine times its size - before
     # validation and before the rate limiter, so this, not the 32 MB above, is
@@ -878,6 +909,14 @@ class Settings(BaseSettings):
     # Meta / WhatsApp: configuration only until the WhatsApp phase lands
     meta_app_id: str | None = None
     meta_app_secret: str | None = None
+    # The secret each Meta product's webhooks are signed with, where it is not
+    # `META_APP_SECRET` (OMNI-050). Meta documents Instagram's as "your app's
+    # App Secret" without saying which secret an Instagram-Login app uses;
+    # unset, each falls back to `META_APP_SECRET`. Read by
+    # `webhook_signing_secret`; the signature verifier already takes the secret
+    # as a parameter.
+    meta_instagram_app_secret: str | None = None
+    meta_messenger_app_secret: str | None = None
     meta_verify_token: str | None = None
     meta_access_token: str | None = None
     # Checked against `META_API_SUNSETS` at start-up, which warns when this
@@ -962,6 +1001,28 @@ class Settings(BaseSettings):
         """`CONNECTION_SENDS_PER_MINUTE=` left blank means no allowance, not an error."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("paused_channels", mode="before")
+    @classmethod
+    def _parse_paused_channels(cls, value: Any) -> Any:
+        """A comma-separated list, a JSON array, or a list - of channel names."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("["):
+                return json.loads(raw)
+            return [item.strip().lower() for item in raw.split(",") if item.strip()]
+        return value
+
+    @field_validator("paused_channels", mode="after")
+    @classmethod
+    def _known_channels_only(cls, value: list[str]) -> list[str]:
+        """A name that is no channel is a typo, refused at startup rather than ignored."""
+        unknown = sorted(set(value) - KNOWN_CHANNELS)
+        if unknown:
+            raise ValueError(f"PAUSED_CHANNELS names unknown channels: {', '.join(unknown)}")
         return value
 
     @field_validator("paymob_callback_integration_ids", mode="before")
@@ -1520,6 +1581,19 @@ class Settings(BaseSettings):
                 "would be pretend and every customer would get the product free"
             ]
         return []
+
+
+def webhook_signing_secret(settings: Settings, product: str) -> str | None:
+    """The secret a Meta product's webhooks are verified with (OMNI-050).
+
+    `whatsapp`, `instagram` or `messenger`; a product-specific secret where one
+    is configured, else `META_APP_SECRET`.
+    """
+    specific = {
+        "instagram": settings.meta_instagram_app_secret,
+        "messenger": settings.meta_messenger_app_secret,
+    }.get(product)
+    return specific or settings.meta_app_secret
 
 
 @lru_cache

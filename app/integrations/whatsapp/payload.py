@@ -38,13 +38,32 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Final
 
-from app.channels.inbound import RefusalReason
+from app.channels.inbound import (
+    MAX_ACTION_PAYLOAD_LENGTH,
+    MAX_ACTION_TITLE_LENGTH,
+    RefusalReason,
+    ReplyAction,
+    ReplyActionSource,
+)
 from app.core.filenames import display_filename
 from app.core.media_types import MAX_MIME_TYPE_LENGTH
 from app.db.models.channel import MAX_IDENTITY_VALUE_LENGTH
 from app.db.models.media import MAX_MEDIA_HANDLE_LENGTH
 
 TEXT_TYPE = "text"
+# A tap on a template's quick-reply button: `"button": {"payload", "text"}`.
+BUTTON_TYPE = "button"
+# A tap on an interactive reply button or list row: `interactive.button_reply`
+# or `interactive.list_reply`, each `{id, title}`.
+INTERACTIVE_TYPE = "interactive"
+INTERACTIVE_REPLIES: Final = {
+    "button_reply": ReplyActionSource.BUTTON_REPLY,
+    "list_reply": ReplyActionSource.LIST_REPLY,
+}
+
+# A person stopping or resuming marketing messages through WhatsApp itself
+# (OMNI-046; `user_preferences` webhook reference, read 2026-10-02).
+USER_PREFERENCES_FIELD: Final = "user_preferences"
 
 # The one `object` a WhatsApp Business Account webhook carries.
 WHATSAPP_OBJECT: Final = "whatsapp_business_account"
@@ -54,7 +73,7 @@ WHATSAPP_OBJECT: Final = "whatsapp_business_account"
 # template status updates, account updates, and the Coexistence fields
 # `history`, `smb_app_state_sync` and `smb_message_echoes` - is refused and
 # counted until something here handles it (ADR-120).
-SUPPORTED_FIELDS: Final = frozenset({"messages"})
+SUPPORTED_FIELDS: Final = frozenset({"messages", USER_PREFERENCES_FIELD})
 
 # The width of `contacts.wa_id`. A phone number is at most fifteen digits
 # (E.164); anything past this column is not a number Meta issued.
@@ -119,6 +138,8 @@ class InboundMessage:
     from_parent_user_id: str | None = None
     #: `context.id`: the message this one replies to, as Meta names it.
     context_id: str | None = None
+    #: What the customer tapped, for a `button` or `interactive` reply (OMNI-030).
+    action: ReplyAction | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +162,30 @@ class DeliveryStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class UserPreference:
+    """A person's marketing preference change, from the `user_preferences` field (OMNI-046).
+
+    `{"wa_id", "user_id"?, "detail", "category": "marketing_messages",
+    "value": "stop" | "resume", "timestamp"}`. The sender is whoever Meta names,
+    by phone and/or business-scoped id, exactly as for a message.
+    """
+
+    phone_number_id: str
+    from_number: str | None
+    from_user_id: str | None
+    category: str
+    value: str
+    timestamp: datetime | None
+    raw: dict[str, Any]
+
+    @property
+    def event_id(self) -> str:
+        who = self.from_user_id or self.from_number or ""
+        stamp = int(self.timestamp.timestamp()) if self.timestamp else 0
+        return f"{USER_PREFERENCES_FIELD}:{who}:{self.category}:{self.value}:{stamp}"
+
+
+@dataclass(frozen=True, slots=True)
 class WebhookEnvelope:
     """What one delivery held. `ignored` is every refusal; `refused` says why."""
 
@@ -148,6 +193,7 @@ class WebhookEnvelope:
     statuses: tuple[DeliveryStatus, ...]
     ignored: int
     refused: Mapping[RefusalReason, int] = field(default_factory=lambda: MappingProxyType({}))
+    preferences: tuple[UserPreference, ...] = ()
 
     @property
     def is_empty(self) -> bool:
@@ -196,7 +242,48 @@ def _message_text(message: Mapping[str, Any], message_type: str) -> str | None:
         return _text(_mapping(message.get(TEXT_TYPE)).get("body"))
     if message_type in MEDIA_TYPES:
         return _text(_mapping(message.get(message_type)).get("caption"))
+    # A tap's words are the words on the button: what the customer chose, and
+    # what a person reading the transcript needs to see (OMNI-030).
+    action = reply_action(message, message_type)
+    if action is not None:
+        return action.title
     return None
+
+
+def reply_action(message: Mapping[str, Any], message_type: str) -> ReplyAction | None:
+    """The button or list row the customer tapped, or None if this is not a tap.
+
+    Meta documents two shapes (messages webhook reference, re-read 2026-10-02):
+    a template quick reply arrives as `"type": "button"` with
+    `"button": {"payload", "text"}`; an interactive reply as
+    `"type": "interactive"` with `interactive.button_reply` or
+    `interactive.list_reply`, each `{id, title}`. Both used to be stored with
+    no text at all, so the agent read `[interactive]` and a "Stop promotions"
+    tap opted nobody out.
+
+    A payload or id longer than Meta issues is dropped rather than cut - a cut
+    id would match nothing, or the wrong thing; a title is display text and is
+    bounded the same way.
+    """
+    if message_type == BUTTON_TYPE:
+        button = _mapping(message.get(BUTTON_TYPE))
+        payload = _bounded(button.get("payload"), MAX_ACTION_PAYLOAD_LENGTH)
+        title = _bounded(button.get("text"), MAX_ACTION_TITLE_LENGTH)
+        source = ReplyActionSource.BUTTON
+    elif message_type == INTERACTIVE_TYPE:
+        interactive = _mapping(message.get(INTERACTIVE_TYPE))
+        reply_type = interactive.get("type")
+        if not isinstance(reply_type, str) or reply_type not in INTERACTIVE_REPLIES:
+            return None
+        reply = _mapping(interactive.get(reply_type))
+        payload = _bounded(reply.get("id"), MAX_ACTION_PAYLOAD_LENGTH)
+        title = _bounded(reply.get("title"), MAX_ACTION_TITLE_LENGTH)
+        source = INTERACTIVE_REPLIES[reply_type]
+    else:
+        return None
+    if payload is None and title is None:
+        return None
+    return ReplyAction(source=source, id_or_payload=payload, title=title)
 
 
 def _media(message: Mapping[str, Any], message_type: str) -> InboundMedia | None:
@@ -294,6 +381,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
     """Flatten Meta's nested envelope into messages and statuses, counting what is refused."""
     messages: list[InboundMessage] = []
     statuses: list[DeliveryStatus] = []
+    preferences: list[UserPreference] = []
     refused: Counter[RefusalReason] = Counter()
     entries = _sequence(payload.get("entry"))
 
@@ -309,7 +397,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
             else RefusalReason.MALFORMED
         )
         refused[reason] += max(len(entries), 1)
-        return _envelope(messages, statuses, refused)
+        return _envelope(messages, statuses, refused, preferences)
 
     for entry in entries:
         for raw_change in _sequence(_mapping(entry).get("changes")):
@@ -326,6 +414,10 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
             if phone_number_id is None:
                 # Without it there is no way to know which workspace this is for.
                 refused[RefusalReason.MISSING_CONNECTION] += 1
+                continue
+
+            if change_field == USER_PREFERENCES_FIELD:
+                preferences.extend(_preferences(value, phone_number_id, refused))
                 continue
 
             profile_names = _profile_names(value)
@@ -365,6 +457,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                             message.get("from_parent_user_id"), MAX_IDENTITY_VALUE_LENGTH
                         ),
                         context_id=_text(_mapping(message.get("context")).get("id")),
+                        action=reply_action(message, message_type),
                     )
                 )
 
@@ -394,17 +487,50 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                     )
                 )
 
-    return _envelope(messages, statuses, refused)
+    return _envelope(messages, statuses, refused, preferences)
+
+
+def _preferences(
+    value: Mapping[str, Any], phone_number_id: str, refused: Counter[RefusalReason]
+) -> list[UserPreference]:
+    """Every marketing preference change in one `user_preferences` change (OMNI-046)."""
+    found: list[UserPreference] = []
+    for raw in _sequence(value.get("user_preferences")):
+        entry = _mapping(raw)
+        phone = _bounded(entry.get("wa_id"), MAX_PHONE_LENGTH)
+        user = _bounded(entry.get("user_id"), MAX_IDENTITY_VALUE_LENGTH)
+        category = _text(entry.get("category"))
+        choice = _text(entry.get("value"))
+        if phone is None and user is None:
+            refused[RefusalReason.MISSING_SENDER] += 1
+            continue
+        if category is None or choice is None:
+            refused[RefusalReason.MALFORMED] += 1
+            continue
+        found.append(
+            UserPreference(
+                phone_number_id=phone_number_id,
+                from_number=phone,
+                from_user_id=user,
+                category=category,
+                value=choice,
+                timestamp=_timestamp(entry.get("timestamp")),
+                raw=entry,
+            )
+        )
+    return found
 
 
 def _envelope(
     messages: list[InboundMessage],
     statuses: list[DeliveryStatus],
     refused: Counter[RefusalReason],
+    preferences: list[UserPreference] | None = None,
 ) -> WebhookEnvelope:
     return WebhookEnvelope(
         messages=tuple(messages),
         statuses=tuple(statuses),
         ignored=sum(refused.values()),
         refused=MappingProxyType(dict(refused)),
+        preferences=tuple(preferences or ()),
     )

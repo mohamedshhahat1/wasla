@@ -15,14 +15,25 @@ a feature matrix.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from app.core.exceptions import ValidationError
 from app.db.models.channel import Channel
 from app.db.models.conversation import Conversation, MessageOrigin
+
+
+class PolicyRefusalError(ValidationError):
+    """The channel's policy refuses this send, and asking again will not change that.
+
+    A body too long for the channel, a closed window with no way out, a kind the
+    channel cannot carry. Distinct from a provider failure, which may pass: a
+    sweep treats this as terminal instead of spending its retries on it
+    (OMNI-039).
+    """
 
 
 class TextUnit(StrEnum):
@@ -45,8 +56,35 @@ class OutOfWindow(StrEnum):
 
     #: An approved template (WhatsApp).
     TEMPLATE = "template"
+    #: A message tag a *person* may reply under for a while longer - Messenger
+    #: and Instagram's `HUMAN_AGENT`, seven days. Never an automated sender's.
+    TAG = "tag"
     #: Nothing free-form, and no template mechanism to escape with.
     NOTHING = "nothing"
+
+
+class SendMechanism(StrEnum):
+    """How a permitted send is made - what the adapter must put on the wire (OMNI-033).
+
+    The policy decides it; the adapter only renders it. Messenger needs
+    `messaging_type` on every send and `MESSAGE_TAG` + `HUMAN_AGENT` for a
+    person's reply after the standard window; WhatsApp's two are implicit in
+    the content (free text or an approved template).
+    """
+
+    STANDARD_WINDOW = "standard_window"
+    TEMPLATE = "template"
+    HUMAN_AGENT_TAG = "human_agent_tag"
+
+
+class ChannelState(StrEnum):
+    """Whether Wasla can act on a channel right now (OMNI-031, ADR-126)."""
+
+    OPERATIONAL = "operational"
+    #: Registered and deliberately switched off: inbound is still kept.
+    PAUSED = "paused"
+    #: No adapter in this deployment.
+    UNAVAILABLE = "unavailable"
 
 
 class SendKind(StrEnum):
@@ -63,6 +101,17 @@ class FollowUpAction(StrEnum):
     FREE_TEXT = "free_text"
     TEMPLATE = "template"
     SKIP = "skip"
+
+
+@dataclass(frozen=True, slots=True)
+class MediaLimit:
+    """What a provider accepts for one family of outbound file (OMNI-045).
+
+    `mime_types` empty means any type the family's detector accepts.
+    """
+
+    max_bytes: int
+    mime_types: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,18 +136,50 @@ class ChannelCapabilities:
     #: Within what the provider guarantees a message id is unique: its
     #: connection (Meta), or one chat (Telegram-shaped providers).
     message_id_scope: Literal["connection", "conversation"]
+    #: Whether an automated reply must tell the customer it is automated - at
+    #: the start, after a long gap, and after a person hands back to the AI
+    #: (OMNI-041). Messenger's and Instagram's policy; off for WhatsApp.
+    disclosure_required: bool = False
+    #: The provider's own limits per outbound family, checked before anything
+    #: is staged so an over-limit file is never uploaded to be refused
+    #: (OMNI-045). A family absent here has only Wasla's own caps.
+    media_limits: Mapping[str, MediaLimit] = field(default_factory=dict)
+
+
+def require_sendable_media(
+    *, family: str, mime_type: str, byte_size: int, policy: ChannelPolicy
+) -> None:
+    """Refuse a file the channel's provider would refuse, before it is staged (OMNI-045)."""
+    capabilities = policy.capabilities
+    if family not in capabilities.media_families:
+        raise PolicyRefusalError(f"This file cannot be sent over {policy.display_name}.")
+    limit = capabilities.media_limits.get(family)
+    if limit is None:
+        return
+    if limit.mime_types and mime_type not in limit.mime_types:
+        raise PolicyRefusalError(f"{policy.display_name} does not accept this type of {family}.")
+    if byte_size > limit.max_bytes:
+        megabytes = limit.max_bytes // (1024 * 1024)
+        raise PolicyRefusalError(
+            f"{policy.display_name} accepts a {family} of at most {megabytes} MB."
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class SendDecision:
-    """Whether a send may go now. A refusal carries the sentence the caller sees."""
+    """Whether a send may go now, and by which mechanism (OMNI-033).
+
+    A refusal carries the sentence the caller sees; an allowance carries what
+    the adapter must render, so a channel's rule about *how* reaches the wire.
+    """
 
     allowed: bool
     reason: str | None = None
+    mechanism: SendMechanism | None = None
 
     @classmethod
-    def allow(cls) -> SendDecision:
-        return cls(allowed=True)
+    def allow(cls, mechanism: SendMechanism = SendMechanism.STANDARD_WINDOW) -> SendDecision:
+        return cls(allowed=True, mechanism=mechanism)
 
     @classmethod
     def refuse(cls, reason: str) -> SendDecision:
@@ -127,6 +208,54 @@ class ReplyPolicy:
     templates: bool
     text_limit: int
     text_limit_unit: TextUnit
+    #: Whether Wasla can act on the channel at all; anything but operational
+    #: means nothing may be sent, whatever the window says (OMNI-031).
+    state: ChannelState = ChannelState.OPERATIONAL
+    #: How a person's free text would go now - the standard window, or a
+    #: human-agent tag after it (OMNI-033). None when it may not go at all.
+    free_text_mechanism: SendMechanism | None = None
+    #: Whether an *agent's* free text may go now. Narrower than a person's on a
+    #: channel whose late replies need a human-agent tag, which an agent can
+    #: never use (OMNI-033).
+    agent_free_text_allowed: bool = False
+
+
+def inoperable_reply_policy(state: ChannelState, policy: ChannelPolicy | None) -> ReplyPolicy:
+    """What a client is told about a conversation on a channel Wasla cannot act on.
+
+    Rendered rather than refused (OMNI-031): one conversation on a paused or
+    unregistered channel used to turn the whole inbox page into a 422,
+    WhatsApp's threads included. Nothing may be sent - no free text, no
+    template - and the limits are the channel's own where its adapter is known.
+    """
+    capabilities = policy.capabilities if policy is not None else None
+    return ReplyPolicy(
+        free_text_allowed=False,
+        window_expires_at=None,
+        out_of_window=OutOfWindow.NOTHING,
+        templates=False,
+        text_limit=capabilities.text_limit if capabilities is not None else 0,
+        text_limit_unit=(
+            capabilities.text_unit if capabilities is not None else TextUnit.CHARACTERS
+        ),
+        state=state,
+    )
+
+
+#: How a channel is named in a sentence a person reads, where shared code has a
+#: channel but no policy to ask (OMNI-044). WhatsApp's wording is unchanged.
+CHANNEL_DISPLAY_NAMES: Final[Mapping[Channel, str]] = {
+    Channel.WHATSAPP: "WhatsApp",
+    Channel.INSTAGRAM: "Instagram",
+    Channel.MESSENGER: "Messenger",
+}
+
+#: The request ceilings the API applies before any channel is known - the
+#: largest any supported channel accepts, each channel's own limit being applied
+#: by the send itself (OMNI-044). A test holds every adapter within them.
+REQUEST_TEXT_CEILING: Final = 4_096
+REQUEST_CAPTION_CEILING: Final = 1_024
+REQUEST_UPLOAD_CEILING_BYTES: Final = 16 * 1024 * 1024
 
 
 def text_length(text: str, unit: TextUnit) -> int:
@@ -212,6 +341,16 @@ class WindowedPolicy:
     window: timedelta
     #: The sentence a free-form send outside the window is refused with.
     closed_window_refusal: str
+    #: How long after the customer's last message a *person* may still reply
+    #: under a human-agent tag (Messenger, Instagram: seven days). None where
+    #: the channel has no such tag. An agent never may, whatever this says.
+    human_tag_window: timedelta | None = None
+
+    def human_tag_open(self, conversation: Conversation, *, now: datetime) -> bool:
+        """Whether a person's late reply may still go under the human-agent tag."""
+        if self.human_tag_window is None or conversation.last_inbound_at is None:
+            return False
+        return now - conversation.last_inbound_at <= self.human_tag_window
 
     def standard_window_open(self, conversation: Conversation, *, now: datetime) -> bool:
         if conversation.last_inbound_at is None:
@@ -234,19 +373,33 @@ class WindowedPolicy:
         if kind is SendKind.TEMPLATE:
             if not self.capabilities.templates:
                 return SendDecision.refuse("This channel has no message templates.")
-            return SendDecision.allow()
-        if not self.standard_window_open(conversation, now=now):
-            return SendDecision.refuse(self.closed_window_refusal)
-        return SendDecision.allow()
+            return SendDecision.allow(SendMechanism.TEMPLATE)
+        if self.standard_window_open(conversation, now=now):
+            return SendDecision.allow(SendMechanism.STANDARD_WINDOW)
+        # After the window, only a person, only under the human-agent tag, and
+        # only for as long as the tag allows. An agent, a follow-up or a
+        # campaign never borrows a human agent's permission (OMNI-033).
+        if origin is MessageOrigin.HUMAN and self.human_tag_open(conversation, now=now):
+            return SendDecision.allow(SendMechanism.HUMAN_AGENT_TAG)
+        return SendDecision.refuse(self.closed_window_refusal)
 
     def reply_policy(self, conversation: Conversation, *, now: datetime) -> ReplyPolicy:
+        window_open = self.standard_window_open(conversation, now=now)
+        tagged = not window_open and self.human_tag_open(conversation, now=now)
+        mechanism = (
+            SendMechanism.STANDARD_WINDOW
+            if window_open
+            else SendMechanism.HUMAN_AGENT_TAG if tagged else None
+        )
         return ReplyPolicy(
-            free_text_allowed=self.standard_window_open(conversation, now=now),
+            free_text_allowed=window_open or tagged,
             window_expires_at=self.window_expires_at(conversation),
             out_of_window=self.capabilities.out_of_window,
             templates=self.capabilities.templates,
             text_limit=self.capabilities.text_limit,
             text_limit_unit=self.capabilities.text_unit,
+            free_text_mechanism=mechanism,
+            agent_free_text_allowed=window_open,
         )
 
 
@@ -260,28 +413,38 @@ def require_sendable_text(body: str, policy: ChannelPolicy) -> None:
     paid for the inference (OMNI-008).
     """
     if not body:
-        raise ValidationError("A message needs something to say.")
+        raise PolicyRefusalError("A message needs something to say.")
     capabilities = policy.capabilities
     if text_length(body, capabilities.text_unit) > capabilities.text_limit:
         unit = "characters" if capabilities.text_unit is TextUnit.CHARACTERS else "bytes"
-        raise ValidationError(
+        raise PolicyRefusalError(
             f"A {policy.display_name} message may be at most {capabilities.text_limit} {unit}."
         )
 
 
 __all__ = [
+    "CHANNEL_DISPLAY_NAMES",
+    "REQUEST_CAPTION_CEILING",
+    "REQUEST_TEXT_CEILING",
+    "REQUEST_UPLOAD_CEILING_BYTES",
     "ChannelCapabilities",
     "ChannelPolicy",
+    "ChannelState",
     "FollowUpAction",
     "FollowUpDecision",
+    "MediaLimit",
     "OutOfWindow",
+    "PolicyRefusalError",
     "ReceiptModel",
     "ReplyPolicy",
     "SendDecision",
     "SendKind",
+    "SendMechanism",
     "TextUnit",
     "WindowedPolicy",
+    "inoperable_reply_policy",
     "longest_prefix",
+    "require_sendable_media",
     "require_sendable_text",
     "text_length",
 ]

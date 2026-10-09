@@ -472,10 +472,10 @@ async def test_a_json_array_body_is_acknowledged(
 
 
 async def test_an_oversized_body_is_refused_before_it_is_read(http: AsyncClient) -> None:
-    """The webhook cap, which is tighter than the general one."""
+    """The webhook cap (3 MiB since OMNI-034), which is tighter than the general one."""
     response = await http.post(
         WEBHOOK,
-        content=b"x" * (2 * 1024 * 1024),
+        content=b"x" * (4 * 1024 * 1024),
         headers={"content-type": "application/json"},
     )
 

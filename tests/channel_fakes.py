@@ -44,8 +44,10 @@ from app.channels.adapter import (
     IdentityNotAddressableError,
     IdentityScopeRef,
     OutboundContent,
+    PreparedContent,
     ProviderReceipt,
     Recipient,
+    SendContext,
 )
 from app.channels.inbound import (
     AttachmentLocator,
@@ -54,10 +56,12 @@ from app.channels.inbound import (
     InboundKind,
     ParsedDelivery,
     RefusalReason,
+    ReplyAction,
     StatusUpdate,
     tally,
 )
 from app.channels.media import locator_expired
+from app.channels.outcomes import SendNotAttemptedError
 from app.channels.policy import (
     ChannelCapabilities,
     ChannelPolicy,
@@ -69,6 +73,7 @@ from app.channels.policy import (
     WindowedPolicy,
 )
 from app.core.config import Settings
+from app.core.storage import MediaUrlGrant
 from app.db.models.channel import (
     Channel,
     ChannelConnection,
@@ -76,10 +81,17 @@ from app.db.models.channel import (
     IdentityKind,
     IdentityScope,
 )
-from app.db.models.conversation import Conversation, MessageKind, MessageStatus
+from app.db.models.conversation import (
+    Conversation,
+    MessageKind,
+    MessageStatus,
+    ReplyActionSource,
+)
 from app.db.models.media import MediaLocatorKind
 
 PAYLOAD_OBJECT: Final = "synthetic"
+#: The one quick-reply payload the synthetic provider treats as an opt-out.
+OPT_OUT_PAYLOAD: Final = "SYNTHETIC-STOP"
 BYTE_LIMIT: Final = 1_000
 SYNTHETIC_INSTRUCTIONS: Final = "\n\nYou are replying over the synthetic test channel."
 
@@ -134,25 +146,79 @@ class SyntheticPolicy(WindowedPolicy):
         return SYNTHETIC_INSTRUCTIONS
 
 
+#: A Messenger-shaped channel: 24 hours for anybody, then seven more days for a
+#: person under a human-agent tag, and never for an agent (OMNI-033).
+TAGGED_CAPABILITIES: Final = ChannelCapabilities(
+    text_limit=BYTE_LIMIT,
+    text_unit=TextUnit.UTF8_BYTES,
+    reply_budget=900,
+    attachments_per_message=4,
+    media_families=frozenset({"image", "video"}),
+    receipts=ReceiptModel.WATERMARK,
+    echoes=True,
+    reply_to=True,
+    reactions=True,
+    unsend=True,
+    templates=False,
+    out_of_window=OutOfWindow.TAG,
+    message_id_scope="connection",
+    # Messenger's and Instagram's policy (OMNI-041).
+    disclosure_required=True,
+)
+
+
+class TaggedPolicy(SyntheticPolicy):
+    """The synthetic channel with Messenger's rules: a 24-hour window and a 7-day human tag."""
+
+    capabilities = TAGGED_CAPABILITIES
+    window = timedelta(hours=24)
+    human_tag_window = timedelta(days=7)
+    closed_window_refusal = "The tagged reply window has closed."
+
+
 @dataclass
 class SendLog:
     """Everything the synthetic provider was asked to do."""
 
     sent: list[tuple[Recipient, OutboundContent]] = field(default_factory=list)
+    contexts: list[SendContext] = field(default_factory=list)
     prepared: list[OutboundContent] = field(default_factory=list)
     fetched: list[str] = field(default_factory=list)
+    #: When set, the provider declines every send before reading it.
+    refuse: bool = False
+    #: How far the provider's clock is behind Wasla's when it timestamps a send;
+    #: None for a provider whose send answer carries no time (OMNI-042).
+    provider_clock_lag: timedelta | None = None
 
 
 @dataclass
 class _Sender:
     log: SendLog
 
-    async def prepare(self, content: OutboundContent) -> None:
+    async def prepare(
+        self, content: OutboundContent, *, media_url: MediaUrlGrant | None = None
+    ) -> PreparedContent:
         self.log.prepared.append(content)
+        if media_url is not None:
+            # A URL-only provider: the file is offered by a short-lived link.
+            return PreparedContent(
+                content=content, reference=await media_url.issue(), reference_kind="url"
+            )
+        return PreparedContent(content=content, reference="syn.upload", reference_kind="upload")
 
-    async def send(self, recipient: Recipient, content: OutboundContent) -> ProviderReceipt:
-        self.log.sent.append((recipient, content))
-        return ProviderReceipt(message_id=f"syn.out.{uuid.uuid4().hex}")
+    async def send(
+        self, recipient: Recipient, prepared: PreparedContent, context: SendContext
+    ) -> ProviderReceipt:
+        self.log.sent.append((recipient, prepared.content))
+        self.log.contexts.append(context)
+        if self.log.refuse:
+            raise SendNotAttemptedError("The synthetic provider declined the message.")
+        stamped = (
+            datetime.now(UTC) - self.log.provider_clock_lag
+            if self.log.provider_clock_lag is not None
+            else None
+        )
+        return ProviderReceipt(message_id=f"syn.out.{uuid.uuid4().hex}", sent_at=stamped)
 
 
 @dataclass
@@ -181,9 +247,15 @@ class SyntheticAdapter:
     participant_preference: tuple[str, ...] = (IdentityKind.IGSID.value,)
     anchor_preference: tuple[str, ...] = (IdentityKind.IGSID.value,)
 
-    def __init__(self, channel: Channel = Channel.INSTAGRAM, *, file: bytes = b"") -> None:
+    def __init__(
+        self,
+        channel: Channel = Channel.INSTAGRAM,
+        *,
+        file: bytes = b"",
+        tagged: bool = False,
+    ) -> None:
         self.channel = channel
-        self.policy: ChannelPolicy = SyntheticPolicy(channel)
+        self.policy: ChannelPolicy = TaggedPolicy(channel) if tagged else SyntheticPolicy(channel)
         self.log = SendLog()
         self._file = file
 
@@ -256,6 +328,30 @@ class SyntheticAdapter:
                 ),
                 raw=dict(raw),
             )
+        if kind == "postback":
+            # Messenger/Instagram-shaped `postback {mid, title, payload}`: a
+            # message carrying an action, never a separate kind (ADR-125).
+            party = raw.get("from")
+            if not isinstance(party, str) or not party:
+                refused[RefusalReason.MISSING_SENDER] += 1
+                return None
+            title = raw.get("title") if isinstance(raw.get("title"), str) else None
+            payload = raw.get("payload") if isinstance(raw.get("payload"), str) else None
+            return InboundEvent(
+                channel=self.channel,
+                connection_key=account,
+                kind=InboundKind.MESSAGE,
+                event_id=event_id,
+                occurred_at=at,
+                sender=(Identifier(IdentityKind.IGSID, party),),
+                message_id=event_id,
+                message_kind=MessageKind.INTERACTIVE,
+                text=title,
+                action=ReplyAction(
+                    source=ReplyActionSource.POSTBACK, id_or_payload=payload, title=title
+                ),
+                raw=dict(raw),
+            )
         if kind not in ("message", "echo"):
             refused[RefusalReason.UNSUPPORTED_FIELD] += 1
             return None
@@ -278,6 +374,21 @@ class SyntheticAdapter:
             if attachments
             else MessageKind.TEXT
         )
+        # A Messenger-shaped quick reply: words beside a payload (OMNI-030).
+        action = None
+        quick = raw.get("quick_reply")
+        if isinstance(quick, Mapping):
+            payload = quick.get("payload")
+            title = quick.get("title")
+            action = ReplyAction(
+                source=ReplyActionSource.QUICK_REPLY,
+                id_or_payload=payload if isinstance(payload, str) else None,
+                title=title if isinstance(title, str) else None,
+            )
+            message_kind = MessageKind.INTERACTIVE
+        text = raw.get("text") if isinstance(raw.get("text"), str) else None
+        if text is None and action is not None:
+            text = action.title
         return InboundEvent(
             channel=self.channel,
             connection_key=account,
@@ -287,8 +398,9 @@ class SyntheticAdapter:
             sender=(Identifier(IdentityKind.IGSID, party),),
             message_id=event_id,
             message_kind=message_kind,
-            text=raw.get("text") if isinstance(raw.get("text"), str) else None,
+            text=text,
             attachments=attachments,
+            action=action,
             raw=dict(raw),
         )
 
@@ -306,6 +418,15 @@ class SyntheticAdapter:
             scope_ref=str(connection.id),
             connection_id=connection.id,
         )
+
+    async def marks_opt_out(
+        self,
+        session: AsyncSession,
+        connection: ChannelConnection,
+        action: ReplyAction,
+    ) -> bool:
+        """The synthetic provider marks one payload, as a workspace's template would."""
+        return action.id_or_payload == OPT_OUT_PAYLOAD
 
     # ------------------------------------------------------------ outbound
 
@@ -351,11 +472,14 @@ def synthetic_payload(account: str, *events: Mapping[str, Any]) -> dict[str, Any
 
 __all__ = [
     "BYTE_LIMIT",
+    "OPT_OUT_PAYLOAD",
     "PAYLOAD_OBJECT",
     "SYNTHETIC_CAPABILITIES",
     "SYNTHETIC_INSTRUCTIONS",
+    "TAGGED_CAPABILITIES",
     "SendLog",
     "SyntheticAdapter",
     "SyntheticPolicy",
+    "TaggedPolicy",
     "synthetic_payload",
 ]

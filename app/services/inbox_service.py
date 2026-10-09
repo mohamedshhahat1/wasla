@@ -34,6 +34,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -368,6 +369,9 @@ class InboxService:
 
         conversation.mode = ConversationMode.AI
         conversation.handoff_reason = None
+        # The AI's next reply discloses again on a channel that requires it:
+        # the customer may have been talking to a person (OMNI-041).
+        conversation.ai_resumed_at = datetime.now(UTC)
         self._analytics.handoff_resumed(conversation_id=conversation_id, actor_id=actor.id)
         self._record(
             AuditAction.CONVERSATION_RELEASED_TO_AI,

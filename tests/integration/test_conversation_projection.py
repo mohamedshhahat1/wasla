@@ -21,11 +21,11 @@ from app.db.models.conversation import (
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.conversation_repository import (
-    ContactRepository,
     ConversationRepository,
     MessageRepository,
 )
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.integration.identity_lookup import contact_by_phone
 
 pytestmark = pytest.mark.integration
 
@@ -141,7 +141,7 @@ async def test_inbound_message_creates_the_whole_aggregate(db_session: AsyncSess
     assert outcome.stored == 1
     assert outcome.duplicates == 0
 
-    contact = await ContactRepository(db_session, tenant_id=tenant.id).get_by_wa_id(CUSTOMER)
+    contact = await contact_by_phone(db_session, tenant.id, CUSTOMER)
     assert contact is not None
     # Meta only sends the profile name in the contacts block.
     assert contact.display_name == PROFILE_NAME
@@ -179,7 +179,7 @@ async def test_replaying_a_delivery_changes_nothing(db_session: AsyncSession) ->
     assert replay.stored == 0
     assert replay.duplicates == 1
 
-    contact = await ContactRepository(db_session, tenant_id=tenant.id).get_by_wa_id(CUSTOMER)
+    contact = await contact_by_phone(db_session, tenant.id, CUSTOMER)
     assert contact is not None
     conversations = ConversationRepository(db_session, tenant_id=tenant.id)
     conversation = await conversations.get_for_contact(
@@ -203,7 +203,7 @@ async def test_a_second_message_reuses_the_conversation(db_session: AsyncSession
         _inbound(message_id=WAMID_SECOND, text="Still there?")
     )
 
-    contact = await ContactRepository(db_session, tenant_id=tenant.id).get_by_wa_id(CUSTOMER)
+    contact = await contact_by_phone(db_session, tenant.id, CUSTOMER)
     assert contact is not None
     conversations = ConversationRepository(db_session, tenant_id=tenant.id)
     conversation = await conversations.get_for_contact(
@@ -244,7 +244,7 @@ async def test_a_late_status_never_moves_a_message_backwards(db_session: AsyncSe
     account = await _account(db_session, tenant=tenant, phone_number_id=PHONE_NUMBER_ID)
     await WhatsAppIngestionService(session=db_session).ingest(_inbound())
 
-    contact = await ContactRepository(db_session, tenant_id=tenant.id).get_by_wa_id(CUSTOMER)
+    contact = await contact_by_phone(db_session, tenant.id, CUSTOMER)
     assert contact is not None
     conversations = ConversationRepository(db_session, tenant_id=tenant.id)
     conversation = await conversations.get_for_contact(
@@ -301,8 +301,8 @@ async def test_the_same_customer_is_separate_in_each_workspace(db_session: Async
         _inbound(phone_number_id=OTHER_PHONE_NUMBER_ID, message_id=WAMID_SECOND)
     )
 
-    first_contact = await ContactRepository(db_session, tenant_id=first.id).get_by_wa_id(CUSTOMER)
-    second_contact = await ContactRepository(db_session, tenant_id=second.id).get_by_wa_id(CUSTOMER)
+    first_contact = await contact_by_phone(db_session, first.id, CUSTOMER)
+    second_contact = await contact_by_phone(db_session, second.id, CUSTOMER)
     assert first_contact is not None
     assert second_contact is not None
     assert first_contact.id != second_contact.id

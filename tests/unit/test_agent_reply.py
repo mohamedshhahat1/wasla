@@ -13,13 +13,16 @@ from app.agents.reply import (
     ARABIC_FALLBACK,
     ENGLISH_CONTINUATION,
     ENGLISH_FALLBACK,
-    MAX_SAFE_AI_WHATSAPP_REPLY_CHARS,
     fallback_reply,
     prepare_channel_reply,
 )
 from app.core.config import Settings
 from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS
-from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS
+from app.integrations.whatsapp.policy import (
+    MAX_SAFE_AI_WHATSAPP_REPLY_CHARS,
+    WHATSAPP_CAPABILITIES,
+    WHATSAPP_TEXT_MAX_CHARS,
+)
 
 PARAGRAPH = "Our finishing packages cover walls, floors and ceilings in detail. " * 8
 
@@ -29,7 +32,7 @@ def _paragraphs(count: int) -> str:
 
 
 def test_a_reply_that_fits_is_sent_exactly_as_written() -> None:
-    reply = prepare_channel_reply("  Yes, we are open until nine.  ")
+    reply = prepare_channel_reply("  Yes, we are open until nine.  ", WHATSAPP_CAPABILITIES)
 
     assert reply.text == "Yes, we are open until nine."
     assert reply.truncated is False
@@ -38,7 +41,7 @@ def test_a_reply_that_fits_is_sent_exactly_as_written() -> None:
 def test_a_reply_at_the_hard_limit_is_not_shortened() -> None:
     text = "a" * WHATSAPP_TEXT_MAX_CHARS
 
-    reply = prepare_channel_reply(text)
+    reply = prepare_channel_reply(text, WHATSAPP_CAPABILITIES)
 
     assert reply.text == text
     assert reply.truncated is False
@@ -48,7 +51,7 @@ def test_a_long_reply_is_one_message_within_the_limit() -> None:
     text = _paragraphs(20)
     assert len(text) > 6_000  # non-vacuity: this genuinely overflows
 
-    reply = prepare_channel_reply(text)
+    reply = prepare_channel_reply(text, WHATSAPP_CAPABILITIES)
 
     assert reply.truncated is True
     assert len(reply.text) <= WHATSAPP_TEXT_MAX_CHARS
@@ -58,7 +61,7 @@ def test_a_long_reply_is_one_message_within_the_limit() -> None:
 
 
 def test_a_long_reply_ends_at_a_paragraph_with_an_offer_to_continue() -> None:
-    reply = prepare_channel_reply(_paragraphs(20))
+    reply = prepare_channel_reply(_paragraphs(20), WHATSAPP_CAPABILITIES)
 
     head, _, offer = reply.text.rpartition("\n\n")
     assert offer == ENGLISH_CONTINUATION
@@ -68,7 +71,7 @@ def test_a_long_reply_ends_at_a_paragraph_with_an_offer_to_continue() -> None:
 def test_without_paragraphs_the_cut_falls_on_a_sentence() -> None:
     text = "This sentence explains one more detail of the offer. " * 200
 
-    reply = prepare_channel_reply(text)
+    reply = prepare_channel_reply(text, WHATSAPP_CAPABILITIES)
 
     head = reply.text.rpartition("\n\n")[0]
     assert head.endswith("offer.")
@@ -77,7 +80,7 @@ def test_without_paragraphs_the_cut_falls_on_a_sentence() -> None:
 def test_an_arabic_reply_is_offered_continuation_in_arabic() -> None:
     text = "نقدم باقات تشطيب كاملة للشقق والفلل بأسعار مناسبة. " * 200
 
-    reply = prepare_channel_reply(text)
+    reply = prepare_channel_reply(text, WHATSAPP_CAPABILITIES)
 
     assert reply.text.endswith(ARABIC_CONTINUATION)
     assert len(reply.text) <= WHATSAPP_TEXT_MAX_CHARS
@@ -87,14 +90,14 @@ def test_a_url_is_not_cut_in_half() -> None:
     url = "https://example.com/brochures/finishing-packages-2026.pdf"
     words = ("word " * 740) + url + " " + ("tail " * 400)
 
-    reply = prepare_channel_reply(words)
+    reply = prepare_channel_reply(words, WHATSAPP_CAPABILITIES)
 
     assert len(reply.text) <= WHATSAPP_TEXT_MAX_CHARS
     assert "https://" not in reply.text or url in reply.text
 
 
 def test_text_with_no_break_is_cut_hard_but_still_fits() -> None:
-    reply = prepare_channel_reply("x" * 9_000)
+    reply = prepare_channel_reply("x" * 9_000, WHATSAPP_CAPABILITIES)
 
     assert len(reply.text) <= WHATSAPP_TEXT_MAX_CHARS
     assert reply.text.endswith(ENGLISH_CONTINUATION)
@@ -108,7 +111,7 @@ def test_a_hard_cut_never_splits_a_character_from_its_marks() -> None:
     """
     text = "e\u0301" * 3_000 + "\U0001f468\u200d\U0001f469" * 1_000
 
-    reply = prepare_channel_reply(text)
+    reply = prepare_channel_reply(text, WHATSAPP_CAPABILITIES)
     head = reply.text.rpartition("\n\n")[0]
 
     assert head, "something was kept"
@@ -122,7 +125,7 @@ def test_a_two_million_character_reply_is_bounded_quickly() -> None:
     text = "word " * 400_000
     started = time.perf_counter()
 
-    reply = prepare_channel_reply(text)
+    reply = prepare_channel_reply(text, WHATSAPP_CAPABILITIES)
 
     assert len(reply.text) <= WHATSAPP_TEXT_MAX_CHARS
     assert time.perf_counter() - started < 1.0
@@ -131,7 +134,9 @@ def test_a_two_million_character_reply_is_bounded_quickly() -> None:
 def test_the_same_reply_is_always_shortened_the_same_way() -> None:
     text = _paragraphs(30)
 
-    assert prepare_channel_reply(text) == prepare_channel_reply(text)
+    assert prepare_channel_reply(text, WHATSAPP_CAPABILITIES) == prepare_channel_reply(
+        text, WHATSAPP_CAPABILITIES
+    )
 
 
 def test_the_backfilled_agent_ceiling_matches_the_deployment_default() -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -27,6 +28,8 @@ from app.services.messaging_service import MessagingService
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 CONNECTION = uuid.uuid4()
+# What `_take_allowance` reads of the connection row: its id and its own allowance.
+CONNECTION_ROW: Any = SimpleNamespace(id=CONNECTION, sends_per_minute=None)
 
 
 class RecordingConnections:
@@ -70,7 +73,7 @@ async def test_nothing_is_counted_unless_an_allowance_is_configured() -> None:
     connections = RecordingConnections(refuse_until=NOW)
     service = _service(connections)
 
-    await service._take_allowance(CONNECTION, origin=MessageOrigin.CAMPAIGN)
+    await service._take_allowance(CONNECTION_ROW, origin=MessageOrigin.CAMPAIGN)
 
     assert connections.asks == []
 
@@ -81,7 +84,7 @@ async def test_a_campaign_over_the_allowance_is_refused_before_anything_is_stage
     service = _service(connections, connection_sends_per_minute=20)
 
     with pytest.raises(ConnectionThrottledError) as refused:
-        await service._take_allowance(CONNECTION, origin=MessageOrigin.CAMPAIGN)
+        await service._take_allowance(CONNECTION_ROW, origin=MessageOrigin.CAMPAIGN)
 
     assert connections.asks == [{"connection_id": CONNECTION, "per_window": 20, "may_refuse": True}]
     error = refused.value
@@ -99,7 +102,7 @@ async def test_a_reply_is_counted_and_never_refused(origin: MessageOrigin) -> No
     connections = RecordingConnections(refuse_until=NOW + timedelta(minutes=1))
     service = _service(connections, connection_sends_per_minute=20)
 
-    await service._take_allowance(CONNECTION, origin=origin)
+    await service._take_allowance(CONNECTION_ROW, origin=origin)
 
     assert connections.asks == [
         {"connection_id": CONNECTION, "per_window": 20, "may_refuse": False}

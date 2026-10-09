@@ -36,7 +36,12 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.db.models.campaign import OPT_OUT_SOURCE_TYPE, OptOutSource
+from app.db.models.campaign import (
+    OPT_OUT_SOURCE_TYPE,
+    OPT_OUT_VIA_TYPE,
+    OptOutSource,
+    OptOutVia,
+)
 from app.db.models.channel import (
     CHANNEL_TYPE,
     Channel,
@@ -123,6 +128,35 @@ class MessageOrigin(StrEnum):
     # on its own behalf rather than on a workspace's - a service notice - so
     # that when one exists it is not filed as somebody's reply.
     SYSTEM = "system"
+    # Sent by the business from outside Wasla - the provider's own app, or the
+    # WhatsApp Business app under Coexistence - and reported back as an echo
+    # (OMNI-037, ADR-129). Nobody in Wasla sent it, and it is still the
+    # business talking: the AI stops and a person has the conversation.
+    EXTERNAL = "external"
+
+
+class ReplyActionSource(StrEnum):
+    """Which provider control a customer used to answer, in neutral terms (OMNI-030)."""
+
+    #: A quick-reply button under a WhatsApp template (`type: button`).
+    BUTTON = "button"
+    #: A WhatsApp interactive reply button (`interactive.button_reply`).
+    BUTTON_REPLY = "button_reply"
+    #: A row of a WhatsApp interactive list (`interactive.list_reply`).
+    LIST_REPLY = "list_reply"
+    #: A Messenger or Instagram quick reply (`message.quick_reply.payload`).
+    QUICK_REPLY = "quick_reply"
+    #: A Messenger or Instagram postback (`postback {title, payload}`), which
+    #: ADR-125 represents as a message carrying this action (OMNI-053).
+    POSTBACK = "postback"
+
+
+#: The longest provider id or payload a reply action keeps. Meta documents 256
+#: characters for an interactive button id and 1,000 for a Messenger payload;
+#: one that is longer is not a value Meta issued, and is dropped, not cut.
+MAX_ACTION_PAYLOAD_LENGTH: Final = 1_000
+#: The longest display title kept. Meta's titles are 20-24 characters.
+MAX_ACTION_TITLE_LENGTH: Final = 255
 
 
 class MessageStatus(StrEnum):
@@ -175,6 +209,7 @@ MESSAGE_KIND_TYPE = _enum_type(MessageKind, name="message_kind")
 MESSAGE_ORIGIN_TYPE = _enum_type(MessageOrigin, name="message_origin")
 MESSAGE_STATUS_TYPE = _enum_type(MessageStatus, name="message_status")
 MESSAGE_DELIVERY_STATE_TYPE = _enum_type(MessageDeliveryState, name="message_delivery_state")
+REPLY_ACTION_SOURCE_TYPE = _enum_type(ReplyActionSource, name="reply_action_source")
 
 # The delivery states that leave a send finished. Anything else is a send whose
 # outcome is still open - which for `REQUESTED` means open for ever, because
@@ -229,6 +264,18 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     opt_out_source: Mapped[OptOutSource | None] = mapped_column(
         OPT_OUT_SOURCE_TYPE,
         nullable=True,
+    )
+    # How the opt-out reached Wasla - a stop word, a tapped button, the
+    # provider's own preference webhook, a provider refusal, a replay of
+    # retained evidence, or a colleague (OMNI-030, OMNI-046). `source` says
+    # who decided; this says by which evidence. Null where it predates it.
+    opt_out_via: Mapped[OptOutVia | None] = mapped_column(OPT_OUT_VIA_TYPE, nullable=True)
+    # The last time this person was re-admitted to campaigns - a colleague
+    # clearing the opt-out, or the customer resuming marketing messages through
+    # the provider. A replay of older opt-out evidence never overrides a newer
+    # resume (OMNI-030).
+    marketing_resumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     @property
@@ -291,6 +338,15 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
             "ix_conversations_tenant_id_account_id_last_message_at",
             "tenant_id",
             "account_id",
+            text("last_message_at DESC NULLS LAST"),
+            text("id DESC"),
+        ),
+        # The inbox narrowed to one channel, in the inbox's own order
+        # (OMNI-048); the connection index above does not serve it.
+        Index(
+            "ix_conversations_tenant_id_channel_last_message_at",
+            "tenant_id",
+            "channel",
             text("last_message_at DESC NULLS LAST"),
             text("id DESC"),
         ),
@@ -398,6 +454,14 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         DateTime(timezone=True),
         nullable=True,
     )
+    # When an automated reply last told this customer they were talking to an
+    # automated assistant - written once that reply was delivered (OMNI-041).
+    automation_disclosed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # When a colleague last handed the conversation back to the AI. A later
+    # AI reply discloses again: the customer may have been talking to a person.
+    ai_resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The most recent reading of how the customer sounds. Current state only;
     # every reading is kept on `message_sentiments`, which is where a history
@@ -594,6 +658,13 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         nullable=True,
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the provider says it sent this message, on the provider's clock - a
+    # send receipt, an echo or a `sent` status. `sent_at` is Wasla's clock,
+    # taken after the provider answered, and a read watermark ("everything sent
+    # at or before this instant was read") is the provider's (OMNI-042).
+    provider_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -624,6 +695,17 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # would silently inherit - and inheriting the wrong attribution is the
     # defect this column exists to remove (MSG-16).
     origin: Mapped[MessageOrigin] = mapped_column(MESSAGE_ORIGIN_TYPE, nullable=False)
+    # What the customer tapped, when this message is a tap (OMNI-030, ADR-124).
+    # The title is also the body, so the transcript reads as words; the payload
+    # is what routing and the opt-out match read, because display text is
+    # translated and edited and a payload is not. Null on everything else.
+    action_source: Mapped[ReplyActionSource | None] = mapped_column(
+        REPLY_ACTION_SOURCE_TYPE, nullable=True
+    )
+    action_payload: Mapped[str | None] = mapped_column(
+        String(MAX_ACTION_PAYLOAD_LENGTH), nullable=True
+    )
+    action_title: Mapped[str | None] = mapped_column(String(MAX_ACTION_TITLE_LENGTH), nullable=True)
 
     @property
     def delivery_uncertain(self) -> bool:

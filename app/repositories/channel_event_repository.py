@@ -11,6 +11,14 @@ still in the schema until the compatibility cleanup, and it is stricter, so an
 id already used by *another* connection of the workspace is refused by it; that
 is reported as a collision - counted, never silently dropped and never filed on
 the other connection's event.
+
+**Nothing refused disappears** (OMNI-043). The refused delivery is kept as
+`failed` evidence on its own connection, payload and all, under a key of its own
+(`collision:<connection>:<event id>`) that the workspace-wide key cannot refuse:
+for Meta's globally unique ids a collision is an anomaly worth reading, and for
+a provider whose ids are unique only per connection it would otherwise be a
+customer's message lost without trace. Evidence is never projected, never
+recovered and never redacted, like every failed event.
 """
 
 from __future__ import annotations
@@ -18,6 +26,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 
 from sqlalchemy import ColumnElement, func, null, select, update
@@ -31,16 +40,38 @@ from app.repositories.base import BaseRepository, TenantScopedRepository
 logger = get_logger(__name__)
 
 
+#: The prefix of a collided delivery's evidence key (OMNI-043).
+COLLISION_EVIDENCE_PREFIX = "collision:"
+#: Why collision evidence was failed - a bounded token, as every event error is.
+EVENT_ID_COLLISION = "event_id_collision"
+_EVENT_ID_LENGTH = 255
+
+
+def collision_evidence_key(connection_id: uuid.UUID, event_id: str) -> str:
+    """The key a collided delivery is kept under: its connection and its own id.
+
+    Within the event id column's 255 characters; an id too long to fit beside
+    its prefix is kept by its SHA-256, the payload holding the original.
+    """
+    key = f"{COLLISION_EVIDENCE_PREFIX}{connection_id.hex}:{event_id}"
+    if len(key) <= _EVENT_ID_LENGTH:
+        return key
+    digest = sha256(event_id.encode()).hexdigest()
+    return f"{COLLISION_EVIDENCE_PREFIX}{connection_id.hex}:sha256:{digest}"
+
+
 @dataclass(frozen=True, slots=True)
 class StoredEvent:
     """What storing one event came to.
 
     `event` is None exactly when the id collided with another connection's
-    event in this workspace (the legacy key refused it).
+    event in this workspace (the legacy key refused it); `evidence` is then the
+    failed row the delivery was kept as (OMNI-043).
     """
 
     event: ChannelEvent | None
     created: bool
+    evidence: ChannelEvent | None = None
 
     @property
     def collided(self) -> bool:
@@ -123,8 +154,52 @@ class ChannelEventRepository(TenantScopedRepository[ChannelEvent]):
                 "channel.event_id_collision",
                 extra={"event": "channel.event_id_collision", "channel": channel.value},
             )
-            return StoredEvent(event=None, created=False)
+            evidence = await self._keep_as_evidence(
+                connection_id=connection_id,
+                channel=channel,
+                event_id=event_id,
+                kind=kind,
+                payload=payload,
+                received_at=received_at,
+            )
+            return StoredEvent(event=None, created=False, evidence=evidence)
         return StoredEvent(event=stored, created=inserted is not None)
+
+    async def _keep_as_evidence(
+        self,
+        *,
+        connection_id: uuid.UUID,
+        channel: Channel,
+        event_id: str,
+        kind: ChannelEventKind,
+        payload: dict[str, Any],
+        received_at: datetime,
+    ) -> ChannelEvent | None:
+        """Store a delivery the workspace-wide key refused as failed evidence (OMNI-043).
+
+        Idempotent: a replay of the same collided delivery finds its evidence
+        and writes nothing.
+        """
+        key = collision_evidence_key(connection_id, event_id)
+        now = datetime.now(UTC)
+        await self.session.execute(
+            pg_insert(ChannelEvent)
+            .values(
+                id=uuid.uuid4(),
+                tenant_id=self.tenant_id,
+                account_id=connection_id,
+                channel=channel,
+                event_id=key,
+                kind=kind,
+                state=ChannelEventState.FAILED,
+                payload=payload,
+                received_at=received_at,
+                processed_at=now,
+                error=EVENT_ID_COLLISION,
+            )
+            .on_conflict_do_nothing()
+        )
+        return await self.get(connection_id=connection_id, event_id=key)
 
     def mark_processed(self, event: ChannelEvent) -> ChannelEvent:
         """Every handoff this event needed has been made (MSG-02)."""

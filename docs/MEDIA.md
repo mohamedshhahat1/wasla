@@ -307,6 +307,10 @@ Two photographs in one delivery are two jobs, possibly on two workers. Each fini
 
 Sending uploads the file to Meta and sends the returned id. A hosted link would need every attachment behind a publicly reachable URL for as long as Meta might fetch it; an upload exposes the bytes to one recipient for one send.
 
+**The provider's own limits are checked before anything is staged** (OMNI-045). Each channel declares per-family limits (`ChannelCapabilities.media_limits`); for WhatsApp: image JPEG or PNG up to 5 MB, video MP4 or 3GPP up to 16 MB, audio up to 16 MB, documents up to 100 MB. A file over its family's limit or of a type the provider does not accept is refused with a 422, never uploaded to be refused by Meta. The route's own 16 MB cap stays the outer bound. An inbound WhatsApp media handle records its seven-day expiry on the locator, so an expired handle is refused before Meta is asked.
+
+**By URL, for a provider that can only fetch** (OMNI-040, ADR-128). Instagram takes video, audio and files only by URL. `ChannelSender.prepare` returns a reference - an upload id or a URL - and for the latter the S3/MinIO store issues a SigV4 query-signed GET for exactly the outbound message's own stored file: `MEDIA_SIGNED_URL_TTL_SECONDS` (600 by default, never more than 3,600). `MediaUrlGrant` refuses a key outside the workspace's prefix or of the wrong shape before the store is asked; the URL is handed to the adapter only and is never logged or stored on a message or an event. The trade-off is accepted in ADR-128: for its lifetime the URL lets whoever holds it fetch that one file. The local store cannot sign, so URL sending needs the `s3` backend. WhatsApp keeps uploading; no live channel uses URLs yet.
+
 An attachment is a free-form message, so the **24-hour service window applies** exactly as it does to text ([ADR-012](../DECISIONS.md)). Outside it, only an approved template will do.
 
 Meta groups attachments as `image`, `audio`, `video` or `document`, which are not the mime families — `application/pdf` is a *document*. Wasla's accepted list is narrower than Meta's: Meta will carry almost any file as a document, and a business forwarding an executable to a customer is not a feature anyone asked for.
@@ -345,6 +349,7 @@ The PDF parser added here also settles a note `KnowledgeService` had carried sin
 | `MEDIA_UPLOAD_GRACE_SECONDS` | `900` | How long an intent must sit before recovery treats it as abandoned rather than in progress |
 | `MEDIA_UPLOAD_RECOVERY_POLL_SECONDS` | `300` | Minutes, not days: what it finds is a file somebody is waiting for |
 | `MEDIA_UPLOAD_RECOVERY_BATCH_SIZE` | `100` | Intents per pass |
+| `MEDIA_SIGNED_URL_TTL_SECONDS` | `600` | Lifetime of a signed single-object URL for a URL-only provider; at most 3,600 |
 | `OPENAI_VISION_MODEL` | `gpt-4.1-mini` | Separate budget from the answering model |
 | `OPENAI_TRANSCRIPTION_MODEL` | `gpt-4o-mini-transcribe` | |
 

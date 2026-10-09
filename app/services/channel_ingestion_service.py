@@ -31,10 +31,12 @@ evils, argued in ADR-089.
 
 from __future__ import annotations
 
+import time
 import uuid
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
 from redis.exceptions import RedisError
@@ -44,9 +46,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.adapter import ChannelAdapter, IdentityScopeRef
 from app.channels.inbound import Identifier, InboundEvent, InboundKind, ParsedDelivery
 from app.core.logging import get_logger
-from app.core.telemetry import record_inbound_outcomes, record_inbound_refusals
+from app.core.telemetry import (
+    record_inbound_outcomes,
+    record_inbound_refusals,
+    record_opt_outs,
+    record_status_resolutions,
+)
 from app.db.errors import is_data_exception
-from app.db.models.campaign import OptOutSource
+from app.db.models.analytics import AnalyticsSource
+from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import ChannelConnection
 from app.db.models.channel_event import ChannelEvent, ChannelEventKind
 from app.db.models.conversation import Contact, Conversation, Message, MessageKind
@@ -63,10 +71,16 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.media_repository import MediaRepository
 from app.services.contact_identity_service import ContactIdentityService
-from app.services.conversation_service import ConversationProjectionService, ProjectionOutcome
+from app.services.conversation_service import (
+    DEFAULT_WATERMARK_TOLERANCE,
+    ConversationProjectionService,
+    EchoKind,
+    ProjectionOutcome,
+)
 from app.services.follow_up_service import FollowUpService
+from app.services.inbox_service import InboxService
 from app.services.media_outcomes import MediaReason, status_for, text_for
-from app.services.opt_out import is_stop_request
+from app.services.opt_out import is_stop_request, record_opt_out
 from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 
@@ -77,12 +91,18 @@ logger = get_logger(__name__)
 AGENT_NOT_QUEUED = "agent_enqueue_failed"
 MEDIA_NOT_QUEUED = "media_enqueue_failed"
 PROVIDER_ID_COLLISION = "provider_id_collision"
+# The provider category a marketing preference is recorded under (OMNI-046).
+MARKETING_CATEGORY = "marketing_messages"
+# Why a conversation was handed to a person when a reply arrived from outside
+# Wasla (OMNI-037). The handoff reason a colleague reads in the inbox.
+EXTERNAL_REPLY_REASON = "A colleague replied from outside Wasla."
 
 _EVENT_KINDS: Mapping[InboundKind, ChannelEventKind] = MappingProxyType(
     {
         InboundKind.MESSAGE: ChannelEventKind.MESSAGE,
         InboundKind.STATUS: ChannelEventKind.STATUS,
         InboundKind.ECHO: ChannelEventKind.ECHO,
+        InboundKind.PREFERENCE: ChannelEventKind.PREFERENCE,
     }
 )
 
@@ -125,6 +145,9 @@ class IngestionOutcome:
     rejected: int = 0
     # Echoes of the business's own sends: stored as evidence, never projected.
     echoes: int = 0
+    # Of those, replies a person sent from outside Wasla: projected, and the
+    # conversation handed to a person (OMNI-037).
+    external_echoes: int = 0
     # Provider ids naming a message that is not this customer's on this
     # connection (OMNI-005): stored as evidence, never projected.
     collisions: int = 0
@@ -147,9 +170,11 @@ class _Step:
     cancelled: int = 0
     opted_out: int = 0
     echoes: int = 0
+    external: int = 0
     collisions: int = 0
     paired: int = 0
     conflicts: int = 0
+    opt_outs_by_via: Counter[str] = field(default_factory=Counter)
     attachments: list[tuple[uuid.UUID, uuid.UUID]] = field(default_factory=list)
     answering: list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]] = field(default_factory=list)
     owed: list[_Handoff] = field(default_factory=list)
@@ -165,7 +190,11 @@ class ChannelIngestionService:
         adapter: ChannelAdapter,
         queue: AgentQueue | None = None,
         media_queue: MediaQueue | None = None,
+        watermark_tolerance: timedelta = DEFAULT_WATERMARK_TOLERANCE,
     ) -> None:
+        """`watermark_tolerance` is `WATERMARK_CLOCK_TOLERANCE_SECONDS`, for a
+        channel whose reads arrive as a watermark (OMNI-042)."""
+        self._watermark_tolerance = watermark_tolerance
         self._session = session
         self._adapter = adapter
         self._queue = queue
@@ -174,6 +203,7 @@ class ChannelIngestionService:
         self._outbound = OutboundMessageDirectory(session)
         self._live: dict[str, ChannelConnection | None] = {}
         self._holdings: dict[str, list[ChannelConnection]] = {}
+        self._status_lookup_seconds: list[float] = []
         self._scopes: dict[tuple[uuid.UUID, str], IdentityScopeRef] = {}
 
     async def ingest(self, delivery: ParsedDelivery) -> IngestionOutcome:
@@ -224,6 +254,7 @@ class ChannelIngestionService:
             unowned=totals.unowned,
             rejected=rejected,
             echoes=totals.echoes,
+            external_echoes=totals.external,
             collisions=totals.collisions,
             paired_identities=totals.paired,
             identity_conflicts=totals.conflicts,
@@ -232,6 +263,9 @@ class ChannelIngestionService:
             ),
         )
         channel = self._adapter.channel.value
+        await record_opt_outs(totals.opt_outs_by_via)
+        await record_status_resolutions(channel, self._status_lookup_seconds)
+        self._status_lookup_seconds.clear()
         await record_inbound_refusals(channel, outcome.refused)
         await record_inbound_outcomes(
             channel,
@@ -239,6 +273,7 @@ class ChannelIngestionService:
                 "stored": outcome.stored,
                 "duplicate": outcome.duplicates,
                 "echo": outcome.echoes,
+                "external_echo": outcome.external_echoes,
                 "collision": outcome.collisions,
                 "unknown_connection": outcome.unknown_accounts,
                 "inactive_connection": outcome.inactive_accounts,
@@ -325,19 +360,29 @@ class ChannelIngestionService:
         step.stored += 1
         record = stored.event
         projection = ConversationProjectionService(
-            session=self._session, tenant_id=connection.tenant_id
+            session=self._session,
+            tenant_id=connection.tenant_id,
+            watermark_tolerance=self._watermark_tolerance,
         )
 
         if event.kind is InboundKind.ECHO:
-            # The business's own message, reported back. Evidence only: it is
-            # nobody's turn to answer, it opens no window and it is not a
-            # customer being active (OMNI-005, OMNI-018).
+            # The business's own message, reported back. Never a customer's
+            # turn, and it opens no window (OMNI-005, OMNI-018). Wasla's own
+            # send is confirmed and nothing else; a reply a person typed in
+            # the provider's own app is projected, and the AI stops talking
+            # over them (OMNI-037).
             step.echoes += 1
+            await self._project_echo(event, connection, projection, step)
             step.owed.append(_Handoff(event=record))
             return
 
         if event.kind is InboundKind.STATUS:
             await self._project_status(event, connection, projection, resolved_message)
+            step.owed.append(_Handoff(event=record))
+            return
+
+        if event.kind is InboundKind.PREFERENCE:
+            await self._record_preference(event, connection, step)
             step.owed.append(_Handoff(event=record))
             return
 
@@ -403,6 +448,15 @@ class ChannelIngestionService:
             step.owed.append(_Handoff(event=record))
             return
 
+        # A tap that asks to stop - its words a stop phrase, or its payload one
+        # the workspace marked - is an opt-out and nothing else: it is honoured
+        # and not answered, because the only reply an agent could give is the
+        # sales message the customer just refused (OMNI-030). A typed "stop"
+        # is unchanged: honoured, and still answered.
+        opt_out_tap = event.action is not None and (
+            is_stop_request(event.text)
+            or await self._adapter.marks_opt_out(self._session, connection, event.action)
+        )
         if historical and event.attachments:
             await self._record_unprocessed_media(connection.tenant_id, message)
         step.owed.append(
@@ -412,6 +466,7 @@ class ChannelIngestionService:
                 message=message,
                 has_attachments=bool(event.attachments),
                 historical=historical,
+                answer=not opt_out_tap,
                 step=step,
             )
         )
@@ -422,7 +477,36 @@ class ChannelIngestionService:
             session=self._session, tenant_id=connection.tenant_id
         ).cancel_for_conversation(conversation_id=message.conversation_id)
         # A customer asking to stop is honoured here rather than by a worker.
-        step.opted_out += self._record_opt_out(sender.contact, text=event.text)
+        if opt_out_tap:
+            self._record_opt_out(
+                sender.contact, via=OptOutVia.REPLY_ACTION, at=occurred_at, step=step
+            )
+        elif is_stop_request(event.text):
+            self._record_opt_out(sender.contact, via=OptOutVia.MESSAGE, at=occurred_at, step=step)
+
+    async def _project_echo(
+        self,
+        event: InboundEvent,
+        connection: ChannelConnection,
+        projection: ConversationProjectionService,
+        step: _Step,
+    ) -> None:
+        conversation = await self._conversation_of(connection, event.sender)
+        echoed = await projection.project_echo(
+            connection=connection, event=event, conversation=conversation
+        )
+        if echoed.kind is not EchoKind.EXTERNAL or echoed.conversation is None:
+            return
+        step.external += 1
+        # A person answered from outside Wasla. The conversation is theirs:
+        # handed over (never assigned), the agent's pending nudges cancelled,
+        # and any queued agent turn suppressed by the mode it will read before
+        # it engages and again before it sends - the engagement barrier.
+        await InboxService(session=self._session, tenant_id=connection.tenant_id).hand_off(
+            conversation_id=echoed.conversation.id,
+            reason=EXTERNAL_REPLY_REASON,
+            source=AnalyticsSource.SYSTEM,
+        )
 
     async def _project_status(
         self,
@@ -441,6 +525,53 @@ class ChannelIngestionService:
                 )
             return
         await projection.project_status(event=event, connection=connection, message=resolved)
+
+    async def _record_preference(
+        self, event: InboundEvent, connection: ChannelConnection, step: _Step
+    ) -> None:
+        """A marketing stop or resume made through the provider itself (OMNI-046).
+
+        The contact is found by the identities the provider named and never
+        created: a preference from somebody who never wrote is nothing to act
+        on. A stop is an opt-out through the one writer, `provider_preference`.
+        A resume is recorded as a re-admission, and lifts only an opt-out the
+        provider's own preference record made - a stop word or a tap the
+        customer sent this business is theirs, not the provider's, to undo.
+        """
+        preference = event.preference
+        if preference is None or preference.category != MARKETING_CATEGORY:
+            return
+        contact = await self._contact_of(connection, event.sender)
+        if contact is None:
+            return
+        at = event.occurred_at or datetime.now(UTC)
+        if preference.value == "stop":
+            self._record_opt_out(contact, via=OptOutVia.PROVIDER_PREFERENCE, at=at, step=step)
+        elif preference.value == "resume":
+            if contact.marketing_resumed_at is None or contact.marketing_resumed_at < at:
+                contact.marketing_resumed_at = at
+            if contact.opt_out_via is OptOutVia.PROVIDER_PREFERENCE:
+                contact.marketing_opt_out_at = None
+                contact.opt_out_source = None
+                contact.opt_out_via = None
+
+    async def _contact_of(
+        self, connection: ChannelConnection, sender: tuple[Identifier, ...]
+    ) -> Contact | None:
+        """The contact these identifiers name on this connection, found and never created."""
+        identities = ContactIdentityRepository(self._session, tenant_id=connection.tenant_id)
+        for identifier in sender:
+            scope = await self._scope(connection, identifier)
+            identity = await identities.find(
+                channel=connection.channel,
+                kind=identifier.kind,
+                scope=scope.scope,
+                scope_ref=scope.scope_ref,
+                value=identifier.value,
+            )
+            if identity is not None:
+                return await self._session.get(Contact, identity.contact_id)
+        return None
 
     async def _conversation_of(
         self, connection: ChannelConnection, sender: tuple[Identifier, ...]
@@ -470,16 +601,17 @@ class ChannelIngestionService:
         message: Message,
         has_attachments: bool,
         historical: bool,
+        answer: bool,
         step: _Step,
     ) -> _Handoff:
         """What still has to happen for a new customer message.
 
         A message on a connection the workspace has released is recorded, not
         answered (MSG-01, MEDIA-08); one Wasla cannot read has no content to
-        answer (MSG-19); one carrying files is answered once they are read
-        (ADR-092).
+        answer (MSG-19); an opt-out tap is honoured, not answered (OMNI-030);
+        one carrying files is answered once they are read (ADR-092).
         """
-        if historical:
+        if historical or not answer:
             return _Handoff(event=record)
         if has_attachments:
             step.attachments.append((tenant_id, message.id))
@@ -502,18 +634,16 @@ class ChannelIngestionService:
             media.processed_at = datetime.now(UTC)
 
     @staticmethod
-    def _record_opt_out(contact: Contact, *, text: str | None) -> int:
-        """Opt the sender out of campaigns if the whole message is a stop word.
+    def _record_opt_out(contact: Contact, *, via: OptOutVia, at: datetime, step: _Step) -> None:
+        """Opt the sender out of campaigns, through the one writer every route uses.
 
         The sender's own contact, as resolved from what the provider said - not
         a lookup by a phone column, which a username sender does not have.
+        Dated by the provider's timestamp: when the customer asked.
         """
-        if not is_stop_request(text) or contact.marketing_opt_out_at is not None:
-            return 0
-        contact.marketing_opt_out_at = datetime.now(UTC)
-        contact.opt_out_source = OptOutSource.CUSTOMER
-        logger.info("campaign.opt_out_requested", extra={"contact_id": str(contact.id)})
-        return 1
+        if record_opt_out(contact, source=OptOutSource.CUSTOMER, via=via, at=at):
+            step.opted_out += 1
+            step.opt_outs_by_via[via.value] += 1
 
     # ----------------------------------------------------------- settlement
 
@@ -633,9 +763,9 @@ class ChannelIngestionService:
                 self._adapter.channel, event.connection_key
             )
         holders = self._holdings[event.connection_key]
-        message = await self._outbound.find_by_provider_message_id(
-            message_id, connection_ids=[holder.id for holder in holders]
-        )
+        started = time.perf_counter()
+        message = await self._outbound.find_by_provider_message_id(message_id, holders=holders)
+        self._status_lookup_seconds.append(time.perf_counter() - started)
         if message is not None:
             owner = next((holder for holder in holders if holder.id == message.connection_id), None)
             if owner is not None:
@@ -663,9 +793,11 @@ def _fold(totals: _Step, step: _Step) -> None:
     totals.cancelled += step.cancelled
     totals.opted_out += step.opted_out
     totals.echoes += step.echoes
+    totals.external += step.external
     totals.collisions += step.collisions
     totals.paired += step.paired
     totals.conflicts += step.conflicts
+    totals.opt_outs_by_via.update(step.opt_outs_by_via)
     totals.attachments.extend(step.attachments)
     totals.answering.extend(step.answering)
     totals.owed.extend(step.owed)

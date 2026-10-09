@@ -36,6 +36,7 @@ from sqlalchemy.orm import aliased
 
 from app.db.models.analytics import AnalyticsEvent, AnalyticsEventType
 from app.db.models.campaign import CampaignRecipient, RecipientStatus
+from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Conversation,
     Message,
@@ -133,6 +134,16 @@ class SentimentMetrics:
     readings: int = 0
     unhappy_conversations: int = 0
     by_label: dict[SentimentLabel, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelMetrics:
+    """One channel's share of the window (OMNI-048)."""
+
+    channel: Channel
+    conversations_created: int = 0
+    messages_received: int = 0
+    messages_sent: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,3 +396,45 @@ class TenantMetricsRepository:
             failed=by_status.get(RecipientStatus.FAILED, 0),
             skipped=by_status.get(RecipientStatus.SKIPPED, 0),
         )
+
+    async def channels(self, *, since: datetime, until: datetime) -> list[ChannelMetrics]:
+        """Conversations and traffic per channel (OMNI-048), only channels with any.
+
+        Sent counts every outbound message that left, as `messages` does; a
+        failed one is not traffic. The message's channel is its conversation's,
+        joined on the tenant-agreed key.
+        """
+        created = await self._session.execute(
+            select(Conversation.channel, func.count())
+            .where(Conversation.tenant_id == self._tenant_id)
+            .where(Conversation.created_at >= since)
+            .where(Conversation.created_at < until)
+            .group_by(Conversation.channel)
+        )
+        traffic = await self._session.execute(
+            select(Conversation.channel, Message.direction, func.count())
+            .select_from(Message)
+            .join(
+                Conversation,
+                (Conversation.id == Message.conversation_id)
+                & (Conversation.tenant_id == Message.tenant_id),
+            )
+            .where(Message.tenant_id == self._tenant_id)
+            .where(Message.created_at >= since)
+            .where(Message.created_at < until)
+            .where(
+                (Message.direction == MessageDirection.INBOUND)
+                | (Message.status != MessageStatus.FAILED)
+            )
+            .group_by(Conversation.channel, Message.direction)
+        )
+        figures: dict[Channel, dict[str, int]] = {}
+        for channel, count in created.all():
+            figures.setdefault(channel, {})["conversations_created"] = int(count)
+        for channel, direction, count in traffic.all():
+            key = "messages_received" if direction is MessageDirection.INBOUND else "messages_sent"
+            figures.setdefault(channel, {})[key] = int(count)
+        return [
+            ChannelMetrics(channel=channel, **values)
+            for channel, values in sorted(figures.items(), key=lambda item: item[0].value)
+        ]

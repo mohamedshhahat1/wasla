@@ -2,6 +2,8 @@
 
     python -m scripts.omnichannel_invariants census   # what the data holds; never fails
     python -m scripts.omnichannel_invariants verify   # invariants; exit 1 on any violation
+    python -m scripts.omnichannel_invariants recover-button-opt-outs --dry-run
+    python -m scripts.omnichannel_invariants recover-button-opt-outs --apply
 
 The URL is `INVARIANTS_DATABASE_URL`, else `DATABASE_URL`. Meant for a replica or
 a restored copy as much as for the primary: every statement is a `SELECT`, run
@@ -26,6 +28,13 @@ oracle), each agent turn a customer's message as its trigger (the echo oracle),
 each file its own message's workspace and conversation, and no identity scoped
 twice. Most are also enforced by keys; this says so of the data, and is what
 proves a backfill or a restore whole.
+
+`recover-button-opt-outs` is the one command here that can write, and only with
+`--apply` (OMNI-030). It replays the "stop" taps still held in retained raw
+payloads through the one opt-out writer, with the provenance `replay`; the dry
+run (the default) is read-only like everything else. It must run on production
+**before the 30-day payload redaction removes the evidence**. Output is counts
+per workspace id; never a phone, a business-scoped id or a message.
 """
 
 from __future__ import annotations
@@ -46,6 +55,14 @@ class Check:
     name: str
     query: str
 
+
+# The English stop phrases, as SQL literals, for the Q6 census - written out so
+# every statement here is a fixed string; a unit test holds them equal to
+# `STOP_WORDS`. Arabic phrases need the matcher's letter folding and are counted
+# by the replay command, which uses `is_stop_request` itself.
+STOP_PHRASES_SQL = (
+    "'no more messages', 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe'"
+)
 
 # ------------------------------------------------------------------ census
 
@@ -158,6 +175,34 @@ CENSUS: tuple[Check, ...] = (
     Check(
         "connections_credential_refused",
         "SELECT count(*) FROM channel_connections WHERE health = 'auth_failed'",
+    ),
+    # The final audit's Q5 and Q6 (OMNI-030): exposure the old parser may
+    # already have left. Taps stored with no words, and retained "stop" taps
+    # whose customer is not opted out - which `recover-button-opt-outs`
+    # replays, and which must be run before retention redacts the payloads.
+    Check(
+        "q5_inbound_interactive_without_text",
+        "SELECT count(*) FROM messages WHERE direction = 'inbound'"
+        " AND kind = 'interactive' AND body IS NULL",
+    ),
+    Check(
+        "q6_retained_stop_taps_without_opt_out",
+        "SELECT count(*) FROM whatsapp_events e"
+        " JOIN messages m ON m.tenant_id = e.tenant_id AND m.connection_id = e.account_id"
+        " AND m.wa_message_id = e.event_id AND m.direction = 'inbound'"
+        " JOIN conversations v ON v.tenant_id = m.tenant_id AND v.id = m.conversation_id"
+        " JOIN contacts c ON c.tenant_id = v.tenant_id AND c.id = v.contact_id"
+        " WHERE e.kind = 'message' AND e.payload IS NOT NULL"
+        " AND c.marketing_opt_out_at IS NULL"
+        " AND lower(btrim(coalesce(e.payload #>> '{button,text}',"
+        " e.payload #>> '{interactive,button_reply,title}',"
+        " e.payload #>> '{interactive,list_reply,title}'))) IN ('no more messages',"
+        " 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe')",
+    ),
+    # Deliveries the workspace-wide key refused, kept as evidence (OMNI-043).
+    Check(
+        "collision_evidence_events",
+        "SELECT count(*) FROM whatsapp_events WHERE event_id LIKE 'collision:%'",
     ),
 )
 
@@ -314,6 +359,49 @@ INVARIANTS: tuple[Check, ...] = (
         " AND NOT EXISTS (SELECT 1 FROM contact_identities i WHERE i.tenant_id = r.tenant_id"
         " AND i.contact_id = r.contact_id AND i.id = r.participant_identity_id)",
     ),
+    # A processed message event projected onto its message, found under the
+    # event's own id on its own connection (OMNI-032, the audit's Q3). What
+    # inbound recovery and the stranded-media sweep rely on.
+    Check(
+        "message_event_without_its_projected_message",
+        "SELECT count(*) FROM whatsapp_events e WHERE e.kind = 'message'"
+        " AND e.state = 'processed' AND NOT EXISTS (SELECT 1 FROM messages m"
+        " WHERE m.tenant_id = e.tenant_id AND m.connection_id = e.account_id"
+        " AND m.wa_message_id = e.event_id)",
+    ),
+    # Collision evidence is evidence: failed, so never recovered or projected
+    # (OMNI-043).
+    Check(
+        "collision_evidence_not_failed",
+        "SELECT count(*) FROM whatsapp_events"
+        " WHERE event_id LIKE 'collision:%' AND state <> 'failed'",
+    ),
+    # A tap keeps its words beside its payload (OMNI-030).
+    Check(
+        "inbound_tap_without_its_words",
+        "SELECT count(*) FROM messages WHERE direction = 'inbound'"
+        " AND action_source IS NOT NULL AND action_title IS NOT NULL AND body IS NULL",
+    ),
+    # An AI reply delivered on a channel whose policy requires the automation
+    # disclosure, on a conversation that has never recorded one (OMNI-041).
+    # Messenger and Instagram are the channels that require it.
+    Check(
+        "ai_reply_on_a_disclosure_channel_never_disclosed",
+        "SELECT count(*) FROM conversations c WHERE c.channel IN ('messenger', 'instagram')"
+        " AND c.automation_disclosed_at IS NULL AND EXISTS (SELECT 1 FROM messages m"
+        " WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.id"
+        " AND m.direction = 'outbound' AND m.origin = 'agent'"
+        " AND m.delivery_state = 'sent')",
+    ),
+    # The window anchor is the newest thing the customer said (OMNI-036, the
+    # audit's Q4). A late delivery used to move it backwards; on production
+    # this counts conversations that already happened to.
+    Check(
+        "window_anchor_older_than_newest_inbound",
+        "SELECT count(*) FROM conversations c WHERE c.last_inbound_at < ("
+        " SELECT max(m.sent_at) FROM messages m WHERE m.tenant_id = c.tenant_id"
+        " AND m.conversation_id = c.id AND m.direction = 'inbound')",
+    ),
     Check(
         "campaign_recipient_conversation_on_another_connection",
         "SELECT count(*) FROM campaign_recipients r JOIN campaigns k"
@@ -371,11 +459,61 @@ async def _run(command: str, url: str) -> int:
     return 0
 
 
+async def _recover(url: str, *, apply: bool) -> int:
+    """Replay retained stop taps; read-only unless `apply` (OMNI-030)."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.services.opt_out_recovery import recover_button_opt_outs
+
+    engine = create_async_engine(url, poolclass=NullPool)
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            if not apply:
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+            report = await recover_button_opt_outs(session, apply=apply)
+            if apply:
+                await session.commit()
+            else:
+                await session.rollback()
+    finally:
+        await engine.dispose()
+    verb = "applied" if apply else "would_apply"
+    for tenant_id, counts in sorted(report.by_workspace.items(), key=lambda item: str(item[0])):
+        sys.stdout.write(
+            f"workspace {tenant_id}: candidates {counts.candidates}, {verb} {counts.applied}, "
+            f"already_opted_out {counts.already_opted_out}, "
+            f"skipped_newer_resume {counts.skipped_newer_resume}, "
+            f"no_projected_message {counts.no_projected_message}\n"
+        )
+    sys.stdout.write(
+        f"recover-button-opt-outs {'apply' if apply else 'dry-run'}: taps_read {report.taps_read}, "
+        f"candidates {report.total('candidates')}, {verb} {report.total('applied')}, "
+        f"already_opted_out {report.total('already_opted_out')}, "
+        f"skipped_newer_resume {report.total('skipped_newer_resume')}\n"
+    )
+    return 0
+
+
+USAGE = (
+    "usage: python -m scripts.omnichannel_invariants census|verify\n"
+    "       python -m scripts.omnichannel_invariants recover-button-opt-outs [--dry-run|--apply]\n"
+)
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 1 or argv[0] not in ("census", "verify"):
-        sys.stderr.write("usage: python -m scripts.omnichannel_invariants census|verify\n")
-        return 64
     url = os.environ.get("INVARIANTS_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if argv and argv[0] == "recover-button-opt-outs":
+        mode = argv[1:] or ["--dry-run"]
+        if mode not in (["--dry-run"], ["--apply"]):
+            sys.stderr.write(USAGE)
+            return 64
+        if not url:
+            sys.stderr.write("omnichannel_invariants: INVARIANTS_DATABASE_URL or DATABASE_URL\n")
+            return 64
+        return asyncio.run(_recover(url, apply=mode == ["--apply"]))
+    if len(argv) != 1 or argv[0] not in ("census", "verify"):
+        sys.stderr.write(USAGE)
+        return 64
     if not url:
         sys.stderr.write("omnichannel_invariants: INVARIANTS_DATABASE_URL or DATABASE_URL\n")
         return 64

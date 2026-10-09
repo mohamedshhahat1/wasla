@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **198 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **199 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -338,12 +338,24 @@ conversation read carries:
 | `channel` | `whatsapp` today; `instagram` and `messenger` are vocabulary no connection uses yet |
 | `connection_id` | The connection the conversation is on. Same value as `account_id`, which stays |
 | `participant` | `{id, channel, kind}` - who the conversation addresses (`kind` is `phone` or `bsuid` on WhatsApp). The identifier's value is deliberately not included |
-| `reply_policy` | `{free_text_allowed, window_expires_at, out_of_window, templates, text_limit, text_limit_unit}` - the channel's rule, stated rather than inferred. `text_limit_unit` is `characters` or `utf8_bytes` |
+| `reply_policy` | `{free_text_allowed, window_expires_at, out_of_window, templates, text_limit, text_limit_unit, state, free_text_mechanism, agent_free_text_allowed}` - the channel's rule, stated rather than inferred. `text_limit_unit` is `characters` or `utf8_bytes`. `state` is `operational`, `paused` or `unavailable` (ADR-126): anything but `operational` renders with nothing sendable. `free_text_mechanism` is how a person's free text would go now (`standard_window`, `human_agent_tag` or null); `agent_free_text_allowed` is whether the AI may send free text now - never under a human-agent tag (ADR-121) |
 
 `service_window_open` keeps exactly its old meaning - WhatsApp's 24-hour
 customer-service window is open - and is not widened for any other channel;
 `reply_policy` is where a channel's other rules appear. Messages carry
 `provider_message_id`, the provider's id on every channel.
+
+**The inbox never fails for a channel** (OMNI-031). A conversation on a channel
+that is paused or has no adapter is listed and readable like any other, with
+`service_window_open: false` and `reply_policy.state` saying why nothing can be
+sent; sending on it answers `422` before anything is stored.
+
+**Messages, additively (2026-10-02):**
+
+| Field | Meaning |
+| --- | --- |
+| `action` | `{id_or_payload, title, source}` or null - what the customer tapped (ADR-124). `source` is `button`, `button_reply`, `list_reply`, `quick_reply` or `postback`; `body` carries the same title. Route on `id_or_payload`, not on the words |
+| `origin` | gains `external`: a reply a person typed in the provider's own app, known from its echo; the conversation is handed to a person (ADR-129) |
 
 **Deprecated, kept until clients have moved** (each is marked `deprecated` in the
 OpenAPI schema; removal is announced here with a date first):
@@ -441,6 +453,7 @@ There is no endpoint that sends a follow-up now. Sending is the worker's job, an
 | GET | `/api/v1/templates` | Any workspace member |
 | GET | `/api/v1/templates/{template_id}` | Any workspace member |
 | POST | `/api/v1/templates/sync?account_id=...` | Owner or admin |
+| PUT | `/api/v1/templates/{template_id}/opt-out-payloads` | Owner or admin |
 
 Listing filters by `account_id`, `status` and `category`. Not cursor-paged, unlike conversations or leads: a WhatsApp Business account holds tens of templates, and Meta caps how many a business may have.
 
@@ -448,6 +461,8 @@ Listing filters by `account_id`, `status` and `category`. Not cursor-paged, unli
 - **Sync is synchronous and returns what changed** — `created`, `updated`, `withdrawn`. A workspace approves a template and then wants to use it, so an answer it can see beats a job it must wait for.
 - **A template that has vanished from Meta becomes `disabled`, not deleted.** A campaign may reference it, and its `rejection_reason` is where the workspace reads why it stopped working.
 - **Only `approved` may be sent.** A status Meta introduces later lands on `unknown`, which is not sendable.
+- **`opt-out-payloads` marks which quick-reply payloads mean "stop marketing messages"** (`{"payloads": [...]}`; an empty list removes the marks). A tap carrying one opts the customer out whatever the button's words say, on the number the template belongs to (ADR-124). The template read carries `opt_out_payloads`.
+- **An authentication template is refused (`422`) for a conversation pinned to a business-scoped id**: Meta cannot deliver one there (OMNI-054).
 
 ## Campaigns
 
@@ -523,6 +538,7 @@ Open to every member, unlike usage: these are the numbers that tell the people s
 - **`average_response_seconds` is null, not zero, when nothing was answered.** Zero would read as instant service. `unanswered` counts the customers still waiting.
 - **Every lead status and sentiment label is named even at zero**, so a dashboard renders the column without knowing the vocabulary.
 - **`handoffs_by_source`** splits handoffs into the agent asking, a reading escalating, and a colleague taking over — the same total with very different meanings.
+- **`by_channel`** (additive) lists, for each channel with activity in the window, `conversations_created`, `messages_received` and `messages_sent` (OMNI-048).
 - **A conversation's events answer "why did this end up with a person"**, newest first. Another workspace's id answers `404`.
 
 ## Planned tenant endpoints
@@ -581,6 +597,8 @@ staff, suspending and restoring.
 | PATCH | `/api/v1/workspace` | Owner or admin (address: owner only) |
 | POST | `/api/v1/workspace/ownership` | Owner |
 | DELETE | `/api/v1/workspace` | Owner |
+
+`PATCH /workspace` also takes `automation_disclosure` - `{en, ar}`, the workspace's own wording of the automation disclosure on channels that require one (ADR-127). A language left out keeps Wasla's wording, `{}` restores both, and an empty string is refused: the obligation is not the workspace's to switch off.
 
 ### Creating one
 

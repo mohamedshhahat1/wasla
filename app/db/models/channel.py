@@ -108,11 +108,10 @@ class ConnectionHealth(StrEnum):
     """Whether a connection can actually be used, separate from whether it may.
 
     `status` is a workspace's decision; this is a fact the provider told us.
-    Only `AUTH_FAILED` is written today - a send or a file fetch the provider
-    refused because of the credential - and it clears on the next success. The
-    others are vocabulary for signals no current channel produces, so a later
-    adapter records them in a column that already exists rather than inventing
-    one (OMNI-012).
+    `AUTH_FAILED` is a refused credential (OMNI-012), `PERMISSION_MISSING` a
+    connection-level refusal and `RATE_LIMITED` a throttle, both classified by
+    Meta's own code (OMNI-035). Each is written by the send that saw it and
+    cleared by the next success.
     """
 
     OK = "ok"
@@ -223,6 +222,9 @@ class ChannelConnection(Base, TenantScopedMixin, TimestampMixin):
         ),
         CheckConstraint("external_account_id <> ''", name="external_account_id_present"),
         CheckConstraint("send_window_count >= 0", name="send_window_count_non_negative"),
+        CheckConstraint(
+            "sends_per_minute IS NULL OR sends_per_minute > 0", name="sends_per_minute_positive"
+        ),
     )
 
     # No generated default. A WhatsApp connection takes its number's id, which
@@ -268,6 +270,11 @@ class ChannelConnection(Base, TenantScopedMixin, TimestampMixin):
     send_window_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # This connection's own allowance per minute, where it differs from the
+    # deployment's `CONNECTION_SENDS_PER_MINUTE` (OMNI-052): Meta gives a number
+    # 80 messages a second by default and up to 1,000 after an upgrade, and
+    # fixes a Coexistence number at 20. Null means the deployment's value.
+    sends_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     @property
     def is_active(self) -> bool:

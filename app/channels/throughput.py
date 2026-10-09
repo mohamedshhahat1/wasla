@@ -72,9 +72,28 @@ class ConnectionThrottledError(RateLimitedError):
         self.retry_at = retry_at
 
 
+class ProviderThrottledError(ConnectionThrottledError):
+    """The provider throttled this connection; the send was declined (OMNI-035).
+
+    Raised to a bulk sender after the message is recorded as undelivered - a
+    throttle is a refusal before reading, so nothing reached a customer - so a
+    campaign or follow-up sweep waits for `retry_at` instead of marking its
+    recipients failed one by one.
+    """
+
+    error_code = "provider_throttled"
+    message = "The provider is rate limiting this connection. Try again shortly."
+
+
+#: How long a bulk sender waits after the provider throttles a connection.
+PROVIDER_THROTTLE_BACKOFF: Final = timedelta(seconds=60)
+
+
 __all__ = [
     "CONNECTION_THROTTLED",
+    "PROVIDER_THROTTLE_BACKOFF",
     "SEND_WINDOW",
     "THROTTLED_ORIGINS",
     "ConnectionThrottledError",
+    "ProviderThrottledError",
 ]

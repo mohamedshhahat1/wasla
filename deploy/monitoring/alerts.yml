@@ -485,6 +485,28 @@ groups:
             operates only the channels it has an adapter for.
           runbook: docs/RUNBOOK.md
 
+      - alert: WebhookBodyTooLarge
+        # A webhook delivery refused for size before any route read it
+        # (OMNI-034). Meta retries a refused delivery identically for up to
+        # seven days, so one refusal is a delivery - and every message in it -
+        # that will never arrive; nothing else in this file can see it, because
+        # the refusal happens before ingestion counts anything. A healthy
+        # deployment refuses none: the cap is Meta's documented maximum.
+        expr: |
+          sum(increase(wasla_http_body_too_large_total{route_group="webhook"}[15m])) > 0
+        labels:
+          severity: critical
+          component: messaging
+        annotations:
+          summary: "A webhook delivery was refused as too large"
+          description: >-
+            The request size limit refused a provider's webhook delivery before
+            it reached the route. Meta will retry it unchanged and refuse it
+            unchanged, so its messages are lost unless the cap is raised to
+            cover it. Compare WEBHOOK_MAX_REQUEST_BYTES with Meta's documented
+            maximum and the request.body_too_large log line's declared size.
+          runbook: docs/RUNBOOK.md
+
       - alert: ChannelConnectionCredentialRefused
         # A live connection whose provider refused its credential on the last
         # send (OMNI-012). Recorded on the connection, cleared by the next
@@ -506,6 +528,75 @@ groups:
             its workspace re-verifies it with a working token. Find it with
             `python -m scripts.omnichannel_invariants` or the connection's
             health column; the send log carries whatsapp.credential_refused.
+          runbook: docs/RUNBOOK.md
+
+      - alert: ChannelInboundStopped
+        # WhatsAppInboundStopped for every channel, read from what ingestion
+        # counted rather than from one provider's webhook route, so a second
+        # channel is covered the day its adapter is registered. Same shape and
+        # the same guard: only a channel that had traffic in the last day.
+        # Labelled by channel, a closed domain.
+        expr: |
+          sum by (channel) (rate(wasla_inbound_events_total[30m])) == 0
+          and
+          sum by (channel) (increase(wasla_inbound_events_total[24h])) > 0
+        for: 30m
+        labels:
+          severity: critical
+          component: messaging
+        annotations:
+          summary: "No {{ $labels.channel }} events have arrived for 30 minutes"
+          description: >-
+            Ingestion has counted nothing on this channel for half an hour, on
+            a deployment that received its events today. Check the provider's
+            webhook subscription, the callback URL and certificate, and that
+            the reverse proxy forwards the channel's webhook route; check
+            WebhookBodyTooLarge and the signature-failure alerts too.
+          runbook: docs/RUNBOOK.md
+
+      - alert: ChannelConnectionUnusable
+        # A live connection the provider says cannot send (OMNI-035): a
+        # connection-level refusal (a revoked permission, a restricted or
+        # unregistered number) or a throttle that has outlasted a campaign
+        # sweep's wait. Recorded on the connection and cleared by the next
+        # successful send, so this is a level, not a count of failures.
+        expr: |
+          sum by (channel, health) (
+            wasla_channel_connections{status="active", health=~"permission_missing|rate_limited"}
+          ) > 0
+        for: 30m
+        labels:
+          severity: warning
+          component: messaging
+        annotations:
+          summary: "A {{ $labels.channel }} connection reads {{ $labels.health }}"
+          description: >-
+            At least one active connection's last send was refused for the
+            connection as a whole, so campaigns and follow-ups on it have
+            stopped (permission_missing) or keep waiting (rate_limited). Find
+            it by its health column; the send log carries the error class, never
+            Meta's text. A permission must be re-granted in the provider's
+            business settings; a lasting throttle needs the number's messaging
+            limit or throughput raised.
+          runbook: docs/RUNBOOK.md
+
+      - alert: ChannelPausedForADay
+        # A channel held paused by configuration (OMNI-031, ADR-126). Pausing
+        # is the rollback lever and is meant to be short: inbound is still
+        # stored and shown, but nobody - person, AI or campaign - can answer on
+        # it. A day of that is a decision someone should be reminded of.
+        expr: max by (channel) (wasla_channel_state{state="paused"}) == 1
+        for: 24h
+        labels:
+          severity: warning
+          component: messaging
+        annotations:
+          summary: "The {{ $labels.channel }} channel has been paused for a day"
+          description: >-
+            Customers on this channel can still write and their messages are
+            stored, but no reply, AI turn or campaign can go out. Resume it by
+            removing it from PAUSED_CHANNELS, or remove its adapter if the
+            rollback is permanent.
           runbook: docs/RUNBOOK.md
 
       - alert: UnresolvedOutboundSends

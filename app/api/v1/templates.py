@@ -6,7 +6,9 @@ action — it calls Meta and rewrites the registry — so it takes an admin.
 
 There is deliberately no route that creates, edits or deletes a template.
 Approval belongs to Meta, and an endpoint that wrote one locally would be
-inventing permission the platform does not have.
+inventing permission the platform does not have. The one thing a workspace
+writes is its own annotation: which quick-reply payloads mean "stop marketing
+messages" (OMNI-030), which Meta does not record and a sync never overwrites.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from app.api.route import CommittingRoute
 from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus
 from app.schemas.whatsapp_template import (
     TemplateListResponse,
+    TemplateOptOutPayloads,
     TemplateRead,
     TemplateSyncResponse,
 )
@@ -65,3 +68,20 @@ async def sync_templates(
     bounded by the client's timeout, page size and page count.
     """
     return TemplateSyncResponse.from_outcome(await templates.sync(account_id))
+
+
+@router.put("/{template_id}/opt-out-payloads", summary="Mark the payloads that opt a customer out")
+async def set_opt_out_payloads(
+    template_id: uuid.UUID,
+    payload: TemplateOptOutPayloads,
+    workspace: TenantAdminDep,
+    templates: TemplateServiceDep,
+) -> TemplateRead:
+    """A tap on a quick reply carrying one of these opts the customer out (OMNI-030).
+
+    An administrative action: it decides whose marketing consent a tap
+    withdraws. The tap is honoured on the number this template belongs to.
+    """
+    return TemplateRead.from_model(
+        await templates.set_opt_out_payloads(template_id, payload.payloads)
+    )

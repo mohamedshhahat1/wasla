@@ -35,6 +35,7 @@ from app.channels.policy import (
     OutOfWindow,
     ReceiptModel,
     SendKind,
+    SendMechanism,
     TextUnit,
     WindowedPolicy,
     longest_prefix,
@@ -49,9 +50,11 @@ from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.integrations.whatsapp.policy import (
     AGENT_INSTRUCTIONS,
     CLOSED_WINDOW_REFUSAL,
+    WHATSAPP_CAPABILITIES,
     WHATSAPP_TEXT_MAX_CHARS,
     WhatsAppChannelPolicy,
 )
+from tests.channel_fakes import TaggedPolicy
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 ARABIC = "مرحبا بك في متجرنا، كيف يمكنني مساعدتك اليوم؟ "
@@ -254,7 +257,7 @@ def test_the_same_reply_is_untouched_on_whatsapp() -> None:
     reply = (ARABIC * 20).strip()
     assert len(reply) < WHATSAPP_TEXT_MAX_CHARS
 
-    assert prepare_channel_reply(reply).text == reply
+    assert prepare_channel_reply(reply, WHATSAPP_CAPABILITIES).text == reply
     assert prepare_channel_reply(reply, BYTE_CAPABILITIES).truncated is True
 
 
@@ -408,3 +411,44 @@ def test_policy_answers_depend_on_the_channel_and_the_time_not_on_whatsapps_cons
     assert whatsapp.follow_up(on_whatsapp, has_text=True, has_template=True, now=now).action is (
         FollowUpAction.TEMPLATE
     )
+
+
+def test_every_adapter_fits_the_request_ceilings() -> None:
+    """The API's pre-channel ceilings are the largest any channel accepts (OMNI-044)."""
+    from app.channels.policy import REQUEST_TEXT_CEILING
+    from tests.channel_fakes import SyntheticAdapter
+
+    for adapter in (WhatsAppAdapter(), SyntheticAdapter(), SyntheticAdapter(tagged=True)):
+        # A byte limit is at least as many characters as it is bytes.
+        assert adapter.policy.capabilities.text_limit <= REQUEST_TEXT_CEILING
+
+
+# ------------------------------------------------ the human-agent tag (OMNI-033)
+#
+# The policy itself must refuse an AI tag, not only the choke point behind it:
+# a later adapter's policy is written against this contract, and `_dispatch`'s
+# second check is a backstop, not the rule (M-O16).
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [MessageOrigin.AGENT, MessageOrigin.FOLLOW_UP, MessageOrigin.CAMPAIGN, MessageOrigin.SYSTEM],
+)
+def test_only_a_person_is_allowed_the_human_agent_tag(origin: MessageOrigin) -> None:
+    policy = TaggedPolicy(Channel.MESSENGER)
+    now = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    day_three = Conversation(last_inbound_at=now - timedelta(days=3))
+
+    refused = policy.may_send(day_three, origin=origin, kind=SendKind.TEXT, now=now)
+    person = policy.may_send(day_three, origin=MessageOrigin.HUMAN, kind=SendKind.TEXT, now=now)
+    day_eight = policy.may_send(
+        Conversation(last_inbound_at=now - timedelta(days=8)),
+        origin=MessageOrigin.HUMAN,
+        kind=SendKind.TEXT,
+        now=now,
+    )
+
+    assert not refused.allowed and refused.mechanism is None
+    assert person.allowed and person.mechanism is SendMechanism.HUMAN_AGENT_TAG
+    assert not day_eight.allowed
+    assert policy.reply_policy(day_three, now=now).agent_free_text_allowed is False

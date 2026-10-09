@@ -47,16 +47,37 @@ from app.channels.adapter import (
     ChannelSender,
     MediaContent,
     OutboundContent,
+    PreparedContent,
     ProviderReceipt,
     Recipient,
+    SendContext,
     TemplateContent,
     TextContent,
 )
 from app.channels.metering import message_meters
-from app.channels.outcomes import ProviderAuthError, UncertainDeliveryError
-from app.channels.policy import ReplyPolicy, SendKind, require_sendable_text
+from app.channels.outcomes import (
+    ProviderAuthError,
+    ProviderConnectionRefusedError,
+    RecipientOptedOutError,
+    UncertainDeliveryError,
+)
+from app.channels.policy import (
+    ChannelState,
+    PolicyRefusalError,
+    ReplyPolicy,
+    SendKind,
+    SendMechanism,
+    inoperable_reply_policy,
+    require_sendable_media,
+    require_sendable_text,
+)
 from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
-from app.channels.throughput import THROTTLED_ORIGINS, ConnectionThrottledError
+from app.channels.throughput import (
+    PROVIDER_THROTTLE_BACKOFF,
+    THROTTLED_ORIGINS,
+    ConnectionThrottledError,
+    ProviderThrottledError,
+)
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
@@ -69,9 +90,11 @@ from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
+from app.core.telemetry import record_opt_outs
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
-from app.db.models.channel import Channel, ConnectionHealth
+from app.db.models.campaign import OptOutSource, OptOutVia
+from app.db.models.channel import Channel, ChannelConnection, ConnectionHealth, IdentityKind
 from app.db.models.conversation import (
     Conversation,
     Message,
@@ -82,7 +105,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.user import User
-from app.db.models.whatsapp_template import TemplateStatus
+from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus
 from app.db.session import released
 from app.integrations.whatsapp.client import TemplateWithdrawnError, build_http_client
 from app.integrations.whatsapp.policy import SERVICE_WINDOW, WHATSAPP_TEXT_MAX_CHARS
@@ -91,6 +114,7 @@ from app.repositories.channel_repository import (
     ContactIdentityRepository,
 )
 from app.repositories.conversation_repository import (
+    ContactRepository,
     ConversationRepository,
     MessageRepository,
 )
@@ -100,6 +124,7 @@ from app.services.audit_service import AuditTrail
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
+from app.services.opt_out import record_opt_out
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -114,6 +139,10 @@ __all__ = ["SERVICE_WINDOW", "WHATSAPP_TEXT_MAX_CHARS", "MessagingService"]
 # person, and nothing about a credential belongs in either.
 CREDENTIAL_REFUSED = "WhatsApp refused this number's credentials."
 CONNECTION_CREDENTIAL_REFUSED = "The provider refused this connection's credentials."
+# A connection-level refusal (OMNI-035), and a provider throttle. Fixed
+# sentences, for the same reason.
+CONNECTION_SEND_REFUSED = "The provider refused to send through this connection."
+PROVIDER_THROTTLED = "The provider is rate limiting this connection."
 
 # The sentence a send on a paused connection is refused with, per channel.
 _DISABLED: Final[dict[Channel, str]] = {Channel.WHATSAPP: "This WhatsApp number is disabled."}
@@ -127,7 +156,8 @@ LinkCall = Callable[[Message], None]
 async def _attempt(
     sender: ChannelSender,
     recipient: Recipient,
-    content: OutboundContent,
+    prepared: PreparedContent,
+    context: SendContext,
 ) -> ProviderReceipt | Exception:
     """Ask the provider to deliver, returning the failure rather than raising it.
 
@@ -137,7 +167,7 @@ async def _attempt(
     `MediaService._write` uses, for the same reason.
     """
     try:
-        return await sender.send(recipient, content)
+        return await sender.send(recipient, prepared, context)
     except (ExternalServiceError, RateLimitedError) as error:
         return error
 
@@ -255,6 +285,7 @@ class MessagingService:
         self._settings = settings
         self._http = http
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
+        self._contacts = ContactRepository(session, tenant_id=tenant_id)
         # The route a send takes (OMNI-004): the conversation's connection and
         # the identity it is pinned to, and the channel's adapter.
         self._connections = ChannelConnectionRepository(session, tenant_id=tenant_id)
@@ -348,11 +379,12 @@ class MessagingService:
         top of this one, because setting a campaign up is a deliberate act that
         can afford to require a sync first.
         """
-        refusal = refusal_reason_for(
-            await self._templates.find_anywhere(name=name, language=language)
-        )
+        template = await self._templates.find_anywhere(name=name, language=language)
+        refusal = refusal_reason_for(template)
         if refusal is not None:
             raise ValidationError(refusal)
+        if template is not None and template.category is TemplateCategory.AUTHENTICATION:
+            await self._refuse_authentication_to_a_business_scoped_id(conversation_id)
 
         return await self._dispatch(
             conversation_id=conversation_id,
@@ -372,6 +404,23 @@ class MessagingService:
             idempotency_key=idempotency_key,
             origin=origin,
         )
+
+    async def _refuse_authentication_to_a_business_scoped_id(
+        self, conversation_id: uuid.UUID
+    ) -> None:
+        """Meta cannot deliver an authentication template to a business-scoped id (OMNI-054).
+
+        "BSUIDs cannot receive one-tap, zero-tap, and copy code authentication
+        templates" (Business-scoped user IDs, read 2026-10-02; the final audit's
+        M10). Refused before anything is staged, rather than sent to be refused.
+        """
+        conversation = await self._conversations.require_by_id(conversation_id)
+        participant = await self._identities.require_by_id(conversation.participant_identity_id)
+        if participant.kind is IdentityKind.BSUID:
+            raise PolicyRefusalError(
+                "WhatsApp cannot send an authentication template to a customer known only by "
+                "their business-scoped id."
+            )
 
     async def send_media(
         self,
@@ -699,15 +748,28 @@ class MessagingService:
         policy = adapter.policy
         if isinstance(content, TextContent):
             require_sendable_text(content.body, policy)
-        if isinstance(content, MediaContent) and (
-            content.family not in policy.capabilities.media_families
-        ):
-            raise ValidationError(f"This file cannot be sent over {policy.display_name}.")
+        if isinstance(content, MediaContent):
+            # The family, and the provider's own type and size limits for it,
+            # before anything is staged: an over-limit file is refused here,
+            # never uploaded to be refused by the provider (OMNI-045).
+            require_sendable_media(
+                family=content.family,
+                mime_type=content.mime_type,
+                byte_size=len(content.content),
+                policy=policy,
+            )
         decision = policy.may_send(
             conversation, origin=origin, kind=send_kind, now=datetime.now(UTC)
         )
         if not decision.allowed:
-            raise ValidationError(decision.reason or "This message cannot be sent now.")
+            raise PolicyRefusalError(decision.reason or "This message cannot be sent now.")
+        # The policy's decision travels to the adapter (OMNI-033). Held here as
+        # well as in the policy: a human-agent tag is a person's permission,
+        # and no other origin may carry one whatever a policy said.
+        mechanism = decision.mechanism or SendMechanism.STANDARD_WINDOW
+        if mechanism is SendMechanism.HUMAN_AGENT_TAG and origin is not MessageOrigin.HUMAN:
+            raise PolicyRefusalError("Only a person may reply under a human-agent tag.")
+        context = SendContext(origin=origin, mechanism=mechanism)
 
         connection = await self._connections.require_by_id(conversation.account_id)
         if connection.channel is not conversation.channel:  # pragma: no cover - keyed
@@ -718,7 +780,7 @@ class MessagingService:
         recipient = adapter.address(participant)
         # The connection's allowance, shared by every sender on it (ADR-123).
         # Before anything is staged: a refusal leaves no row to reconcile.
-        await self._take_allowance(connection.id, origin=origin)
+        await self._take_allowance(connection, origin=origin)
 
         if idempotency_key is not None:
             message, claimed = await self._messages.claim_idempotency_key(
@@ -746,9 +808,11 @@ class MessagingService:
                     template_language=template_language,
                 )
                 logger.info(
-                    "whatsapp.outbound_replayed",
+                    "channel.outbound_replayed",
                     extra={
-                        "event": "whatsapp.outbound_replayed",
+                        "event": "channel.outbound_replayed",
+                        # The name dashboards used until OMNI-044; kept a release.
+                        "legacy_event": "whatsapp.outbound_replayed",
                         "conversation_id": str(conversation_id),
                     },
                 )
@@ -777,12 +841,14 @@ class MessagingService:
                 credentials=self._credentials,
             ) as sender,
         ):
+            prepared = PreparedContent(content=content)
             if isinstance(content, MediaContent):
                 # TX1. Nothing has been asked of the provider, so a failure in
-                # the upload below is provably not a delivery.
+                # the upload below is provably not a delivery. What comes back
+                # is the provider's reference to the file (OMNI-040).
                 async with released(self._session):
                     try:
-                        await sender.prepare(content)
+                        prepared = await sender.prepare(content)
                     except (ExternalServiceError, RateLimitedError) as error:
                         prepared_failure: Exception | None = error
                     else:
@@ -799,16 +865,18 @@ class MessagingService:
             message.delivery_state = MessageDeliveryState.REQUESTED
             await self._session.flush()
             async with released(self._session):
-                outcome = await _attempt(sender, recipient, content)
+                outcome = await _attempt(sender, recipient, prepared, context)
 
         if isinstance(outcome, UncertainDeliveryError):
             # Left exactly as it is. `REQUESTED` with `PENDING` is the honest
             # record of a message that may be on somebody's phone, and the one
             # thing that must not follow is another send (ADR-093).
             logger.warning(
-                "whatsapp.outbound_uncertain",
+                "channel.outbound_uncertain",
                 extra={
-                    "event": "whatsapp.outbound_uncertain",
+                    "event": "channel.outbound_uncertain",
+                    # The name dashboards used until OMNI-044; kept a release.
+                    "legacy_event": "whatsapp.outbound_uncertain",
                     "conversation_id": str(conversation_id),
                 },
             )
@@ -857,6 +925,62 @@ class MessagingService:
             )
             raise outcome
 
+        if isinstance(outcome, RecipientOptedOutError):
+            # The provider says the person stopped marketing messages: nothing
+            # was delivered, and their contact now says so too, through the
+            # one opt-out writer (OMNI-046).
+            await self._undelivered(message, reason=str(outcome))
+            contact = await self._contacts.require_by_id(conversation.contact_id)
+            if record_opt_out(
+                contact,
+                source=OptOutSource.CUSTOMER,
+                via=OptOutVia.PROVIDER_REFUSAL,
+                at=datetime.now(UTC),
+            ):
+                await record_opt_outs({OptOutVia.PROVIDER_REFUSAL.value: 1})
+            return message
+
+        if isinstance(outcome, ProviderConnectionRefusedError):
+            # The connection cannot send - a permission revoked, an account
+            # restricted (OMNI-035). Recorded on the message and on the
+            # connection's health; a bulk sender is stopped rather than left to
+            # spend every recipient's attempts on it. A person or an agent gets
+            # the undelivered message back, as with any refusal.
+            await self._undelivered(message, reason=CONNECTION_SEND_REFUSED)
+            await self._connections.record_health(
+                connection.id, ConnectionHealth(outcome.health), reason=outcome.reason
+            )
+            logger.error(
+                "channel.connection_refused",
+                extra={
+                    "event": "channel.connection_refused",
+                    "channel": connection.channel.value,
+                    "account_id": str(connection.id),
+                    "reason": outcome.reason,
+                },
+            )
+            if origin in THROTTLED_ORIGINS:
+                raise outcome
+            return message
+
+        if isinstance(outcome, RateLimitedError):
+            # The provider throttled the connection: declined before reading,
+            # so provably undelivered (OMNI-035). A bulk sender waits for the
+            # throttle to pass instead of failing this recipient - and the next,
+            # and the next; anyone else gets the undelivered message back.
+            await self._undelivered(message, reason=PROVIDER_THROTTLED)
+            await self._connections.record_health(
+                connection.id, ConnectionHealth.RATE_LIMITED, reason="provider_throttled"
+            )
+            if origin in THROTTLED_ORIGINS:
+                now = datetime.now(UTC)
+                raise ProviderThrottledError(
+                    connection_id=connection.id,
+                    retry_at=now + PROVIDER_THROTTLE_BACKOFF,
+                    now=now,
+                )
+            return message
+
         if isinstance(outcome, Exception):
             return await self._undelivered(message, reason=str(outcome))
 
@@ -865,8 +989,12 @@ class MessagingService:
             message,
             wa_message_id=outcome.message_id,
             sent_at=now,
+            # The provider's own time for it, where its answer gives one
+            # (OMNI-042); an echo or a `sent` status may fill it in later.
+            provider_sent_at=outcome.sent_at,
         )
-        conversation.last_message_at = now
+        # Forward only (OMNI-036): a send never moves the inbox order back.
+        await self._conversations.touch_outbound(conversation, at=now)
         # A credential that works again clears a recorded refusal. Conditional:
         # a healthy connection writes nothing here, on any send.
         await self._connections.record_health(connection.id, ConnectionHealth.OK)
@@ -922,8 +1050,13 @@ class MessagingService:
         """
         await self._messages.mark_failed(message, reason=reason)
         logger.warning(
-            "whatsapp.outbound_failed",
-            extra={"conversation_id": str(message.conversation_id)},
+            "channel.outbound_failed",
+            extra={
+                "event": "channel.outbound_failed",
+                # The name dashboards used until OMNI-044; kept a release.
+                "legacy_event": "whatsapp.outbound_failed",
+                "conversation_id": str(message.conversation_id),
+            },
         )
         # The request's commit boundary only commits a session that is in a
         # transaction, and after `released` above this one is not until
@@ -946,14 +1079,18 @@ class MessagingService:
         async with build_http_client() as http:
             yield http
 
-    async def _take_allowance(self, connection_id: uuid.UUID, *, origin: MessageOrigin) -> None:
+    async def _take_allowance(
+        self, connection: ChannelConnection, *, origin: MessageOrigin
+    ) -> None:
         """Spend one unit of the connection's sending allowance, or refuse (OMNI-017).
 
-        A no-op unless `CONNECTION_SENDS_PER_MINUTE` is configured, so a
+        The connection's own allowance where it has one (OMNI-052), else
+        `CONNECTION_SENDS_PER_MINUTE`; a no-op when neither is set, so a
         deployment that has not chosen a limit behaves exactly as before. Only
         a bulk sender is ever refused (`THROTTLED_ORIGINS`); a reply is counted.
         """
-        per_minute = self._settings.connection_sends_per_minute
+        connection_id = connection.id
+        per_minute = connection.sends_per_minute or self._settings.connection_sends_per_minute
         if per_minute is None:
             return
         now = datetime.now(UTC)
@@ -980,12 +1117,24 @@ class MessagingService:
         window - and is now the conversation's channel policy's to answer
         (ADR-121). A conversation the customer has never written in has no open
         window: the business may only open it with a template.
+
+        False, never an error, on a channel Wasla cannot act on (OMNI-031).
         """
+        if self._channels.state_for(conversation.channel) is not ChannelState.OPERATIONAL:
+            return False
         policy = self._channels.policy_for(conversation.channel)
         return policy.standard_window_open(conversation, now=datetime.now(UTC))
 
     def reply_policy(self, conversation: Conversation) -> ReplyPolicy:
-        """What a person may send on this conversation now - the API's `reply_policy`."""
+        """What a person may send on this conversation now - the API's `reply_policy`.
+
+        Presentation tolerates every channel state (OMNI-031): a paused or
+        unregistered channel's conversation is rendered with nothing sendable
+        rather than failing the page it is on. Sending still refuses.
+        """
+        state = self._channels.state_for(conversation.channel)
+        if state is not ChannelState.OPERATIONAL:
+            return inoperable_reply_policy(state, self._channels.known_policy(conversation.channel))
         return self._channels.policy_for(conversation.channel).reply_policy(
             conversation, now=datetime.now(UTC)
         )

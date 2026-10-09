@@ -15,6 +15,7 @@ from typing import Annotated
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.channels.registry import ChannelRegistry, default_registry
 from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
 from app.core.exceptions import AuthenticationError, NotFoundError, PermissionDeniedError
@@ -424,15 +425,29 @@ def get_lead_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> Lead
 LeadServiceDep = Annotated[LeadService, Depends(get_lead_service)]
 
 
+def get_channel_registry() -> ChannelRegistry:
+    """The channels this deployment operates, and which are paused (OMNI-031).
+
+    A dependency of its own so a test can stand a registry with a paused or
+    synthetic channel behind the real routes.
+    """
+    return default_registry()
+
+
+ChannelRegistryDep = Annotated[ChannelRegistry, Depends(get_channel_registry)]
+
+
 def get_messaging_service(
     settings: SettingsDep,
     session: SessionDep,
     workspace: ActiveWorkspaceDep,
+    channels: ChannelRegistryDep,
 ) -> MessagingService:
     return MessagingService(
         session=session,
         settings=settings,
         tenant_id=workspace.tenant.id,
+        channels=channels,
     )
 
 
