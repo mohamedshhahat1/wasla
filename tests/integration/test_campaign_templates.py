@@ -339,3 +339,40 @@ async def _answer(response: httpx.Response) -> httpx.Response:
 
 def _conversations(workspace: Workspace) -> Any:
     return select(Conversation.id).where(Conversation.account_id == workspace.account_id)
+
+
+async def test_a_template_paused_elsewhere_mid_batch_stops_the_campaign_without_spending(
+    world: tuple[FakeMeta, CampaignWorker, Database],
+) -> None:
+    """CMP-19 through the registry: another send paused the template while this batch ran.
+
+    The next recipient's send is refused locally (`TemplateRefusedError`) before
+    anything is staged; the campaign fails once and nobody after it spends an
+    attempt (kills M-C18).
+    """
+    meta, each, database = world
+    workspace = await seed(database, recipients=6)
+
+    async def pause_after_two(payload: dict[str, Any], n: int) -> None:
+        if n == 2:
+            async with database.session_factory() as session:
+                await session.execute(
+                    update(WhatsAppTemplate)
+                    .where(WhatsAppTemplate.id == workspace.template_id)
+                    .values(status=TemplateStatus.PAUSED)
+                )
+                await session.commit()
+
+    meta.on_request = pause_after_two
+    campaign_id = await compose(database, workspace)
+
+    await each.run_once()
+
+    assert len(meta.requests) == 2
+    row = await ledger(database, campaign_id)
+    assert row.status is CampaignStatus.FAILED
+    assert dict(row.recipients) == {"sent/attempts=0": 2, "pending/attempts=0": 4}
+    async with database.session_factory() as session:
+        campaign = await session.get(Campaign, campaign_id)
+        assert campaign is not None
+        assert campaign.status_reason == CampaignStopReason.TEMPLATE_WITHDRAWN
