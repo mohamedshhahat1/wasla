@@ -62,6 +62,7 @@ from app.core.telemetry import observe_lifecycle_event
 from app.db import advisory_locks
 from app.db.models import Membership, MembershipStatus, Tenant, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.campaign import CampaignStopReason
 from app.db.models.enums import TenantStatus
 from app.db.models.payment_method import PaymentMethodStatus
 from app.repositories import (
@@ -74,6 +75,7 @@ from app.repositories.billing_repository import SubscriptionRepository
 from app.repositories.payment_method_repository import PaymentMethodRepository
 from app.repositories.tenant_repository import normalise_slug
 from app.services.audit_service import AuditTrail
+from app.services.campaign_service import CampaignService
 from app.services.follow_up_service import FollowUpService
 from app.services.subscription_service import (
     SubscriptionService,
@@ -578,6 +580,9 @@ class WorkspaceService:
         await self._stop_automated_messages(
             tenant_id=tenant.id,
             reason="The workspace was deleted.",
+            campaign_reason=CampaignStopReason.WORKSPACE_DELETED,
+            actor=actor,
+            actor_kind=AuditActorKind.USER,
         )
         await self._session.flush()
 
@@ -741,6 +746,9 @@ class WorkspaceService:
         await self._stop_automated_messages(
             tenant_id=tenant.id,
             reason="The workspace was suspended.",
+            campaign_reason=CampaignStopReason.WORKSPACE_SUSPENDED,
+            actor=actor,
+            actor_kind=AuditActorKind.PLATFORM_STAFF,
         )
         await self._session.flush()
 
@@ -767,8 +775,22 @@ class WorkspaceService:
         )
         return tenant
 
-    async def _stop_automated_messages(self, *, tenant_id: uuid.UUID, reason: str) -> None:
-        """Cancel the AI-scheduled messages a workspace leaving service still holds.
+    async def _stop_automated_messages(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        reason: str,
+        campaign_reason: CampaignStopReason,
+        actor: User,
+        actor_kind: AuditActorKind,
+    ) -> None:
+        """Stop the automated messages a workspace leaving service still holds.
+
+        **Campaigns are paused**, in this same transaction, with the reason and
+        one audit entry each naming who changed the workspace (CMP-02). They
+        stay paused if the workspace is restored: an admin reschedules them.
+        The campaign worker re-reads the workspace before every recipient and
+        is the authoritative guard, as the follow-up dispatch is below.
 
         The first of two guards (PD-TOOLS-06). A follow-up an agent scheduled is
         a WhatsApp message to a real customer, waiting on a timer, and a
@@ -781,6 +803,9 @@ class WorkspaceService:
         Only what an agent scheduled. A colleague's own follow-up is their work
         and is not a decision this should take for them.
         """
+        await CampaignService(session=self._session, tenant_id=tenant_id).pause_unserved_campaigns(
+            reason=campaign_reason, actor=actor, actor_kind=actor_kind
+        )
         cancelled = await FollowUpService(
             session=self._session,
             tenant_id=tenant_id,

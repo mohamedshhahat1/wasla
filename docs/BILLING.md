@@ -561,6 +561,14 @@ allow, AI turns, campaign copies and follow-ups are refused as
 reply. Paying the overdue invoice restores the paid plan and its capacity, with
 nothing to re-enable.
 
+**A subscription suspended by dunning stops broadcasting** (CMQ-11, ADR-135).
+The transition to `suspended` pauses the workspace's scheduled and running
+campaigns in its own transaction (`status_reason: subscription_suspended`, a
+system audit entry each), and the campaign worker refuses a suspended
+subscription before every batch and recipient. `past_due` is the grace and
+keeps sending. Settling the invoice does not resume a campaign: an admin
+reschedules it, and its reservation is taken again in the period then current.
+
 ## Plans
 
 A plan is a row in `plans`: a stable `code`, a name, a price in `Numeric` (never float — 19.99 is not representable in binary floating point, and that error reaches an invoice), an interval, trial days, and its limits.

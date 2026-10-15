@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -245,6 +245,15 @@ async def hold_limit_lock(session: AsyncSession, *, tenant_id: uuid.UUID, key: L
     one counted after it against the new, and none against a half-applied one.
     """
     await session.execute(select(func.pg_advisory_xact_lock(_lock_id(tenant_id, key))))
+
+
+#: A count `reserve_period` may take as a figure, or read itself once it holds
+#: the lock (CMP-03).
+Count = int | Callable[[], Awaitable[int]]
+
+
+async def _counted(count: Count) -> int:
+    return count if isinstance(count, int) else await count()
 
 
 class EntitlementService:
@@ -806,7 +815,9 @@ class EntitlementService:
             raise PlanLimitExceededError(_refusal(entitlement))
         return entitlement
 
-    async def reserve_period(self, key: LimitKey, *, additional: int, reserved: int) -> Entitlement:
+    async def reserve_period(
+        self, key: LimitKey, *, additional: Count, reserved: Count
+    ) -> Entitlement:
         """Take the lock on a period limit and answer, counting work already promised.
 
         For a period allowance whose usage is recorded later than it is
@@ -814,11 +825,21 @@ class EntitlementService:
         send is metered when it happens. `reserved` is what is already
         scheduled and not yet sent, so two campaigns launched together cannot
         both fit into one remaining allowance.
+
+        **Both counts are read under the lock** (CMP-03, ADR-136). Pass a
+        coroutine function rather than a number: it is awaited after
+        `pg_advisory_xact_lock`, so a second scheduler waiting on the lock
+        counts what the first committed. A number evaluated by the caller is
+        read before the lock - which is how two campaigns scheduled at the same
+        moment both fitted into one remainder (audit P02: 40/40). An `int` is
+        still accepted for a figure that cannot change concurrently.
         """
         await self._session.execute(
             select(func.pg_advisory_xact_lock(_lock_id(self._tenant_id, key)))
         )
-        entitlement = await self.check(key, additional=additional + max(reserved, 0))
+        asked = await _counted(additional)
+        promised = await _counted(reserved)
+        entitlement = await self.check(key, additional=asked + max(promised, 0))
         if not entitlement.allowed:
             logger.info(
                 "billing.reservation_refused",

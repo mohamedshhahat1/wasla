@@ -25,6 +25,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -81,6 +82,79 @@ class CampaignStatus(StrEnum):
     FAILED = "failed"
 
 
+class CampaignStopReason(StrEnum):
+    """Why a campaign is paused or failed, in words a program can read (CMP-02, CMP-23).
+
+    `last_error` keeps its sentence for a person; this is the closed vocabulary
+    an operator filters on and a metric is labelled by. One field that says
+    why a campaign is not sending.
+    """
+
+    #: The platform suspended the workspace (CMP-02).
+    WORKSPACE_SUSPENDED = "workspace_suspended"
+    #: The workspace's owner deleted it; it is inside its retention (CMP-02).
+    WORKSPACE_DELETED = "workspace_deleted"
+    #: The subscription is suspended for an unpaid invoice (CMQ-11).
+    SUBSCRIPTION_SUSPENDED = "subscription_suspended"
+    #: A person paused it.
+    ADMIN_PAUSED = "admin_paused"
+    #: The template is no longer in the registry.
+    TEMPLATE_REMOVED = "template_removed"
+    #: The registry does not hold it as approved.
+    TEMPLATE_NOT_APPROVED = "template_not_approved"
+    #: Meta refused a send because the template is paused or gone (132001/15/16).
+    TEMPLATE_WITHDRAWN = "template_withdrawn"
+    #: The template is not a marketing template (CMP-09).
+    TEMPLATE_CATEGORY = "template_category"
+    #: Meta refused the template's parameters (132000/132012/131008, CMP-05).
+    TEMPLATE_PARAMETERS_REFUSED = "template_parameters_refused"
+    #: The sending number is disabled.
+    CONNECTION_DISABLED = "connection_disabled"
+    #: The credential is missing, or Meta refused it.
+    CREDENTIAL_REFUSED = "credential_refused"
+    #: Meta refused to send through the connection (OMNI-035).
+    CONNECTION_REFUSED = "connection_refused"
+    #: Meta could not be reached for longer than the bound (CMP-07).
+    PROVIDER_UNREACHABLE = "provider_unreachable"
+    #: Every recent batch raised (CMP-20).
+    REPEATED_BATCH_FAILURE = "repeated_batch_failure"
+
+
+MAX_STOP_REASON_LENGTH: Final = 40
+
+
+class RecipientReason(StrEnum):
+    """Why a recipient ended as it did, in words a program can read (CMP-13).
+
+    `last_error` keeps its sentence for display; this is what a listing is
+    filtered by. Null on a recipient that was sent, and on rows recorded
+    before reason codes existed.
+    """
+
+    #: Opted out on the campaign's channel since the audience was built.
+    OPTED_OUT = "opted_out"
+    #: The contact was erased.
+    CONTACT_GONE = "contact_gone"
+    #: Its conversation is on another number, or with another contact.
+    OTHER_CONNECTION = "other_connection"
+    #: The conversation no longer addresses the identity materialised.
+    IDENTITY_CHANGED = "identity_changed"
+    #: The plan in force does not include the campaign's channel (ENT-16).
+    CHANNEL_NOT_IN_PLAN = "channel_not_in_plan"
+    #: Meta refused the send: the person stopped marketing messages (131050).
+    RECIPIENT_OPTED_OUT_AT_PROVIDER = "recipient_opted_out_at_provider"
+    #: Meta's per-user marketing limit (131049); Meta says wait 24 hours.
+    MARKETING_LIMIT_PER_USER = "marketing_limit_per_user"
+    #: Meta could not deliver to this person (131026).
+    UNDELIVERABLE = "undeliverable"
+    #: The send's outcome could not be known; never sent again (ADR-093).
+    DELIVERY_UNCONFIRMED = "delivery_unconfirmed"
+    #: Every attempt failed.
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+    #: Meta refused the template's parameters for this send (CMP-05).
+    TEMPLATE_PARAMETERS_REFUSED = "template_parameters_refused"
+
+
 class RecipientStatus(StrEnum):
     """What happened to one person's copy.
 
@@ -133,6 +207,10 @@ class OptOutVia(StrEnum):
     REPLAY = "replay"
     #: Recorded by a colleague through the API.
     TEAM = "team"
+    #: The provider accepted a send and later reported it failed because the
+    #: person stopped marketing messages (131050 on a `failed` status, CMP-10).
+    #: Last, because 0105 appends the label (`ALTER TYPE ... ADD VALUE`).
+    PROVIDER_STATUS = "provider_status"
 
 
 # Statuses in which a campaign is finished and will never send again.
@@ -180,6 +258,30 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "scheduled_at",
             postgresql_where=text("status IN ('scheduled', 'running')"),
         ),
+        CheckConstraint(
+            "status_reason IS NULL OR status_reason IN ("
+            + ", ".join(f"'{reason.value}'" for reason in CampaignStopReason)
+            + ")",
+            name="status_reason_known",
+        ),
+        CheckConstraint(
+            "consecutive_batch_failures >= 0", name="consecutive_batch_failures_non_negative"
+        ),
+        # The send rate the schema and the service already bound, held by the
+        # column too (CMP-22). 0106.
+        CheckConstraint(
+            f"messages_per_minute BETWEEN {MIN_MESSAGES_PER_MINUTE} AND {MAX_MESSAGES_PER_MINUTE}",
+            name="messages_per_minute_bounded",
+        ),
+        # The sending number is one of the campaign's own workspace (ADR-100's
+        # pattern, CMP-22). 0106. The template's twin needs a (tenant_id, id)
+        # key on `whatsapp_templates` that does not exist: accepted residual.
+        ForeignKeyConstraint(
+            ["tenant_id", "account_id"],
+            ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
+            name="fk_campaigns_tenant_account",
+            ondelete="CASCADE",
+        ),
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(
@@ -208,6 +310,11 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # per-recipient personalisation needs a source of per-recipient facts that
     # nothing here has yet.
     variables: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # The header's and the buttons' send-time parameters, for a template whose
+    # stored components need them (CMP-05): `{"header": [...], "buttons":
+    # [{"index", "value"}]}`. Null for a body-only template. Bounded by the
+    # request schema, like `variables`.
+    template_parameters: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     audience: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     audience_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -226,6 +333,12 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # its allowance, which is how the rate limit survives a restart: a worker
     # that dies does not hand the next one permission to send a burst.
     next_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Which claim currently owns this campaign's sending (CMP-01, ADR-134). Set
+    # by the sweep's claim together with the lease in `next_send_at`, renewed
+    # per recipient, and cleared when the batch ends. A worker proceeds only
+    # while the row still carries its own token, so a worker whose lease was
+    # taken over stops at its next recipient rather than working on.
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -233,6 +346,23 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         nullable=True,
     )
     last_error: Mapped[str | None] = mapped_column(String(MAX_ERROR_LENGTH), nullable=True)
+    # Why the campaign is paused or failed, from `CampaignStopReason` (CMP-02).
+    # Text with a CHECK rather than a native enum, so the vocabulary can grow
+    # without an autocommit migration. Cleared when it is scheduled again.
+    status_reason: Mapped[str | None] = mapped_column(String(MAX_STOP_REASON_LENGTH), nullable=True)
+    # When Meta first could not be reached in the current run of unreachable
+    # batches (CMP-07). An outage costs time, not the audience: the campaign
+    # waits, spending no attempts, and is paused `provider_unreachable` once
+    # this is older than the bound. Cleared by any batch that reaches Meta.
+    provider_unreachable_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Batches in a row that raised out of `dispatch_batch` (CMP-20). Reset by
+    # a batch that completes; at the bound the campaign is paused
+    # `repeated_batch_failure` instead of being retried for ever.
+    consecutive_batch_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
     @property
     def is_running(self) -> bool:
@@ -292,6 +422,12 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
             "participant_identity_id",
             postgresql_where=text("participant_identity_id IS NOT NULL"),
         ),
+        CheckConstraint(
+            "reason_code IS NULL OR reason_code IN ("
+            + ", ".join(f"'{reason.value}'" for reason in RecipientReason)
+            + ")",
+            name="reason_code_known",
+        ),
         # The identity this copy is addressed to: one of this recipient's own
         # contact's identities, in its own workspace (OMNI-004).
         ForeignKeyConstraint(
@@ -347,6 +483,14 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     )
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(String(MAX_ERROR_LENGTH), nullable=True)
+    # Why it ended as it did, from `RecipientReason` (CMP-13). Text with a
+    # CHECK, like `campaigns.status_reason`. Null when sent, and on rows
+    # recorded before reason codes.
+    reason_code: Mapped[str | None] = mapped_column(String(MAX_STOP_REASON_LENGTH), nullable=True)
+    # Not to be asked before this moment (CMP-18): Meta's pair rate limit
+    # (131056) is about this person and this number, so the person waits and
+    # the rest of the campaign goes on. The claim skips it until then.
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     @property
@@ -371,6 +515,8 @@ __all__ = [
     "Campaign",
     "CampaignRecipient",
     "CampaignStatus",
+    "CampaignStopReason",
     "OptOutSource",
+    "RecipientReason",
     "RecipientStatus",
 ]

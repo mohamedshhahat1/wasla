@@ -6812,3 +6812,194 @@ GitHub.
 hand-written rows: charging an empty answer, charging at engagement and a
 sweeper that never expires are each counted by it (M-K06..M-K08,
 `scripts/verification/run_kept_data_mutations.py`).
+
+## ADR-134 — One Owner Per Campaign Recipient, Whatever The Number Of Workers (CMP-01)
+
+**Context.** Two campaign replicas sent the same people the same campaign
+(CAMPAIGNS_OUTBOUND_MESSAGING_AUDIT.md section 15: 3/40, 26/40, and 23/250
+with the shipped constants). The batch's row locks end at the first send
+commit (ADR-093 TX1) and the rest of the batch ran on stale snapshots
+(`expire_on_commit=False`); `claim_due` ignored the lease for `scheduled`
+campaigns; the lease was shorter than a worst-case sweep; and `claim_by_id`
+never checked the lease was still the caller's.
+
+**Decision.**
+
+1. **The decisive guard is per recipient.** Before every send,
+   `CampaignRecipientRepository.take` runs one `SELECT ... WHERE status =
+   'pending' FOR UPDATE SKIP LOCKED` with `populate_existing`. A row another
+   worker owns or finished is skipped with no send and no attempt; every later
+   decision reads the row as it is. The owned marker is the existing
+   `message_id` link, written in TX1 while the lock is held: after that commit
+   a second worker sees the link and abandons rather than sends. No new
+   recipient column was needed.
+2. **A lease token** (`campaigns.lease_token`, 0101). `claim_due` writes a new
+   token per claimed row; `claim_by_id` proceeds only while the row carries
+   it; `CampaignRepository.hold`, before every recipient, is one conditional
+   `UPDATE` that checks the campaign is `scheduled`/`running` and still this
+   worker's, and renews the lease. The batch clears the token when it ends.
+3. **Both branches of the claim honour the lease.**
+4. **The lease outlasts one send, not a batch**: worst case 3 attempts x 10 s
+   read timeout plus 2 throttle waits x (30 s `Retry-After` + 50 % jitter) =
+   120 s; `CLAIM_LEASE_SECONDS` stays 300.
+5. **Clocks.** Due-ness and lease expiry compare the worker's Python clock, as
+   before. Skew between replicas changes only *when* a lease is re-taken; it
+   cannot cause a second copy, because ownership of a person is decided by the
+   row lock and the link, never by a timestamp.
+
+**Consequences.** A worker whose lease is taken over stops at its next
+recipient; the one send in flight is linked and is abandoned by the new owner,
+never resent. Campaign replicas are safe. The two-, four- and eight-worker
+tests in `tests/integration/test_campaign_two_workers.py` fail at 6ecbdd6 and
+pass now.
+
+## ADR-135 — A Workspace That Is Not Served Does Not Broadcast (CMP-02, CMQ-11)
+
+**Context.** A platform-suspended or soft-deleted workspace, and one whose
+subscription dunning had suspended, kept sending scheduled campaigns (audit
+P03, P12: 10/10). Only agent follow-ups were stopped (TOOL-04).
+
+**Decision.** `app/services/workspace_serving.py` holds the one "served"
+predicate; the follow-up gate and the campaign gate both call it (asserted by
+test). The campaign worker asks it, then whether the subscription is
+`suspended`, before every batch and every recipient. Workspace suspension and
+deletion and the dunning transition to `suspended` pause the workspace's
+`scheduled`/`running` campaigns in their own transaction, with
+`campaigns.status_reason` (`workspace_suspended`, `workspace_deleted`,
+`subscription_suspended`; 0102) and one `CAMPAIGN_PAUSED` audit entry each
+naming the actor. `past_due` is the grace and keeps sending. Nothing resumes by
+itself: an admin reschedules, and the reservation is taken again then.
+
+## ADR-136 — The Campaign Allowance Is Reserved From Counts Read Under Its Lock (CMP-03, CMP-04, CMP-24)
+
+**Context.** `schedule()` evaluated "pending in other live campaigns" as a
+call argument, before `reserve_period` took the advisory lock (audit P02:
+40/40 concurrent pairs both accepted). `set_audience()` checked `draft` with
+an unlocked read, so a wider audience could land on a scheduled campaign
+(P11b: 200 pending against 10 reserved).
+
+**Decision.** `EntitlementService.reserve_period` accepts each count as a
+coroutine function and awaits it after `pg_advisory_xact_lock`. `schedule()`
+and `set_audience()` lock the campaign row (`lock_by_id`) before reading it,
+then take the allowance's advisory lock, in that order. `schedule()` refuses
+`402 channel_not_in_plan` before reserving when the plan in force excludes the
+campaign's channel; the per-batch skip remains for a later plan change.
+
+## ADR-137 — A Template's Needs Come From Its Stored Components; Template Refusals Stop A Campaign Once (CMP-05, CMP-19)
+
+**Context.** Composition counted only the body's placeholders and the send
+carried a body component alone; Meta refused every recipient of a template
+with a header or button parameter, three attempts each (P06/P07).
+
+**Decision.**
+
+1. The parameter spec is **derived** from `whatsapp_templates.components`
+   (written unedited by every sync), not stored as a second copy that could
+   drift (`app/services/template_parameters.py`). No `parameter_spec` column.
+   A template with no stored components has unknown needs and is refused
+   `template_not_synced`.
+2. Composition requires every value the spec needs - body (positional, or
+   named and sent with `parameter_name`), text header, dynamic URL suffix,
+   copy code - or refuses `422 template_parameters`, naming the component.
+   Values are kept in `campaigns.template_parameters` (0103).
+3. **Media headers are refused at composition** (`template_unsupported`):
+   sending one needs a Meta media handle per campaign that the media store
+   does not produce. Deferred, not silently skipped.
+4. Meta's code travels on a per-message refusal and is stored on
+   `messages.failure_code` (0103). 132000/132012/131008 fail the campaign once
+   (`template_parameters_refused`) without pausing the template;
+   132001/132015/132016 and a registry refusal mid-batch fail it once
+   (`template_withdrawn`); recipients not yet asked spend nothing.
+
+## ADR-138 — Campaigns Send Marketing Templates Only (CMP-09)
+
+`WhatsAppTemplate`'s docstring always said so; nothing enforced it. A campaign
+is composed only on a `MARKETING` template (`422 template_category`) and fails
+`template_category` if a sync recategorises it after scheduling.
+
+## ADR-139 — Each Meta Answer Class Handled As Meta Documents It (CMP-06, CMP-07, CMP-18)
+
+- **131049** (per-user marketing limit: wait at least 24 hours) and **131026**
+  (undeliverable) fail that person at once (`marketing_limit_per_user`,
+  `undeliverable`); no retry within the campaign. Re-asking after 24 hours is
+  later product.
+- **Meta unreachable**: `httpx.ConnectError`, `ConnectTimeout` and
+  `PoolTimeout` end before a byte of the request is written, and become
+  `ProviderUnreachableError` after the client's own retries; a read or write
+  timeout and a reset stay uncertain (ADR-093). A campaign unlinks the
+  recipient, spends no attempt, waits a minute, and is paused
+  `provider_unreachable` after `CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS`.
+- **131056** (pair rate limit) is about one person: the client raises
+  `PairRateLimitedError` without in-client retries; a campaign defers that
+  person a minute (`campaign_recipients.not_before`, 0104) and goes on; other
+  senders treat it as a throttle.
+- Recipients carry a closed `reason_code` (0104).
+
+## ADR-140 — A Send That Provably Never Left Is Sent On Resume (CMP-11)
+
+Amends ADR-093's abandon rule. A pending recipient linked to a message is
+abandoned **unless that message's own delivery state is `UNDELIVERED`** -
+Meta read the request and refused it, nothing reached the customer - in which
+case it is unlinked and sent, attempts unchanged. Read from the message row,
+never inferred from the campaign. A refused credential now clears the link at
+once (invariant CR-03 counts any left). `REQUESTED` and anything else is still
+abandoned, never resent.
+
+## ADR-141 — A Marketing Template Sent By Hand Is Admin-Only And Honours Opt-Out (CMQ-02)
+
+Decision (b). `POST /conversations/{id}/messages/template` with a template the
+registry files as `MARKETING`: `403 marketing_template_admin_only` for a
+member; `422 recipient_opted_out`, before staging, for a contact opted out on
+the conversation's channel (the campaign's own consent read). Not counted
+against `period_campaign_messages` and not paced beyond the workspace budget.
+Utility and authentication templates are unchanged; a template the registry
+has never heard of has no category and keeps the MSG-10 asymmetry.
+
+## ADR-142 — Meta's Later Failed Statuses And Template Status Events Are Acted On (CMP-10, CMQ-05)
+
+A failed status's `errors[0].code` is stored on `messages.failure_code`.
+131050 on a campaign or marketing-template message records the opt-out
+through `record_opt_out` on the conversation's channel, `via=provider_status`
+(0105). 132001/132015/132016 write the registry back to `PAUSED` through the
+same function a refused send uses. Statistics gain `failed_after_send`.
+`message_template_status_update` is parsed (keyed by the business account) and
+applied to every registry row for (account, name, language) through the
+sync's mapping; an event older than the row's last write, an unmapped word,
+or an unknown template changes nothing. Subscribing the field in the Meta App
+is an operator's action. No periodic sync (unchanged).
+
+## ADR-143 — Campaign API, Audit And Database Bounds (CMP-13, CMP-14, CMP-15, CMP-22)
+
+Recipients are listed by keyset cursor and filtered by status and reason
+code. Creating a campaign and setting its audience are audited (count and
+filter summary, never contact ids or parameters); pause was audited by
+ADR-135. A `scheduled_at` without a UTC offset is refused `422
+scheduled_at_needs_offset`. 0106 adds `CHECK messages_per_minute BETWEEN 1 AND
+600` and `(tenant_id, account_id)` -> `whatsapp_accounts (tenant_id, id)`; the
+template twin needs a key `whatsapp_templates` lacks and is an accepted
+residual. A batch that keeps raising is paused `repeated_batch_failure` after
+`CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` (CMP-20).
+
+## ADR-025 (amended 2026-10-15) — "Wrote First" And Meta's Opt-In Policy
+
+Unchanged in substance. Meta's opt-in policy asks for explicit opt-in before
+business-initiated messages; whether "wrote first" is enough for marketing is
+CMQ-07, an open product and legal decision (Egypt PDPL 151/2020).
+
+## ADR-026 (amended 2026-10-15) — Pacing From The End Of The Batch
+
+"Never above it" held only when a sweep was short: `next_send_at` was dated
+from the sweep's start. It is now the batch's end plus the batch's share of
+the rate (CMP-20).
+
+## ADR-093 (amended 2026-10-15) — The Re-Arm Exception
+
+See ADR-140: a pending recipient linked to an `UNDELIVERED` message is sent
+again; every other linked state is abandoned as before. ADR-134 adds the
+per-recipient claim in front of TX1; the state machine is unchanged.
+
+## ADR-123 (amended 2026-10-15) — Campaigns And The Connection Allowance
+
+docs/CAMPAIGNS.md now names `CONNECTION_SENDS_PER_MINUTE` and the 0090
+per-connection override: with either set, campaigns on one number share its
+allowance.

@@ -125,6 +125,7 @@ class StubCampaigns:
         *,
         campaign_id: uuid.UUID,
         filters: AudienceFilter,
+        actor: User | None = None,
     ) -> Campaign:
         self.audiences.append({"campaign_id": campaign_id, "filters": filters})
         return _campaign()
@@ -139,7 +140,7 @@ class StubCampaigns:
         self.scheduled.append({"campaign_id": campaign_id, "scheduled_at": scheduled_at})
         return _campaign(CampaignStatus.SCHEDULED)
 
-    async def pause(self, campaign_id: uuid.UUID) -> Campaign:
+    async def pause(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
         self.paused.append(campaign_id)
         return _campaign(CampaignStatus.PAUSED)
 
@@ -155,9 +156,11 @@ class StubCampaigns:
         campaign_id: uuid.UUID,
         *,
         status: RecipientStatus | None = None,
+        reason: Any = None,
         limit: int = 100,
-    ) -> list[Any]:
-        return [_recipient()]
+        cursor: str | None = None,
+    ) -> Page[Any]:
+        return Page(items=[_recipient()], next_cursor=None)
 
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
@@ -223,6 +226,7 @@ async def test_statistics_report_delivery_as_well_as_outcome(
         "delivered": 2,
         "read": 1,
         "total": 4,
+        "failed_after_send": 0,
     }
 
 

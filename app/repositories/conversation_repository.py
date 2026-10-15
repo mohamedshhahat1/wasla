@@ -746,6 +746,19 @@ class MessageRepository(TenantScopedRepository[Message]):
         )
         return self.add(message)
 
+    async def delivery_state(self, message_id: uuid.UUID) -> MessageDeliveryState | None:
+        """One message's delivery state as committed now, in this workspace (CMP-11).
+
+        A scalar rather than the mapped row, so a message already in the
+        session's identity map is not read as it was loaded.
+        """
+        state: MessageDeliveryState | None = await self.session.scalar(
+            select(Message.delivery_state).where(
+                Message.id == message_id, Message.tenant_id == self.tenant_id
+            )
+        )
+        return state
+
     async def get_by_idempotency_key(self, key: str) -> Message | None:
         """The message a previous request with this key produced, if any."""
         return await self._first(self._select().where(Message.idempotency_key == key))
@@ -823,16 +836,20 @@ class MessageRepository(TenantScopedRepository[Message]):
         message.delivery_state = MessageDeliveryState.SENT
         return message
 
-    async def mark_failed(self, message: Message, *, reason: str) -> Message:
+    async def mark_failed(
+        self, message: Message, *, reason: str, code: int | None = None
+    ) -> Message:
         """Record a send that provably delivered nothing.
 
         Only reached where that is known - Meta declined the request, or the
         request never left. A send whose outcome is unknown is left in
         `REQUESTED`, because `FAILED` is a claim about the customer's phone
-        that nobody is in a position to make.
+        that nobody is in a position to make. `code` is the provider's own
+        error code, when it named one (CMP-05).
         """
         message.status = MessageStatus.FAILED
         message.failure_reason = reason[:500]
+        message.failure_code = code
         message.delivery_state = MessageDeliveryState.UNDELIVERED
         return message
 
@@ -863,6 +880,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         status: MessageStatus,
         at: datetime,
         failure_text: str | None = None,
+        failure_code: int | None = None,
     ) -> Message:
         """Move a message forward, and never backwards.
 
@@ -889,6 +907,11 @@ class MessageRepository(TenantScopedRepository[Message]):
             message.read_at = at
         elif status is MessageStatus.FAILED and message.failure_reason is None:
             message.failure_reason = failure_text or PROVIDER_REPORTED_FAILURE
+        if status is MessageStatus.FAILED and message.failure_code is None:
+            # The code is kept whichever way the ranking goes (CMP-10): a
+            # failure after delivery does not change the status, and what it
+            # says - 131050, 132015 - is still worth having on the row.
+            message.failure_code = failure_code
 
         if _STATUS_ORDER[status] > _STATUS_ORDER[message.status]:
             message.status = status

@@ -247,7 +247,9 @@ def test_p5_p6_another_products_delivery_is_refused_and_counted(
 
 @pytest.mark.parametrize(
     "field",
-    ["smb_message_echoes", "history", "smb_app_state_sync", "message_template_status_update"],
+    # `message_template_status_update` is handled now (CMQ-05): applied to the
+    # template registry by `template_status_events`, never projected.
+    ["smb_message_echoes", "history", "smb_app_state_sync"],
 )
 def test_a_change_this_adapter_does_not_process_is_refused_by_rule(field: str) -> None:
     """Coexistence fields used to be ignored by key-name coincidence (OMNI-010).
@@ -293,3 +295,42 @@ def test_the_parser_still_never_raises(payload: dict[str, Any]) -> None:
 
     assert envelope.is_empty
     assert envelope.ignored == sum(envelope.refused.values())
+
+
+def test_a_template_status_update_is_read_by_account_and_never_projected() -> None:
+    """CMQ-05: keyed by the business account (`entry.id`), not by a phone number."""
+    from app.integrations.whatsapp.payload import template_status_events
+
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "555000111",
+                "time": 1760500000,
+                "changes": [
+                    {
+                        "field": "message_template_status_update",
+                        "value": {
+                            "event": "PAUSED",
+                            "message_template_id": 42,
+                            "message_template_name": "spring_offer",
+                            "message_template_language": "ar_EG",
+                            "reason": "NONE",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    envelope = parse_webhook(payload)
+    (event,) = template_status_events(payload)
+
+    assert envelope.ignored == 0
+    assert envelope.is_empty
+    assert (event.waba_id, event.name, event.language, event.event) == (
+        "555000111",
+        "spring_offer",
+        "ar_EG",
+        "PAUSED",
+    )

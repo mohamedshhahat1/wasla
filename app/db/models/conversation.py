@@ -26,6 +26,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -631,6 +632,12 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # The provider's own numeric code for why the message failed - refused at
+    # send, or reported later by a `failed` status (CMP-05, CMP-10, ADR-139).
+    # A published vocabulary, kept beside the fixed sentence above: it is what
+    # an opt-out (131050), a template pause (132015) or a campaign-wide
+    # refusal (132000) is recognised by. Never the provider's prose.
+    failure_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Nullable because an inbound message has no delivery protocol to be in the
     # middle of, and because every row written before ADR-093 predates the
     # question. Read through the two properties below rather than compared to

@@ -23,12 +23,14 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
+from app.integrations.whatsapp.payload import template_status_events
 from app.services.channel_ingestion_service import (
     AGENT_NOT_QUEUED,
     MEDIA_NOT_QUEUED,
     ChannelIngestionService,
     IngestionOutcome,
 )
+from app.services.template_status_updates import apply_template_status_events
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentQueue
 
@@ -49,6 +51,7 @@ class WhatsAppIngestionService:
         media_queue: MediaQueue | None = None,
     ) -> None:
         self._adapter = WhatsAppAdapter()
+        self._session = session
         self._ingestion = ChannelIngestionService(
             session=session,
             adapter=self._adapter,
@@ -57,7 +60,11 @@ class WhatsAppIngestionService:
         )
 
     async def ingest(self, payload: Mapping[str, Any]) -> IngestionOutcome:
-        return await self._ingestion.ingest(self._adapter.parse(payload))
+        outcome = await self._ingestion.ingest(self._adapter.parse(payload))
+        # Template status changes ride the same subscription and signature,
+        # and are applied to the registry rather than projected (CMQ-05).
+        await apply_template_status_events(self._session, template_status_events(payload))
+        return outcome
 
 
 __all__ = [

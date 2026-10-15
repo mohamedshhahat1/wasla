@@ -87,7 +87,8 @@ class Check:
 # `STOP_WORDS`. Arabic phrases need the matcher's letter folding and are counted
 # by the replay command, which uses `is_stop_request` itself.
 STOP_PHRASES_SQL = (
-    "'no more messages', 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe'"
+    "'no more messages', 'opt out', 'opt-out', 'optout', 'please stop', 'remove me',"
+    " 'stop', 'stop please', 'stop promotions', 'unsub', 'unsubscribe'"
 )
 
 # ------------------------------------------------------------------ census
@@ -225,7 +226,8 @@ CENSUS: tuple[Check, ...] = (
         " AND lower(btrim(coalesce(e.payload #>> '{button,text}',"
         " e.payload #>> '{interactive,button_reply,title}',"
         " e.payload #>> '{interactive,list_reply,title}'))) IN ('no more messages',"
-        " 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe')",
+        " 'opt out', 'opt-out', 'optout', 'please stop', 'remove me',"
+        " 'stop', 'stop please', 'stop promotions', 'unsub', 'unsubscribe')",
     ),
     # Deliveries the workspace-wide key refused, kept as evidence (OMNI-043).
     Check(
@@ -491,6 +493,74 @@ _REDUCTION_DISABLE = "('capacity_reduction', 'capacity_reduction_automatic')"
 _DISABLED = "('channel_connection_disabled', 'whatsapp_account_disabled')"
 _RELEASED = "('channel_connection_released', 'whatsapp_account_released')"
 
+# Campaigns (CR-01..CR-07, ADR-134..ADR-143): what the campaigns audit counted
+# by hand after its probes, kept here so a restore or a deployment can be
+# checked the same way. Every one is zero on a healthy database.
+CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
+    # CR-01: one campaign put two of its messages in one conversation - two
+    # copies on one phone (CMP-01). Read from the campaign meter, which names
+    # every message a campaign sent; the recipient row only names the last.
+    Check(
+        "cr01_conversation_with_two_messages_of_one_campaign",
+        "SELECT count(*) FROM (SELECT u.tenant_id, u.metadata ->> 'campaign_id',"
+        " m.conversation_id FROM usage_events u JOIN messages m ON m.tenant_id = u.tenant_id"
+        " AND m.id = CAST(u.metadata ->> 'message_id' AS uuid)"
+        " WHERE u.event_type = 'campaign_message' GROUP BY 1, 2, 3 HAVING count(*) > 1) s",
+    ),
+    # CR-02: a campaign metered a different number of messages than it has
+    # recipients sent - the doubled meter of CMP-01 (audit: 392 vs 340).
+    Check(
+        "cr02_campaign_meters_differ_from_recipients_sent",
+        "SELECT count(*) FROM campaigns c WHERE (SELECT count(*) FROM usage_events u"
+        " WHERE u.tenant_id = c.tenant_id AND u.event_type = 'campaign_message'"
+        " AND u.metadata ->> 'campaign_id' = CAST(c.id AS text))"
+        " <> (SELECT count(*) FROM campaign_recipients r WHERE r.campaign_id = c.id"
+        " AND r.status = 'sent')",
+    ),
+    # CR-03: a pending recipient linked to a message that provably never left
+    # (CMP-11): it would have been abandoned on resume instead of sent.
+    Check(
+        "cr03_pending_recipient_linked_to_an_undelivered_message",
+        "SELECT count(*) FROM campaign_recipients r JOIN messages m"
+        " ON m.tenant_id = r.tenant_id AND m.id = r.message_id"
+        " WHERE r.status = 'pending' AND m.delivery_state = 'undelivered'",
+    ),
+    # CR-04: a recipient added after its campaign was scheduled - an audience
+    # that grew past the reservation taken (CMP-03, CMP-04).
+    Check(
+        "cr04_recipient_added_after_its_campaign_was_scheduled",
+        "SELECT count(*) FROM campaign_recipients r WHERE EXISTS (SELECT 1 FROM audit_logs a"
+        " WHERE a.target_id = r.campaign_id AND a.action = 'campaign_scheduled'"
+        " AND a.occurred_at < r.created_at)",
+    ),
+    # CR-05: a campaign still scheduled or running for a workspace that is not
+    # served - suspended, deleted, or its subscription suspended (CMP-02, CMQ-11).
+    Check(
+        "cr05_live_campaign_of_a_workspace_not_served",
+        "SELECT count(*) FROM campaigns c JOIN tenants t ON t.id = c.tenant_id"
+        " LEFT JOIN subscriptions s ON s.tenant_id = c.tenant_id"
+        " WHERE c.status IN ('scheduled', 'running') AND (t.status <> 'active'"
+        " OR t.deleted_at IS NOT NULL OR s.status = 'suspended')",
+    ),
+    # CR-06: a live campaign on a template that is not marketing (CMP-09).
+    Check(
+        "cr06_live_campaign_on_a_template_that_is_not_marketing",
+        "SELECT count(*) FROM campaigns c JOIN whatsapp_templates w ON w.id = c.template_id"
+        " WHERE c.status IN ('scheduled', 'running') AND w.category <> 'marketing'",
+    ),
+    # CR-07: a recipient sent after opting out on the campaign's channel, with
+    # no resume since (ENT-19, R2).
+    Check(
+        "cr07_recipient_sent_after_opting_out_on_that_channel",
+        "SELECT count(*) FROM campaign_recipients r JOIN campaigns c ON c.id = r.campaign_id"
+        " JOIN channel_connections cc ON cc.id = c.account_id"
+        " JOIN contact_channel_consents k ON k.tenant_id = r.tenant_id"
+        " AND k.contact_id = r.contact_id AND k.channel = cc.channel"
+        " WHERE r.status = 'sent' AND k.marketing_opt_out_at < r.sent_at"
+        " AND (k.resumed_at IS NULL OR k.resumed_at < k.marketing_opt_out_at)",
+    ),
+)
+
 ENTITLEMENT_INVARIANTS: tuple[Check, ...] = (
     # E01 - active connections fit the capacity in force (ENT-05, ENT-08),
     # unless an open reduction, a subscription not served or an expiry the
@@ -708,8 +778,18 @@ async def violations(
 ) -> dict[str, int]:
     """Every invariant's violation count. All zero on a healthy database."""
     return await _counts(
-        connection, INVARIANTS + ENTITLEMENT_INVARIANTS, read_only=read_only, bindings=bindings
+        connection,
+        INVARIANTS + ENTITLEMENT_INVARIANTS + CAMPAIGN_INVARIANTS,
+        read_only=read_only,
+        bindings=bindings,
     )
+
+
+async def campaign_violations(
+    connection: AsyncConnection, *, read_only: bool = True
+) -> dict[str, int]:
+    """The campaign invariants alone (CR-01..CR-07). All zero on a healthy database."""
+    return await _counts(connection, CAMPAIGN_INVARIANTS, read_only=read_only)
 
 
 async def entitlement_violations(

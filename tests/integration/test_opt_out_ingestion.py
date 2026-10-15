@@ -154,3 +154,59 @@ async def test_a_stop_still_produces_a_message_and_an_agent_job(db_session: Asyn
     assert outcome.stored == 1
     contact = await _contact(db_session, account)
     assert await opted_out_at(db_session, contact.id) is not None
+
+
+# The stop vocabulary, extended (CMP-12: unambiguous forms the audit's P08
+# found missed; CMQ-12: the polite and colloquial forms the owner chose) - each
+# through the real inbound path, W1. Written whole, as a customer types them.
+STOPS_ADDED = [
+    "opt-out",
+    "STOP STOP",
+    "stop stop stop",
+    "Stop, stop!",
+    "unsub",
+    "اوقف",
+    "أوقف",
+    "أوقف الرسائل",
+    "أُوقِف",  # with diacritics
+    "اوقـــف",  # with tatweel
+    "ستوب",
+    "stop please",
+    "please stop",
+    "لا ترسل",
+    "remove me",
+]
+# Kept out on purpose (CMQ-12): ambiguous on their own, or a sentence.
+NOT_STOPS = [
+    "كفاية",
+    "وقف",
+    "بطل رسايل",
+    "Unsubscribe me",
+    "stop by the shop tomorrow",
+    "stop the order",
+    "please stop by",
+]
+
+
+@pytest.mark.parametrize("text", STOPS_ADDED)
+async def test_each_added_stop_phrase_opts_the_customer_out(
+    db_session: AsyncSession, text: str
+) -> None:
+    account = await _account(db_session, slug=f"stop-{abs(hash(text)) % 10**8}")
+    await WhatsAppIngestionService(session=db_session).ingest(_inbound(text=text))
+
+    contact = await contact_by_phone(db_session, account.tenant_id, CUSTOMER)
+    assert contact is not None
+    assert await opted_out_at(db_session, contact.id) is not None
+
+
+@pytest.mark.parametrize("text", NOT_STOPS)
+async def test_a_phrase_kept_out_of_the_vocabulary_changes_nothing(
+    db_session: AsyncSession, text: str
+) -> None:
+    account = await _account(db_session, slug=f"nostop-{abs(hash(text)) % 10**8}")
+    await WhatsAppIngestionService(session=db_session).ingest(_inbound(text=text))
+
+    contact = await contact_by_phone(db_session, account.tenant_id, CUSTOMER)
+    assert contact is not None
+    assert await opted_out_at(db_session, contact.id) is None

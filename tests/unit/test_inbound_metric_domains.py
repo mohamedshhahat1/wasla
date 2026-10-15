@@ -103,3 +103,11 @@ def test_the_census_stop_phrases_are_the_matchers() -> None:
     assert expected == STOP_PHRASES_SQL
     (q6,) = [check for check in CENSUS if check.name == "q6_retained_stop_taps_without_opt_out"]
     assert " ".join(q6.query.split()).endswith(f"IN ({STOP_PHRASES_SQL})")
+
+
+def test_the_campaign_metric_domains_are_the_vocabularies() -> None:
+    """CMP-23: `wasla_campaign_stops_total{reason}` is `CampaignStopReason`, closed."""
+    from app.core.telemetry import CAMPAIGN_STOP_REASONS
+    from app.db.models.campaign import CampaignStopReason
+
+    assert frozenset(reason.value for reason in CampaignStopReason) == CAMPAIGN_STOP_REASONS

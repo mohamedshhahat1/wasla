@@ -30,7 +30,7 @@ from app.channels.registry import ChannelRegistry
 from app.core.config import Settings
 from app.db.models.agent_turn import AgentTurn
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
-from app.db.models.campaign import CampaignRecipient, RecipientStatus
+from app.db.models.campaign import CampaignRecipient, CampaignStatus, RecipientStatus
 from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
 from app.db.models.conversation import Conversation, Message, MessageDirection, MessageOrigin
 from app.db.models.follow_up import FollowUp, FollowUpStatus
@@ -334,25 +334,42 @@ async def test_suspended_a_follow_up_on_instagram_is_skipped(
 
 
 @pytest.mark.parametrize(
-    ("status", "sent"),
-    [(SubscriptionStatus.SUSPENDED, 0), (SubscriptionStatus.ACTIVE, 2)],
-    ids=["suspended", "active"],
+    ("status", "includes_whatsapp", "outcome"),
+    [
+        (SubscriptionStatus.ACTIVE, False, RecipientStatus.SKIPPED),
+        (SubscriptionStatus.ACTIVE, True, RecipientStatus.SENT),
+        (SubscriptionStatus.SUSPENDED, True, RecipientStatus.PENDING),
+    ],
+    ids=["plan-excludes", "plan-includes", "suspended"],
 )
 async def test_a_campaign_on_a_channel_the_plan_in_force_excludes_is_skipped(
-    db_session: AsyncSession, settings: Settings, status: SubscriptionStatus, sent: int
+    db_session: AsyncSession,
+    settings: Settings,
+    status: SubscriptionStatus,
+    includes_whatsapp: bool,
+    outcome: RecipientStatus,
 ) -> None:
     """Through the real campaign worker and service; campaigns send on WhatsApp alone.
 
-    The paid plan includes WhatsApp; the plan a workspace not served falls back
-    to - the deployment's default - is made to exclude it here, the one way a
-    campaign's channel can fall outside the plan in force today. Served, both
-    copies go out; suspended, both are skipped `channel_not_in_plan`, terminal.
+    A plan in force that excludes the campaign's channel - changed after the
+    campaign was scheduled, which `schedule()` now refuses up front (CMP-24) -
+    skips both copies `channel_not_in_plan`, terminal; one that includes it
+    sends both. A subscription suspended for an unpaid invoice is not served
+    at all (CMQ-11): the campaign is paused before any copy is judged, and the
+    recipients stay pending for an admin to resume rather than being lost to
+    the fallback plan.
     """
     tag = uuid.uuid4().hex[:8]
     campaign = await _sending_campaign(db_session, slug=f"plan-{tag}", recipients=2)
-    paid = await plan_with_channels(db_session, channels=[Channel.WHATSAPP, Channel.INSTAGRAM])
+    paid = await plan_with_channels(
+        db_session,
+        channels=(
+            [Channel.WHATSAPP, Channel.INSTAGRAM] if includes_whatsapp else [Channel.INSTAGRAM]
+        ),
+    )
     fallback = await plan_with_channels(db_session, channels=[Channel.INSTAGRAM])
     await subscribe(db_session, campaign.tenant_id, paid, status=status)
+    sent = 2 if outcome is RecipientStatus.SENT else 0
     sends: list[StubMessaging] = []
 
     def factory(session: AsyncSession, tenant_id: uuid.UUID) -> MessagingService:
@@ -374,8 +391,10 @@ async def test_a_campaign_on_a_channel_the_plan_in_force_excludes_is_skipped(
         )
     )
     assert sum(stub.sends for stub in sends) == sent
-    if sent:
-        assert {row.status for row in recipients} == {RecipientStatus.SENT}
-    else:
-        assert {row.status for row in recipients} == {RecipientStatus.SKIPPED}
+    assert {row.status for row in recipients} == {outcome}
+    if outcome is RecipientStatus.SKIPPED:
         assert {row.last_error for row in recipients} == {CHANNEL_NOT_IN_PLAN_DETAIL}
+    if status is SubscriptionStatus.SUSPENDED:
+        await db_session.refresh(campaign)
+        assert campaign.status is CampaignStatus.PAUSED
+        assert campaign.status_reason == "subscription_suspended"

@@ -479,7 +479,9 @@ Priority rises on a bad reading and never falls on a good one; a person gives it
 
 ## 13. Campaign flow
 
-**Status: Implemented** — the template registry, campaign composition and targeting, the rate-limited worker, delivery statistics and marketing opt-out, exercised against real PostgreSQL. Detail in `docs/CAMPAIGNS.md`; the decisions are ADR-025 and ADR-026.
+**Status: Implemented** — the template registry, campaign composition and targeting, the rate-limited worker, delivery statistics and marketing opt-out, exercised against real PostgreSQL. Detail in `docs/CAMPAIGNS.md`; the decisions are ADR-025 and ADR-026, and the campaigns remediation's ADR-134..143.
+
+The send path, per recipient: `hold` (the campaign is live and still carries this worker's lease token; the lease is renewed) → the served gate (`workspace_serving`, the follow-up gate's own predicate, plus a suspended subscription) → `take` (the recipient is still pending and nobody else's, locked and re-read) → consent on the campaign's channel → the ADR-093 protocol with every template component the stored spec needs. Any "no" stops or skips without a send.
 
 ```
 template approved in the WhatsApp Business Manager

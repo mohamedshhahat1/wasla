@@ -214,6 +214,28 @@ ordinary traffic. A refused connection or an exhausted allowance has no alert:
 both are commercial conditions answered to the customer, counted in
 `wasla_entitlement_refusals_total` for a dashboard.
 
+### Campaigns
+
+Added with ADR-134/135/139 (CMP-01, CMP-02, CMP-07, CMP-20, CMP-23). Counters
+`wasla_campaign_sends_total{outcome}` (sent, skipped, failed, abandoned,
+deferred), `wasla_campaign_stops_total{reason}` (the `CampaignStopReason`
+vocabulary), `wasla_campaign_events_total{event}` (lease_taken_over,
+lease_lost, recipient_owned_elsewhere) and
+`wasla_template_status_updates_total{source}` (send_writeback, status_webhook,
+template_webhook); opt-outs gain `via="provider_status"`. Gauges
+`wasla_campaigns_stuck` and `wasla_campaigns_stuck_oldest_age_seconds` are read
+at scrape time. No label names a workspace, campaign, connection or person.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `CampaignsStuck` | `wasla_campaigns_stuck > 0` for 15m - campaigns due and no worker sending | warning |
+| `CampaignRecipientOwnedElsewhere` | Any recipient refused by the per-recipient claim in an hour - two workers overlapped | warning |
+| `CampaignsPausedProviderUnreachable` | A campaign paused `provider_unreachable` in the last hour | warning |
+| `CampaignsPausedRepeatedBatchFailure` | A campaign paused `repeated_batch_failure` in the last hour | warning |
+
+Each was proved with `promtool test rules` to fire, clear, and stay silent on
+ordinary traffic (an admin's pause, a lease takeover alone).
+
 ### Media
 
 Added by the media remediation (MEDIA-15). A stranded attachment was visible

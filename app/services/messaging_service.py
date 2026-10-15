@@ -56,8 +56,10 @@ from app.channels.adapter import (
 )
 from app.channels.metering import message_meters
 from app.channels.outcomes import (
+    PairRateLimitedError,
     ProviderAuthError,
     ProviderConnectionRefusedError,
+    ProviderUnreachableError,
     RecipientOptedOutError,
     UncertainDeliveryError,
 )
@@ -82,6 +84,7 @@ from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
     ExternalServiceError,
+    PermissionDeniedError,
     RateLimitedError,
     ValidationError,
 )
@@ -103,9 +106,10 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.enums import TenantRole
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.user import User
-from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus
+from app.db.models.whatsapp_template import TemplateCategory
 from app.db.session import released
 from app.integrations.whatsapp.client import TemplateWithdrawnError, build_http_client
 from app.integrations.whatsapp.policy import SERVICE_WINDOW, WHATSAPP_TEXT_MAX_CHARS
@@ -113,6 +117,7 @@ from app.repositories.channel_repository import (
     ChannelConnectionRepository,
     ContactIdentityRepository,
 )
+from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -125,6 +130,7 @@ from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
 from app.services.opt_out import record_opt_out
+from app.services.provider_feedback import SEND_WRITEBACK, withdraw_template
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -132,7 +138,12 @@ logger = get_logger(__name__)
 
 # WhatsApp's limit and window live with WhatsApp's policy now (OMNI-008), and
 # are importable from here under the names the request schema and tests use.
-__all__ = ["SERVICE_WINDOW", "WHATSAPP_TEXT_MAX_CHARS", "MessagingService"]
+__all__ = [
+    "SERVICE_WINDOW",
+    "WHATSAPP_TEXT_MAX_CHARS",
+    "MessagingService",
+    "TemplateRefusedError",
+]
 
 # What a message records when the provider refused the connection's credential.
 # A fixed sentence: the failure reason is returned by the API and read by a
@@ -143,9 +154,25 @@ CONNECTION_CREDENTIAL_REFUSED = "The provider refused this connection's credenti
 # sentences, for the same reason.
 CONNECTION_SEND_REFUSED = "The provider refused to send through this connection."
 PROVIDER_THROTTLED = "The provider is rate limiting this connection."
+PAIR_RATE_LIMITED = "The provider limits messages from this number to this person for now."
 
 # The sentence a send on a paused connection is refused with, per channel.
 _DISABLED: Final[dict[Channel, str]] = {Channel.WHATSAPP: "This WhatsApp number is disabled."}
+
+
+class TemplateRefusedError(ValidationError):
+    """The registry refuses this template, before anything was staged (MSG-10, CMP-19).
+
+    About the template rather than the recipient: a campaign stops on it once
+    instead of spending an attempt per remaining person discovering it.
+    """
+
+    error_code = "template_refused"
+
+
+# Who may send a marketing template by hand (CMQ-02).
+MARKETING_SENDER_ROLES: Final = frozenset({TenantRole.TENANT_OWNER, TenantRole.TENANT_ADMIN})
+
 
 # A caller tying its own row to this send, inside the transaction that commits
 # the intent. Synchronous and staging-only, like `UsageRecorder.record`: it must
@@ -358,8 +385,18 @@ class MessagingService:
         link: LinkCall | None = None,
         idempotency_key: str | None = None,
         origin: MessageOrigin,
+        sender_role: TenantRole | None = None,
     ) -> Message:
         """Send an approved template, which is valid outside the service window.
+
+        **A marketing template sent by a person** (CMQ-02, ADR-141) is
+        admin-only - `sender_role` is the sender's role in the workspace - and
+        is refused, before anything is staged, to a contact opted out on the
+        conversation's channel. Sent one by one at the workspace's request
+        budget it was otherwise a broadcast that ignored opt-out. Utility and
+        authentication templates are unchanged for everybody; a template the
+        registry has never heard of has no category and is not treated as
+        marketing (the asymmetry below).
 
         The registry is consulted here so that every caller inherits it. It was
         checked by the campaign and follow-up services and by nothing else, so
@@ -382,9 +419,18 @@ class MessagingService:
         template = await self._templates.find_anywhere(name=name, language=language)
         refusal = refusal_reason_for(template)
         if refusal is not None:
-            raise ValidationError(refusal)
+            # Its own type, so a bulk sender can tell the template's refusal -
+            # which every later recipient would meet too - from this one
+            # message's (CMP-19). Still a `ValidationError` to everyone else.
+            raise TemplateRefusedError(refusal)
         if template is not None and template.category is TemplateCategory.AUTHENTICATION:
             await self._refuse_authentication_to_a_business_scoped_id(conversation_id)
+        if (
+            origin is MessageOrigin.HUMAN
+            and template is not None
+            and template.category is TemplateCategory.MARKETING
+        ):
+            await self._admit_manual_marketing(conversation_id, sender_role=sender_role)
 
         return await self._dispatch(
             conversation_id=conversation_id,
@@ -404,6 +450,25 @@ class MessagingService:
             idempotency_key=idempotency_key,
             origin=origin,
         )
+
+    async def _admit_manual_marketing(
+        self, conversation_id: uuid.UUID, *, sender_role: TenantRole | None
+    ) -> None:
+        """A person's marketing template: an admin's, to someone who has not opted out (CMQ-02)."""
+        if sender_role not in MARKETING_SENDER_ROLES:
+            raise PermissionDeniedError(
+                "Only a workspace owner or admin may send a marketing template.",
+                error_code="marketing_template_admin_only",
+            )
+        conversation = await self._conversations.require_by_id(conversation_id)
+        # The same consent read a campaign makes for each recipient (R2).
+        if not await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).accepts_marketing(conversation.contact_id, conversation.channel):
+            raise ValidationError(
+                "This customer has opted out of marketing messages on this channel.",
+                error_code="recipient_opted_out",
+            )
 
     async def _refuse_authentication_to_a_business_scoped_id(
         self, conversation_id: uuid.UUID
@@ -895,7 +960,7 @@ class MessagingService:
                 language=template_language,
                 code=outcome.code,
             )
-            return await self._undelivered(message, reason=str(outcome))
+            return await self._undelivered(message, reason=str(outcome), code=outcome.code)
 
         if isinstance(outcome, ProviderAuthError):
             # Nothing was delivered, so the row is recorded honestly as
@@ -929,7 +994,7 @@ class MessagingService:
             # The provider says the person stopped marketing messages: nothing
             # was delivered, and their consent on this channel now says so
             # too, through the one opt-out writer (OMNI-046, ENT-19).
-            await self._undelivered(message, reason=str(outcome))
+            await self._undelivered(message, reason=str(outcome), code=outcome.provider_code)
             if await record_opt_out(
                 self._session,
                 tenant_id=self._tenant_id,
@@ -965,6 +1030,23 @@ class MessagingService:
                 raise outcome
             return message
 
+        if isinstance(outcome, PairRateLimitedError) and origin is MessageOrigin.CAMPAIGN:
+            # Meta's limit on this number and this person (131056): a
+            # campaign defers the one person and goes on (CMP-18), so it gets
+            # the undelivered message, with the code, rather than a throttle
+            # that would stop it. Every other sender waits it out below.
+            return await self._undelivered(
+                message, reason=PAIR_RATE_LIMITED, code=outcome.provider_code
+            )
+
+        if isinstance(outcome, ProviderUnreachableError) and origin is MessageOrigin.CAMPAIGN:
+            # Meta could not be reached at all (CMP-07): provably undelivered,
+            # and the same for every recipient, so a campaign waits for the
+            # outage instead of spending each person's attempts on it. Let
+            # out after the row is recorded, as a refused credential is.
+            await self._undelivered(message, reason=str(outcome))
+            raise outcome
+
         if isinstance(outcome, RateLimitedError):
             # The provider throttled the connection: declined before reading,
             # so provably undelivered (OMNI-035). A bulk sender waits for the
@@ -984,7 +1066,9 @@ class MessagingService:
             return message
 
         if isinstance(outcome, Exception):
-            return await self._undelivered(message, reason=str(outcome))
+            return await self._undelivered(
+                message, reason=str(outcome), code=getattr(outcome, "provider_code", None)
+            )
 
         now = datetime.now(UTC)
         await self._messages.mark_sent(
@@ -1031,28 +1115,29 @@ class MessagingService:
         template that Meta un-pauses look permanently dead until somebody
         noticed.
         """
-        template = await self._templates.find_anywhere(name=name, language=language)
-        if template is None:
-            return
-        template.status = TemplateStatus.PAUSED
-        template.rejection_reason = f"WhatsApp refused this template (code {code})."
-        logger.warning(
-            "whatsapp.template_withdrawn",
-            extra={
-                "event": "whatsapp.template_withdrawn",
-                "template_id": str(template.id),
-                "meta_code": code,
-            },
+        # One write-back for both sources - a refused send here, a later
+        # `failed` status in the conversation service (CMP-10).
+        await withdraw_template(
+            self._session,
+            tenant_id=self._tenant_id,
+            name=name,
+            language=language,
+            code=code,
+            source=SEND_WRITEBACK,
         )
 
-    async def _undelivered(self, message: Message, *, reason: str) -> Message:
+    async def _undelivered(
+        self, message: Message, *, reason: str, code: int | None = None
+    ) -> Message:
         """Nothing was delivered, and that is known rather than assumed.
 
         Recorded, not raised: the caller gets the message back in failed state,
         and the row survives the commit. A caller that wants to try again may -
-        as a *new* message, because this one is finished.
+        as a *new* message, because this one is finished. `code` is the
+        provider's own error code, which a campaign reads to tell a refusal of
+        the template from a refusal of one person (CMP-05, CMP-06).
         """
-        await self._messages.mark_failed(message, reason=reason)
+        await self._messages.mark_failed(message, reason=reason, code=code)
         logger.warning(
             "channel.outbound_failed",
             extra={

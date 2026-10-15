@@ -59,7 +59,14 @@ STOP_WORDS: Final[frozenset[str]] = frozenset(
         "unsubscribe",
         "opt out",
         "optout",
+        "opt-out",
+        "unsub",
         "no more messages",
+        # Polite forms the owner chose to recognise (CMQ-12): still the whole
+        # message, still unable to mean anything else on their own.
+        "stop please",
+        "please stop",
+        "remove me",
         # Arabic. The alef variants are normalised before matching, so one
         # spelling of each is enough.
         "الغاء",
@@ -68,6 +75,16 @@ STOP_WORDS: Final[frozenset[str]] = frozenset(
         "ايقاف الرسائل",
         "توقف",
         "لا رسائل",
+        # The imperative of ايقاف, with and without its object (CMP-12); the
+        # hamza form folds to this one.
+        "اوقف",
+        "اوقف الرسائل",
+        # Egyptian Arabizi for "stop", written in Arabic letters (CMP-12).
+        "ستوب",
+        # "Do not send" (CMQ-12).
+        "لا ترسل",
+        # Kept out, on purpose: كفاية ("enough"), وقف ("stopped" / an
+        # endowment), بطل رسايل (colloquial, ambiguous) and "unsubscribe me".
     }
 )
 
@@ -90,11 +107,32 @@ def normalised(text: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _repeats_a_stop_phrase(words: list[str]) -> bool:
+    """Whether the message is one listed phrase said more than once - "STOP STOP".
+
+    Compared word for word on the whole message, never as a substring: "stop
+    stop" is a stop, "stop the order" is not, and nothing else counts (CMP-12).
+    """
+    for phrase in STOP_WORDS:
+        unit = phrase.split()
+        if (
+            len(words) > len(unit)
+            and len(words) % len(unit) == 0
+            and words == unit * (len(words) // len(unit))
+        ):
+            return True
+    return False
+
+
 def is_stop_request(text: str | None) -> bool:
     """Whether this message, taken whole, asks to stop receiving campaigns."""
     if not text or len(text) > MAX_STOP_LENGTH:
         return False
-    return normalised(text) in STOP_WORDS
+    cleaned = normalised(text)
+    if cleaned in STOP_WORDS:
+        return True
+    words = [word for word in (TRIM.sub("", token) for token in cleaned.split()) if word]
+    return _repeats_a_stop_phrase(words)
 
 
 async def record_opt_out(

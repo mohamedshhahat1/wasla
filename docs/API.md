@@ -543,11 +543,15 @@ Listing filters by `account_id`, `status` and `category`. Not cursor-paged, unli
 
 Reading is ordinary inbox work. Composing, targeting and starting take an administrator: a campaign writes to thousands of customers at once and is the least reversible thing the platform does.
 
-Six behaviours worth knowing:
+Behaviours worth knowing:
 
 - **There is no `body` field, and no way to name a phone number.** A campaign sends an approved template to contacts who already have a conversation on the sending number. Both absences are the compliance boundary — see [ADR-025](../DECISIONS.md).
-- **`variables` must match the template's own count.** A mismatch answers `422` at composition rather than failing at Meta ten thousand times.
-- **An audience can only be set on a draft.** Rebuilding a part-sent list would duplicate some people and drop others.
+- **Every parameter the template needs, or `422`.** `variables` (the body's, in placeholder order), `header_variables` (a text header's) and `button_parameters` (`[{"index", "value"}]` - a dynamic URL's suffix or a copy code) are checked against the template's stored components at composition (CMP-05). Stable codes: `template_parameters` (missing or extra, the component named), `template_not_synced` (no components known - sync first), `template_unsupported` (a media header or an unfillable button). Only `MARKETING` templates (`template_category`, CMP-09).
+- **`scheduled_at` needs a UTC offset** (`2026-10-20T10:00:00+03:00`); one without is refused `422 scheduled_at_needs_offset` (CMP-15).
+- **Scheduling reserves the campaign allowance** for the whole audience, counting other live campaigns, under the workspace's lock: `402 plan_limit_exceeded`, or `402 channel_not_in_plan` when the plan in force excludes the campaign's channel (CMP-03, CMP-24).
+- **`status_reason`** on a paused or failed campaign is a closed code (`workspace_suspended`, `template_withdrawn`, `credential_refused`, ...; docs/CAMPAIGNS.md).
+- **Recipients** are paged by `cursor` (`next_cursor`), filtered by `status` and `reason`; each carries `reason_code` and `participant_identity_id` (CMP-13). Statistics carry `failed_after_send` (CMP-10).
+- **An audience can only be set on a draft.** Rebuilding a part-sent list would duplicate some people and drop others. Checked under the campaign's row lock: a materialisation racing a schedule is refused `422` once the campaign is scheduled (CMP-04).
 - **Scheduling with no `scheduled_at` means now**, and still returns immediately: the worker sends, so no request is held open behind a broadcast.
 - **`pause` and `cancel` are different.** Paused is resumable — schedule again. Cancelled is final, and what was sent stays sent.
 - **Lifecycle changes are named transitions.** There is no `PATCH` that sets `status`.

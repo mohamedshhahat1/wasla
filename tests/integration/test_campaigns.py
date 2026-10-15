@@ -150,6 +150,13 @@ async def _account(session: AsyncSession, *, tenant: Tenant, suffix: str = "a") 
     return account
 
 
+def _body(variables: int) -> str:
+    """A body with exactly `variables` placeholders, as Meta's sync would store it."""
+    if not variables:
+        return "Hello."
+    return "Hello " + " ".join("{{" + str(index) + "}}" for index in range(1, variables + 1))
+
+
 async def _template(
     session: AsyncSession,
     *,
@@ -165,8 +172,9 @@ async def _template(
         name=name,
         language="ar_EG",
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": _body(variables)}],
         status=status,
-        body_text="Hello {{1}}" if variables else "Hello.",
+        body_text=_body(variables),
         variable_count=variables,
     )
     session.add(template)
@@ -584,10 +592,13 @@ async def test_the_rate_limit_is_written_down_rather_than_slept(db_session: Asyn
     outcome = await service.dispatch_batch(campaign, now=moment)
     await db_session.flush()
 
-    # Two per minute, so two go now and the rest wait a minute.
+    # Two per minute, so two go now and the rest wait a minute - counted from
+    # when the batch ended (CMP-20), which is this batch's few milliseconds on.
     assert outcome.sent == 2
     assert campaign.status is CampaignStatus.RUNNING
-    assert campaign.next_send_at == moment + timedelta(minutes=1)
+    assert campaign.next_send_at is not None
+    assert moment + timedelta(minutes=1) <= campaign.next_send_at
+    assert campaign.next_send_at < moment + timedelta(minutes=1, seconds=5)
 
 
 async def test_the_next_batch_finishes_the_campaign(db_session: AsyncSession) -> None:

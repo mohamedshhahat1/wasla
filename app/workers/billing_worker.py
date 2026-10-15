@@ -51,6 +51,7 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.campaign import CampaignStopReason
 from app.db.models.channel_capacity import CapacityReductionCause
 from app.db.models.topup import TopupSource, TopupStatus
 from app.db.session import Database
@@ -68,6 +69,7 @@ from app.repositories.tenant_repository import TenantRepository
 from app.repositories.topup_repository import PlatformTopupPurchaseRepository
 from app.services.audit_service import AuditTrail
 from app.services.billing_calendar import current_usage_period
+from app.services.campaign_service import CampaignService
 from app.services.capacity_reduction import ChannelCapacityReductions, needs_reduction
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
@@ -1035,6 +1037,18 @@ class BillingWorker:
                     "unpaid_days": self._suspend_after_days,
                 }
                 tenant = await TenantRepository(session).get_by_id(subscription.tenant_id)
+                # Service is withheld pending payment (ADR-061), and that
+                # includes broadcasting to the workspace's customers (CMQ-11):
+                # its live campaigns are paused in this transaction, with the
+                # reason. Settling the invoice does not resume them - an admin
+                # reschedules. `past_due`, the grace, leaves them sending.
+                await CampaignService(
+                    session=session, tenant_id=subscription.tenant_id
+                ).pause_unserved_campaigns(
+                    reason=CampaignStopReason.SUBSCRIPTION_SUSPENDED,
+                    actor=None,
+                    actor_kind=AuditActorKind.SYSTEM,
+                )
                 context = {
                     "workspace_name": tenant.name if tenant is not None else "your workspace",
                     "amount_due": f"{invoice.outstanding:.2f}",

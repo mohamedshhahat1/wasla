@@ -20,6 +20,7 @@ import httpx
 import pytest
 
 from app.channels.outcomes import (
+    PairRateLimitedError,
     ProviderAuthError,
     ProviderConnectionRefusedError,
     SendNotAttemptedError,
@@ -120,7 +121,7 @@ def _classes(counted: list[tuple[str, dict[str, str]]]) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize("code", [130429, 131056, 4, 80007, 131057])
+@pytest.mark.parametrize("code", [130429, 4, 80007, 131057])
 async def test_a_throttling_code_on_a_400_is_a_rate_limit_retried_first(
     code: int, counted: list[tuple[str, dict[str, str]]]
 ) -> None:
@@ -131,6 +132,26 @@ async def test_a_throttling_code_on_a_400_is_a_rate_limit_retried_first(
 
     # Retried like a 429 - declined before reading, so a retry duplicates nothing.
     assert graph.calls == 3
+    assert _classes(counted) == ["throttled"]
+
+
+async def test_the_pair_rate_limit_is_raised_at_once_for_the_sender_to_defer(
+    counted: list[tuple[str, dict[str, str]]],
+) -> None:
+    """131056 is about one sender and one recipient (CMP-18): not retried in-client.
+
+    Meta: "messages to other numbers aren't affected". Retrying inside a second
+    meets the same limit; a campaign defers the one person instead, and every
+    other sender treats it as the throttle it is (it is a `RateLimitedError`).
+    """
+    graph = Graph(400, 131056)
+
+    with pytest.raises(PairRateLimitedError) as raised:
+        await _send(graph)
+
+    assert isinstance(raised.value, RateLimitedError)
+    assert raised.value.provider_code == 131056
+    assert graph.calls == 1
     assert _classes(counted) == ["throttled"]
 
 

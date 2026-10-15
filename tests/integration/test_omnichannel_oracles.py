@@ -66,6 +66,7 @@ from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 from scripts.omnichannel_invariants import (
+    CAMPAIGN_INVARIANTS,
     CENSUS,
     ENTITLEMENT_INVARIANTS,
     INVARIANTS,
@@ -326,6 +327,7 @@ async def test_no_write_path_breaks_an_invariant(
         name="oracle",
         language="en",
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": "Hello."}],
         status=TemplateStatus.APPROVED,
     )
     db_session.add(template)
@@ -387,7 +389,9 @@ async def test_no_write_path_breaks_an_invariant(
 
     after, census_after = await _sweep(db_session)
 
-    assert set(after) == {check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS}
+    assert set(after) == {
+        check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS + CAMPAIGN_INVARIANTS
+    }
     added = {name: after[name] - before[name] for name in after if after[name] != before[name]}
     assert added == {}, f"the population broke invariants: {added}"
     grew = {name: census_after[name] - census_before[name] for name in census_after}
@@ -519,7 +523,9 @@ async def test_the_operator_checks_run_on_a_read_only_replica(prepared_database:
                 async with connection.begin():
                     await connection.execute(text("CREATE TEMPORARY TABLE oracle_probe (x int)"))
         assert "read-only" in str(refused.value).lower()
-        assert set(found) == {check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS}
+        assert set(found) == {
+            check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS + CAMPAIGN_INVARIANTS
+        }
         assert set(counted) == {check.name for check in CENSUS}
     finally:
         await engine.dispose()

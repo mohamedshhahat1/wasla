@@ -439,6 +439,11 @@ class AuditAction(StrEnum):
     # Writing to many customers at once
     CAMPAIGN_SCHEDULED = "campaign_scheduled"
     CAMPAIGN_CANCELLED = "campaign_cancelled"
+    # Composition, the audience and a pause - by a person or by the system
+    # when the workspace stopped being served (CMP-14, CMP-02). 0102.
+    CAMPAIGN_CREATED = "campaign_created"
+    CAMPAIGN_AUDIENCE_SET = "campaign_audience_set"
+    CAMPAIGN_PAUSED = "campaign_paused"
 
     # What the agents are allowed to say (RAG-17, docs/RAG.md).
     #
@@ -642,6 +647,10 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "channel_capacity_reduction_resolved",
     "channel_capacity_selection_saved",
     "billing_topup_grant_withdrawn",
+    # 0102
+    "campaign_created",
+    "campaign_audience_set",
+    "campaign_paused",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

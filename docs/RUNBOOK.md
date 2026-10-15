@@ -638,13 +638,59 @@ SELECT round_number, call_ordinal, tool_name, state, reason_code, argument_field
 ### Campaigns are not sending
 
 ```sql
-SELECT status, next_send_at, last_error FROM campaigns WHERE id = '<id>';
+SELECT status, status_reason, scheduled_at, next_send_at, lease_token,
+       consecutive_batch_failures, provider_unreachable_since, last_error
+FROM campaigns WHERE id = '<id>';
 ```
 
-- `scheduled` with a future `scheduled_at` — waiting, correctly.
-- `running` with `next_send_at` in the future — the rate limit pacing it ([ADR-026](../DECISIONS.md)). Expected.
-- `failed` with `last_error` — the template was withdrawn or the number was disabled. Fix the cause, then schedule again.
-- Recipients stuck `pending` while the campaign is `running` — check the campaign worker is in `WORKER_KINDS`.
+`status_reason` is the one field that says why (CMP-02, CMP-23). By status:
+
+- `scheduled` with a future `scheduled_at` - waiting, correctly.
+- `running` with `next_send_at` in the future - the rate limit pacing it
+  ([ADR-026](../DECISIONS.md)), a lease held by a worker mid-batch, a
+  throttled number (`CONNECTION_SENDS_PER_MINUTE`, ADR-123; logs
+  `channel.connection_throttled`) or Meta throttling (logs
+  `whatsapp.send_rate_limited`). Expected; it resumes by itself.
+- `running` or `scheduled` and overdue - `wasla_campaigns_stuck` above zero,
+  alert `CampaignsStuck`. No worker is claiming: check a worker runs with
+  `WORKER_KINDS` including `campaign`, its heartbeat, and
+  `campaign.sweep_failed`.
+- `running` with `provider_unreachable_since` set - Meta cannot be reached at
+  all (CMP-07). The campaign waits a minute at a time and spends no attempts;
+  check outbound connectivity to `graph.facebook.com`.
+
+`paused` or `failed`, by `status_reason`:
+
+| `status_reason` | Meaning | What to do |
+| --- | --- | --- |
+| `admin_paused` | Somebody paused it (audited) | Schedule again to resume |
+| `workspace_suspended` | The platform suspended the workspace | Restore it; the campaign stays paused until an admin reschedules |
+| `workspace_deleted` | The owner deleted the workspace | Nothing: it is in its retention period |
+| `subscription_suspended` | Dunning suspended the subscription (CMQ-11) | Once the invoice is settled, an admin reschedules; the reservation is taken again |
+| `template_removed`, `template_not_approved` | The registry no longer holds the template approved | Sync templates; recompose if it is gone |
+| `template_withdrawn` | Meta paused, disabled or deleted the template (132001/132015/132016, at a send or by a later status) | Check WhatsApp Manager, sync, reschedule |
+| `template_category` | The template is no longer MARKETING | Recompose on a marketing template |
+| `template_parameters_refused` | Meta refused the parameters (132000/132012/131008); `last_error` has the code | Fix the header, body or button values against the template, recompose |
+| `connection_disabled` | The number is disabled | Enable it, reschedule |
+| `credential_refused` | Meta refused the token (401/190) or none is configured | Reconnect, reschedule - the person in flight is sent then, not lost |
+| `connection_refused` | Meta refused the connection (368, permissions) | Resolve with Meta, reschedule |
+| `provider_unreachable` | Meta was unreachable longer than `CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS` | Fix connectivity, reschedule; no attempts were spent |
+| `repeated_batch_failure` | `CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` batches in a row raised | Find `campaign.batch_failed` and its `error_type`; fix, reschedule |
+
+Recipients carry `reason_code` (`GET /campaigns/{id}/recipients?reason=...`).
+`delivery_unconfirmed` means the send may have reached the customer and was
+never repeated ([ADR-093](../DECISIONS.md)); the unresolved message is on
+`UnresolvedOutboundDirectory`.
+
+**Two campaign workers overlapping** (`CampaignRecipientOwnedElsewhere`) is
+safe - the per-recipient claim refused the second copy (ADR-134) - but means a
+lease was re-taken while a worker was still sending: check replica clocks and
+`campaign.lease_taken_over`.
+
+**Meta's portfolio messaging limit** (250 new, 2,000, 10,000, 100,000,
+unlimited unique users per moving 24 h, shared by the portfolio's numbers) is
+not read by Wasla (CMP-17). A campaign larger than the tier will meet refusals
+past it; keep first campaigns under the tier.
 
 ---
 
@@ -1989,6 +2035,30 @@ SELECT cause, status, target_general, target_typed, target_allowed_types,
 
 What to tell a customer during a grace is in `docs/BILLING_OPERATIONS.md`
 (*Channel capacity reductions*).
+
+### Campaigns remediation (0101-0106)
+
+Six additive migrations (CAMPAIGNS_FINDINGS_REMEDIATION.md):
+
+| Revision | Adds |
+| --- | --- |
+| 0101 | `campaigns.lease_token` |
+| 0102 | `campaigns.status_reason` (CHECK) and the audit actions `campaign_created`, `campaign_audience_set`, `campaign_paused` |
+| 0103 | `campaigns.template_parameters`, `messages.failure_code` |
+| 0104 | `campaign_recipients.reason_code` (CHECK), `not_before`; `campaigns.provider_unreachable_since`, `consecutive_batch_failures` (CHECK) |
+| 0105 | `opt_out_via` label `provider_status` |
+| 0106 | `ck_campaigns_messages_per_minute_bounded`, `fk_campaigns_tenant_account` |
+
+All are online: nullable columns or a constant default, CHECKs and keys added
+`NOT VALID` then validated, labels in an autocommit block, under a 15 s
+`lock_timeout`. **Downgrades refuse** (nothing changed) while data written by
+the newer code exists - a status reason, template parameters, a failure code,
+a reason code or deferral, an opt-out `via=provider_status`, or an audit entry
+with one of the new actions - because dropping it would lose why a campaign
+stopped or what was sent. Enum labels are never dropped. 0106's downgrade drops
+only the two constraints.
+
+---
 
 ### Platform entitlement operations (0099-0100)
 

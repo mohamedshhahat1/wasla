@@ -53,7 +53,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,7 +89,6 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
-from app.db.models.enums import TenantStatus
 from app.db.models.follow_up import (
     MAX_ATTEMPTS,
     MAX_BODY_LENGTH,
@@ -99,7 +97,6 @@ from app.db.models.follow_up import (
     FollowUpStatus,
 )
 from app.db.models.lead import ActorKind
-from app.db.models.tenant import Tenant
 from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
@@ -109,6 +106,7 @@ from app.repositories.follow_up_repository import FollowUpRepository
 from app.repositories.lead_repository import LeadRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
+from app.services import workspace_serving as serving
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
     EntitlementService,
@@ -998,17 +996,9 @@ class FollowUpService:
         when a deleted workspace's data is erased, not whether it is served in
         the meantime.
         """
-        row = (
-            await self._session.execute(
-                select(Tenant.status, Tenant.deleted_at)
-                .where(Tenant.id == self._tenant_id)
-                .execution_options(populate_existing=True)
-            )
-        ).one_or_none()
-        if row is None:
-            return False
-        status, deleted_at = row
-        return status is TenantStatus.ACTIVE and deleted_at is None
+        # The one definition every automated sender asks (CMP-02): campaigns
+        # are gated on exactly this predicate.
+        return await serving.workspace_is_served(self._session, self._tenant_id)
 
     async def cancel_agent_follow_ups(self, *, reason: str) -> int:
         """Cancel every pending nudge an agent scheduled. Returns how many.

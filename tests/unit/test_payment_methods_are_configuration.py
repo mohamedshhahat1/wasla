@@ -63,6 +63,14 @@ NOT_PAYMOB_IDS: set[tuple[str, str]] = {
     ("app/integrations/meta/errors.py", "131005"),
     ("app/integrations/meta/errors.py", "131031"),
     ("app/integrations/meta/errors.py", "133010"),
+    # Meta's documented codes a campaign acts on (CMP-05, CMP-06, CMP-18).
+    ("app/integrations/whatsapp/client.py", "131056"),
+    ("app/channels/outcomes.py", "131050"),
+    ("app/services/template_parameters.py", "132000"),
+    ("app/services/template_parameters.py", "132012"),
+    ("app/services/template_parameters.py", "131008"),
+    ("app/services/campaign_service.py", "131049"),
+    ("app/services/campaign_service.py", "131026"),
 }
 
 BASE = {

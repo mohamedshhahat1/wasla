@@ -73,8 +73,10 @@ from app.channels.media import (
     read_capped,
 )
 from app.channels.outcomes import (
+    PairRateLimitedError,
     ProviderAuthError,
     ProviderConnectionRefusedError,
+    ProviderUnreachableError,
     RecipientOptedOutError,
     SendNotAttemptedError,
     UncertainDeliveryError,
@@ -118,6 +120,10 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # "This message was not delivered to maintain healthy ecosystem engagement" is
 # 131049; 131050 is the person having chosen to stop marketing messages.
 MARKETING_OPTED_OUT_CODE: Final = 131050
+# Meta's pair rate limit: this number to this person, too often (CMP-18). A
+# throttle Meta says leaves other recipients unaffected, so it is not retried
+# here in milliseconds - a sender defers the one person instead.
+PAIR_RATE_LIMIT_CODE: Final = 131056
 
 TEMPLATE_WITHDRAWN_CODES: Final[frozenset[int]] = frozenset(
     {
@@ -265,7 +271,7 @@ class TemplateWithdrawnError(SendNotAttemptedError):
     message = "WhatsApp has withdrawn this template."
 
     def __init__(self, *, code: int) -> None:
-        super().__init__(self.message)
+        super().__init__(self.message, provider_code=code)
         self.code = code
 
 
@@ -969,12 +975,19 @@ class WhatsAppClient:
         while True:
             try:
                 response = await self._http.post(url, json=payload, headers=headers)
-            except httpx.ConnectError as error:
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
                 # Nothing reached Meta, so a retry cannot duplicate anything.
+                # All three end before a byte of the request is written: no
+                # connection was made (refused, unresolvable), the connect or
+                # TLS handshake did not finish in time, or no pooled
+                # connection was free (httpx's exception hierarchy). Caught
+                # ahead of `TimeoutException`, the parent of the two timeouts,
+                # whose other members - a read or write timeout - may have
+                # delivered and stay uncertain (CMP-07, ADR-139).
                 if attempt >= self._max_attempts:
                     logger.warning("whatsapp.send_unreachable", extra={"attempts": attempt})
                     await call.record(CallOutcome.UNAVAILABLE)
-                    raise SendNotAttemptedError("WhatsApp could not be reached.") from error
+                    raise ProviderUnreachableError("WhatsApp could not be reached.") from error
                 await self._backoff(attempt)
                 attempt += 1
                 continue
@@ -1013,6 +1026,13 @@ class WhatsAppClient:
                 # names none (OMNI-035).
                 error_code = self._log_failure(response)
                 kind = classify_meta_error(response.status_code, error_code)
+                if error_code == PAIR_RATE_LIMIT_CODE:
+                    # About this person, not the connection (CMP-18): the
+                    # caller defers them; retrying here inside a second only
+                    # meets the same limit.
+                    await call.record(CallOutcome.RATE_LIMITED)
+                    await record_provider_error(Provider.WHATSAPP, kind.value)
+                    raise PairRateLimitedError(provider_code=error_code)
                 if kind is MetaErrorClass.THROTTLED:
                     if attempt >= self._max_attempts:
                         logger.warning(
@@ -1047,7 +1067,12 @@ class WhatsAppClient:
                     # writing down: the caller marks the registry so the next
                     # send of it is refused locally (MSG-24).
                     raise TemplateWithdrawnError(code=error_code)
-                raise SendNotAttemptedError("WhatsApp rejected the message.")
+                # Meta's code travels with the refusal, so a caller can tell a
+                # campaign-wide fact (132000: the template's parameters) from
+                # one person's (131049) without reading prose (CMP-05, CMP-06).
+                raise SendNotAttemptedError(
+                    "WhatsApp rejected the message.", provider_code=error_code
+                )
 
             if response.status_code >= SERVER_ERROR_FLOOR:
                 # 5xx is not retried, and it is not a refusal either: Meta may

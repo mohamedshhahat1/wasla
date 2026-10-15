@@ -28,8 +28,10 @@ from app.db.models.campaign import (
     Campaign,
     CampaignRecipient,
     CampaignStatus,
+    CampaignStopReason,
     OptOutSource,
     OptOutVia,
+    RecipientReason,
     RecipientStatus,
 )
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
@@ -45,6 +47,7 @@ from app.services.entitlement_terms import ordered
 # this is a bound on a request body, not a statement about templates.
 MAX_TEMPLATE_VARIABLES = 20
 MAX_VARIABLE_LENGTH = 1024
+MAX_TEMPLATE_BUTTONS = 10
 # A campaign description is a note to whoever runs the campaign next, and the
 # column is `Text` - so nothing but this decides how long it may be. Two
 # thousand characters is several paragraphs, which is more than anybody writes
@@ -59,6 +62,14 @@ class _Payload(BaseModel):
     """Request bodies reject unknown fields rather than ignoring them."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class ButtonParameterRequest(_Payload):
+    """A dynamic button's send-time value: a URL suffix, or a code to copy (CMP-05)."""
+
+    # Meta allows up to ten buttons on a template.
+    index: int = Field(ge=0, le=MAX_TEMPLATE_BUTTONS - 1)
+    value: str = Field(min_length=1, max_length=MAX_VARIABLE_LENGTH)
 
 
 class CampaignCreateRequest(_Payload):
@@ -81,6 +92,19 @@ class CampaignCreateRequest(_Payload):
         default=DEFAULT_MESSAGES_PER_MINUTE,
         ge=MIN_MESSAGES_PER_MINUTE,
         le=MAX_MESSAGES_PER_MINUTE,
+    )
+    # A text header's variables, in placeholder order (CMP-05). Validated
+    # against the template's stored components in the service; a media header
+    # is refused there.
+    header_variables: list[Annotated[str, Field(max_length=MAX_VARIABLE_LENGTH)]] = Field(
+        default_factory=list,
+        max_length=MAX_TEMPLATE_VARIABLES,
+    )
+    # One value per dynamic button - a URL button whose URL ends in a
+    # placeholder, or a copy-code button (CMP-05).
+    button_parameters: list[ButtonParameterRequest] = Field(
+        default_factory=list,
+        max_length=MAX_TEMPLATE_BUTTONS,
     )
 
 
@@ -136,6 +160,9 @@ class CampaignRead(BaseModel):
     description: str | None
     status: CampaignStatus
     variables: list[str] | None
+    # The header's and the buttons' send-time parameters (CMP-05), when the
+    # template needs any: `{"header": [...], "buttons": [{"index", "value"}]}`.
+    template_parameters: dict[str, Any] | None = None
     audience: dict[str, Any] | None
     audience_size: int
     messages_per_minute: int
@@ -146,6 +173,11 @@ class CampaignRead(BaseModel):
     next_send_at: datetime | None
     created_by_id: uuid.UUID | None
     last_error: str | None
+    # Why it is paused or failed, from a closed vocabulary (CMP-02, CMP-23):
+    # `workspace_suspended`, `subscription_suspended`, `admin_paused`,
+    # `template_withdrawn`, `credential_refused` and the rest of
+    # `CampaignStopReason`. Null while it is sending, or done.
+    status_reason: CampaignStopReason | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -167,6 +199,12 @@ class RecipientRead(BaseModel):
     # Carries the skip reason as well as a failure, which is what tells a
     # workspace somebody was left out because they had opted out.
     last_error: str | None
+    # The same reason as a closed code a program can filter on (CMP-13):
+    # `opted_out`, `marketing_limit_per_user`, `delivery_unconfirmed`, ...
+    # Null when sent, and on rows recorded before reason codes.
+    reason_code: RecipientReason | None = None
+    # Exactly who this copy is addressed to (OMNI-004).
+    participant_identity_id: uuid.UUID | None = None
     sent_at: datetime | None
 
     @classmethod
@@ -176,6 +214,8 @@ class RecipientRead(BaseModel):
 
 class RecipientListResponse(BaseModel):
     recipients: list[RecipientRead]
+    # Pass back as `cursor` for the next page; null on the last (CMP-13).
+    next_cursor: str | None = None
 
 
 class CampaignStatisticsRead(BaseModel):
@@ -188,6 +228,8 @@ class CampaignStatisticsRead(BaseModel):
     delivered: int
     read: int
     total: int
+    # Sent - Meta accepted them - then reported `failed` (CMP-10).
+    failed_after_send: int = 0
 
     @classmethod
     def from_statistics(cls, statistics: CampaignStatistics) -> Self:
@@ -199,6 +241,7 @@ class CampaignStatisticsRead(BaseModel):
             delivered=statistics.delivered,
             read=statistics.read,
             total=statistics.total,
+            failed_after_send=statistics.failed_after_send,
         )
 
 
@@ -301,6 +344,7 @@ __all__ = [
     "AudiencePreviewRequest",
     "AudiencePreviewResponse",
     "AudienceRequest",
+    "ButtonParameterRequest",
     "CampaignCreateRequest",
     "CampaignRead",
     "CampaignScheduleRequest",
