@@ -47,7 +47,7 @@ from app.api.dependencies import (
 )
 from app.core.config import Settings
 from app.core.dependencies import SESSION_STATE_ATTRIBUTE, get_session
-from app.db.models.audit import AuditAction, AuditLog
+from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import (
     BillingInterval,
     LimitKey,
@@ -55,6 +55,7 @@ from app.db.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.db.models.campaign import Campaign, CampaignStatus, CampaignStopReason
 from app.db.models.email import OutboundEmail
 from app.db.models.enums import TenantRole
 from app.db.models.invoice import (
@@ -67,6 +68,8 @@ from app.db.models.invoice import (
 from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
+from app.db.models.whatsapp import WhatsAppAccount
+from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus, WhatsAppTemplate
 from app.integrations.billing import paymob
 from app.integrations.billing.paymob import hmac_signature
 from app.main import create_app
@@ -1244,3 +1247,89 @@ async def test_a_fresh_checkout_after_the_subscription_ended_grants_the_plan(
         invoice.period_end,
     )
     assert await _agent_limit(db_session, tenant) == PAID_AGENTS
+
+
+# --------------------------------------------------------------- campaigns
+
+
+async def _live_campaign(session: AsyncSession, tenant: Tenant) -> Campaign:
+    """A scheduled campaign, as the worker would find it due."""
+    account = WhatsAppAccount(
+        tenant_id=tenant.id,
+        phone_number_id=f"pn-dunning-{tenant.slug}",
+        waba_id=f"waba-dunning-{tenant.slug}",
+        display_phone_number="+201000000000",
+    )
+    session.add(account)
+    await session.flush()
+    template = WhatsAppTemplate(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        name="dunning_offer",
+        language="ar_EG",
+        category=TemplateCategory.MARKETING,
+        status=TemplateStatus.APPROVED,
+        body_text="Hello.",
+        variable_count=0,
+        components=[{"type": "BODY", "text": "Hello."}],
+    )
+    session.add(template)
+    await session.flush()
+    campaign = Campaign(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        template_id=template.id,
+        name="Dunning",
+        status=CampaignStatus.SCHEDULED,
+        audience_size=0,
+        messages_per_minute=60,
+        scheduled_at=NOW,
+    )
+    session.add(campaign)
+    await session.flush()
+    return campaign
+
+
+async def test_dunning_suspension_pauses_the_workspaces_campaigns(
+    db_session: AsyncSession,
+) -> None:
+    """Service withheld pending payment includes broadcasting (CMQ-11).
+
+    The transition itself pauses the workspace's live campaigns, with the
+    reason and a system audit entry; the campaign worker's per-batch gate is
+    the guard behind it (`test_campaign_served_gate.py`).
+    """
+    tenant = await _tenant(db_session)
+    await _free_plan(db_session)
+    paid = await _paid_plan(db_session)
+    subscription = await _subscription(db_session, tenant, paid, status=SubscriptionStatus.PAST_DUE)
+    await _unpaid_invoice(db_session, tenant, subscription, issued_days_ago=SUSPEND_DAYS + 1)
+    campaign = await _live_campaign(db_session, tenant)
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.SUSPENDED
+    await db_session.refresh(campaign)
+    assert campaign.status is CampaignStatus.PAUSED
+    assert campaign.status_reason == CampaignStopReason.SUBSCRIPTION_SUSPENDED
+    paused = await _audits(db_session, AuditAction.CAMPAIGN_PAUSED)
+    assert [(entry.target_id, entry.actor_kind, entry.meta) for entry in paused] == [
+        (campaign.id, AuditActorKind.SYSTEM, {"reason": "subscription_suspended"})
+    ]
+
+
+async def test_the_dunning_grace_leaves_campaigns_sending(db_session: AsyncSession) -> None:
+    """`past_due` is the grace BILLING.md promises: campaigns are not touched."""
+    tenant = await _tenant(db_session)
+    await _free_plan(db_session)
+    paid = await _paid_plan(db_session)
+    subscription = await _subscription(db_session, tenant, paid, status=SubscriptionStatus.ACTIVE)
+    await _unpaid_invoice(db_session, tenant, subscription, issued_days_ago=PAST_DUE_DAYS + 1)
+    campaign = await _live_campaign(db_session, tenant)
+
+    await _worker(db_session).run_once(now=NOW)
+
+    assert subscription.status is SubscriptionStatus.PAST_DUE
+    await db_session.refresh(campaign)
+    assert campaign.status is CampaignStatus.SCHEDULED
+    assert campaign.status_reason is None
