@@ -592,10 +592,13 @@ async def test_the_rate_limit_is_written_down_rather_than_slept(db_session: Asyn
     outcome = await service.dispatch_batch(campaign, now=moment)
     await db_session.flush()
 
-    # Two per minute, so two go now and the rest wait a minute.
+    # Two per minute, so two go now and the rest wait a minute - counted from
+    # when the batch ended (CMP-20), which is this batch's few milliseconds on.
     assert outcome.sent == 2
     assert campaign.status is CampaignStatus.RUNNING
-    assert campaign.next_send_at == moment + timedelta(minutes=1)
+    assert campaign.next_send_at is not None
+    assert moment + timedelta(minutes=1) <= campaign.next_send_at
+    assert campaign.next_send_at < moment + timedelta(minutes=1, seconds=5)
 
 
 async def test_the_next_batch_finishes_the_campaign(db_session: AsyncSession) -> None:

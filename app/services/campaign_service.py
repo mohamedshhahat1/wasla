@@ -72,7 +72,13 @@ from app.db.models.campaign import (
 )
 from app.db.models.channel import Channel, ContactIdentity
 from app.db.models.consent import ContactChannelConsent
-from app.db.models.conversation import Contact, Message, MessageOrigin, MessageStatus
+from app.db.models.conversation import (
+    Contact,
+    Message,
+    MessageDeliveryState,
+    MessageOrigin,
+    MessageStatus,
+)
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
 from app.integrations.whatsapp.client import (
@@ -93,7 +99,11 @@ from app.repositories.channel_repository import (
     ContactIdentityRepository,
 )
 from app.repositories.consent_repository import ContactConsentRepository
-from app.repositories.conversation_repository import ContactRepository, ConversationRepository
+from app.repositories.conversation_repository import (
+    ContactRepository,
+    ConversationRepository,
+    MessageRepository,
+)
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services import workspace_serving as serving
@@ -230,6 +240,7 @@ class CampaignService:
         )
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
+        self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
         self._templates = WhatsAppTemplateRepository(session, tenant_id=tenant_id)
@@ -860,7 +871,11 @@ class CampaignService:
 
         # Rate limiting, stored rather than slept. A sleep would hold the lock
         # and would not survive a restart; a timestamp does both.
-        campaign.next_send_at = moment + timedelta(
+        # From when the batch ended, not when the sweep began (CMP-20): a
+        # batch that took a minute of slow sends would otherwise have spent
+        # its pacing interval before it finished, and the next one followed
+        # sooner than the rate allows.
+        campaign.next_send_at = clock() + timedelta(
             minutes=len(claimed) / campaign.messages_per_minute
         )
         if throttled_until is not None and throttled_until > campaign.next_send_at:
@@ -868,6 +883,8 @@ class CampaignService:
             campaign.next_send_at = throttled_until
         # The batch is over, and with it this worker's claim.
         campaign.lease_token = None
+        # A batch that ran resets the run of failed ones (CMP-20).
+        campaign.consecutive_batch_failures = 0
         if reached_provider:
             # Meta answered: whatever outage there was is over (CMP-07).
             campaign.provider_unreachable_since = None
@@ -1043,15 +1060,27 @@ class CampaignService:
 
         if recipient.message_id is not None:
             # **A pending recipient naming a message is one whose send did not
-            # resolve.** `_fail_recipient` clears the link when Meta refused -
-            # nothing was delivered, so the next attempt makes a new message -
-            # and success is not pending. So reaching here means a previous
-            # attempt committed a send intent and its worker then stopped, and
-            # whether Meta took that message is not knowable (ADR-093).
-            return self._abandon_recipient(
-                recipient,
-                "An earlier attempt could not be confirmed, so it was not sent again.",
-            )
+            # resolve** - unless the message itself says it provably did not
+            # leave (CMP-11, ADR-140). `_fail_recipient` clears the link when
+            # Meta refused one person; a campaign stopped by a refused
+            # credential or connection leaves its in-flight recipient linked
+            # to a message recorded UNDELIVERED - Meta read the request and
+            # declined it, nothing reached the customer - and resuming must
+            # send that person, not abandon them (audit P10: 4 of 5).
+            #
+            # Read from the message's own delivery state, never inferred from
+            # the campaign's status. Anything else - REQUESTED above all, a
+            # worker that stopped between the send intent and Meta's answer -
+            # is unknowable, and is abandoned, never resent (ADR-093).
+            if await self._messages.delivery_state(recipient.message_id) is (
+                MessageDeliveryState.UNDELIVERED
+            ):
+                recipient.message_id = None
+            else:
+                return self._abandon_recipient(
+                    recipient,
+                    "An earlier attempt could not be confirmed, so it was not sent again.",
+                )
 
         conversation = None
         if recipient.conversation_id is not None:

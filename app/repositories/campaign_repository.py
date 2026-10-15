@@ -603,6 +603,57 @@ class DueCampaignClaim(BaseRepository[Campaign]):
             campaign.next_send_at = lease_until
         return campaign
 
+    async def record_batch_failure(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        lease_token: uuid.UUID,
+        detail: str,
+        pause_after: int,
+        reason: str,
+    ) -> Campaign | None:
+        """Count one batch that raised; pause the campaign once `pause_after` have in a row.
+
+        One conditional statement, only while the claim is still the caller's
+        (CMP-20). Returns the campaign when this failure paused it.
+        """
+        counted = (
+            await self.session.execute(
+                update(Campaign)
+                .where(
+                    Campaign.id == campaign_id,
+                    Campaign.lease_token == lease_token,
+                    Campaign.status.in_([CampaignStatus.SCHEDULED, CampaignStatus.RUNNING]),
+                )
+                .values(
+                    consecutive_batch_failures=Campaign.consecutive_batch_failures + 1,
+                    last_error=detail,
+                )
+                .returning(Campaign.consecutive_batch_failures)
+                .execution_options(synchronize_session=False)
+            )
+        ).scalar_one_or_none()
+        if counted is None or counted < pause_after:
+            return None
+        return (
+            (
+                await self.session.execute(
+                    update(Campaign)
+                    .where(Campaign.id == campaign_id, Campaign.lease_token == lease_token)
+                    .values(
+                        status=CampaignStatus.PAUSED,
+                        status_reason=reason,
+                        next_send_at=None,
+                        lease_token=None,
+                    )
+                    .returning(Campaign)
+                    .execution_options(synchronize_session=False)
+                )
+            )
+            .scalars()
+            .one_or_none()
+        )
+
     async def claim_due(
         self,
         *,

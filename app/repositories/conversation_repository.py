@@ -746,6 +746,19 @@ class MessageRepository(TenantScopedRepository[Message]):
         )
         return self.add(message)
 
+    async def delivery_state(self, message_id: uuid.UUID) -> MessageDeliveryState | None:
+        """One message's delivery state as committed now, in this workspace (CMP-11).
+
+        A scalar rather than the mapped row, so a message already in the
+        session's identity map is not read as it was loaded.
+        """
+        state: MessageDeliveryState | None = await self.session.scalar(
+            select(Message.delivery_state).where(
+                Message.id == message_id, Message.tenant_id == self.tenant_id
+            )
+        )
+        return state
+
     async def get_by_idempotency_key(self, key: str) -> Message | None:
         """The message a previous request with this key produced, if any."""
         return await self._first(self._select().where(Message.idempotency_key == key))

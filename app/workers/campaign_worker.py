@@ -37,13 +37,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
-from app.db.models.campaign import Campaign
+from app.core.telemetry import record_campaign_stop
+from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.campaign import Campaign, CampaignStopReason
 from app.db.session import Database
 from app.integrations.whatsapp.client import build_http_client
 from app.repositories.campaign_repository import (
     DEFAULT_CAMPAIGN_CLAIM_LIMIT,
     DueCampaignClaim,
 )
+from app.services.audit_service import AuditTrail
 from app.services.campaign_service import BatchOutcome, CampaignLease, CampaignService
 from app.services.messaging_service import MessagingService
 
@@ -69,6 +72,10 @@ POLL_SECONDS = 15.0
 # stalled worker stops at its next recipient; the per-recipient claim keeps the
 # one in flight from being sent twice.
 CLAIM_LEASE_SECONDS = 300.0
+
+# What a campaign whose batch raised records in `last_error`: a fixed sentence,
+# never the exception's text, which can carry anything (CMP-20).
+BATCH_FAILED = "A batch of this campaign could not run; it is retried at the next sweep."
 
 # How the worker obtains something to send with. Injected rather than built
 # inline so a test can drive a sweep without a WhatsApp account, exactly as
@@ -193,19 +200,46 @@ class CampaignWorker:
         an earlier campaign of the sweep was sending may have been re-taken by
         another replica, and the campaign is then that replica's.
         """
-        async with self._database.session() as session:
-            campaign = await DueCampaignClaim(session).claim_by_id(
-                campaign_id, lease_token=lease.token, lease_until=now + lease.duration
+        failed = False
+        try:
+            async with self._database.session() as session:
+                campaign = await DueCampaignClaim(session).claim_by_id(
+                    campaign_id, lease_token=lease.token, lease_until=now + lease.duration
+                )
+                if campaign is None:
+                    return False
+                try:
+                    outcome = await self._send_batch(
+                        session, campaign, lease=lease, http=http, now=now
+                    )
+                except Exception as error:
+                    # Contained to the one campaign. A single broken row must
+                    # not strand every other workspace's sends. What was
+                    # flushed before it - a recipient's outcome after a send -
+                    # still commits with the session, as it always did.
+                    failed = True
+                    logger.exception(
+                        "campaign.batch_failed",
+                        extra={
+                            "event": "campaign.batch_failed",
+                            "campaign_id": str(campaign_id),
+                            "error_type": type(error).__name__,
+                        },
+                    )
+        except Exception as error:
+            # The batch's own commit failed: nothing of it is durable.
+            failed = True
+            logger.exception(
+                "campaign.batch_failed",
+                extra={
+                    "event": "campaign.batch_failed",
+                    "campaign_id": str(campaign_id),
+                    "error_type": type(error).__name__,
+                },
             )
-            if campaign is None:
-                return False
-            try:
-                outcome = await self._send_batch(session, campaign, lease=lease, http=http, now=now)
-            except Exception:
-                # Contained to the one campaign. A single broken row must not
-                # strand every other workspace's sends.
-                logger.exception("campaign.batch_failed", extra={"campaign_id": str(campaign_id)})
-                return False
+        if failed:
+            await self._record_batch_failure(campaign_id, lease=lease)
+            return False
 
         logger.debug(
             "campaign.batch_handled",
@@ -216,6 +250,50 @@ class CampaignWorker:
             },
         )
         return True
+
+    async def _record_batch_failure(self, campaign_id: uuid.UUID, *, lease: CampaignLease) -> None:
+        """Count a batch that raised, and pause the campaign at the bound (CMP-20).
+
+        In a transaction of its own, after the batch's has ended. A campaign
+        whose every batch raised used to keep its lease and be retried every
+        five minutes for ever, with no `last_error` and no alert. Now each
+        failure is counted and written down as a fixed sentence - never the
+        exception's text - and once `CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` batches
+        in a row have failed it is paused `repeated_batch_failure`, for a
+        person to look at. Only while this worker still holds the claim.
+        """
+        try:
+            async with self._database.session() as session:
+                paused = await DueCampaignClaim(session).record_batch_failure(
+                    campaign_id,
+                    lease_token=lease.token,
+                    detail=BATCH_FAILED,
+                    pause_after=self._settings.campaign_batch_failure_pause_after,
+                    reason=CampaignStopReason.REPEATED_BATCH_FAILURE.value,
+                )
+                if paused is not None:
+                    AuditTrail(session, tenant_id=paused.tenant_id).record(
+                        AuditAction.CAMPAIGN_PAUSED,
+                        actor=None,
+                        actor_kind=AuditActorKind.SYSTEM,
+                        target_type="campaign",
+                        target_id=paused.id,
+                        target_label=paused.name,
+                        meta={"reason": CampaignStopReason.REPEATED_BATCH_FAILURE.value},
+                    )
+            if paused is not None:
+                await record_campaign_stop(CampaignStopReason.REPEATED_BATCH_FAILURE.value)
+                logger.error(
+                    "campaign.paused_repeated_failure",
+                    extra={
+                        "event": "campaign.paused_repeated_failure",
+                        "campaign_id": str(campaign_id),
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "campaign.batch_failure_unrecorded", extra={"campaign_id": str(campaign_id)}
+            )
 
     async def _send_batch(
         self,
