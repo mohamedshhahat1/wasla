@@ -729,9 +729,13 @@ async def test_staff_state_a_products_channel_and_plans_and_every_change_is_audi
             select(AuditLog).where(AuditLog.target_id == created.id).order_by(AuditLog.occurred_at)
         )
     )
-    actions = [entry.action for entry in entries]
-    assert actions == [AuditAction.BILLING_TOPUP_CREATED, AuditAction.BILLING_TOPUP_UPDATED]
-    change: dict[str, Any] = entries[1].meta or {}
+    # Both entries are written in this test's one transaction, and `occurred_at`
+    # is the transaction's `now()`: they share it, so the order of the rows says
+    # nothing. Each is found by its action instead.
+    by_action = {entry.action: entry for entry in entries}
+    assert len(entries) == 2
+    assert set(by_action) == {AuditAction.BILLING_TOPUP_CREATED, AuditAction.BILLING_TOPUP_UPDATED}
+    change: dict[str, Any] = by_action[AuditAction.BILLING_TOPUP_UPDATED].meta or {}
     assert change["before"]["channel_type"] == "instagram"
     assert change["before"]["eligible_plan_codes"] == sorted([starter.code, pro.code])
     assert change["after"]["channel_type"] is None
