@@ -163,7 +163,7 @@ async def pause_campaign(
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
     """Stop sending and keep the rest of the list. Schedule again to resume."""
-    return CampaignRead.from_model(await campaigns.pause(campaign_id))
+    return CampaignRead.from_model(await campaigns.pause(campaign_id, actor=workspace.user))
 
 
 @router.post("/{campaign_id}/cancel", response_model=CampaignRead, summary="Stop, finally")

@@ -131,6 +131,22 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
         )
         return status is CampaignStatus.CANCELLED
 
+    async def lock_live(self) -> list[Campaign]:
+        """This workspace's scheduled and running campaigns, locked, as they are now.
+
+        For a lifecycle transition pausing them (CMP-02). Waits for a worker
+        that is between a recipient's check and its send intent, so the pause
+        lands after that one send and the worker's next check sees it.
+        """
+        statement = (
+            self._select()
+            .where(Campaign.status.in_([CampaignStatus.SCHEDULED, CampaignStatus.RUNNING]))
+            .order_by(Campaign.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return await self._all(statement)
+
     async def current_status(self, campaign_id: uuid.UUID) -> CampaignStatus | None:
         """The campaign's status as committed now, never as a loaded object remembers it."""
         status: CampaignStatus | None = await self.session.scalar(

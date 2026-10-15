@@ -33,9 +33,10 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, Final
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.outcomes import ProviderConnectionRefusedError
+from app.channels.outcomes import ProviderAuthError, ProviderConnectionRefusedError
 from app.channels.registry import PAUSED_RECHECK, ChannelPausedError
 from app.channels.throughput import ConnectionThrottledError
 from app.core.exceptions import (
@@ -46,9 +47,9 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
-from app.core.telemetry import record_campaign_event
-from app.db.models.audit import AuditAction
-from app.db.models.billing import LimitKey
+from app.core.telemetry import record_campaign_event, record_campaign_stop
+from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
     MAX_CAMPAIGN_NAME_LENGTH,
@@ -58,6 +59,7 @@ from app.db.models.campaign import (
     Campaign,
     CampaignRecipient,
     CampaignStatus,
+    CampaignStopReason,
     OptOutSource,
     OptOutVia,
     RecipientStatus,
@@ -83,6 +85,7 @@ from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import ContactRepository, ConversationRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services import workspace_serving as serving
 from app.services.audit_service import AuditTrail
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
@@ -407,6 +410,7 @@ class CampaignService:
         # A fresh schedule is owned by nobody until a sweep claims it.
         campaign.lease_token = None
         campaign.last_error = None
+        campaign.status_reason = None
         # Writing to thousands of people who did not just say something is the
         # single most consequential thing a workspace can do here, so who
         # authorised it and how many it would reach are both recorded.
@@ -428,11 +432,13 @@ class CampaignService:
         )
         return campaign
 
-    async def pause(self, campaign_id: uuid.UUID) -> Campaign:
+    async def pause(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
         """Stop sending, keep the rest of the list.
 
         Reversible, which is the whole point: somebody watching a campaign go
         out and having second thoughts needs an action that is not destructive.
+        It stops at the next recipient, not after the batch in flight (CMP-08):
+        the worker re-reads the campaign before every person.
         """
         campaign = await self._campaigns.require_by_id(campaign_id)
         if campaign.is_finished:
@@ -441,8 +447,67 @@ class CampaignService:
             raise ValidationError("A draft is not sending.")
 
         campaign.status = CampaignStatus.PAUSED
+        campaign.status_reason = CampaignStopReason.ADMIN_PAUSED.value
+        # Audited like scheduling and cancelling (CMP-14): stopping a
+        # broadcast part-way is a decision somebody is answerable for.
+        self._audit.record(
+            AuditAction.CAMPAIGN_PAUSED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"reason": CampaignStopReason.ADMIN_PAUSED.value},
+        )
         logger.info("campaign.paused", extra={"campaign_id": str(campaign.id)})
+        await record_campaign_stop(CampaignStopReason.ADMIN_PAUSED.value)
         return campaign
+
+    async def pause_unserved_campaigns(
+        self,
+        *,
+        reason: CampaignStopReason,
+        actor: User | None = None,
+        actor_kind: AuditActorKind | None = None,
+    ) -> int:
+        """Pause every scheduled or running campaign of a workspace leaving service.
+
+        Called in the transaction that suspends or deletes the workspace, or
+        suspends its subscription (CMP-02, CMQ-11). The worker's own gate,
+        asked before every batch and every recipient, is the authoritative
+        guard; this is what makes the stop visible as a state with a reason,
+        so nobody looking at a suspended workspace sees campaigns waiting to
+        go out against its customers.
+
+        **Paused, not failed or cancelled, and never resumed by itself.** A
+        restored workspace or a settled invoice leaves these campaigns paused;
+        an admin reschedules them, and the reservation is taken again then, in
+        the period they will run in. A broadcast arriving weeks later because a
+        suspension was lifted is not something anybody decided.
+        """
+        campaigns = await self._campaigns.lock_live()
+        for campaign in campaigns:
+            self._pause_for(campaign, reason)
+            self._audit.record(
+                AuditAction.CAMPAIGN_PAUSED,
+                actor=actor,
+                actor_kind=actor_kind,
+                target_type="campaign",
+                target_id=campaign.id,
+                target_label=campaign.name,
+                meta={"reason": reason.value},
+            )
+            await record_campaign_stop(reason.value)
+        if campaigns:
+            logger.info(
+                "campaign.paused_on_workspace_change",
+                extra={
+                    "event": "campaign.paused_on_workspace_change",
+                    "tenant_id": str(self._tenant_id),
+                    "reason": reason.value,
+                    "paused": len(campaigns),
+                },
+            )
+        return len(campaigns)
 
     async def cancel(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
         """Finish the campaign where it stands. What was sent stays sent.
@@ -516,9 +581,21 @@ class CampaignService:
             # somewhere else and sending would be the wrong way to find out.
             return BatchOutcome(campaign.id, campaign.status)
 
+        unserved = await self._unserved_reason()
+        if unserved is not None:
+            # **Nothing automated leaves a workspace that is not served**
+            # (CMP-02, CMQ-11): suspended by the platform, deleted by its
+            # owner, or its subscription suspended for an unpaid invoice.
+            # Asked before every batch and again before every recipient, the
+            # way cancel is - the lifecycle transitions pause the campaigns
+            # they can see, and this is the guard that cannot miss one.
+            # Paused with the reason; no send, no attempt spent.
+            return await self._pause_unserved(campaign, unserved)
+
         blocked = await self._blocking_reason(campaign)
         if blocked is not None:
-            return self._fail(campaign, blocked)
+            reason, detail = blocked
+            return await self._fail(campaign, detail, reason=reason)
 
         messaging = self._messaging
         if messaging is None:
@@ -555,6 +632,13 @@ class CampaignService:
                 # the next send intent commits - milliseconds, never across a
                 # provider call (ADR-093).
                 return await self._stopped(campaign, sent=sent, failed=failed, skipped=skipped)
+            unserved = await self._unserved_reason()
+            if unserved is not None:
+                # Suspended, deleted or unpaid mid-batch: stops at the next
+                # person, exactly like a cancel (CMP-02).
+                return await self._pause_unserved(
+                    campaign, unserved, sent=sent, failed=failed, skipped=skipped
+                )
             if await self._recipients.take(recipient) is None:
                 # Another worker owns this person right now, or finished them
                 # since the batch was claimed (CMP-01). Not this worker's to
@@ -609,7 +693,16 @@ class CampaignService:
                     campaign.id, lease_token=token, lease_until=lease_until()
                 ):
                     return await self._stopped(campaign, sent=sent, failed=failed, skipped=skipped)
-                return self._fail(campaign, str(error))
+                return await self._fail(
+                    campaign,
+                    str(error),
+                    reason=(
+                        CampaignStopReason.CONNECTION_REFUSED
+                        if isinstance(error, ProviderConnectionRefusedError)
+                        and not isinstance(error, ProviderAuthError)
+                        else CampaignStopReason.CREDENTIAL_REFUSED
+                    ),
+                )
             if outcome is RecipientStatus.SENT:
                 sent += 1
             elif outcome is RecipientStatus.SKIPPED:
@@ -635,6 +728,10 @@ class CampaignService:
         # The batch is over, and with it this worker's claim.
         campaign.lease_token = None
 
+        # Flushed first: the session does not autoflush, so the last
+        # recipient's outcome was not yet in the count and a finished campaign
+        # completed only on the next sweep.
+        await self._session.flush()
         remaining = await self._recipients.pending_count(campaign.id)
         if remaining == 0:
             self._complete(campaign, moment)
@@ -670,8 +767,8 @@ class CampaignService:
             self._session, tenant_id=self._tenant_id, default_plan_code=self._default_plan_code
         ).channel_in_plan(await self._channel_of(campaign))
 
-    async def _blocking_reason(self, campaign: Campaign) -> str | None:
-        """Why this campaign must not send at all, or None.
+    async def _blocking_reason(self, campaign: Campaign) -> tuple[CampaignStopReason, str] | None:
+        """Why this campaign must not send at all, and the sentence for it, or None.
 
         Distinct from a recipient failing: these are conditions that will not
         improve by trying the next person, so the campaign stops rather than
@@ -679,15 +776,86 @@ class CampaignService:
         """
         account = await self._accounts.get_by_id(campaign.account_id)
         if account is None or not account.is_active:
-            return "The WhatsApp number this campaign sends from is disabled."
+            return (
+                CampaignStopReason.CONNECTION_DISABLED,
+                "The WhatsApp number this campaign sends from is disabled.",
+            )
 
         template = await self._templates.get_by_id(campaign.template_id)
         if template is None:
-            return "The template this campaign sends has been removed."
+            return (
+                CampaignStopReason.TEMPLATE_REMOVED,
+                "The template this campaign sends has been removed.",
+            )
         refusal = refusal_reason_for(template)
         if refusal is not None or not template.is_sendable:
-            return refusal or "WhatsApp has not approved this template."
+            return (
+                CampaignStopReason.TEMPLATE_NOT_APPROVED,
+                refusal or "WhatsApp has not approved this template.",
+            )
         return None
+
+    async def _unserved_reason(self) -> CampaignStopReason | None:
+        """Why this workspace is not one Wasla sends for now, or None (CMP-02, CMQ-11).
+
+        The workspace's lifecycle through the one predicate every automated
+        sender shares (`workspace_serving`, which the follow-up gate asks too),
+        then the subscription: one suspended for an unpaid invoice is service
+        withheld pending payment (ADR-061), so its campaigns stop. `past_due`
+        is the grace, and keeps sending, as BILLING.md defines it. Two indexed
+        scalar reads, against a Graph API call.
+        """
+        state = await serving.workspace_serving(self._session, self._tenant_id)
+        if state is serving.WorkspaceServing.SUSPENDED:
+            return CampaignStopReason.WORKSPACE_SUSPENDED
+        if state is not serving.WorkspaceServing.SERVED:
+            return CampaignStopReason.WORKSPACE_DELETED
+        subscription = await self._session.scalar(
+            select(Subscription.status).where(Subscription.tenant_id == self._tenant_id)
+        )
+        if subscription is SubscriptionStatus.SUSPENDED:
+            return CampaignStopReason.SUBSCRIPTION_SUSPENDED
+        return None
+
+    async def _pause_unserved(
+        self,
+        campaign: Campaign,
+        reason: CampaignStopReason,
+        *,
+        sent: int = 0,
+        failed: int = 0,
+        skipped: int = 0,
+    ) -> BatchOutcome:
+        """Pause a campaign the worker found unserved, and say so in the audit log."""
+        self._pause_for(campaign, reason)
+        self._audit.record(
+            AuditAction.CAMPAIGN_PAUSED,
+            actor=None,
+            actor_kind=AuditActorKind.SYSTEM,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"reason": reason.value},
+        )
+        await record_campaign_stop(reason.value)
+        logger.warning(
+            "campaign.paused_unserved",
+            extra={
+                "event": "campaign.paused_unserved",
+                "campaign_id": str(campaign.id),
+                "reason": reason.value,
+            },
+        )
+        return BatchOutcome(
+            campaign.id, CampaignStatus.PAUSED, sent=sent, failed=failed, skipped=skipped
+        )
+
+    @staticmethod
+    def _pause_for(campaign: Campaign, reason: CampaignStopReason) -> None:
+        campaign.status = CampaignStatus.PAUSED
+        campaign.status_reason = reason.value
+        campaign.next_send_at = None
+        campaign.lease_token = None
 
     async def _deliver(
         self,
@@ -900,15 +1068,19 @@ class CampaignService:
         logger.info("campaign.completed", extra={"campaign_id": str(campaign.id)})
         return BatchOutcome(campaign.id, CampaignStatus.COMPLETED)
 
-    def _fail(self, campaign: Campaign, detail: str) -> BatchOutcome:
+    async def _fail(
+        self, campaign: Campaign, detail: str, *, reason: CampaignStopReason
+    ) -> BatchOutcome:
         campaign.status = CampaignStatus.FAILED
         campaign.last_error = detail[:MAX_ERROR_LENGTH]
+        campaign.status_reason = reason.value
         campaign.next_send_at = None
         campaign.lease_token = None
         logger.warning(
             "campaign.blocked",
-            extra={"campaign_id": str(campaign.id), "detail": detail},
+            extra={"campaign_id": str(campaign.id), "detail": detail, "reason": reason.value},
         )
+        await record_campaign_stop(reason.value)
         return BatchOutcome(campaign.id, CampaignStatus.FAILED)
 
     # ------------------------------------------------------------------ opt-out

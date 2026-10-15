@@ -28,6 +28,7 @@ from app.db.models.campaign import (
     Campaign,
     CampaignRecipient,
     CampaignStatus,
+    CampaignStopReason,
     OptOutSource,
     OptOutVia,
     RecipientStatus,
@@ -146,6 +147,11 @@ class CampaignRead(BaseModel):
     next_send_at: datetime | None
     created_by_id: uuid.UUID | None
     last_error: str | None
+    # Why it is paused or failed, from a closed vocabulary (CMP-02, CMP-23):
+    # `workspace_suspended`, `subscription_suspended`, `admin_paused`,
+    # `template_withdrawn`, `credential_refused` and the rest of
+    # `CampaignStopReason`. Null while it is sending, or done.
+    status_reason: CampaignStopReason | None = None
     created_at: datetime
     updated_at: datetime
 

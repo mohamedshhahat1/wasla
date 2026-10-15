@@ -23,6 +23,7 @@ from app.db.session import Database
 from tests.integration.campaign_harness import (
     FakeMeta,
     compose,
+    erase,
     ledger,
     quiesce,
     seed,
@@ -94,6 +95,7 @@ async def test_a_campaign_leased_but_not_started_is_not_claimed_again(
         await _assert_once(meta, db_a, campaigns, people=40)
     finally:
         await quiesce(db_a)
+        await erase(db_a)
         await db_a.dispose()
         await db_b.dispose()
 
@@ -121,6 +123,7 @@ async def test_a_batch_longer_than_its_lease_is_not_shared(prepared_database: st
         await _assert_once(meta, db_a, [campaign], people=40)
     finally:
         await quiesce(db_a)
+        await erase(db_a)
         await db_a.dispose()
         await db_b.dispose()
 
@@ -167,6 +170,7 @@ async def test_a_worker_whose_lease_was_taken_over_sends_nothing_more(
         assert len(meta.requests) == 20
     finally:
         await quiesce(db_a)
+        await erase(db_a)
         await db_a.dispose()
         await db_b.dispose()
 
@@ -201,6 +205,7 @@ async def test_the_shipped_shape_scaled_in_time_sends_everyone_once(
         await _assert_once(meta, db_a, campaigns, people=250)
     finally:
         await quiesce(db_a)
+        await erase(db_a)
         await db_a.dispose()
         await db_b.dispose()
 
@@ -237,5 +242,6 @@ async def test_many_workers_on_many_campaigns_send_everyone_once(
         assert len(meta.by_worker()) >= min(2, replicas)
     finally:
         await quiesce(first_db)
+        await erase(first_db)
         for _, database in pool:
             await database.dispose()

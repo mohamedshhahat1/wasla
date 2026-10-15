@@ -25,6 +25,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -79,6 +80,47 @@ class CampaignStatus(StrEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
+
+
+class CampaignStopReason(StrEnum):
+    """Why a campaign is paused or failed, in words a program can read (CMP-02, CMP-23).
+
+    `last_error` keeps its sentence for a person; this is the closed vocabulary
+    an operator filters on and a metric is labelled by. One field that says
+    why a campaign is not sending.
+    """
+
+    #: The platform suspended the workspace (CMP-02).
+    WORKSPACE_SUSPENDED = "workspace_suspended"
+    #: The workspace's owner deleted it; it is inside its retention (CMP-02).
+    WORKSPACE_DELETED = "workspace_deleted"
+    #: The subscription is suspended for an unpaid invoice (CMQ-11).
+    SUBSCRIPTION_SUSPENDED = "subscription_suspended"
+    #: A person paused it.
+    ADMIN_PAUSED = "admin_paused"
+    #: The template is no longer in the registry.
+    TEMPLATE_REMOVED = "template_removed"
+    #: The registry does not hold it as approved.
+    TEMPLATE_NOT_APPROVED = "template_not_approved"
+    #: Meta refused a send because the template is paused or gone (132001/15/16).
+    TEMPLATE_WITHDRAWN = "template_withdrawn"
+    #: The template is not a marketing template (CMP-09).
+    TEMPLATE_CATEGORY = "template_category"
+    #: Meta refused the template's parameters (132000/132012/131008, CMP-05).
+    TEMPLATE_PARAMETERS_REFUSED = "template_parameters_refused"
+    #: The sending number is disabled.
+    CONNECTION_DISABLED = "connection_disabled"
+    #: The credential is missing, or Meta refused it.
+    CREDENTIAL_REFUSED = "credential_refused"
+    #: Meta refused to send through the connection (OMNI-035).
+    CONNECTION_REFUSED = "connection_refused"
+    #: Meta could not be reached for longer than the bound (CMP-07).
+    PROVIDER_UNREACHABLE = "provider_unreachable"
+    #: Every recent batch raised (CMP-20).
+    REPEATED_BATCH_FAILURE = "repeated_batch_failure"
+
+
+MAX_STOP_REASON_LENGTH: Final = 40
 
 
 class RecipientStatus(StrEnum):
@@ -180,6 +222,12 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "scheduled_at",
             postgresql_where=text("status IN ('scheduled', 'running')"),
         ),
+        CheckConstraint(
+            "status_reason IS NULL OR status_reason IN ("
+            + ", ".join(f"'{reason.value}'" for reason in CampaignStopReason)
+            + ")",
+            name="status_reason_known",
+        ),
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(
@@ -239,6 +287,10 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         nullable=True,
     )
     last_error: Mapped[str | None] = mapped_column(String(MAX_ERROR_LENGTH), nullable=True)
+    # Why the campaign is paused or failed, from `CampaignStopReason` (CMP-02).
+    # Text with a CHECK rather than a native enum, so the vocabulary can grow
+    # without an autocommit migration. Cleared when it is scheduled again.
+    status_reason: Mapped[str | None] = mapped_column(String(MAX_STOP_REASON_LENGTH), nullable=True)
 
     @property
     def is_running(self) -> bool:
@@ -377,6 +429,7 @@ __all__ = [
     "Campaign",
     "CampaignRecipient",
     "CampaignStatus",
+    "CampaignStopReason",
     "OptOutSource",
     "RecipientStatus",
 ]

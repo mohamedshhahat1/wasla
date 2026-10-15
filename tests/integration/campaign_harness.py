@@ -30,10 +30,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.db.models.audit import AuditLog
+from app.db.models.billing import Plan, Subscription
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
 from app.db.models.conversation import (
     Contact,
@@ -45,6 +47,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEvent, UsageEventType
+from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus, WhatsAppTemplate
 from app.db.session import Database
@@ -53,6 +56,7 @@ from app.services.campaign_service import CampaignService
 from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
 from app.workers.campaign_worker import CampaignWorker
+from tests.billing_fixtures import erase_ledger
 from tests.channel_plans import allow_channels
 
 PLATFORM_TOKEN = "harness-platform-token"
@@ -203,7 +207,7 @@ async def seed(
     """A workspace with one number, an approved template and N people who wrote first."""
     suffix = uuid.uuid4().hex[:10]
     async with database.session_factory() as session:
-        tenant = Tenant(name=f"Harness {suffix}", slug=f"harness-{suffix}")
+        tenant = Tenant(name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}")
         session.add(tenant)
         await session.flush()
         await allow_channels(session, tenant.id, limits=limits)
@@ -288,6 +292,52 @@ async def compose(
     return campaign_id
 
 
+#: Every workspace and person the harness makes is recognisable, so a teardown
+#: can erase exactly them: committed rows outlive the test, and other suites
+#: count audit entries and plans across the whole database.
+TENANT_PREFIX = "harness-"
+USER_DOMAIN = "@harness.example.com"
+
+
+async def erase(database: Database) -> None:
+    """Erase every workspace, plan and person the harness made, and their trail."""
+    async with database.session_factory() as session:
+        ids = list(
+            (
+                await session.execute(
+                    select(Tenant.id).where(Tenant.slug.startswith(TENANT_PREFIX))
+                )
+            ).scalars()
+        )
+        if ids:
+            campaigns = select(Campaign.id).where(Campaign.tenant_id.in_(ids))
+            await session.execute(
+                delete(AuditLog).where(
+                    or_(
+                        AuditLog.tenant_id.in_(ids),
+                        AuditLog.target_id.in_(ids),
+                        AuditLog.target_id.in_(campaigns),
+                    )
+                )
+            )
+            await erase_ledger(session, ids)
+            plans = list(
+                (
+                    await session.execute(
+                        select(Subscription.plan_id).where(Subscription.tenant_id.in_(ids))
+                    )
+                ).scalars()
+            )
+            await session.execute(delete(Subscription).where(Subscription.tenant_id.in_(ids)))
+            await session.execute(delete(Tenant).where(Tenant.id.in_(ids)))
+            if plans:
+                await session.execute(delete(Plan).where(Plan.id.in_(plans)))
+        users = select(User.id).where(User.email.endswith(USER_DOMAIN))
+        await session.execute(delete(AuditLog).where(AuditLog.actor_id.in_(users)))
+        await session.execute(delete(User).where(User.email.endswith(USER_DOMAIN)))
+        await session.commit()
+
+
 async def quiesce(database: Database, *, keep: set[uuid.UUID] | None = None) -> None:
     """Stop every live campaign this test did not make: the sweep is not tenant-scoped."""
     async with database.session_factory() as session:
@@ -360,11 +410,13 @@ async def ledger(database: Database, campaign_id: uuid.UUID) -> Ledger:
 
 __all__ = [
     "BODY_ONLY",
+    "USER_DOMAIN",
     "FakeMeta",
     "Ledger",
     "Workspace",
     "accepted",
     "compose",
+    "erase",
     "harness_settings",
     "ledger",
     "meta_error",
