@@ -261,6 +261,8 @@ async def send_template(
         sent_by_id=workspace.user.id,
         idempotency_key=idempotency_key,
         origin=MessageOrigin.HUMAN,
+        # A marketing template is admin-only and opt-out-checked (CMQ-02).
+        sender_role=workspace.role,
     )
     return MessageRead.from_model(message)
 

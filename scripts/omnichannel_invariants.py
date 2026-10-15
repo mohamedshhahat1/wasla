@@ -87,7 +87,8 @@ class Check:
 # `STOP_WORDS`. Arabic phrases need the matcher's letter folding and are counted
 # by the replay command, which uses `is_stop_request` itself.
 STOP_PHRASES_SQL = (
-    "'no more messages', 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe'"
+    "'no more messages', 'opt out', 'opt-out', 'optout', 'please stop', 'remove me',"
+    " 'stop', 'stop please', 'stop promotions', 'unsub', 'unsubscribe'"
 )
 
 # ------------------------------------------------------------------ census
@@ -225,7 +226,8 @@ CENSUS: tuple[Check, ...] = (
         " AND lower(btrim(coalesce(e.payload #>> '{button,text}',"
         " e.payload #>> '{interactive,button_reply,title}',"
         " e.payload #>> '{interactive,list_reply,title}'))) IN ('no more messages',"
-        " 'opt out', 'optout', 'stop', 'stop promotions', 'unsubscribe')",
+        " 'opt out', 'opt-out', 'optout', 'please stop', 'remove me',"
+        " 'stop', 'stop please', 'stop promotions', 'unsub', 'unsubscribe')",
     ),
     # Deliveries the workspace-wide key refused, kept as evidence (OMNI-043).
     Check(

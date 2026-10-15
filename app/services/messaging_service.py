@@ -84,6 +84,7 @@ from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
     ExternalServiceError,
+    PermissionDeniedError,
     RateLimitedError,
     ValidationError,
 )
@@ -105,6 +106,7 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.enums import TenantRole
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.user import User
 from app.db.models.whatsapp_template import TemplateCategory
@@ -115,6 +117,7 @@ from app.repositories.channel_repository import (
     ChannelConnectionRepository,
     ContactIdentityRepository,
 )
+from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
@@ -165,6 +168,10 @@ class TemplateRefusedError(ValidationError):
     """
 
     error_code = "template_refused"
+
+
+# Who may send a marketing template by hand (CMQ-02).
+MARKETING_SENDER_ROLES: Final = frozenset({TenantRole.TENANT_OWNER, TenantRole.TENANT_ADMIN})
 
 
 # A caller tying its own row to this send, inside the transaction that commits
@@ -378,8 +385,18 @@ class MessagingService:
         link: LinkCall | None = None,
         idempotency_key: str | None = None,
         origin: MessageOrigin,
+        sender_role: TenantRole | None = None,
     ) -> Message:
         """Send an approved template, which is valid outside the service window.
+
+        **A marketing template sent by a person** (CMQ-02, ADR-141) is
+        admin-only - `sender_role` is the sender's role in the workspace - and
+        is refused, before anything is staged, to a contact opted out on the
+        conversation's channel. Sent one by one at the workspace's request
+        budget it was otherwise a broadcast that ignored opt-out. Utility and
+        authentication templates are unchanged for everybody; a template the
+        registry has never heard of has no category and is not treated as
+        marketing (the asymmetry below).
 
         The registry is consulted here so that every caller inherits it. It was
         checked by the campaign and follow-up services and by nothing else, so
@@ -408,6 +425,12 @@ class MessagingService:
             raise TemplateRefusedError(refusal)
         if template is not None and template.category is TemplateCategory.AUTHENTICATION:
             await self._refuse_authentication_to_a_business_scoped_id(conversation_id)
+        if (
+            origin is MessageOrigin.HUMAN
+            and template is not None
+            and template.category is TemplateCategory.MARKETING
+        ):
+            await self._admit_manual_marketing(conversation_id, sender_role=sender_role)
 
         return await self._dispatch(
             conversation_id=conversation_id,
@@ -427,6 +450,25 @@ class MessagingService:
             idempotency_key=idempotency_key,
             origin=origin,
         )
+
+    async def _admit_manual_marketing(
+        self, conversation_id: uuid.UUID, *, sender_role: TenantRole | None
+    ) -> None:
+        """A person's marketing template: an admin's, to someone who has not opted out (CMQ-02)."""
+        if sender_role not in MARKETING_SENDER_ROLES:
+            raise PermissionDeniedError(
+                "Only a workspace owner or admin may send a marketing template.",
+                error_code="marketing_template_admin_only",
+            )
+        conversation = await self._conversations.require_by_id(conversation_id)
+        # The same consent read a campaign makes for each recipient (R2).
+        if not await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).accepts_marketing(conversation.contact_id, conversation.channel):
+            raise ValidationError(
+                "This customer has opted out of marketing messages on this channel.",
+                error_code="recipient_opted_out",
+            )
 
     async def _refuse_authentication_to_a_business_scoped_id(
         self, conversation_id: uuid.UUID
