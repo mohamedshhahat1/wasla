@@ -192,18 +192,31 @@ async def test_missing_header_or_button_parameters_are_refused_at_composition(
     assert "button" in button.message
 
 
-async def test_a_media_header_is_refused_at_composition(
+async def test_a_media_header_without_its_file_is_refused_at_composition(
     world: tuple[FakeMeta, CampaignWorker, Database],
 ) -> None:
-    """Media headers are deferred (ADR-137): refused, never sent without the image."""
+    """An IMAGE header needs the campaign's header file (ADR-144; was deferred, ADR-137).
+
+    Refused naming the header, never sent without the image. A LOCATION
+    header carries no file and is still refused as unsupported.
+    """
     _, _, database = world
     workspace = await seed(database, recipients=1, components=IMAGE_HEADER_URL_BUTTON)
 
     refused = await _refused(
         database, workspace, variables=["Ahmed"], button_parameters={0: "spring"}
     )
+    assert refused.error_code == TEMPLATE_PARAMETERS
+    assert "image" in refused.message and "header" in refused.message
+
+    location = await seed(
+        database,
+        recipients=1,
+        components=[{"type": "HEADER", "format": "LOCATION"}, {"type": "BODY", "text": "Hi."}],
+    )
+    refused = await _refused(database, location)
     assert refused.error_code == TEMPLATE_UNSUPPORTED
-    assert "image" in refused.message
+    assert "location" in refused.message
 
 
 async def test_a_template_never_synced_with_its_components_is_refused(

@@ -94,6 +94,8 @@ class BodyAllowance:
 UPLOAD_ALLOWANCES: Final[tuple[BodyAllowance, ...]] = (
     # Multipart attachment upload; bounded again by `MEDIA_MAX_BYTES` inside.
     BodyAllowance("POST", re.compile(r"/conversations/[^/]+/messages/media"), UPLOAD),
+    # A campaign's template header file (HM-02); the same cap, the same reader.
+    BodyAllowance("POST", re.compile(r"/campaigns/header-media"), UPLOAD),
     # A knowledge document as text or base64, up to 400 000 characters.
     BodyAllowance("POST", re.compile(r"/knowledge/bases/[^/]+/documents"), DOCUMENT),
 )

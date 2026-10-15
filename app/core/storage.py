@@ -182,6 +182,24 @@ def build_key(*, tenant_id: uuid.UUID, mime_type: str | None = None) -> str:
     return f"{tenant_id}/{now:%Y}/{now:%m}/{uuid.uuid4()}{extension}"
 
 
+async def write_object(storage: MediaStorage, *, key: str, data: bytes, mime_type: str) -> bool:
+    """Write an object at a key the caller already committed, reporting refusal.
+
+    The middle step of the write protocol, shared by every writer: TX1 has
+    committed the key and what belongs at it, this runs with no transaction
+    and no connection held, and TX2 records the outcome (ADR-087). A `bool`
+    rather than a raise, because callers run this inside `released`, where
+    touching the session is forbidden and the row that records what happened
+    is on the other side of the block. A refused write leaves the intent for
+    reconciliation, which asks the store whether the object arrived anyway.
+    """
+    try:
+        await storage.put_at(key=key, data=data, mime_type=mime_type)
+    except StorageError:
+        return False
+    return True
+
+
 class LocalMediaStorage:
     """Files on the local filesystem, under a configured root.
 

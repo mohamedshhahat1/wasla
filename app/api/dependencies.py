@@ -44,6 +44,7 @@ from app.services.account_service import AccountService
 from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
+from app.services.campaign_header_media_service import CampaignHeaderMediaService
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
 from app.services.credential_service import CredentialService
@@ -368,6 +369,34 @@ def get_campaign_service(
 
 
 CampaignServiceDep = Annotated[CampaignService, Depends(get_campaign_service)]
+
+
+def get_campaign_header_media_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    storage: MediaStorageDep,
+    workspace: ActiveWorkspaceDep,
+) -> CampaignHeaderMediaService:
+    """Workspace-scoped: another workspace's header file answers not found (HM-02).
+
+    The workspace's entitlements, because an upload reserves its storage
+    capacity under the workspace's lock (ADR-091).
+    """
+    return CampaignHeaderMediaService(
+        session=session,
+        tenant_id=workspace.tenant.id,
+        storage=storage,
+        entitlements=EntitlementService(
+            session,
+            tenant_id=workspace.tenant.id,
+            default_plan_code=settings.default_plan_code,
+        ),
+    )
+
+
+CampaignHeaderMediaServiceDep = Annotated[
+    CampaignHeaderMediaService, Depends(get_campaign_header_media_service)
+]
 
 
 def get_follow_up_service(

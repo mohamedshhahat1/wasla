@@ -28,6 +28,7 @@ successor permission to send a burst.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
@@ -70,6 +71,7 @@ from app.db.models.campaign import (
     RecipientReason,
     RecipientStatus,
 )
+from app.db.models.campaign_media import CampaignHeaderMedia
 from app.db.models.channel import Channel, ContactIdentity
 from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import (
@@ -87,6 +89,7 @@ from app.integrations.whatsapp.client import (
     PAIR_RATE_LIMIT_CODE,
     TEMPLATE_WITHDRAWN_CODES,
 )
+from app.repositories.campaign_media_repository import CampaignHeaderMediaRepository
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -141,6 +144,10 @@ CHANNEL_NOT_IN_PLAN_CODE: Final = "channel_not_in_plan"
 # The stable error code a campaign on a template that is not marketing is
 # refused with at composition (CMP-09).
 TEMPLATE_CATEGORY_CODE: Final = "template_category"
+
+# The stable error code for a header file that is not stored: never written, or
+# removed by retention (HM-02, HM-07).
+HEADER_MEDIA_NOT_STORED_CODE: Final = "header_media_not_stored"
 
 # The stable error code for a `scheduled_at` without a UTC offset (CMP-15).
 NAIVE_SCHEDULE_CODE: Final = "scheduled_at_needs_offset"
@@ -252,11 +259,27 @@ class CampaignService:
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
         self._audit = AuditTrail(session, tenant_id=tenant_id)
+        self._header_files = CampaignHeaderMediaRepository(session, tenant_id=tenant_id)
 
     # ------------------------------------------------------------------ reads
 
     async def get(self, campaign_id: uuid.UUID) -> Campaign:
         return await self._campaigns.require_by_id(campaign_id)
+
+    async def header_media_for(
+        self, campaigns: Sequence[Campaign]
+    ) -> dict[uuid.UUID, CampaignHeaderMedia]:
+        """Each campaign's header file, by campaign id, for the ones that have one (HM-08)."""
+        files = await self._header_files.by_ids(
+            campaign.header_media_id
+            for campaign in campaigns
+            if campaign.header_media_id is not None
+        )
+        return {
+            campaign.id: files[campaign.header_media_id]
+            for campaign in campaigns
+            if campaign.header_media_id is not None and campaign.header_media_id in files
+        }
 
     async def list_campaigns(
         self,
@@ -322,6 +345,7 @@ class CampaignService:
         created_by_id: uuid.UUID | None = None,
         header_variables: list[str] | None = None,
         button_parameters: dict[int, str] | None = None,
+        header_media_id: uuid.UUID | None = None,
         actor: User | None = None,
     ) -> Campaign:
         """Compose a draft. Nothing is sent and no audience exists yet.
@@ -330,7 +354,12 @@ class CampaignService:
         its components need** (CMP-05, ADR-137): the body's variables, a text
         header's, and each dynamic button's - or a refusal naming the
         component, before anyone is written to. A template whose components
-        are not known, or that needs a media header, is refused too.
+        are not known, or whose header is a location, is refused too.
+
+        **A media header takes the workspace's own stored file** (HM-02,
+        HM-03): `header_media_id` names one of this workspace's header files,
+        stored, of the kind the template's header names. Another workspace's
+        id is not found. Fixed here: nothing changes it afterwards.
         """
         account = await self._accounts.require_by_id(account_id)
         if not account.is_active:
@@ -360,10 +389,19 @@ class CampaignService:
                 error_code=TEMPLATE_CATEGORY_CODE,
             )
 
+        header_file = None
+        if header_media_id is not None:
+            header_file = await self._header_files.require_by_id(header_media_id)
+            if not header_file.is_stored:
+                raise ValidationError(
+                    "This header file is not stored. Upload it again.",
+                    error_code=HEADER_MEDIA_NOT_STORED_CODE,
+                )
         supplied = CampaignParameters(
             body=tuple(variables or ()),
             header=tuple(header_variables or ()),
             buttons=dict(button_parameters or {}),
+            header_file_kind=header_file.kind if header_file is not None else None,
         )
         refused = parameter_refusal(parameter_spec(template.components), supplied)
         if refused is not None:
@@ -379,6 +417,7 @@ class CampaignService:
             created_by_id=created_by_id,
         )
         campaign.template_parameters = supplied.as_dict()
+        campaign.header_media_id = header_media_id
         # Flushed so the caller can read the generated id and the timestamps.
         # Without it a route serialising this row answers 500: the primary key
         # default and the server defaults are applied at flush, and the request
@@ -513,6 +552,16 @@ class CampaignService:
         pending = await self._recipients.pending_count(campaign.id)
         if pending == 0:
             raise ValidationError("This campaign has nobody left to send to.")
+        if campaign.header_media_id is not None:
+            # A header file retention has removed since composition (HM-07):
+            # refused here, rather than scheduled to pause at its first batch.
+            header_file = await self._header_files.get_by_id(campaign.header_media_id)
+            if header_file is None or not header_file.is_stored:
+                raise ValidationError(
+                    "This campaign's header file is no longer stored. Compose the campaign "
+                    "again with a new one.",
+                    error_code=HEADER_MEDIA_NOT_STORED_CODE,
+                )
 
         if self._entitlements is not None:
             # The request's own entitlement service, which carries the
@@ -1028,13 +1077,24 @@ class CampaignService:
             )
         refused = parameter_refusal(
             parameter_spec(template.components),
-            CampaignParameters.from_campaign(campaign.variables, campaign.template_parameters),
+            CampaignParameters.from_campaign(
+                campaign.variables,
+                campaign.template_parameters,
+                header_file_kind=await self._header_file_kind(campaign),
+            ),
         )
         if refused is not None:
             # A sync changed what the template needs since composition: Meta
             # would refuse every recipient for it, so the campaign stops once.
             return (CampaignStopReason.TEMPLATE_PARAMETERS_REFUSED, refused.message)
         return None
+
+    async def _header_file_kind(self, campaign: Campaign) -> str | None:
+        """The kind of the campaign's header file, or None if it has none."""
+        if campaign.header_media_id is None:
+            return None
+        header_file = await self._header_files.get_by_id(campaign.header_media_id)
+        return header_file.kind if header_file is not None else None
 
     async def _unserved_reason(self) -> CampaignStopReason | None:
         """Why this workspace is not one Wasla sends for now, or None (CMP-02, CMQ-11).

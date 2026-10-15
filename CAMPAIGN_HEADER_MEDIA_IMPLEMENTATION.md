@@ -11,8 +11,8 @@ continues from the first phase that is not committed.
 | --- | --- | --- | --- | --- |
 | 0 | Baseline at 427a0f1: media headers refused | committed | (this commit) | P07 before; `test_a_media_header_is_refused_at_composition` 1 passed |
 | 1 | Migration 0107, models, vocabulary, purge ledger | committed | (this commit) | unit 3,411 passed / 1 skipped; parity + atomicity + purge + invariants (migration-built) 39 passed; docs truth + purge + templates (model-built) 50 passed; alembic fresh/round-trip/check clean |
-| 2 | Asset route through the write path | not started | | |
-| 3 | Composition and preview | not started | | |
+| 2 | Asset route through the write path | committed | (this commit) | header-media API 148 passed (local + MinIO); campaign/media/conversation/entitlement/purge suites 607 passed + 6 stub failures fixed (route stub lacked `header_media_for`); docs truth + route authorization 34 passed |
+| 3 | Composition and preview | committed | (this commit, with Phase 2) | as Phase 2; `test_campaign_templates.py` 82 with docs |
 | 4 | Worker: upload once under the lease, header, refresh | not started | | |
 | 5 | Every failure campaign-level | not started | | |
 | 6 | Retention and lifecycle | not started | | |
@@ -49,3 +49,18 @@ refusal() by header format      IMAGE / VIDEO / DOCUMENT / LOCATION -> template_
 Pages: developers.facebook.com/documentation/business-messaging/whatsapp/business-phone-numbers/media.md,
 .../templates/template-media.md, .../templates/components.md,
 .../messages/document-messages.md, developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes.
+
+## Phase 2-3 notes
+
+* **Found by the tests:** the request-size middleware held `POST /campaigns/header-media`
+  to the authenticated default cap, so a deployment would have answered 413 for any
+  header file above it. Added to `UPLOAD_ALLOWANCES` (`app/core/limits.py`) with the
+  attachment route's cap.
+* `read_capped` moved from `conversations.py` to `app/api/uploads.py`; both upload routes
+  use it. `MessagingService._store` and the header upload share `storage.write_object`.
+* Changed test: `test_a_media_header_is_refused_at_composition` became
+  `test_a_media_header_without_its_file_is_refused_at_composition` (IMAGE without a file
+  is now `template_parameters`; LOCATION stays `template_unsupported`).
+* No campaign route changes fields after create (named transitions only), so
+  "header_media_id cannot change after scheduling" is structural: `PATCH` is 405 and the
+  audience/schedule bodies refuse an unknown `header_media_id` with 422.

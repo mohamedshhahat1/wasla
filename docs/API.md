@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **209 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **212 operations**, of which
 17 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -533,6 +533,9 @@ Listing filters by `account_id`, `status` and `category`. Not cursor-paged, unli
 | GET | `/api/v1/campaigns` | Any workspace member |
 | POST | `/api/v1/campaigns` | Owner or admin (`201`) |
 | POST | `/api/v1/campaigns/audience/preview` | Owner or admin |
+| POST | `/api/v1/campaigns/header-media` | Owner or admin (`201`, multipart `file`) |
+| GET | `/api/v1/campaigns/header-media/{asset_id}` | Any workspace member |
+| GET | `/api/v1/campaigns/header-media/{asset_id}/file` | Any workspace member |
 | GET | `/api/v1/campaigns/{campaign_id}` | Any workspace member |
 | POST | `/api/v1/campaigns/{campaign_id}/audience` | Owner or admin |
 | POST | `/api/v1/campaigns/{campaign_id}/schedule` | Owner or admin |
@@ -546,10 +549,11 @@ Reading is ordinary inbox work. Composing, targeting and starting take an admini
 Behaviours worth knowing:
 
 - **There is no `body` field, and no way to name a phone number.** A campaign sends an approved template to contacts who already have a conversation on the sending number. Both absences are the compliance boundary — see [ADR-025](../DECISIONS.md).
-- **Every parameter the template needs, or `422`.** `variables` (the body's, in placeholder order), `header_variables` (a text header's) and `button_parameters` (`[{"index", "value"}]` - a dynamic URL's suffix or a copy code) are checked against the template's stored components at composition (CMP-05). Stable codes: `template_parameters` (missing or extra, the component named), `template_not_synced` (no components known - sync first), `template_unsupported` (a media header or an unfillable button). Only `MARKETING` templates (`template_category`, CMP-09).
+- **Every parameter the template needs, or `422`.** `variables` (the body's, in placeholder order), `header_variables` (a text header's) and `button_parameters` (`[{"index", "value"}]` - a dynamic URL's suffix or a copy code) are checked against the template's stored components at composition (CMP-05). Stable codes: `template_parameters` (missing or extra, the component named), `template_not_synced` (no components known - sync first), `template_unsupported` (a LOCATION or GIF header, or an unfillable button). Only `MARKETING` templates (`template_category`, CMP-09).
+- **A media header takes a header file** (ADR-144). Upload it first: `POST /campaigns/header-media` (multipart `file`) answers `{id, kind, mime_type, size_bytes, filename, sha256, created_at}`; then compose with `header_media_id`. The file's own bytes decide `kind` - `image` (JPEG, PNG; at most 5 MB), `video` (MP4, 3GPP; 16 MB), `document` (PDF; 16 MB, with its name as `filename`) - whatever the browser said. Refusals: `422 header_media_type` (another type), `422 header_media_too_large` (Meta's limit for the kind; the route's own 16 MB cap answers `422` within a chunk), `402` (no storage left - it counts against the workspace's storage), `403` for a member, `404` for another workspace's file. At composition: an IMAGE / VIDEO / DOCUMENT template without a file, or with a file of another kind, and a TEXT-header template given one, are `422 template_parameters` naming the header; a file not stored is `422 header_media_not_stored` (also at schedule). Nothing changes the file once composed. `CampaignRead.header_media` shows `{id, kind, mime_type, size_bytes, filename, created_at}` or null - never Meta's id, a storage key or a link. `GET .../file` streams the bytes as an attachment with `nosniff`.
 - **`scheduled_at` needs a UTC offset** (`2026-10-20T10:00:00+03:00`); one without is refused `422 scheduled_at_needs_offset` (CMP-15).
 - **Scheduling reserves the campaign allowance** for the whole audience, counting other live campaigns, under the workspace's lock: `402 plan_limit_exceeded`, or `402 channel_not_in_plan` when the plan in force excludes the campaign's channel (CMP-03, CMP-24).
-- **`status_reason`** on a paused or failed campaign is a closed code (`workspace_suspended`, `template_withdrawn`, `credential_refused`, ...; docs/CAMPAIGNS.md).
+- **`status_reason`** on a paused or failed campaign is a closed code (`workspace_suspended`, `template_withdrawn`, `credential_refused`, `header_media_unavailable`, `header_media_refused`, ...; docs/CAMPAIGNS.md).
 - **Recipients** are paged by `cursor` (`next_cursor`), filtered by `status` and `reason`; each carries `reason_code` and `participant_identity_id` (CMP-13). Statistics carry `failed_after_send` (CMP-10).
 - **An audience can only be set on a draft.** Rebuilding a part-sent list would duplicate some people and drop others. Checked under the campaign's row lock: a materialisation racing a schedule is refused `422` once the campaign is scheduled (CMP-04).
 - **Scheduling with no `scheduled_at` means now**, and still returns immediately: the worker sends, so no request is held open behind a broadcast.

@@ -92,7 +92,7 @@ from app.core.filenames import require_storable_filename
 from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
-from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
+from app.core.storage import EXTENSIONS, MediaStorage, build_key, write_object
 from app.core.telemetry import record_opt_outs
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
@@ -277,7 +277,7 @@ def _media_family(kind: MediaClass) -> str:
     return MEDIA_FAMILIES[kind]
 
 
-def _safe_filename(filename: str | None, *, mime_type: str) -> str:
+def safe_upload_filename(filename: str | None, *, mime_type: str) -> str:
     """A filename Meta will accept and a filesystem cannot be hurt by.
 
     A name reaching here came from a request body. It is shown to the recipient
@@ -578,7 +578,7 @@ class MessagingService:
         if storage is not None:
             await self._entitlements.require(LimitKey.STORAGE_BYTES, additional=len(content))
 
-        upload_name = _safe_filename(display_name, mime_type=canonical)
+        upload_name = safe_upload_filename(display_name, mime_type=canonical)
 
         message = await self._dispatch(
             conversation_id=conversation_id,
@@ -761,11 +761,7 @@ class MessagingService:
         session is forbidden - and the row that records what happened is on the
         other side of that block.
         """
-        try:
-            await storage.put_at(key=key, data=content, mime_type=mime_type)
-        except StorageError:
-            return False
-        return True
+        return await write_object(storage, key=key, data=content, mime_type=mime_type)
 
     async def _dispatch(
         self,

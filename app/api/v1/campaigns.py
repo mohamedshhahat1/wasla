@@ -16,12 +16,18 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, File, Query, Response, UploadFile, status
 
-from app.api.dependencies import ActiveWorkspaceDep, CampaignServiceDep, TenantAdminDep
+from app.api.dependencies import (
+    ActiveWorkspaceDep,
+    CampaignHeaderMediaServiceDep,
+    CampaignServiceDep,
+    TenantAdminDep,
+)
 from app.api.route import CommittingRoute
+from app.api.uploads import read_capped
 from app.core.pagination import MAX_CURSOR_LENGTH
-from app.db.models.campaign import CampaignStatus, RecipientReason, RecipientStatus
+from app.db.models.campaign import Campaign, CampaignStatus, RecipientReason, RecipientStatus
 from app.schemas.campaign import (
     AudiencePreviewRequest,
     AudiencePreviewResponse,
@@ -30,15 +36,24 @@ from app.schemas.campaign import (
     CampaignRead,
     CampaignScheduleRequest,
     CampaignStatisticsRead,
+    HeaderMediaRead,
+    HeaderMediaUploadRead,
     RecipientListResponse,
     RecipientRead,
 )
 from app.schemas.conversation import CursorPage
+from app.services.campaign_service import CampaignService
 
 router = APIRouter(route_class=CommittingRoute, prefix="/campaigns", tags=["campaigns"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
+
+
+async def _read(campaigns: CampaignService, campaign: Campaign) -> CampaignRead:
+    """One campaign as the API shows it, with its header file if it has one (HM-08)."""
+    files = await campaigns.header_media_for([campaign])
+    return CampaignRead.from_model(campaign, header_media=files.get(campaign.id))
 
 
 @router.get("", response_model=CursorPage[CampaignRead], summary="List campaigns")
@@ -57,8 +72,12 @@ async def list_campaigns(
         limit=limit,
         cursor=cursor,
     )
+    files = await campaigns.header_media_for(page.items)
     return CursorPage[CampaignRead](
-        items=[CampaignRead.from_model(campaign) for campaign in page.items],
+        items=[
+            CampaignRead.from_model(campaign, header_media=files.get(campaign.id))
+            for campaign in page.items
+        ],
         next_cursor=page.next_cursor,
     )
 
@@ -85,9 +104,69 @@ async def create_campaign(
         created_by_id=workspace.user.id,
         header_variables=list(payload.header_variables),
         button_parameters={entry.index: entry.value for entry in payload.button_parameters},
+        header_media_id=payload.header_media_id,
         actor=workspace.user,
     )
-    return CampaignRead.from_model(campaign)
+    return await _read(campaigns, campaign)
+
+
+@router.post(
+    "/header-media",
+    response_model=HeaderMediaUploadRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a template header file",
+)
+async def upload_header_media(
+    workspace: TenantAdminDep,
+    header_media: CampaignHeaderMediaServiceDep,
+    file: Annotated[UploadFile, File()],
+) -> HeaderMediaUploadRead:
+    """Store an image, a video or a PDF a campaign's template header is sent with (HM-02).
+
+    Multipart, like an attachment. The file's own bytes decide its kind - a
+    JPEG or PNG image, an MP4 or 3GPP video, a PDF document - whatever the
+    browser said; Meta's limit for the kind applies (image 5 MB, video and
+    document 16 MB). It counts against the workspace's storage. Nothing is
+    sent to Meta here: the campaign worker uploads it once per campaign.
+    """
+    content = await read_capped(file)
+    asset = await header_media.upload(
+        content=content,
+        claimed_type=file.content_type,
+        filename=file.filename,
+        actor=workspace.user,
+    )
+    return HeaderMediaUploadRead.from_model(asset)
+
+
+@router.get("/header-media/{asset_id}", response_model=HeaderMediaRead, summary="One header file")
+async def get_header_media(
+    asset_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    header_media: CampaignHeaderMediaServiceDep,
+) -> HeaderMediaRead:
+    return HeaderMediaRead.from_model(await header_media.get(asset_id))
+
+
+@router.get("/header-media/{asset_id}/file", summary="A header file's bytes")
+async def download_header_media(
+    asset_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    header_media: CampaignHeaderMediaServiceDep,
+) -> Response:
+    """The stored bytes, through the authenticated API and never from a link (HM-01)."""
+    asset = await header_media.get(asset_id)
+    content = await header_media.read(asset)
+    return Response(
+        content=content,
+        # Canonical: resolved from the bytes when the file was uploaded.
+        media_type=asset.mime_type,
+        headers={
+            "Content-Disposition": "attachment",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 # Declared before `/{campaign_id}` so the literal path is matched first. A UUID
@@ -117,7 +196,7 @@ async def get_campaign(
     workspace: ActiveWorkspaceDep,
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
-    return CampaignRead.from_model(await campaigns.get(campaign_id))
+    return await _read(campaigns, await campaigns.get(campaign_id))
 
 
 @router.post("/{campaign_id}/audience", response_model=CampaignRead, summary="Set the audience")
@@ -137,7 +216,7 @@ async def set_audience(
         filters=payload.to_filter(),
         actor=workspace.user,
     )
-    return CampaignRead.from_model(campaign)
+    return await _read(campaigns, campaign)
 
 
 @router.post("/{campaign_id}/schedule", response_model=CampaignRead, summary="Send, now or later")
@@ -157,7 +236,7 @@ async def schedule_campaign(
         scheduled_at=payload.scheduled_at,
         actor=workspace.user,
     )
-    return CampaignRead.from_model(campaign)
+    return await _read(campaigns, campaign)
 
 
 @router.post("/{campaign_id}/pause", response_model=CampaignRead, summary="Stop, reversibly")
@@ -167,7 +246,7 @@ async def pause_campaign(
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
     """Stop sending and keep the rest of the list. Schedule again to resume."""
-    return CampaignRead.from_model(await campaigns.pause(campaign_id, actor=workspace.user))
+    return await _read(campaigns, await campaigns.pause(campaign_id, actor=workspace.user))
 
 
 @router.post("/{campaign_id}/cancel", response_model=CampaignRead, summary="Stop, finally")
@@ -177,7 +256,7 @@ async def cancel_campaign(
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
     """Finish the campaign where it stands. What has been sent stays sent."""
-    return CampaignRead.from_model(await campaigns.cancel(campaign_id, actor=workspace.user))
+    return await _read(campaigns, await campaigns.cancel(campaign_id, actor=workspace.user))
 
 
 @router.get("/{campaign_id}/statistics", summary="Delivery and failure counts")

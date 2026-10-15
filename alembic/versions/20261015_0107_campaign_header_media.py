@@ -56,6 +56,7 @@ MEDIA_FK = "fk_campaigns_tenant_header_media"
 ACCOUNT_FK = "fk_campaigns_tenant_header_provider_account"
 COMPLETE_CHECK = "ck_campaigns_header_provider_complete"
 INDEX = "ix_campaigns_header_media_id"
+COUNT_ASSETS = "SELECT count(*) FROM campaign_header_media"
 KINDS = ("image", "video", "document")
 REASONS_0102 = (
     "workspace_suspended",
@@ -223,9 +224,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     found = []
-    assets = bind.exec_driver_sql(
-        f"SELECT count(*) FROM {TABLE}"
-    ).scalar_one()  # noqa: S608 - module constant
+    assets = bind.exec_driver_sql(COUNT_ASSETS).scalar_one()
     if assets:
         found.append(f"campaign header media files: {assets}")
     named = bind.exec_driver_sql(
