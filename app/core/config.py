@@ -577,6 +577,13 @@ class Settings(BaseSettings):
     # replies and people (OMNI-017, ADR-123). Unset, nothing is counted and a
     # campaign is spaced by its own `messages_per_minute` alone (ADR-026).
     connection_sends_per_minute: int | None = Field(default=None, ge=1)
+    # How long Meta may stay unreachable - no connection at all - before a
+    # campaign waiting on it is paused `provider_unreachable` for a person to
+    # look at (CMP-07). Until then it waits, spending no recipient's attempts.
+    campaign_provider_unreachable_pause_hours: float = Field(default=6.0, gt=0, le=168)
+    # How many batches in a row may raise out of a campaign's sweep before it
+    # is paused `repeated_batch_failure` rather than retried for ever (CMP-20).
+    campaign_batch_failure_pause_after: int = Field(default=5, ge=1, le=1_000)
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

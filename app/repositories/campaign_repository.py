@@ -346,19 +346,30 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         campaign_id: uuid.UUID,
         *,
         limit: int = DEFAULT_RECIPIENT_BATCH,
+        now: datetime | None = None,
     ) -> list[CampaignRecipient]:
         """Lock and return recipients still waiting for their copy.
 
         ``FOR UPDATE SKIP LOCKED`` for the reason follow-ups use it, with more
         at stake: two replicas working one campaign would otherwise both read
         the same pending rows and send ten thousand people the message twice.
+        The lock ends at the first send commit; `take` is what holds per
+        person after that (CMP-01).
+
+        A recipient deferred by Meta's pair rate limit is skipped until its
+        `not_before` (CMP-18), so one person does not hold up the rest.
         """
+        moment = now or datetime.now(UTC)
         statement = (
             select(CampaignRecipient)
             .where(
                 CampaignRecipient.tenant_id == self.tenant_id,
                 CampaignRecipient.campaign_id == campaign_id,
                 CampaignRecipient.status == RecipientStatus.PENDING,
+                or_(
+                    CampaignRecipient.not_before.is_(None),
+                    CampaignRecipient.not_before <= moment,
+                ),
             )
             .order_by(CampaignRecipient.id)
             .limit(limit)
@@ -366,6 +377,18 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         )
         result = await self.session.execute(statement)
         return list(result.scalars().all())
+
+    async def earliest_deferral(self, campaign_id: uuid.UUID) -> datetime | None:
+        """When the first pending recipient deferred by a pair limit may be asked (CMP-18)."""
+        moment: datetime | None = await self.session.scalar(
+            select(func.min(CampaignRecipient.not_before)).where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == RecipientStatus.PENDING,
+                CampaignRecipient.not_before.is_not(None),
+            )
+        )
+        return moment
 
     async def take(self, recipient: CampaignRecipient) -> CampaignRecipient | None:
         """Own one pending recipient for one send, or None if that is not this worker's to do.

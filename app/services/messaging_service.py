@@ -56,8 +56,10 @@ from app.channels.adapter import (
 )
 from app.channels.metering import message_meters
 from app.channels.outcomes import (
+    PairRateLimitedError,
     ProviderAuthError,
     ProviderConnectionRefusedError,
+    ProviderUnreachableError,
     RecipientOptedOutError,
     UncertainDeliveryError,
 )
@@ -148,6 +150,7 @@ CONNECTION_CREDENTIAL_REFUSED = "The provider refused this connection's credenti
 # sentences, for the same reason.
 CONNECTION_SEND_REFUSED = "The provider refused to send through this connection."
 PROVIDER_THROTTLED = "The provider is rate limiting this connection."
+PAIR_RATE_LIMITED = "The provider limits messages from this number to this person for now."
 
 # The sentence a send on a paused connection is refused with, per channel.
 _DISABLED: Final[dict[Channel, str]] = {Channel.WHATSAPP: "This WhatsApp number is disabled."}
@@ -983,6 +986,23 @@ class MessagingService:
             if origin in THROTTLED_ORIGINS:
                 raise outcome
             return message
+
+        if isinstance(outcome, PairRateLimitedError) and origin is MessageOrigin.CAMPAIGN:
+            # Meta's limit on this number and this person (131056): a
+            # campaign defers the one person and goes on (CMP-18), so it gets
+            # the undelivered message, with the code, rather than a throttle
+            # that would stop it. Every other sender waits it out below.
+            return await self._undelivered(
+                message, reason=PAIR_RATE_LIMITED, code=outcome.provider_code
+            )
+
+        if isinstance(outcome, ProviderUnreachableError) and origin is MessageOrigin.CAMPAIGN:
+            # Meta could not be reached at all (CMP-07): provably undelivered,
+            # and the same for every recipient, so a campaign waits for the
+            # outage instead of spending each person's attempts on it. Let
+            # out after the row is recorded, as a refused credential is.
+            await self._undelivered(message, reason=str(outcome))
+            raise outcome
 
         if isinstance(outcome, RateLimitedError):
             # The provider throttled the connection: declined before reading,

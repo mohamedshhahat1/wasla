@@ -36,7 +36,11 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.channels.outcomes import ProviderAuthError, ProviderConnectionRefusedError
+from app.channels.outcomes import (
+    ProviderAuthError,
+    ProviderConnectionRefusedError,
+    ProviderUnreachableError,
+)
 from app.channels.registry import PAUSED_RECHECK, ChannelPausedError
 from app.channels.throughput import ConnectionThrottledError
 from app.core.exceptions import (
@@ -48,7 +52,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
-from app.core.telemetry import record_campaign_event, record_campaign_stop
+from app.core.telemetry import record_campaign_event, record_campaign_send, record_campaign_stop
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
 from app.db.models.campaign import (
@@ -63,6 +67,7 @@ from app.db.models.campaign import (
     CampaignStopReason,
     OptOutSource,
     OptOutVia,
+    RecipientReason,
     RecipientStatus,
 )
 from app.db.models.channel import Channel, ContactIdentity
@@ -70,7 +75,11 @@ from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import Contact, Message, MessageOrigin, MessageStatus
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
-from app.integrations.whatsapp.client import TEMPLATE_WITHDRAWN_CODES
+from app.integrations.whatsapp.client import (
+    MARKETING_OPTED_OUT_CODE,
+    PAIR_RATE_LIMIT_CODE,
+    TEMPLATE_WITHDRAWN_CODES,
+)
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -189,6 +198,7 @@ class CampaignService:
         messaging: MessagingService | None = None,
         entitlements: EntitlementService | None = None,
         default_plan_code: str | None = None,
+        provider_unreachable_pause: timedelta | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -211,6 +221,13 @@ class CampaignService:
         # The plan in force decides which channels a campaign may still send on
         # (ENT-16); a workspace not served is on the default plan.
         self._default_plan_code = default_plan_code
+        # How long Meta may stay unreachable before a waiting campaign is
+        # paused for a person to look at (CMP-07).
+        self._provider_unreachable_pause = (
+            provider_unreachable_pause
+            if provider_unreachable_pause is not None
+            else DEFAULT_PROVIDER_UNREACHABLE_PAUSE
+        )
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
@@ -676,11 +693,19 @@ class CampaignService:
             campaign.started_at = campaign.started_at or moment
 
         allowance = max(1, min(batch_limit, campaign.messages_per_minute))
-        claimed = await self._recipients.claim_pending(campaign.id, limit=allowance)
+        claimed = await self._recipients.claim_pending(campaign.id, limit=allowance, now=moment)
         if not claimed:
+            deferred_until = await self._recipients.earliest_deferral(campaign.id)
+            if deferred_until is not None:
+                # Only people deferred by Meta's pair limit remain (CMP-18):
+                # not finished, just waiting for the earliest of them.
+                campaign.next_send_at = max(deferred_until, moment)
+                campaign.lease_token = None
+                return BatchOutcome(campaign.id, campaign.status)
             return self._complete(campaign, moment)
 
-        sent = failed = skipped = 0
+        sent = failed = skipped = deferred = 0
+        reached_provider = False
         throttled_until: datetime | None = None
         # Asked once per batch: the plan in force does not change per person.
         in_plan = await self._channel_in_plan(campaign)
@@ -725,11 +750,40 @@ class CampaignService:
             if not in_plan:
                 # ENT-16: a channel the plan in force does not include sends
                 # nothing automated. A policy outcome, never retried.
-                self._skip(recipient, CHANNEL_NOT_IN_PLAN_DETAIL)
+                self._skip(
+                    recipient, CHANNEL_NOT_IN_PLAN_DETAIL, RecipientReason.CHANNEL_NOT_IN_PLAN
+                )
                 skipped += 1
                 continue
             try:
                 outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
+            except ProviderUnreachableError:
+                # Meta could not be reached at all (CMP-07). Nothing was
+                # delivered and nothing about this person caused it, so they
+                # are unlinked from the undelivered message, keep every
+                # attempt, and the campaign waits. Every other recipient would
+                # meet the same outage; spending their attempts on it used to
+                # cost a campaign its audience. Paused once the outage has
+                # outlasted the bound, so it is not retried silently for ever.
+                recipient.message_id = None
+                since = campaign.provider_unreachable_since or moment
+                campaign.provider_unreachable_since = since
+                if clock() - since >= self._provider_unreachable_pause:
+                    if not await self._campaigns.hold(
+                        campaign.id, lease_token=token, lease_until=lease_until()
+                    ):
+                        return await self._stopped(
+                            campaign, sent=sent, failed=failed, skipped=skipped
+                        )
+                    return await self._pause_unserved(
+                        campaign,
+                        CampaignStopReason.PROVIDER_UNREACHABLE,
+                        sent=sent,
+                        failed=failed,
+                        skipped=skipped,
+                    )
+                throttled_until = clock() + PROVIDER_UNREACHABLE_BACKOFF
+                break
             except ConnectionThrottledError as error:
                 # The number's shared allowance is spent (ADR-123), or the
                 # provider throttled it (OMNI-035). Either way nothing reached
@@ -782,12 +836,20 @@ class CampaignService:
                         else CampaignStopReason.CREDENTIAL_REFUSED
                     ),
                 )
-            if outcome is RecipientStatus.SENT:
+            if isinstance(outcome, _Deferred):
+                deferred += 1
+                reached_provider = True
+            elif outcome is RecipientStatus.SENT:
                 sent += 1
+                reached_provider = True
             elif outcome is RecipientStatus.SKIPPED:
                 skipped += 1
             else:
                 failed += 1
+                reached_provider = True
+            await record_campaign_send(
+                "deferred" if isinstance(outcome, _Deferred) else _send_outcome(recipient, outcome)
+            )
 
         if not await self._campaigns.hold(campaign.id, lease_token=token, lease_until=None):
             # Paused, cancelled or taken over while the last recipient was
@@ -806,6 +868,9 @@ class CampaignService:
             campaign.next_send_at = throttled_until
         # The batch is over, and with it this worker's claim.
         campaign.lease_token = None
+        if reached_provider:
+            # Meta answered: whatever outage there was is over (CMP-07).
+            campaign.provider_unreachable_since = None
 
         # Flushed first: the session does not autoflush, so the last
         # recipient's outcome was not yet in the count and a finished campaign
@@ -959,18 +1024,22 @@ class CampaignService:
         *,
         messaging: MessagingService,
         now: datetime,
-    ) -> RecipientStatus:
+    ) -> RecipientStatus | _Deferred:
         """Send one person's copy and record what happened to it."""
         contact = await self._contacts.get_by_id(recipient.contact_id)
         if contact is None:
-            return self._skip(recipient, "This contact no longer exists.")
+            return self._skip(
+                recipient, "This contact no longer exists.", RecipientReason.CONTACT_GONE
+            )
         if not await ContactConsentRepository(
             self._session, tenant_id=self._tenant_id
         ).accepts_marketing(contact.id, await self._channel_of(campaign)):
             # Checked again here, not only when the audience was built. Somebody
             # who opts out while a campaign is running must not receive the rest
             # of it - on the channel this campaign sends on (ENT-19).
-            return self._skip(recipient, "This contact has opted out of campaigns.")
+            return self._skip(
+                recipient, "This contact has opted out of campaigns.", RecipientReason.OPTED_OUT
+            )
 
         if recipient.message_id is not None:
             # **A pending recipient naming a message is one whose send did not
@@ -1002,6 +1071,7 @@ class CampaignService:
             return self._skip(
                 recipient,
                 "This copy names a conversation outside this campaign's number.",
+                RecipientReason.OTHER_CONNECTION,
             )
         if recipient.participant_identity_id is None:
             # A recipient materialised before identities existed: record the
@@ -1012,6 +1082,7 @@ class CampaignService:
                 recipient,
                 "This contact's conversation no longer addresses the identity this "
                 "campaign was built for.",
+                RecipientReason.IDENTITY_CHANGED,
             )
         recipient.conversation_id = conversation.id
 
@@ -1061,8 +1132,9 @@ class CampaignService:
             # single thing to tell anybody (MSG-18). `dispatch_batch` fails the
             # campaign once instead.
             raise
-        except (ConnectionThrottledError, ChannelPausedError):
-            # Not this recipient's failure: `dispatch_batch` waits for the window.
+        except (ConnectionThrottledError, ChannelPausedError, ProviderUnreachableError):
+            # Not this recipient's failure: `dispatch_batch` waits for the
+            # window, or for the outage to pass (CMP-07).
             raise
         except TemplateRefusedError as error:
             # The registry refuses the template - withdrawn by Meta through
@@ -1109,6 +1181,37 @@ class CampaignService:
                         else f"WhatsApp refused this template (code {code})."
                     ),
                 )
+            if code == MARKETING_OPTED_OUT_CODE:
+                # The person stopped marketing messages in WhatsApp; their
+                # consent on this channel already says so (OMNI-046). Never
+                # retried.
+                recipient.attempts += 1
+                recipient.message_id = None
+                return self._skip(
+                    recipient,
+                    message.failure_reason or "The customer stopped marketing messages.",
+                    RecipientReason.RECIPIENT_OPTED_OUT_AT_PROVIDER,
+                )
+            if code is not None and code in TERMINAL_PER_PERSON_CODES:
+                # **Meta says asking again soon only fails again** (CMP-06):
+                # 131049, its per-user marketing limit - "wait at least 24
+                # hours" - and 131026, undeliverable to this person. The
+                # person fails at once; the campaign goes on.
+                recipient.attempts += 1
+                recipient.message_id = None
+                recipient.status = RecipientStatus.FAILED
+                recipient.reason_code = TERMINAL_PER_PERSON_CODES[code]
+                recipient.last_error = (message.failure_reason or "Rejected by WhatsApp.")[
+                    :MAX_ERROR_LENGTH
+                ]
+                return RecipientStatus.FAILED
+            if code == PAIR_RATE_LIMIT_CODE:
+                # Meta's limit on this number and this person (131056, CMP-18):
+                # other people are not affected. This one waits, keeping every
+                # attempt; the batch goes on to the next.
+                recipient.message_id = None
+                recipient.not_before = now + PAIR_RATE_LIMIT_DEFERRAL
+                return _DEFERRED
             return self._fail_recipient(
                 recipient, message.failure_reason or "Rejected by WhatsApp."
             )
@@ -1117,6 +1220,7 @@ class CampaignService:
         recipient.sent_at = now
         recipient.message_id = message.id
         recipient.last_error = None
+        recipient.reason_code = None
         # A campaign message is metered twice on purpose, and the two figures
         # answer different questions. The messaging service already counted it
         # as a message sent, which is what a messaging allowance is spent from;
@@ -1134,10 +1238,13 @@ class CampaignService:
         )
         return RecipientStatus.SENT
 
-    def _skip(self, recipient: CampaignRecipient, detail: str) -> RecipientStatus:
+    def _skip(
+        self, recipient: CampaignRecipient, detail: str, reason: RecipientReason
+    ) -> RecipientStatus:
         """A policy outcome, never retried: the reason will not change by itself."""
         recipient.status = RecipientStatus.SKIPPED
         recipient.last_error = detail[:MAX_ERROR_LENGTH]
+        recipient.reason_code = reason.value
         return RecipientStatus.SKIPPED
 
     def _abandon_recipient(self, recipient: CampaignRecipient, detail: str) -> RecipientStatus:
@@ -1152,6 +1259,7 @@ class CampaignService:
         recipient.attempts += 1
         recipient.status = RecipientStatus.FAILED
         recipient.last_error = detail[:MAX_ERROR_LENGTH]
+        recipient.reason_code = RecipientReason.DELIVERY_UNCONFIRMED.value
         return RecipientStatus.FAILED
 
     def _fail_recipient(self, recipient: CampaignRecipient, detail: str) -> RecipientStatus:
@@ -1164,6 +1272,7 @@ class CampaignService:
         recipient.message_id = None
         if recipient.is_exhausted:
             recipient.status = RecipientStatus.FAILED
+            recipient.reason_code = RecipientReason.ATTEMPTS_EXHAUSTED.value
             return RecipientStatus.FAILED
         # Left pending, so the next batch picks it up. No backoff of its own:
         # the campaign's own rate limit already spaces the attempts out.
@@ -1289,6 +1398,44 @@ class CampaignService:
             at=datetime.now(UTC),
         )
         return contact
+
+
+class _Deferred:
+    """A recipient deferred by a per-person limit: neither sent nor failed (CMP-18)."""
+
+
+_DEFERRED: Final = _Deferred()
+
+# Meta's codes that are final for one person and say nothing about anybody
+# else (CMP-06): 131049, the per-user marketing limit ("wait at least 24 hours
+# before resending ... will only result in another error"), and 131026, a
+# message undeliverable to this person. Error-codes page, read 2026-10-13
+# (EXT-CMP-03). Re-asking within the campaign is never worth an attempt.
+TERMINAL_PER_PERSON_CODES: Final[dict[int, str]] = {
+    131049: RecipientReason.MARKETING_LIMIT_PER_USER.value,
+    131026: RecipientReason.UNDELIVERABLE.value,
+}
+
+# How long a person deferred by Meta's pair rate limit (131056) waits before
+# the campaign asks again. Meta gives no figure beyond "wait and retry"; the
+# pair limit is about one message every few seconds, so a minute is generous
+# and costs the rest of the audience nothing (CMP-18).
+PAIR_RATE_LIMIT_DEFERRAL: Final = timedelta(minutes=1)
+
+# How long a campaign waits after Meta could not be reached at all (CMP-07),
+# and how long an outage may last before it is paused for a person to look at.
+PROVIDER_UNREACHABLE_BACKOFF: Final = timedelta(minutes=1)
+DEFAULT_PROVIDER_UNREACHABLE_PAUSE: Final = timedelta(hours=6)
+
+
+def _send_outcome(recipient: CampaignRecipient, outcome: RecipientStatus) -> str:
+    """The `wasla_campaign_sends_total` outcome of one recipient's send."""
+    if recipient.reason_code == RecipientReason.DELIVERY_UNCONFIRMED.value:
+        return "abandoned"
+    return {
+        RecipientStatus.SENT: "sent",
+        RecipientStatus.SKIPPED: "skipped",
+    }.get(outcome, "failed")
 
 
 class _CampaignWideRefusalError(Exception):

@@ -247,6 +247,9 @@ class CampaignWorker:
             tenant_id=campaign.tenant_id,
             messaging=messaging,
             default_plan_code=self._settings.default_plan_code,
+            provider_unreachable_pause=timedelta(
+                hours=self._settings.campaign_provider_unreachable_pause_hours
+            ),
         )
         return await service.dispatch_batch(campaign, now=now, lease=lease)
 

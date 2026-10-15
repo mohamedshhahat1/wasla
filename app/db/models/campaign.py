@@ -123,6 +123,38 @@ class CampaignStopReason(StrEnum):
 MAX_STOP_REASON_LENGTH: Final = 40
 
 
+class RecipientReason(StrEnum):
+    """Why a recipient ended as it did, in words a program can read (CMP-13).
+
+    `last_error` keeps its sentence for display; this is what a listing is
+    filtered by. Null on a recipient that was sent, and on rows recorded
+    before reason codes existed.
+    """
+
+    #: Opted out on the campaign's channel since the audience was built.
+    OPTED_OUT = "opted_out"
+    #: The contact was erased.
+    CONTACT_GONE = "contact_gone"
+    #: Its conversation is on another number, or with another contact.
+    OTHER_CONNECTION = "other_connection"
+    #: The conversation no longer addresses the identity materialised.
+    IDENTITY_CHANGED = "identity_changed"
+    #: The plan in force does not include the campaign's channel (ENT-16).
+    CHANNEL_NOT_IN_PLAN = "channel_not_in_plan"
+    #: Meta refused the send: the person stopped marketing messages (131050).
+    RECIPIENT_OPTED_OUT_AT_PROVIDER = "recipient_opted_out_at_provider"
+    #: Meta's per-user marketing limit (131049); Meta says wait 24 hours.
+    MARKETING_LIMIT_PER_USER = "marketing_limit_per_user"
+    #: Meta could not deliver to this person (131026).
+    UNDELIVERABLE = "undeliverable"
+    #: The send's outcome could not be known; never sent again (ADR-093).
+    DELIVERY_UNCONFIRMED = "delivery_unconfirmed"
+    #: Every attempt failed.
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+    #: Meta refused the template's parameters for this send (CMP-05).
+    TEMPLATE_PARAMETERS_REFUSED = "template_parameters_refused"
+
+
 class RecipientStatus(StrEnum):
     """What happened to one person's copy.
 
@@ -228,6 +260,9 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             + ")",
             name="status_reason_known",
         ),
+        CheckConstraint(
+            "consecutive_batch_failures >= 0", name="consecutive_batch_failures_non_negative"
+        ),
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(
@@ -296,6 +331,19 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # Text with a CHECK rather than a native enum, so the vocabulary can grow
     # without an autocommit migration. Cleared when it is scheduled again.
     status_reason: Mapped[str | None] = mapped_column(String(MAX_STOP_REASON_LENGTH), nullable=True)
+    # When Meta first could not be reached in the current run of unreachable
+    # batches (CMP-07). An outage costs time, not the audience: the campaign
+    # waits, spending no attempts, and is paused `provider_unreachable` once
+    # this is older than the bound. Cleared by any batch that reaches Meta.
+    provider_unreachable_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Batches in a row that raised out of `dispatch_batch` (CMP-20). Reset by
+    # a batch that completes; at the bound the campaign is paused
+    # `repeated_batch_failure` instead of being retried for ever.
+    consecutive_batch_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
     @property
     def is_running(self) -> bool:
@@ -355,6 +403,12 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
             "participant_identity_id",
             postgresql_where=text("participant_identity_id IS NOT NULL"),
         ),
+        CheckConstraint(
+            "reason_code IS NULL OR reason_code IN ("
+            + ", ".join(f"'{reason.value}'" for reason in RecipientReason)
+            + ")",
+            name="reason_code_known",
+        ),
         # The identity this copy is addressed to: one of this recipient's own
         # contact's identities, in its own workspace (OMNI-004).
         ForeignKeyConstraint(
@@ -410,6 +464,14 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     )
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(String(MAX_ERROR_LENGTH), nullable=True)
+    # Why it ended as it did, from `RecipientReason` (CMP-13). Text with a
+    # CHECK, like `campaigns.status_reason`. Null when sent, and on rows
+    # recorded before reason codes.
+    reason_code: Mapped[str | None] = mapped_column(String(MAX_STOP_REASON_LENGTH), nullable=True)
+    # Not to be asked before this moment (CMP-18): Meta's pair rate limit
+    # (131056) is about this person and this number, so the person waits and
+    # the rest of the campaign goes on. The claim skips it until then.
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     @property
@@ -436,5 +498,6 @@ __all__ = [
     "CampaignStatus",
     "CampaignStopReason",
     "OptOutSource",
+    "RecipientReason",
     "RecipientStatus",
 ]
