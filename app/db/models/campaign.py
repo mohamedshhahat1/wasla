@@ -267,6 +267,21 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         CheckConstraint(
             "consecutive_batch_failures >= 0", name="consecutive_batch_failures_non_negative"
         ),
+        # The send rate the schema and the service already bound, held by the
+        # column too (CMP-22). 0106.
+        CheckConstraint(
+            f"messages_per_minute BETWEEN {MIN_MESSAGES_PER_MINUTE} AND {MAX_MESSAGES_PER_MINUTE}",
+            name="messages_per_minute_bounded",
+        ),
+        # The sending number is one of the campaign's own workspace (ADR-100's
+        # pattern, CMP-22). 0106. The template's twin needs a (tenant_id, id)
+        # key on `whatsapp_templates` that does not exist: accepted residual.
+        ForeignKeyConstraint(
+            ["tenant_id", "account_id"],
+            ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
+            name="fk_campaigns_tenant_account",
+            ondelete="CASCADE",
+        ),
     )
 
     account_id: Mapped[uuid.UUID] = mapped_column(

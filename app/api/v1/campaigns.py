@@ -21,7 +21,7 @@ from fastapi import APIRouter, Query, status
 from app.api.dependencies import ActiveWorkspaceDep, CampaignServiceDep, TenantAdminDep
 from app.api.route import CommittingRoute
 from app.core.pagination import MAX_CURSOR_LENGTH
-from app.db.models.campaign import CampaignStatus, RecipientStatus
+from app.db.models.campaign import CampaignStatus, RecipientReason, RecipientStatus
 from app.schemas.campaign import (
     AudiencePreviewRequest,
     AudiencePreviewResponse,
@@ -85,6 +85,7 @@ async def create_campaign(
         created_by_id=workspace.user.id,
         header_variables=list(payload.header_variables),
         button_parameters={entry.index: entry.value for entry in payload.button_parameters},
+        actor=workspace.user,
     )
     return CampaignRead.from_model(campaign)
 
@@ -134,6 +135,7 @@ async def set_audience(
     campaign = await campaigns.set_audience(
         campaign_id=campaign_id,
         filters=payload.to_filter(),
+        actor=workspace.user,
     )
     return CampaignRead.from_model(campaign)
 
@@ -194,7 +196,15 @@ async def list_recipients(
     workspace: ActiveWorkspaceDep,
     campaigns: CampaignServiceDep,
     status_filter: Annotated[RecipientStatus | None, Query(alias="status")] = None,
+    reason: RecipientReason | None = None,
     limit: LimitQuery = 100,
+    cursor: CursorQuery = None,
 ) -> RecipientListResponse:
-    rows = await campaigns.list_recipients(campaign_id, status=status_filter, limit=limit)
-    return RecipientListResponse(recipients=[RecipientRead.from_model(row) for row in rows])
+    """Every recipient, a page at a time: follow `next_cursor` to the end (CMP-13)."""
+    page = await campaigns.list_recipients(
+        campaign_id, status=status_filter, reason=reason, limit=limit, cursor=cursor
+    )
+    return RecipientListResponse(
+        recipients=[RecipientRead.from_model(row) for row in page.items],
+        next_cursor=page.next_cursor,
+    )

@@ -31,6 +31,7 @@ from app.db.models.campaign import (
     CampaignStopReason,
     OptOutSource,
     OptOutVia,
+    RecipientReason,
     RecipientStatus,
 )
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
@@ -198,6 +199,12 @@ class RecipientRead(BaseModel):
     # Carries the skip reason as well as a failure, which is what tells a
     # workspace somebody was left out because they had opted out.
     last_error: str | None
+    # The same reason as a closed code a program can filter on (CMP-13):
+    # `opted_out`, `marketing_limit_per_user`, `delivery_unconfirmed`, ...
+    # Null when sent, and on rows recorded before reason codes.
+    reason_code: RecipientReason | None = None
+    # Exactly who this copy is addressed to (OMNI-004).
+    participant_identity_id: uuid.UUID | None = None
     sent_at: datetime | None
 
     @classmethod
@@ -207,6 +214,8 @@ class RecipientRead(BaseModel):
 
 class RecipientListResponse(BaseModel):
     recipients: list[RecipientRead]
+    # Pass back as `cursor` for the next page; null on the last (CMP-13).
+    next_cursor: str | None = None
 
 
 class CampaignStatisticsRead(BaseModel):

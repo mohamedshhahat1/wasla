@@ -275,11 +275,18 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         campaign_id: uuid.UUID,
         *,
         status: RecipientStatus | None = None,
+        reason: str | None = None,
         limit: int = 100,
+        after: uuid.UUID | None = None,
     ) -> list[CampaignRecipient]:
+        """A page of recipients by id - a keyset, so every page is cheap (CMP-13)."""
         query = self._select().where(CampaignRecipient.campaign_id == campaign_id)
         if status is not None:
             query = query.where(CampaignRecipient.status == status)
+        if reason is not None:
+            query = query.where(CampaignRecipient.reason_code == reason)
+        if after is not None:
+            query = query.where(CampaignRecipient.id > after)
         return await self._all(query.order_by(CampaignRecipient.id).limit(limit))
 
     async def existing_contact_ids(self, campaign_id: uuid.UUID) -> set[uuid.UUID]:

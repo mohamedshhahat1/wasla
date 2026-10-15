@@ -142,6 +142,9 @@ CHANNEL_NOT_IN_PLAN_CODE: Final = "channel_not_in_plan"
 # refused with at composition (CMP-09).
 TEMPLATE_CATEGORY_CODE: Final = "template_category"
 
+# The stable error code for a `scheduled_at` without a UTC offset (CMP-15).
+NAIVE_SCHEDULE_CODE: Final = "scheduled_at_needs_offset"
+
 # How far ahead a campaign may be scheduled. The lower bound is zero: sending
 # now is a legitimate thing to ask for, unlike a follow-up, which exists
 # precisely to happen later.
@@ -285,10 +288,25 @@ class CampaignService:
         campaign_id: uuid.UUID,
         *,
         status: RecipientStatus | None = None,
+        reason: RecipientReason | None = None,
         limit: int = 100,
-    ) -> list[CampaignRecipient]:
+        cursor: str | None = None,
+    ) -> Page[CampaignRecipient]:
+        """Every recipient, a page at a time, filtered by status and reason code (CMP-13).
+
+        Paged by id with a cursor, so a campaign of fifty thousand can be read
+        to the end - the listing used to stop at the first hundred.
+        """
         campaign = await self._campaigns.require_by_id(campaign_id)
-        return await self._recipients.list_for_campaign(campaign.id, status=status, limit=limit)
+        after = Cursor.decode(cursor).id if cursor else None
+        rows = await self._recipients.list_for_campaign(
+            campaign.id,
+            status=status,
+            reason=reason.value if reason is not None else None,
+            limit=limit,
+            after=after,
+        )
+        return paginate(rows, limit=limit, key=lambda row: Cursor(sort_value=None, id=row.id))
 
     # -------------------------------------------------------------- composing
 
@@ -304,6 +322,7 @@ class CampaignService:
         created_by_id: uuid.UUID | None = None,
         header_variables: list[str] | None = None,
         button_parameters: dict[int, str] | None = None,
+        actor: User | None = None,
     ) -> Campaign:
         """Compose a draft. Nothing is sent and no audience exists yet.
 
@@ -365,6 +384,20 @@ class CampaignService:
         # default and the server defaults are applied at flush, and the request
         # commits after the response has already been built.
         await self._session.flush()
+        # Audited (CMP-14): composing a broadcast is where its template and
+        # number are chosen. The template's parameters stay out of the trail.
+        self._audit.record(
+            AuditAction.CAMPAIGN_CREATED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={
+                "account_id": str(account_id),
+                "template_id": str(template_id),
+                "messages_per_minute": campaign.messages_per_minute,
+            },
+        )
         logger.info("campaign.created", extra={"campaign_id": str(campaign.id)})
         return campaign
 
@@ -383,6 +416,7 @@ class CampaignService:
         *,
         campaign_id: uuid.UUID,
         filters: AudienceFilter,
+        actor: User | None = None,
     ) -> Campaign:
         """Materialise the recipient list.
 
@@ -437,6 +471,18 @@ class CampaignService:
 
         campaign.audience = filters.as_dict()
         campaign.audience_size = len(already) + added
+        # Audited (CMP-14) with how many and which filters - the number of
+        # hand-picked contacts, never who they are.
+        summary = filters.as_dict()
+        summary["contact_ids"] = len(filters.contact_ids)
+        self._audit.record(
+            AuditAction.CAMPAIGN_AUDIENCE_SET,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"recipients": campaign.audience_size, "filters": summary},
+        )
         logger.info(
             "campaign.audience_set",
             extra={"campaign_id": str(campaign.id), "audience_size": campaign.audience_size},
@@ -496,8 +542,16 @@ class CampaignService:
                 reserved=lambda: self._recipients.pending_in_other_live_campaigns(campaign.id),
             )
 
+        if scheduled_at is not None and scheduled_at.utcoffset() is None:
+            # Refused rather than taken as UTC (CMP-15): a Cairo admin's 10:00
+            # was sent at 13:00 local. There is no workspace time zone to
+            # interpret it in (CMQ-04), so the offset has to come with it.
+            raise ValidationError(
+                "A scheduled time needs a UTC offset, for example 2026-10-20T10:00:00+03:00.",
+                error_code=NAIVE_SCHEDULE_CODE,
+            )
         now = datetime.now(UTC)
-        when = now if scheduled_at is None else _aware(scheduled_at)
+        when = now if scheduled_at is None else scheduled_at
         if when - now > MAX_SCHEDULE_AHEAD:
             raise ValidationError(
                 f"A campaign cannot be scheduled more than {MAX_SCHEDULE_AHEAD.days} days ahead."
@@ -1501,10 +1555,6 @@ def _validated_rate(messages_per_minute: int) -> int:
             f"{MAX_MESSAGES_PER_MINUTE} messages per minute."
         )
     return messages_per_minute
-
-
-def _aware(moment: datetime) -> datetime:
-    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
 __all__ = [

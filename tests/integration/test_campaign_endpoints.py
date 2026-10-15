@@ -125,6 +125,7 @@ class StubCampaigns:
         *,
         campaign_id: uuid.UUID,
         filters: AudienceFilter,
+        actor: User | None = None,
     ) -> Campaign:
         self.audiences.append({"campaign_id": campaign_id, "filters": filters})
         return _campaign()
@@ -155,9 +156,11 @@ class StubCampaigns:
         campaign_id: uuid.UUID,
         *,
         status: RecipientStatus | None = None,
+        reason: Any = None,
         limit: int = 100,
-    ) -> list[Any]:
-        return [_recipient()]
+        cursor: str | None = None,
+    ) -> Page[Any]:
+        return Page(items=[_recipient()], next_cursor=None)
 
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
