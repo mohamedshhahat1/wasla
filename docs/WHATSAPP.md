@@ -236,6 +236,20 @@ The last row is the one most easily got backwards, and getting it backwards cost
 
 Meta's error `code`, `type` and `error_subcode` are logged; the message raised to callers is our own, because provider error text can echo fragments of a request and this client holds a live platform credential.
 
+### Media uploads and campaign header files
+
+`upload_media` (`POST /{phone-number-id}/media`, form fields `file`, `type`, `messaging_product=whatsapp`) returns the id a file is sent with. Every ending is classified, because a campaign uploads its header file once for everybody and acts on which one it met ([ADR-144](../DECISIONS.md)); all are `ExternalServiceError`s, so an attachment send - which treats any upload failure as "nothing delivered" - is unchanged:
+
+| Ending | Raises | A campaign |
+| --- | --- | --- |
+| connection error, connect or pool timeout | `ProviderUnreachableError` | waits; pauses `provider_unreachable` after the bound |
+| `429` or a throttling code | `RateLimitedError` | waits; uploads again next batch |
+| `401`, code 0 or 190 / a connection-level code | `ProviderAuthError` / `ProviderConnectionRefusedError` | fails `credential_refused` / `connection_refused` |
+| any other `4xx` | `MediaUploadRefusedError`, with `provider_code` | fails `header_media_refused` |
+| `5xx`, read timeout, transport failure, `2xx` without an id | `UncertainDeliveryError` | records no id; uploads again next batch |
+
+A campaign's header is then sent as Meta documents it ("Template media", "Document messages", read 2026-10-15): `{"type": "header", "parameters": [{"type": "image", "image": {"id": "<id>"}}]}`, `video` the same, and `document` with `"filename"` - the Meta-safe name the upload used. Limits ("Media"): JPEG and PNG images up to 5 MB, MP4 and 3GPP video (H.264, AAC) up to 16 MB, documents up to 100 MB (Wasla's upload cap is 16 MB). "Media IDs returned by the API expire after 30 days": the campaign worker uploads again after `CAMPAIGN_HEADER_MEDIA_REFRESH_SECONDS` (25 days). Meta documents no code for an expired id; a send answered `131053` ("Unable to upload the media used in the message") makes the campaign upload once more.
+
 ## Delivery protocol
 
 An outbound send commits before Meta can deliver anything ([ADR-093](../DECISIONS.md)):

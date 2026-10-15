@@ -80,6 +80,10 @@ number active? template approved, MARKETING, parameters fit? -- no --> FAILED, s
     |
 claim the next batch of pending recipients not deferred (also SKIP LOCKED)
     |
+image / video / document header? Meta's id fresh (< 25 days, this number)? -- yes --> use it
+    -- no --> hold, read the stored file (SHA-256 checked), upload it to Meta,
+              write the id only while the lease is still this worker's (ADR-144)
+    |
 for each recipient:
     hold: campaign still scheduled/running and still this worker's? renew the lease
           -- no --> stop here (a pause, a cancel, or a lost lease)
@@ -96,6 +100,19 @@ nobody left (deferred people still count)? -- yes --> COMPLETED
 ```
 
 **One owner per recipient, whatever the number of workers** ([ADR-134](../DECISIONS.md), CMP-01). A batch's row locks end at its first send commit ([ADR-093](../DECISIONS.md)), so ownership is re-established before every person in two single statements: `hold` (the campaign is live and still carries this worker's `lease_token`, and the lease is renewed) and `take` (the recipient is still pending and not locked by another worker, re-read from the database). The lease therefore has to outlast one send - worst case 3 x 10 s plus 2 x 45 s of throttle waits, 120 s - not a batch; `CLAIM_LEASE_SECONDS` is 300. A lease that does run out is re-taken with a new token; the stalled worker stops at its next recipient, and the one send it had in flight was linked to its recipient before Meta was asked, so the new owner abandons rather than resends it. Campaign replicas are safe to run from this release on.
+
+**A header image, video or document is uploaded once per campaign** ([ADR-144](../DECISIONS.md)). The workspace uploads the file to Wasla (`POST /api/v1/campaigns/header-media`), never a link; it is stored like any attachment and counts against the workspace's storage. The worker holding the campaign's lease reads it back, checks its SHA-256, uploads it to Meta through the number's own credential and records Meta's id - conditioned on its lease token, in its own transaction - before the first recipient is taken. Every recipient's header carries that one id. Two or four workers upload it once; a worker whose lease was taken over during the upload writes nothing and sends nothing (its file at Meta goes unused and expires). Meta's ids expire after 30 days, so an id older than `CAMPAIGN_HEADER_MEDIA_REFRESH_SECONDS` (25 days) - after a long pause, say - is uploaded again before the batch.
+
+| Header file problem | What happens |
+| --- | --- |
+| stored file gone, or not what was stored | `PAUSED header_media_unavailable`; nothing sent to Meta |
+| Meta refuses the upload (a 4xx with a code) | `FAILED header_media_refused`, Meta's code in `last_error`; the template stays approved |
+| Meta not reachable for the upload | waits, no attempts spent; `PAUSED provider_unreachable` after the bound |
+| throttled, 5xx, read timeout, 2xx without an id | no id recorded; the next batch uploads again |
+| a send answered 131053 | uploaded again once and that person resent; a second 131053 fails the campaign `header_media_refused` after two sends |
+| the credential refused or unreadable | `FAILED credential_refused` |
+
+No recipient spends an attempt for a header problem, and a header problem never fails recipients one by one.
 
 **What counts as sent.** The recipient row moves to `SENT` in the transaction that meters the send; the per-recipient claim is what makes that pair safe from double counting across workers. The invariant `cr02_campaign_meters_differ_from_recipients_sent` checks it.
 
@@ -124,7 +141,7 @@ The worker holds one HTTP connection pool per sweep, so a batch of fifty is fift
 
 ## Stopping
 
-`PAUSED` and `CANCELLED` are deliberately different states. Every pause or failure records `status_reason`, from a closed vocabulary (`CampaignStopReason`): `workspace_suspended`, `workspace_deleted`, `subscription_suspended`, `admin_paused`, `template_removed`, `template_not_approved`, `template_withdrawn`, `template_category`, `template_parameters_refused`, `connection_disabled`, `credential_refused`, `connection_refused`, `provider_unreachable`, `repeated_batch_failure`. It is the one field that says why a campaign is not sending; `last_error` keeps its sentence for a person.
+`PAUSED` and `CANCELLED` are deliberately different states. Every pause or failure records `status_reason`, from a closed vocabulary (`CampaignStopReason`): `workspace_suspended`, `workspace_deleted`, `subscription_suspended`, `admin_paused`, `template_removed`, `template_not_approved`, `template_withdrawn`, `template_category`, `template_parameters_refused`, `connection_disabled`, `credential_refused`, `connection_refused`, `provider_unreachable`, `repeated_batch_failure`, `header_media_unavailable`, `header_media_refused`. It is the one field that says why a campaign is not sending; `last_error` keeps its sentence for a person.
 
 **A workspace that is not served does not broadcast** ([ADR-135](../DECISIONS.md), CMP-02, CMQ-11). Suspension by the platform, deletion by the owner, and a subscription suspended for an unpaid invoice pause the workspace's scheduled and running campaigns in the same transaction, one audit entry each. The worker asks the same "served" predicate the follow-up gate asks (`app/services/workspace_serving.py`) before every batch and every recipient, so a transition it could not see still stops it at the next person. `past_due` is the grace and keeps sending. Restoring a workspace or settling the invoice resumes nothing: an admin reschedules, and the reservation is taken again then.
 
@@ -202,7 +219,10 @@ Every recipient that did not end `sent` carries `reason_code` (CMP-13): `opted_o
 | `GET /api/v1/templates` | member | What may be sent |
 | `POST /api/v1/templates/sync` | admin | Refresh the registry from Meta |
 | `GET /api/v1/campaigns` | member | Newest first, keyset paged |
-| `POST /api/v1/campaigns` | admin | Compose a draft |
+| `POST /api/v1/campaigns` | admin | Compose a draft (`header_media_id` for a media-header template) |
+| `POST /api/v1/campaigns/header-media` | admin | Upload a template header file (image, video, PDF) |
+| `GET /api/v1/campaigns/header-media/{id}` | member | A header file's metadata |
+| `GET /api/v1/campaigns/header-media/{id}/file` | member | Its bytes, as an attachment |
 | `POST /api/v1/campaigns/audience/preview` | admin | Count a filter without writing anything |
 | `POST /api/v1/campaigns/{id}/audience` | admin | Materialise the recipient list (drafts only) |
 | `POST /api/v1/campaigns/{id}/schedule` | admin | Send, now or at a time |
@@ -225,6 +245,7 @@ Lifecycle changes are named transitions rather than a `PATCH` on `status`. Statu
 | `CONNECTION_SENDS_PER_MINUTE` | unset | One number's sending allowance, shared by every sender on it ([ADR-123](../DECISIONS.md)); `channel_connections.sends_per_minute` overrides it per number (0090). Unset, a campaign is paced by its own rate alone |
 | `CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS` | 6 | How long Meta may be unreachable before a waiting campaign is paused |
 | `CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` | 5 | Batches in a row that may raise before a campaign is paused |
+| `CAMPAIGN_HEADER_MEDIA_REFRESH_SECONDS` | 2160000 (25 days) | How old Meta's id for a header file may be before it is uploaded again; Meta's expire after 30 days |
 
 There is no campaign-specific credential. Sends use the platform Meta token, as every other outbound path does ([ADR-009](../DECISIONS.md)).
 
@@ -233,7 +254,8 @@ There is no campaign-specific credential. Sends use the platform Meta token, as 
 - **No per-recipient personalisation.** A campaign's template variables are one list for the whole send. Filling `{{1}}` with each customer's name needs a source of per-recipient facts that nothing here has yet.
 - **The rate is per campaign unless a number has an allowance.** Two campaigns running at once on one number can exceed either one's rate while `CONNECTION_SENDS_PER_MINUTE` is unset; with it set (or a per-number override), they share the number's allowance and wait for it without spending attempts.
 - **Meta's portfolio messaging limit is not read or enforced** (CMP-17, EXT-CMP-01). Meta counts unique users messaged outside a customer-service window in a moving 24 hours, shared by every number of the business portfolio, with tiers of 250 (new), 2,000, 10,000, 100,000 and unlimited. A 50,000-person campaign on a 250-tier portfolio will be refused beyond the tier, with an error Meta does not document; keep first campaigns under the tier. Reading the limit and warning at scheduling is CMQ-06.
-- **Templates with a media header cannot be sent by a campaign yet** - composition refuses them (CMP-05). Text headers, body (positional or named) and URL and copy-code buttons are filled.
+- **One header file per campaign.** IMAGE, VIDEO and DOCUMENT headers are sent with the campaign's header file, the same for everybody; a per-recipient picture is not supported. **LOCATION and GIF headers are refused** at composition (`template_unsupported`). Text headers, body (positional or named) and URL and copy-code buttons are filled.
+- **That Meta honours one uploaded id across many messages for 30 days** is what its pages imply (they recommend sending by uploaded id and state the lifetime) and is EXTERNAL VERIFICATION until a real campaign shows it.
 - **Workspace time zone.** A `scheduled_at` must carry its UTC offset (CMP-15); there are no quiet hours (CMQ-04).
 - **No import, deliberately.** See [ADR-025](../DECISIONS.md). Adding one means answering the consent question, not writing a CSV parser.
 - **No campaign analytics events.** Counts come from the recipient and message rows; the analytics event table arrives in Phase 12, and writing a second shape now would mean migrating two later.

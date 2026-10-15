@@ -676,11 +676,19 @@ FROM campaigns WHERE id = '<id>';
 | `connection_refused` | Meta refused the connection (368, permissions) | Resolve with Meta, reschedule |
 | `provider_unreachable` | Meta was unreachable longer than `CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS` | Fix connectivity, reschedule; no attempts were spent |
 | `repeated_batch_failure` | `CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` batches in a row raised | Find `campaign.batch_failed` and its `error_type`; fix, reschedule |
+| `header_media_unavailable` | The campaign's header file is gone from the store, or is not what was stored (SHA-256), or retention removed it (ADR-144) | Nothing reached Meta. Look up `campaign_header_media` by `campaigns.header_media_id`: `storage_state`, and whether the object exists at `storage_key`. A purged or missing file cannot come back - have the workspace upload the picture again and compose a new campaign; a store outage is not this (the campaign waits instead) |
+| `header_media_refused` | Meta refused the header file - its upload (`last_error` has Meta's code), or two sends in a row (131053) after uploading it again | The template is still approved. Check the file against Meta's limits (image JPEG/PNG 5 MB, video MP4/3GPP H.264+AAC 16 MB, PDF); have the workspace upload one Meta accepts and compose again. Alert `CampaignHeaderMediaRefused` |
 
 Recipients carry `reason_code` (`GET /campaigns/{id}/recipients?reason=...`).
 `delivery_unconfirmed` means the send may have reached the customer and was
 never repeated ([ADR-093](../DECISIONS.md)); the unresolved message is on
 `UnresolvedOutboundDirectory`.
+
+**A media-header campaign waiting** with no `status_reason`: its header file
+upload was throttled or answered uncertainly (5xx, read timeout, 2xx without an
+id), or the media store could not be read. Nothing is recorded and the next
+batch uploads again (logs `campaign.header_media_uploaded`; counter
+`wasla_campaign_events_total{event="header_media_uploaded"|"header_media_refreshed"|"header_media_reupload_on_send"}`).
 
 **Two campaign workers overlapping** (`CampaignRecipientOwnedElsewhere`) is
 safe - the per-recipient claim refused the second copy (ADR-134) - but means a

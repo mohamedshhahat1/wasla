@@ -218,6 +218,8 @@ A pass that dies anywhere leaves a claimed row; the next pass deletes again — 
 
 A poll rather than a queue: enqueueing one job per file would put the deletion of customer data behind the replay command, where an operator could re-run a dead-lettered purge weeks later against a row since re-populated.
 
+**A campaign's header file is kept while a campaign needs it** ([ADR-144](../DECISIONS.md), HM-07). `campaign_header_media` follows the same age and the same two-phase purge, except that a file a draft, scheduled, running or paused campaign names is never claimed. A file named only by completed, cancelled or failed campaigns, or by none, expires like any other; a campaign resumed after its file went pauses `header_media_unavailable`, and its schedule is refused.
+
 ### When the whole workspace is purged
 
 `MEDIA_RETENTION_DAYS` removes files by age; a **workspace purge** removes a deleted workspace's rows once its retention window has passed ([RUNBOOK.md](RUNBOOK.md)). The rows and the objects are two systems again, and the purge used to hold the keys only in memory between deleting the rows and deleting the objects — so a refused delete, or a process dying after the commit, left the customer's files in the bucket with no row naming them and the workspace recorded as purged (MEDIA-07).
@@ -261,6 +263,8 @@ Anything that goes wrong after the first commit leaves a row that names the exac
 A check constraint says what each state is allowed to look like, so a consumer can trust the column instead of re-deriving the lifecycle from which columns happen to be null. `UNIQUE(storage_key)` gives every object exactly one owning row, so recovery never has two candidates and no way to choose.
 
 **A retry reuses the committed key.** The allocation happens under a row lock, so a redelivered media job finds the key the first attempt committed and writes its bytes there. Two attempts each minting a fresh key would each write an object, of which only one could end up on the row — which is the orphan again, through the front door.
+
+**A campaign's header file is a writer of this protocol** ([ADR-144](../DECISIONS.md)). `POST /api/v1/campaigns/header-media` reserves the workspace's storage under its lock and commits the intent in TX1, writes the object with `storage.write_object` - the helper the outbound attachment path uses - with no transaction held, and marks the row `stored` in TX2. Its rows live in `campaign_header_media`, not `message_media` (they have no message or conversation), under the same `storage_state` values and CHECK, `UNIQUE(storage_key)` and key layout; reconciliation, retention, the storage capacity sum and the purge ledger all read both tables.
 
 ## Recovering an interrupted write
 

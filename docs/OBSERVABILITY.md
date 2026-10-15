@@ -220,7 +220,9 @@ Added with ADR-134/135/139 (CMP-01, CMP-02, CMP-07, CMP-20, CMP-23). Counters
 `wasla_campaign_sends_total{outcome}` (sent, skipped, failed, abandoned,
 deferred), `wasla_campaign_stops_total{reason}` (the `CampaignStopReason`
 vocabulary), `wasla_campaign_events_total{event}` (lease_taken_over,
-lease_lost, recipient_owned_elsewhere) and
+lease_lost, recipient_owned_elsewhere; and header_media_uploaded,
+header_media_refreshed, header_media_reupload_on_send for a campaign's header
+file, ADR-144) and
 `wasla_template_status_updates_total{source}` (send_writeback, status_webhook,
 template_webhook); opt-outs gain `via="provider_status"`. Gauges
 `wasla_campaigns_stuck` and `wasla_campaigns_stuck_oldest_age_seconds` are read
@@ -232,6 +234,7 @@ at scrape time. No label names a workspace, campaign, connection or person.
 | `CampaignRecipientOwnedElsewhere` | Any recipient refused by the per-recipient claim in an hour - two workers overlapped | warning |
 | `CampaignsPausedProviderUnreachable` | A campaign paused `provider_unreachable` in the last hour | warning |
 | `CampaignsPausedRepeatedBatchFailure` | A campaign paused `repeated_batch_failure` in the last hour | warning |
+| `CampaignHeaderMediaRefused` | A campaign failed `header_media_refused` in the last hour - Meta refused its header file (ADR-144) | warning |
 
 Each was proved with `promtool test rules` to fire, clear, and stay silent on
 ordinary traffic (an admin's pause, a lease takeover alone).
