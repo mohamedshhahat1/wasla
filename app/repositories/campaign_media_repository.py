@@ -119,7 +119,7 @@ class PlatformCampaignMediaRepository:
                 CampaignHeaderMedia.storage_state == MediaStorageState.PENDING,
                 CampaignHeaderMedia.upload_started_at <= cutoff,
             )
-            .order_by(CampaignHeaderMedia.upload_started_at)
+            .order_by(CampaignHeaderMedia.upload_started_at, CampaignHeaderMedia.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -141,7 +141,7 @@ class PlatformCampaignMediaRepository:
                 CampaignHeaderMedia.created_at < cutoff,
                 ~_named_by_live_campaign(),
             )
-            .order_by(CampaignHeaderMedia.created_at)
+            .order_by(CampaignHeaderMedia.created_at, CampaignHeaderMedia.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
@@ -151,7 +151,7 @@ class PlatformCampaignMediaRepository:
         statement = (
             select(CampaignHeaderMedia)
             .where(CampaignHeaderMedia.storage_state == MediaStorageState.PURGING)
-            .order_by(CampaignHeaderMedia.purge_started_at)
+            .order_by(CampaignHeaderMedia.purge_started_at, CampaignHeaderMedia.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

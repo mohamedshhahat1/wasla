@@ -255,6 +255,16 @@ def _retry_after(response: httpx.Response) -> float | None:
     return seconds if seconds > 0 else None
 
 
+class MediaUploadRefusedError(SendNotAttemptedError):
+    """Meta read a media upload and refused it, with its code (HM-06).
+
+    About the file, not a person: a campaign whose header file is refused
+    fails once, `header_media_refused`, rather than per recipient.
+    """
+
+    message = "WhatsApp refused the file."
+
+
 class TemplateWithdrawnError(SendNotAttemptedError):
     """Meta refused this template, not this message.
 
@@ -617,6 +627,26 @@ class WhatsAppClient:
         Sending by hosted link is the other option and is not used: it would
         require every attachment to sit behind a public URL, which is a wider
         exposure than uploading the bytes for one send.
+
+        **Every ending is classified** (HM-06, ADR-144), because a campaign
+        uploads its header file once for everybody and must know which of
+        these it met. All are `ExternalServiceError`s, so an attachment send,
+        which treats any upload failure as "nothing was delivered", is
+        unchanged.
+
+        | Ending | Raises |
+        | --- | --- |
+        | no connection; connect or pool timeout | `ProviderUnreachableError` |
+        | 429 or a throttling code | `RateLimitedError` |
+        | 401, code 0 or 190 | `ProviderAuthError` |
+        | a connection-level code | `ProviderConnectionRefusedError` |
+        | any other 4xx | `MediaUploadRefusedError`, with Meta's code |
+        | 5xx, read timeout, transport, 2xx with no id | `UncertainDeliveryError` |
+
+        The first reached nothing; the last may have left Meta holding a copy,
+        with no id to use.
+
+        Not retried here: a caller that wants another attempt makes one.
         """
         url = f"{GRAPH_BASE_URL}/{self._api_version}/{phone_number_id}/media"
         files = {"file": (filename, content, mime_type)}
@@ -629,17 +659,33 @@ class WhatsAppClient:
                 files=files,
                 headers={"Authorization": f"Bearer {self._access_token}"},
             )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
+            # Ended before a byte of the request was written (CMP-07, ADR-139).
+            raise ProviderUnreachableError("WhatsApp could not be reached.") from error
         except httpx.HTTPError as error:
-            raise ExternalServiceError("WhatsApp could not be reached.") from error
+            raise UncertainDeliveryError("WhatsApp did not complete the upload.") from error
 
-        if response.status_code >= CLIENT_ERROR_FLOOR:
+        if CLIENT_ERROR_FLOOR <= response.status_code < SERVER_ERROR_FLOOR:
+            error_code = self._log_failure(response)
+            kind = classify_meta_error(response.status_code, error_code)
+            if kind is MetaErrorClass.THROTTLED:
+                raise RateLimitedError("WhatsApp is rate limiting this account.")
+            if kind is MetaErrorClass.CREDENTIAL:
+                raise ProviderAuthError(CREDENTIALS_REFUSED, reason="credential_refused")
+            if kind is MetaErrorClass.CONNECTION:
+                raise ProviderConnectionRefusedError(
+                    CONNECTION_REFUSED, reason=f"meta_code_{error_code}"
+                )
+            raise MediaUploadRefusedError(provider_code=error_code)
+        if response.status_code >= SERVER_ERROR_FLOOR:
             self._log_failure(response)
-            raise ExternalServiceError("WhatsApp rejected the upload.")
+            raise UncertainDeliveryError("WhatsApp did not complete the upload.")
 
-        body = self._decode(response)
+        # A 2xx: Meta may hold the file whatever its body says (MSG-07).
+        body = self._decode(response, accepted=True)
         uploaded = body.get("id")
         if not isinstance(uploaded, str) or not uploaded:
-            raise ExternalServiceError("WhatsApp accepted the upload without an identifier.")
+            raise UncertainDeliveryError("WhatsApp accepted the upload without an identifier.")
         return uploaded
 
     async def _describe(self, media_id: str) -> dict[str, Any]:
@@ -1278,6 +1324,7 @@ __all__ = [
     "MediaHostRefusedError",
     "MediaTooLargeError",
     "MediaUnavailableError",
+    "MediaUploadRefusedError",
     "ProviderAuthError",
     "SendNotAttemptedError",
     "SentMessage",

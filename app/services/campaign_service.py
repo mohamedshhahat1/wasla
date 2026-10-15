@@ -28,7 +28,7 @@ successor permission to send a burst.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
@@ -36,6 +36,7 @@ from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.channels.outcomes import (
     ProviderAuthError,
@@ -44,6 +45,7 @@ from app.channels.outcomes import (
 )
 from app.channels.registry import PAUSED_RECHECK, ChannelPausedError
 from app.channels.throughput import ConnectionThrottledError
+from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import (
     DependencyUnavailableError,
     ExternalServiceError,
@@ -53,6 +55,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.core.storage import MediaStorage, StorageError
 from app.core.telemetry import record_campaign_event, record_campaign_send, record_campaign_stop
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
@@ -71,7 +74,7 @@ from app.db.models.campaign import (
     RecipientReason,
     RecipientStatus,
 )
-from app.db.models.campaign_media import CampaignHeaderMedia
+from app.db.models.campaign_media import CampaignHeaderMedia, HeaderMediaKind
 from app.db.models.channel import Channel, ContactIdentity
 from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import (
@@ -84,10 +87,12 @@ from app.db.models.conversation import (
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
 from app.db.models.whatsapp_template import TemplateStatus
+from app.db.session import released
 from app.integrations.whatsapp.client import (
     MARKETING_OPTED_OUT_CODE,
     PAIR_RATE_LIMIT_CODE,
     TEMPLATE_WITHDRAWN_CODES,
+    MediaUploadRefusedError,
 )
 from app.repositories.campaign_media_repository import CampaignHeaderMediaRepository
 from app.repositories.campaign_repository import (
@@ -112,16 +117,26 @@ from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services import workspace_serving as serving
 from app.services.audit_service import AuditTrail
+from app.services.campaign_header_media_service import (
+    CampaignHeaderMediaService,
+    HeaderMediaUnavailableError,
+)
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
     EntitlementService,
     hold_limit_lock,
 )
-from app.services.messaging_service import MessagingService, TemplateRefusedError
+from app.services.messaging_service import (
+    MessagingService,
+    TemplateRefusedError,
+    safe_upload_filename,
+)
 from app.services.opt_out import record_opt_out, record_resume
 from app.services.template_parameters import (
+    FILE_HEADER_FORMATS,
     TEMPLATE_PARAMETER_CODES,
     CampaignParameters,
+    HeaderFileParameter,
     parameter_spec,
     send_components,
 )
@@ -220,6 +235,8 @@ class CampaignService:
         entitlements: EntitlementService | None = None,
         default_plan_code: str | None = None,
         provider_unreachable_pause: timedelta | None = None,
+        storage: MediaStorage | None = None,
+        header_media_refresh: timedelta | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -248,6 +265,15 @@ class CampaignService:
             provider_unreachable_pause
             if provider_unreachable_pause is not None
             else DEFAULT_PROVIDER_UNREACHABLE_PAUSE
+        )
+        # Where a campaign's header file is read from, and how old Meta's id
+        # for it may grow before it is uploaded again (HM-05). The worker
+        # supplies the store; a request never uploads.
+        self._storage = storage
+        self._header_refresh = (
+            header_media_refresh
+            if header_media_refresh is not None
+            else DEFAULT_HEADER_MEDIA_REFRESH
         )
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
@@ -819,6 +845,25 @@ class CampaignService:
                 return BatchOutcome(campaign.id, campaign.status)
             return self._complete(campaign, moment)
 
+        # **The header file, once for the campaign** (HM-04): uploaded - or
+        # reused while Meta's id is fresh - before the first recipient is
+        # taken, by the worker holding the lease, never per person. Every way
+        # it can fail stops or waits the campaign as a whole (HM-06).
+        header = _HeaderState()
+        # Read for its format and not held: a template row kept alive for the
+        # batch would be the one every later send's registry check is handed,
+        # and a pause another sender wrote since would not be seen (CMP-19).
+        spec = parameter_spec(
+            (await self._templates.require_by_id(campaign.template_id)).components
+        )
+        if spec is not None and spec.header_format in FILE_HEADER_FORMATS:
+            prepared = await self._header_file(
+                campaign, token=token, lease_until=lease_until, clock=clock, messaging=messaging
+            )
+            if isinstance(prepared, BatchOutcome):
+                return prepared
+            header.file = prepared
+
         sent = failed = skipped = deferred = 0
         reached_provider = False
         throttled_until: datetime | None = None
@@ -871,7 +916,20 @@ class CampaignService:
                 skipped += 1
                 continue
             try:
-                outcome = await self._deliver(campaign, recipient, messaging=messaging, now=moment)
+                delivered = await self._deliver_with_header(
+                    campaign,
+                    recipient,
+                    messaging=messaging,
+                    now=moment,
+                    header=header,
+                    token=token,
+                    lease_until=lease_until,
+                    clock=clock,
+                )
+            except _BatchEndedError as ended:
+                # The header file was refused twice, or could not be uploaded
+                # again: the campaign stopped as a whole (HM-06).
+                return ended.outcome
             except ProviderUnreachableError:
                 # Meta could not be reached at all (CMP-07). Nothing was
                 # delivered and nothing about this person caused it, so they
@@ -954,6 +1012,11 @@ class CampaignService:
                         else CampaignStopReason.CREDENTIAL_REFUSED
                     ),
                 )
+            if delivered is None:
+                # Re-taken after the header file was uploaded again, and owned
+                # by somebody else by then: not this worker's to send.
+                continue
+            outcome = delivered
             if isinstance(outcome, _Deferred):
                 deferred += 1
                 reached_provider = True
@@ -1021,6 +1084,297 @@ class CampaignService:
             failed=failed,
             skipped=skipped,
         )
+
+    async def _deliver_with_header(
+        self,
+        campaign: Campaign,
+        recipient: CampaignRecipient,
+        *,
+        messaging: MessagingService,
+        now: datetime,
+        header: _HeaderState,
+        token: uuid.UUID | None,
+        lease_until: Callable[[], datetime | None],
+        clock: Callable[[], datetime],
+    ) -> RecipientStatus | _Deferred | None:
+        """`_deliver`, sent again once after a fresh upload if Meta refuses the header file.
+
+        Meta's 131053 ("Unable to upload the media used in the message") is the
+        only code it documents for a file a send could not use; it names no
+        code for an expired id (Error codes, read 2026-10-15). The first such
+        answer re-uploads and re-sends **that recipient only** - Meta refused
+        the request, so it provably delivered nothing. A second, for anyone in
+        the batch, fails the campaign `header_media_refused`: two requests in
+        all for that cause. Returns None when the person was taken by another
+        worker between the two sends.
+        """
+        try:
+            return await self._deliver(
+                campaign, recipient, messaging=messaging, now=now, header_file=header.file
+            )
+        except _HeaderFileRejectedError:
+            pass
+        if header.reuploaded:
+            raise _BatchEndedError(await self._header_refused(campaign, token=token))
+        header.reuploaded = True
+        await record_campaign_event("header_media_reupload_on_send")
+        prepared = await self._header_file(
+            campaign,
+            token=token,
+            lease_until=lease_until,
+            clock=clock,
+            messaging=messaging,
+            again=True,
+        )
+        if isinstance(prepared, BatchOutcome):
+            raise _BatchEndedError(prepared)
+        header.file = prepared
+        if not await self._campaigns.hold(
+            campaign.id, lease_token=token, lease_until=lease_until()
+        ):
+            raise _BatchEndedError(await self._stopped(campaign, sent=0, failed=0, skipped=0))
+        if await self._recipients.take(recipient) is None:
+            return None
+        try:
+            return await self._deliver(
+                campaign, recipient, messaging=messaging, now=now, header_file=header.file
+            )
+        except _HeaderFileRejectedError:
+            raise _BatchEndedError(await self._header_refused(campaign, token=token)) from None
+
+    async def _header_file(
+        self,
+        campaign: Campaign,
+        *,
+        token: uuid.UUID | None,
+        lease_until: Callable[[], datetime | None],
+        clock: Callable[[], datetime],
+        messaging: MessagingService,
+        again: bool = False,
+    ) -> HeaderFileParameter | BatchOutcome:
+        """Meta's id for the campaign's header file, uploading it if it must (HM-04 .. HM-06).
+
+        Reused while it is fresh: uploaded through the campaign's own number,
+        less than `campaign_header_media_refresh_seconds` ago. Otherwise -
+        never uploaded, too old, through another number, or `again` because a
+        send refused it - uploaded once, by this worker, only while it holds
+        the campaign:
+
+            hold        the campaign is live and carries this worker's lease
+            --          read the stored file and check its SHA-256; no
+                        transaction, no row lock across the store
+            --          upload it to Meta through the number's own credential;
+                        no transaction across the call (ADR-080, ADR-093)
+            write       Meta's id, conditioned on the lease token, in its own
+                        short transaction (`record_header_upload`)
+
+        A worker whose lease was taken over in between writes nothing and sends
+        nothing: its upload is an unused file at Meta, which expires. A
+        `BatchOutcome` means the batch is over - stopped, waiting or failed.
+        """
+        header_media_id = campaign.header_media_id
+        asset = (
+            await self._header_files.get_by_id(header_media_id)
+            if header_media_id is not None
+            else None
+        )
+        if (
+            asset is not None
+            and not again
+            and campaign.header_provider_media_id is not None
+            and campaign.header_provider_account_id == campaign.account_id
+            and campaign.header_provider_uploaded_at is not None
+            and clock() - campaign.header_provider_uploaded_at < self._header_refresh
+        ):
+            return _header_parameter(asset, campaign.header_provider_media_id)
+
+        if not await self._campaigns.hold(
+            campaign.id, lease_token=token, lease_until=lease_until()
+        ):
+            return await self._stopped(campaign, sent=0, failed=0, skipped=0)
+        if asset is None:
+            # Composition requires a file and the key keeps it; a row that
+            # still lacks one cannot be sent with its header.
+            return await self._header_stop(
+                campaign, token=token, pause=CampaignStopReason.HEADER_MEDIA_UNAVAILABLE
+            )
+        if self._storage is None:  # pragma: no cover - the worker always supplies one
+            raise RuntimeError("Sending a campaign's header file needs the media store.")
+        loader = CampaignHeaderMediaService(
+            session=self._session, tenant_id=self._tenant_id, storage=self._storage
+        )
+        try:
+            # Commits what the batch staged (its RUNNING status) and ends the
+            # row lock `hold` took: nothing is held across the store.
+            async with released(self._session):
+                header_bytes = await loader.load_for_upload(asset)
+        except HeaderMediaUnavailableError:
+            # Gone, or not what was stored: never sent as something else.
+            return await self._header_stop(
+                campaign, token=token, pause=CampaignStopReason.HEADER_MEDIA_UNAVAILABLE
+            )
+        except StorageError:
+            # The store cannot say: like reconciliation, that decides nothing.
+            return await self._header_wait(
+                campaign, token=token, until=clock() + PROVIDER_UNREACHABLE_BACKOFF
+            )
+
+        refreshing = campaign.header_provider_media_id is not None
+        try:
+            provider_media_id = await messaging.upload_header_file(
+                connection_id=campaign.account_id,
+                content=header_bytes.content,
+                mime_type=header_bytes.mime_type,
+                filename=_upload_name(asset),
+            )
+        except ProviderUnreachableError:
+            # CMP-07's rule: nothing reached Meta, nothing is spent; the
+            # campaign waits, and pauses once the outage outlasts the bound.
+            since = campaign.provider_unreachable_since or clock()
+            campaign.provider_unreachable_since = since
+            if clock() - since >= self._provider_unreachable_pause:
+                return await self._header_stop(
+                    campaign, token=token, pause=CampaignStopReason.PROVIDER_UNREACHABLE
+                )
+            return await self._header_wait(
+                campaign, token=token, until=clock() + PROVIDER_UNREACHABLE_BACKOFF
+            )
+        except MediaUploadRefusedError as error:
+            # About the file, for everybody: the campaign fails once, with
+            # Meta's code. The template is not paused - it is the asset.
+            return await self._header_stop(
+                campaign,
+                token=token,
+                fail=CampaignStopReason.HEADER_MEDIA_REFUSED,
+                detail=(
+                    f"WhatsApp refused the header file (code {error.provider_code})."
+                    if error.provider_code is not None
+                    else "WhatsApp refused the header file."
+                ),
+            )
+        except (ProviderAuthError, ProviderConnectionRefusedError) as error:
+            return await self._header_stop(
+                campaign,
+                token=token,
+                fail=(
+                    CampaignStopReason.CREDENTIAL_REFUSED
+                    if isinstance(error, ProviderAuthError)
+                    else CampaignStopReason.CONNECTION_REFUSED
+                ),
+                detail=str(error),
+            )
+        except (DependencyUnavailableError, CredentialDecryptionError) as error:
+            # No credential to send as, or one this process cannot read - never
+            # the platform's instead (ADR-034).
+            return await self._header_stop(
+                campaign,
+                token=token,
+                fail=CampaignStopReason.CREDENTIAL_REFUSED,
+                detail=str(error),
+            )
+        except ValidationError as error:
+            # The provider's own limits, or a channel without uploads.
+            return await self._header_stop(
+                campaign,
+                token=token,
+                fail=CampaignStopReason.HEADER_MEDIA_REFUSED,
+                detail=error.message,
+            )
+        except (ExternalServiceError, RateLimitedError):
+            # Throttled, or an answer that does not settle it - a 5xx, a read
+            # timeout, a 2xx without an id. Meta may hold a copy; there is no
+            # id to use. Nothing is recorded and the next batch uploads again:
+            # a second upload is harmless, a second send is not.
+            return await self._header_wait(
+                campaign, token=token, until=clock() + PROVIDER_UNREACHABLE_BACKOFF
+            )
+
+        uploaded_at = clock()
+        recorded = await self._campaigns.record_header_upload(
+            campaign.id,
+            lease_token=token,
+            provider_media_id=provider_media_id,
+            uploaded_at=uploaded_at,
+            account_id=campaign.account_id,
+        )
+        # Its own short transaction: the id is durable before anybody is sent it.
+        await self._session.commit()
+        if not recorded:
+            logger.info(
+                "campaign.header_media_upload_unused",
+                extra={
+                    "event": "campaign.header_media_upload_unused",
+                    "campaign_id": str(campaign.id),
+                },
+            )
+            return await self._stopped(campaign, sent=0, failed=0, skipped=0)
+        # Mirrored on the snapshot without making it dirty: the statement above
+        # wrote it, under the lease, and nothing else may.
+        set_committed_value(campaign, "header_provider_media_id", provider_media_id)
+        set_committed_value(campaign, "header_provider_uploaded_at", uploaded_at)
+        set_committed_value(campaign, "header_provider_account_id", campaign.account_id)
+        # Meta answered: whatever outage there was is over (CMP-07).
+        campaign.provider_unreachable_since = None
+        if not again:
+            await record_campaign_event(
+                "header_media_refreshed" if refreshing else "header_media_uploaded"
+            )
+        logger.info(
+            "campaign.header_media_uploaded",
+            extra={
+                "event": "campaign.header_media_uploaded",
+                "campaign_id": str(campaign.id),
+                "kind": asset.kind,
+                "refresh": refreshing,
+                "again": again,
+            },
+        )
+        return _header_parameter(asset, provider_media_id)
+
+    async def _header_stop(
+        self,
+        campaign: Campaign,
+        *,
+        token: uuid.UUID | None,
+        pause: CampaignStopReason | None = None,
+        fail: CampaignStopReason | None = None,
+        detail: str = "",
+    ) -> BatchOutcome:
+        """Pause or fail the campaign for its header file - only while it is still this worker's."""
+        if not await self._campaigns.hold(campaign.id, lease_token=token, lease_until=None):
+            return await self._stopped(campaign, sent=0, failed=0, skipped=0)
+        if pause is not None:
+            return await self._pause_unserved(campaign, pause)
+        assert fail is not None  # noqa: S101 - one of the two is always given
+        return await self._fail(campaign, detail, reason=fail)
+
+    async def _header_refused(self, campaign: Campaign, *, token: uuid.UUID | None) -> BatchOutcome:
+        """Fail the campaign for a file Meta refused twice; its id is not kept.
+
+        Forgotten so that a campaign rescheduled after somebody looked at it
+        uploads the file afresh rather than sending the refused id again.
+        """
+        outcome = await self._header_stop(
+            campaign,
+            token=token,
+            fail=CampaignStopReason.HEADER_MEDIA_REFUSED,
+            detail=_HEADER_REFUSED_TWICE,
+        )
+        if outcome.status is CampaignStatus.FAILED:
+            campaign.header_provider_media_id = None
+            campaign.header_provider_uploaded_at = None
+            campaign.header_provider_account_id = None
+        return outcome
+
+    async def _header_wait(
+        self, campaign: Campaign, *, token: uuid.UUID | None, until: datetime
+    ) -> BatchOutcome:
+        """End the batch without a send and come back at `until`; nobody's attempt is spent."""
+        if not await self._campaigns.hold(campaign.id, lease_token=token, lease_until=None):
+            return await self._stopped(campaign, sent=0, failed=0, skipped=0)
+        campaign.next_send_at = until
+        campaign.lease_token = None
+        return BatchOutcome(campaign.id, campaign.status)
 
     async def _channel_of(self, campaign: Campaign) -> Channel:
         """The channel this campaign sends on: its connection's."""
@@ -1165,6 +1519,7 @@ class CampaignService:
         *,
         messaging: MessagingService,
         now: datetime,
+        header_file: HeaderFileParameter | None = None,
     ) -> RecipientStatus | _Deferred:
         """Send one person's copy and record what happened to it."""
         contact = await self._contacts.get_by_id(recipient.contact_id)
@@ -1266,7 +1621,11 @@ class CampaignService:
                 components=send_components(
                     spec,
                     CampaignParameters.from_campaign(
-                        campaign.variables, campaign.template_parameters
+                        campaign.variables,
+                        campaign.template_parameters,
+                        # The one id the campaign's upload returned, the same
+                        # for everybody (HM-04).
+                        header_file=header_file,
                     ),
                 ),
                 sent_by_id=campaign.created_by_id,
@@ -1313,6 +1672,14 @@ class CampaignService:
             # The messaging service records a rejected send rather than raising,
             # so a refusal arrives as a row state - with Meta's code on it.
             code = message.failure_code
+            if code == HEADER_MEDIA_REJECTED_CODE and header_file is not None:
+                # **About the header file, not this person** (HM-06): Meta no
+                # longer knows the id, or cannot use the file. Meta read the
+                # request and refused it - nothing was delivered - so the
+                # person keeps every attempt and is sent again once, after a
+                # fresh upload; a second such answer fails the campaign.
+                recipient.message_id = None
+                raise _HeaderFileRejectedError()
             if code in TEMPLATE_PARAMETER_CODES or code in TEMPLATE_WITHDRAWN_CODES:
                 # **A fact about the template, not this person** (CMP-05,
                 # CMP-19). Meta refuses the parameters (132000, 132012,
@@ -1578,6 +1945,13 @@ PAIR_RATE_LIMIT_DEFERRAL: Final = timedelta(minutes=1)
 # How long a campaign waits after Meta could not be reached at all (CMP-07),
 # and how long an outage may last before it is paused for a person to look at.
 PROVIDER_UNREACHABLE_BACKOFF: Final = timedelta(minutes=1)
+# Meta's "Unable to upload the media used in the message" (Error codes, read
+# 2026-10-15): the only code it documents for a send that could not use its
+# media. It names none for an expired id; this is the one acted on (HM-06).
+HEADER_MEDIA_REJECTED_CODE: Final = 131053
+# Meta: "Media IDs returned by the API expire after 30 days" - re-uploaded
+# five days before (HM-05; `campaign_header_media_refresh_seconds`).
+DEFAULT_HEADER_MEDIA_REFRESH: Final = timedelta(days=25)
 DEFAULT_PROVIDER_UNREACHABLE_PAUSE: Final = timedelta(hours=6)
 
 
@@ -1602,6 +1976,45 @@ class _CampaignWideRefusalError(Exception):
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+
+
+class _HeaderFileRejectedError(Exception):
+    """Meta refused a send for the header file it carried (131053, HM-06)."""
+
+
+class _BatchEndedError(Exception):
+    """The batch is over because of the header file; `outcome` says how."""
+
+    def __init__(self, outcome: BatchOutcome) -> None:
+        super().__init__(outcome.status.value)
+        self.outcome = outcome
+
+
+@dataclass(slots=True)
+class _HeaderState:
+    """One batch's header file: what is being sent, and whether it was re-uploaded."""
+
+    file: HeaderFileParameter | None = None
+    reuploaded: bool = False
+
+
+_HEADER_REFUSED_TWICE: Final = (
+    "WhatsApp refused the header file twice (code 131053), once after uploading it again."
+)
+
+
+def _upload_name(asset: CampaignHeaderMedia) -> str:
+    """The Meta-safe name the file is uploaded and sent with, as an attachment's (MEDIA-06)."""
+    return safe_upload_filename(asset.filename, mime_type=asset.mime_type)
+
+
+def _header_parameter(asset: CampaignHeaderMedia, provider_media_id: str) -> HeaderFileParameter:
+    return HeaderFileParameter(
+        kind=asset.kind,
+        provider_media_id=provider_media_id,
+        # Meta shows a document's name: the one its upload used.
+        filename=_upload_name(asset) if asset.kind == HeaderMediaKind.DOCUMENT.value else None,
+    )
 
 
 def _validated_name(name: str) -> str:

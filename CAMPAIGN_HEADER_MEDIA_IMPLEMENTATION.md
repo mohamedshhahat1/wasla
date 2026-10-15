@@ -13,8 +13,8 @@ continues from the first phase that is not committed.
 | 1 | Migration 0107, models, vocabulary, purge ledger | committed | (this commit) | unit 3,411 passed / 1 skipped; parity + atomicity + purge + invariants (migration-built) 39 passed; docs truth + purge + templates (model-built) 50 passed; alembic fresh/round-trip/check clean |
 | 2 | Asset route through the write path | committed | (this commit) | header-media API 148 passed (local + MinIO); campaign/media/conversation/entitlement/purge suites 607 passed + 6 stub failures fixed (route stub lacked `header_media_for`); docs truth + route authorization 34 passed |
 | 3 | Composition and preview | committed | (this commit, with Phase 2) | as Phase 2; `test_campaign_templates.py` 82 with docs |
-| 4 | Worker: upload once under the lease, header, refresh | not started | | |
-| 5 | Every failure campaign-level | not started | | |
+| 4 | Worker: upload once under the lease, header, refresh | committed | (this commit) | `test_campaign_header_media.py` 23 passed model-built; with the API, templates and docs 106 passed migration-built; campaign/outbound/messaging/unit regression 3,680 passed after 3 guard tests acknowledged |
+| 5 | Every failure campaign-level | committed | (this commit, with Phase 4) | as Phase 4; client upload classes 14 passed |
 | 6 | Retention and lifecycle | not started | | |
 | 7 | Observability, invariants, docs, ADR | not started | | |
 | 8 | Mutation | not started | | |
@@ -64,3 +64,18 @@ Pages: developers.facebook.com/documentation/business-messaging/whatsapp/busines
 * No campaign route changes fields after create (named transitions only), so
   "header_media_id cannot change after scheduling" is structural: `PATCH` is 405 and the
   audience/schedule bodies refuse an unknown `header_media_id` with 422.
+
+## Phase 4-5 notes
+
+* `WhatsAppClient.upload_media` now classifies every ending (unreachable, throttled,
+  credential, connection, refused-with-code, uncertain); all remain `ExternalServiceError`
+  subclasses, so the attachment send is unchanged. `MessagingService.upload_header_file`
+  reuses the adapter's sender and `prepare` - the one provider upload path.
+* **Found while testing:** holding the template row for the whole batch kept it in the
+  session's identity map, and the per-send registry check then read a stale status
+  (`test_a_template_paused_elsewhere_mid_batch...` failed, 6 sends instead of 2). The
+  pre-existing code relied on the row being dropped between reads; the header check now
+  reads the template's format without keeping the object.
+* Guard tests acknowledged (not weakened): ordering tie-breakers on the three new
+  queries; 131053 added to the Meta-code allowlist; the multipart `file` field of the
+  new route added to the bounded-field exemptions, as the attachment route's is.
