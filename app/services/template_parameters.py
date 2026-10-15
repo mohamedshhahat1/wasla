@@ -25,10 +25,15 @@ Shapes follow Meta's documentation, read 2026-10-13:
   `{"type": "button", "sub_type": "url" | "copy_code", "index": "0", "parameters": [...]}`;
   a named placeholder's parameter carries `parameter_name`.
 
-**Media headers are refused at composition** (deferred, ADR-137): sending one
-needs a media handle uploaded to Meta per campaign, which Wasla's media store
-does not produce yet. A refusal before anyone is written to closes the defect;
-a silent body-only send is what it was.
+**Media headers** (ADR-144, which amends ADR-137's deferral): an IMAGE, VIDEO or
+DOCUMENT header is filled with a file the workspace uploaded to Wasla - one
+per campaign, of the kind the header names - and sent as the id Meta gave the
+campaign worker's upload of it: `{"type": "header", "parameters": [{"type":
+"image", "image": {"id": ...}}]}`, `video` alike, `document` with its
+`filename` (Meta, "Template media" and "Document messages", read 2026-10-15).
+A LOCATION header carries no file and is still refused (DEFERRED), and so is
+GIF - Meta's Marketing Messages API format - and any format this does not know:
+a refusal before anyone is written to, never a send without the header.
 """
 
 from __future__ import annotations
@@ -50,7 +55,11 @@ TEMPLATE_UNSUPPORTED: Final = "template_unsupported"
 #: campaign stops on the first (error-codes page, read 2026-10-13; EXT-CMP).
 TEMPLATE_PARAMETER_CODES: Final = frozenset({132000, 132012, 131008})
 
-MEDIA_HEADER_FORMATS: Final = frozenset({"IMAGE", "VIDEO", "DOCUMENT", "LOCATION"})
+#: Header formats filled with a file the workspace uploaded (HM-03). The
+#: format in lower case is the asset's kind and the parameter's `type`.
+FILE_HEADER_FORMATS: Final = frozenset({"IMAGE", "VIDEO", "DOCUMENT"})
+#: Every header format a campaign can fill: none, text, or a file.
+SENDABLE_HEADER_FORMATS: Final = FILE_HEADER_FORMATS | {"TEXT"}
 
 #: Button types that never take a send-time parameter. A URL button needs one
 #: only when its URL ends in a placeholder; COPY_CODE always does.
@@ -71,7 +80,7 @@ class ParameterSpec:
 
     body: tuple[str, ...] = ()
     body_named: bool = False
-    #: `None` for no header; TEXT, or a media format composition refuses.
+    #: `None` for no header; TEXT; a file format; or one composition refuses.
     header_format: str | None = None
     header: tuple[str, ...] = ()
     header_named: bool = False
@@ -144,12 +153,28 @@ def parameter_spec(components: list[Any] | None) -> ParameterSpec | None:
 
 
 @dataclass(frozen=True, slots=True)
+class HeaderFileParameter:
+    """The file a media header is sent with: Meta's id for it, and a document's name."""
+
+    kind: str
+    provider_media_id: str
+    filename: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CampaignParameters:
-    """What a campaign supplies: body values, header values, button values by index."""
+    """What a campaign supplies: body values, header values, button values by index.
+
+    `header_file_kind` is the kind of the header file composition was given
+    (`image`, `video`, `document`), or None; `header_file` is what a send
+    carries for it, once the worker holds Meta's id.
+    """
 
     body: tuple[str, ...] = ()
     header: tuple[str, ...] = ()
     buttons: dict[int, str] = field(default_factory=dict)
+    header_file_kind: str | None = None
+    header_file: HeaderFileParameter | None = None
 
     def as_dict(self) -> dict[str, Any] | None:
         """The record kept on the campaign (`campaigns.template_parameters`), body excluded."""
@@ -162,7 +187,12 @@ class CampaignParameters:
 
     @classmethod
     def from_campaign(
-        cls, variables: list[str] | None, stored: dict[str, Any] | None
+        cls,
+        variables: list[str] | None,
+        stored: dict[str, Any] | None,
+        *,
+        header_file_kind: str | None = None,
+        header_file: HeaderFileParameter | None = None,
     ) -> CampaignParameters:
         stored = stored or {}
         buttons = {
@@ -174,6 +204,8 @@ class CampaignParameters:
             body=tuple(variables or ()),
             header=tuple(str(value) for value in stored.get("header", [])),
             buttons=buttons,
+            header_file_kind=header_file_kind,
+            header_file=header_file,
         )
 
 
@@ -188,11 +220,31 @@ def refusal(spec: ParameterSpec | None, supplied: CampaignParameters) -> Validat
             "This template's components are not known yet. Sync the templates, then try again.",
             error_code=TEMPLATE_NOT_SYNCED,
         )
-    if spec.header_format in MEDIA_HEADER_FORMATS:
+    if spec.header_format is not None and spec.header_format not in SENDABLE_HEADER_FORMATS:
+        # LOCATION (deferred), GIF, or a format Meta adds tomorrow: refused,
+        # never sent without its header.
         return ValidationError(
             f"This template's header is {spec.header_format.lower()}; campaigns cannot send "
-            "media headers yet.",
+            "that kind of header.",
             error_code=TEMPLATE_UNSUPPORTED,
+        )
+    if spec.header_format in FILE_HEADER_FORMATS:
+        wanted = spec.header_format.lower()
+        if supplied.header_file_kind is None:
+            return ValidationError(
+                f"This template's header is {article(wanted)} {wanted}; choose a header file.",
+                error_code=TEMPLATE_PARAMETERS,
+            )
+        if supplied.header_file_kind != wanted:
+            return ValidationError(
+                f"This template's header is {article(wanted)} {wanted}; the header file is "
+                f"{article(supplied.header_file_kind)} {supplied.header_file_kind}.",
+                error_code=TEMPLATE_PARAMETERS,
+            )
+    elif supplied.header_file_kind is not None:
+        return ValidationError(
+            "This template's header takes no file; remove the header file.",
+            error_code=TEMPLATE_PARAMETERS,
         )
     if spec.unsupported_buttons:
         return ValidationError(
@@ -232,6 +284,11 @@ def refusal(spec: ParameterSpec | None, supplied: CampaignParameters) -> Validat
     return None
 
 
+def article(noun: str) -> str:
+    """'a' or 'an', for a sentence a person reads."""
+    return "an" if noun[:1] in "aeiou" else "a"
+
+
 def _parameter(name: str, value: str, *, named: bool) -> dict[str, Any]:
     parameter: dict[str, Any] = {"type": "text", "text": value}
     if named:
@@ -249,6 +306,20 @@ def send_components(
     placeholders.
     """
     components: list[dict[str, Any]] = []
+    if spec.header_format in FILE_HEADER_FORMATS:
+        # One file for every recipient: the id the campaign's upload returned.
+        header_file = supplied.header_file
+        if header_file is None:
+            raise ValueError("A media header needs Meta's id for the campaign's header file.")
+        media: dict[str, Any] = {"id": header_file.provider_media_id}
+        if header_file.kind == "document" and header_file.filename:
+            media["filename"] = header_file.filename
+        components.append(
+            {
+                "type": "header",
+                "parameters": [{"type": header_file.kind, header_file.kind: media}],
+            }
+        )
     if spec.header:
         components.append(
             {
@@ -288,12 +359,15 @@ def send_components(
 
 
 __all__ = [
+    "FILE_HEADER_FORMATS",
+    "SENDABLE_HEADER_FORMATS",
     "TEMPLATE_NOT_SYNCED",
     "TEMPLATE_PARAMETERS",
     "TEMPLATE_PARAMETER_CODES",
     "TEMPLATE_UNSUPPORTED",
     "ButtonNeed",
     "CampaignParameters",
+    "HeaderFileParameter",
     "ParameterSpec",
     "parameter_spec",
     "refusal",

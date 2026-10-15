@@ -79,8 +79,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage, StorageError
+from app.db.models.campaign_media import CampaignHeaderMedia
 from app.db.models.media import MediaStorageState, MessageMedia
 from app.db.models.usage import UsageEventType
+from app.repositories.campaign_media_repository import PlatformCampaignMediaRepository
 from app.repositories.media_repository import PlatformMediaRepository
 from app.services.media_service import content_hash
 from app.services.usage_service import UsageRecorder
@@ -136,6 +138,9 @@ class MediaUploadReconciler:
         self._session = session
         self._storage = storage
         self._media = PlatformMediaRepository(session)
+        # A campaign's header files follow the same protocol on their own
+        # table (HM-02, ADR-144), and are settled by the same verdicts.
+        self._header_files = PlatformCampaignMediaRepository(session)
 
     async def run(
         self,
@@ -202,7 +207,11 @@ class MediaUploadReconciler:
         finalising the same intent - and it is one bounded GET against
         infrastructure on the deployment network, not a provider inference.
         """
-        rows = await self._media.claim_stale_uploads(cutoff=cutoff, limit=1)
+        rows: list[MessageMedia] | list[CampaignHeaderMedia] = (
+            await self._media.claim_stale_uploads(cutoff=cutoff, limit=1)
+        )
+        if not rows:
+            rows = await self._header_files.claim_stale_uploads(cutoff=cutoff, limit=1)
         if not rows:
             await self._session.rollback()
             return None
@@ -228,7 +237,7 @@ class MediaUploadReconciler:
         await self._session.commit()
         return verdict
 
-    async def _verify(self, media: MessageMedia, *, key: str) -> Verdict:
+    async def _verify(self, media: MessageMedia | CampaignHeaderMedia, *, key: str) -> Verdict:
         """Ask the store what is at this exact key, and whether it is ours.
 
         HEAD first, because it is the only call that distinguishes the three
@@ -264,7 +273,7 @@ class MediaUploadReconciler:
             return Verdict.MISMATCHED
         return Verdict.FINALIZED
 
-    def _apply(self, media: MessageMedia, verdict: Verdict) -> None:
+    def _apply(self, media: MessageMedia | CampaignHeaderMedia, verdict: Verdict) -> None:
         """Write the verdict onto the row. Never `UNREACHABLE`, which decides nothing."""
         if verdict is Verdict.FINALIZED:
             media.storage_state = MediaStorageState.STORED
@@ -321,11 +330,14 @@ class MediaUploadReconciler:
 
     async def pending_count(self) -> int:
         """How many upload intents are outstanding, across every workspace."""
-        return await self._media.pending_upload_count()
+        return (
+            await self._media.pending_upload_count()
+            + await self._header_files.pending_upload_count()
+        )
 
     async def mismatched_count(self) -> int:
         """How many objects were found to disagree with the row that owns them."""
-        return await self._media.mismatched_count()
+        return await self._media.mismatched_count() + await self._header_files.mismatched_count()
 
 
 __all__ = [

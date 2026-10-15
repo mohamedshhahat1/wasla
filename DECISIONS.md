@@ -7003,3 +7003,101 @@ per-recipient claim in front of TX1; the state machine is unchanged.
 docs/CAMPAIGNS.md now names `CONNECTION_SENDS_PER_MINUTE` and the 0090
 per-connection override: with either set, campaigns on one number share its
 allowance.
+
+## ADR-144 — A Campaign's Header File Is Uploaded To Meta Once Per Campaign, Under The Lease (HM-01 .. HM-08)
+
+**Context.** Most marketing templates are approved with an IMAGE, VIDEO or
+DOCUMENT header. ADR-137 refused them at composition (`template_unsupported`):
+sending one needs a file Meta can use, and the media store produced none. A
+business could not use those templates in a campaign at all
+(CAMPAIGN_HEADER_MEDIA_IMPLEMENTATION.md).
+
+**Decision.**
+
+1. **Uploaded through Wasla, never a link** (HM-01). A workspace owner or
+   admin uploads the file to `POST /api/v1/campaigns/header-media`; Wasla
+   stores it through the media write protocol (ADR-087) and the campaign
+   worker uploads the bytes to Meta (`POST /{phone-number-id}/media`). Meta
+   receives a media id; no URL to the private bucket, and no URL a customer
+   typed, is ever sent.
+2. **Its own table** (HM-02), `campaign_header_media`, rather than a row of
+   `message_media`: that table's rows require a message and a conversation
+   (both NOT NULL, tenant-composite, `UNIQUE(message_id, position)`), and its
+   recovery releases an agent turn on the row's conversation. Everything about
+   the object is shared - `build_key`, the `storage_state` lifecycle and its
+   CHECK, `UNIQUE(storage_key)`, `storage.write_object`, the `STORAGE_BYTES`
+   sum (ADR-091), upload reconciliation, retention and the purge ledger. A
+   campaign names one by `(tenant_id, header_media_id)`; the file is
+   immutable and is fixed at composition.
+3. **The bytes decide the kind** (HM-03, ADR-076): JPEG or PNG is an image
+   (Meta: 5 MB), MP4 or 3GPP a video (16 MB; Meta lists 3GPP beside MP4), PDF a
+   document (Wasla's 16 MB cap; Meta allows 100 MB). The kind must equal the
+   template's header format, or composition is refused `422
+   template_parameters` naming the header - as is a media template without a
+   file and a TEXT-header template given one. LOCATION headers stay refused
+   `template_unsupported` (DEFERRED), and so does GIF, a header format Meta
+   documents for its Marketing Messages API, which was not refused before.
+4. **Once per campaign and connection, under the lease** (HM-04). The worker
+   uploads only after `hold()` succeeded with its lease token, before the
+   first recipient of the batch is taken, with the session released across
+   the store read and the Meta call, through the connection's own credential
+   (`CredentialService`; an undecryptable token is never replaced by the
+   platform's, ADR-034). Meta's id is written by one statement conditioned on
+   the token (`record_header_upload`), in its own transaction, before anyone
+   is sent it. A worker that lost its lease writes nothing and sends nothing;
+   its upload is an unused file at Meta, which expires. Every recipient's
+   header parameter carries the one id: `{"type": "image", "image": {"id"}}`,
+   `video` alike, `document` with the Meta-safe `filename` the upload used.
+5. **Kept fresh** (HM-05). Meta: "Media IDs returned by the API expire after
+   30 days". The id is reused while it is younger than
+   `CAMPAIGN_HEADER_MEDIA_REFRESH_SECONDS` (25 days) and was uploaded through
+   the campaign's own number; otherwise - a long pause included - the worker
+   uploads again before the batch.
+6. **Every failure is the campaign's** (HM-06), and none spends a
+   recipient's attempt: a stored file gone or failing its SHA-256 pauses
+   `header_media_unavailable` with no request to Meta; a refused upload fails
+   `header_media_refused` with Meta's code, the template left approved; an
+   unreachable Meta waits and pauses `provider_unreachable` after the CMP-07
+   bound; a throttled or uncertain answer (5xx, read timeout, 2xx without an
+   id) records no id and the next batch uploads again - a second upload is
+   harmless, a second send is not; a refused or unreadable credential fails
+   `credential_refused`. Meta documents no code for an expired id; 131053
+   ("Unable to upload the media used in the message") is the one it documents
+   for a send that could not use its media, and is acted on: the first
+   uploads again and resends **that recipient** - a 4xx proves nothing was
+   delivered - the second fails the campaign `header_media_refused` after two
+   sends and forgets the id.
+7. **Kept while needed** (HM-07). Retention never removes a file a draft,
+   scheduled, running or paused campaign names; one named only by completed,
+   cancelled or failed campaigns, or by none, follows `MEDIA_RETENTION_DAYS`.
+   A campaign whose file is gone pauses `header_media_unavailable`; its
+   schedule is refused `header_media_not_stored`.
+8. **Shown, never leaked** (HM-08). `CampaignRead.header_media` carries `{id,
+   kind, mime_type, size_bytes, filename, created_at}`. Meta's id, the storage
+   key and any link appear in no response, log line or audit entry.
+
+**Consequences.** Two, four workers and a lease taken over mid-upload give one
+upload (two in the takeover case, one of them never sent), one id on every
+send and nobody twice (`tests/integration/test_campaign_header_media.py`).
+The WhatsApp client's `upload_media` classifies every ending; all remain
+`ExternalServiceError`s, so attachment sends are unchanged. Invariants CR-08
+(a live media-header campaign without a matching file), CR-09 (an id uploaded
+through another number) and CR-10 (another workspace's file) are in
+`scripts.omnichannel_invariants`. Migration 0107. Whether Meta honours one
+uploaded id across many messages for the full 30 days is EXTERNAL
+VERIFICATION: its pages recommend sending by uploaded id and state the
+lifetime, but none says so in as many words.
+
+## ADR-137 (amended 2026-10-15) — Media Headers Are Sent
+
+Decision 3 is superseded by ADR-144: IMAGE, VIDEO and DOCUMENT headers are
+filled with the campaign's header file and sent; LOCATION and GIF headers are
+refused `template_unsupported`. The spec is still derived from the stored
+components, and a media template's needs are checked again per batch.
+
+## ADR-134 (amended 2026-10-15) — The Header Upload Happens Under The Lease
+
+The header file is uploaded by the worker holding the campaign's lease, after
+`hold()`, and Meta's id is written only while the row still carries the
+worker's token (ADR-144, HM-04) - the same rule `record_batch_failure`
+follows. The per-recipient claim and the lease arithmetic are unchanged.

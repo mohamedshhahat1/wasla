@@ -112,6 +112,9 @@ class StubCampaigns:
     async def get(self, campaign_id: uuid.UUID) -> Campaign:
         return _campaign()
 
+    async def header_media_for(self, campaigns: Sequence[Campaign]) -> dict[uuid.UUID, Any]:
+        return {}
+
     async def create(self, **kwargs: Any) -> Campaign:
         self.created.append(kwargs)
         return _campaign()

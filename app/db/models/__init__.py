@@ -39,6 +39,7 @@ from .campaign import (
     OptOutSource,
     RecipientStatus,
 )
+from .campaign_media import CampaignHeaderMedia, HeaderMediaKind
 from .channel import (
     Channel,
     ChannelConnection,
@@ -235,6 +236,7 @@ __all__ = [
     "BillingIncidentStatus",
     "BillingInterval",
     "Campaign",
+    "CampaignHeaderMedia",
     "CampaignRecipient",
     "CampaignStatus",
     "CapacityReductionCause",
@@ -269,6 +271,7 @@ __all__ = [
     "FollowUp",
     "FollowUpStatus",
     "GenerationState",
+    "HeaderMediaKind",
     "IdentityKind",
     "IdentityProvider",
     "IdentityScope",

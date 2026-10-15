@@ -1,4 +1,4 @@
-"""The campaign invariants CR-01..CR-07 count what they claim to (non-vacuity).
+"""The campaign invariants CR-01..CR-10 count what they claim to (non-vacuity).
 
 `scripts/omnichannel_invariants.py` carries the checks the campaigns audit ran
 by hand after its probes (section 30). Each test here writes exactly one
@@ -9,14 +9,16 @@ A query made vacuous (mutant M-C38) fails its test.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
+from app.db.models.campaign_media import CampaignHeaderMedia
 from app.db.models.conversation import (
     Conversation,
     Message,
@@ -25,6 +27,7 @@ from app.db.models.conversation import (
     MessageOrigin,
 )
 from app.db.models.enums import TenantStatus
+from app.db.models.media import MediaStorageState
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.models.whatsapp_template import TemplateCategory, WhatsAppTemplate
@@ -202,3 +205,101 @@ async def test_cr07_recipient_sent_after_opting_out(db_session: AsyncSession) ->
     # A sent recipient with no meter also moves CR-02; this is about CR-07.
     added = await _added(db_session, before)
     assert added["cr07_recipient_sent_after_opting_out_on_that_channel"] == 1
+
+
+def _header_file(
+    campaign: Campaign, *, tenant_id: uuid.UUID | None = None, kind: str = "image"
+) -> CampaignHeaderMedia:
+    return CampaignHeaderMedia(
+        tenant_id=tenant_id or campaign.tenant_id,
+        kind=kind,
+        mime_type="image/png" if kind == "image" else "application/pdf",
+        byte_size=10,
+        content_hash="0" * 64,
+        storage_key=f"{campaign.tenant_id}/2026/10/{campaign.id}{kind}.bin",
+        storage_state=MediaStorageState.STORED,
+    )
+
+
+async def _image_header(session: AsyncSession, campaign: Campaign) -> None:
+    template = await session.get(WhatsAppTemplate, campaign.template_id)
+    assert template is not None
+    template.components = [
+        {"type": "HEADER", "format": "IMAGE"},
+        {"type": "BODY", "text": "Spring sale."},
+    ]
+
+
+async def test_cr08_live_image_header_campaign_without_its_file(db_session: AsyncSession) -> None:
+    campaign, _, _ = await _world(db_session, "cr08")
+    await _image_header(db_session, campaign)
+    image = _header_file(campaign)
+    db_session.add(image)
+    await db_session.flush()
+    campaign.header_media_id = image.id
+    campaign.status = CampaignStatus.SCHEDULED
+    before = await _counts(db_session)
+
+    campaign.header_media_id = None
+
+    assert await _added(db_session, before) == {
+        "cr08_live_media_header_campaign_without_a_matching_file": 1
+    }
+
+
+async def test_cr08_a_file_of_another_kind_counts_too(db_session: AsyncSession) -> None:
+    campaign, _, _ = await _world(db_session, "cr08k")
+    await _image_header(db_session, campaign)
+    image, document = _header_file(campaign), _header_file(campaign, kind="document")
+    db_session.add_all([image, document])
+    await db_session.flush()
+    campaign.header_media_id = image.id
+    campaign.status = CampaignStatus.PAUSED
+    before = await _counts(db_session)
+
+    campaign.header_media_id = document.id
+
+    assert await _added(db_session, before) == {
+        "cr08_live_media_header_campaign_without_a_matching_file": 1
+    }
+
+
+async def test_cr09_header_uploaded_through_another_number(db_session: AsyncSession) -> None:
+    campaign, _, _ = await _world(db_session, "cr09")
+    tenant = await db_session.get(Tenant, campaign.tenant_id)
+    assert tenant is not None
+    other = await _account(db_session, tenant=tenant, suffix="b")
+    image = _header_file(campaign)
+    db_session.add(image)
+    await db_session.flush()
+    campaign.header_media_id = image.id
+    campaign.header_provider_media_id = "1234567890"
+    campaign.header_provider_uploaded_at = datetime.now(UTC)
+    campaign.header_provider_account_id = campaign.account_id
+    before = await _counts(db_session)
+
+    campaign.header_provider_account_id = other.id
+
+    assert await _added(db_session, before) == {
+        "cr09_header_media_uploaded_through_another_number": 1
+    }
+
+
+async def test_cr10_campaign_naming_another_workspaces_file(db_session: AsyncSession) -> None:
+    campaign, _, _ = await _world(db_session, "cr10")
+    stranger = await _tenant(db_session, slug="cr10-other")
+    theirs = _header_file(campaign, tenant_id=stranger.id)
+    db_session.add(theirs)
+    await db_session.flush()
+    before = await _counts(db_session)
+
+    # The composite key refuses this write; the invariant is the second line,
+    # so the key's trigger is set aside for this rolled-back transaction only.
+    await db_session.execute(text("SET LOCAL session_replication_role = replica"))
+    campaign.header_media_id = theirs.id
+    await db_session.flush()
+    await db_session.execute(text("SET LOCAL session_replication_role = origin"))
+
+    assert await _added(db_session, before) == {
+        "cr10_campaign_naming_another_workspaces_header_file": 1
+    }

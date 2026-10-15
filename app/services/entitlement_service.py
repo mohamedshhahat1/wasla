@@ -66,6 +66,7 @@ from app.db.models.billing import (
     PlanVersion,
     Subscription,
 )
+from app.db.models.campaign_media import CampaignHeaderMedia
 from app.db.models.channel import Channel, ChannelConnection, ConnectionStatus
 from app.db.models.enums import InvitationStatus, MembershipStatus
 from app.db.models.invitation import TenantInvitation
@@ -958,10 +959,26 @@ class EntitlementService:
                 # counter, nothing to drift, and nothing to reconcile - a state
                 # transition that frees the object frees the capacity in the
                 # same statement.
-                statement = select(func.coalesce(func.sum(MessageMedia.byte_size), 0)).where(
-                    MessageMedia.tenant_id == self._tenant_id,
-                    MessageMedia.storage_state.in_(OCCUPYING_STORAGE_STATES),
+                #
+                # A campaign's header files occupy it too (HM-02, ADR-144):
+                # the same storage lifecycle on their own table.
+                attachments = (
+                    select(func.coalesce(func.sum(MessageMedia.byte_size), 0))
+                    .where(
+                        MessageMedia.tenant_id == self._tenant_id,
+                        MessageMedia.storage_state.in_(OCCUPYING_STORAGE_STATES),
+                    )
+                    .scalar_subquery()
                 )
+                header_files = (
+                    select(func.coalesce(func.sum(CampaignHeaderMedia.byte_size), 0))
+                    .where(
+                        CampaignHeaderMedia.tenant_id == self._tenant_id,
+                        CampaignHeaderMedia.storage_state.in_(OCCUPYING_STORAGE_STATES),
+                    )
+                    .scalar_subquery()
+                )
+                statement = select(attachments + header_files)
             case _:  # pragma: no cover - RESOURCE_LIMITS is exhaustive here
                 raise ValueError(f"{key} is not a resource limit.")
 

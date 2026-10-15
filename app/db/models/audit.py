@@ -444,6 +444,8 @@ class AuditAction(StrEnum):
     CAMPAIGN_CREATED = "campaign_created"
     CAMPAIGN_AUDIENCE_SET = "campaign_audience_set"
     CAMPAIGN_PAUSED = "campaign_paused"
+    # A file uploaded for a campaign's template header (HM-02). 0107.
+    CAMPAIGN_HEADER_MEDIA_UPLOADED = "campaign_header_media_uploaded"
 
     # What the agents are allowed to say (RAG-17, docs/RAG.md).
     #
@@ -651,6 +653,8 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "campaign_created",
     "campaign_audience_set",
     "campaign_paused",
+    # 0107
+    "campaign_header_media_uploaded",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

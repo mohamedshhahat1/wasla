@@ -71,6 +71,8 @@ NOT_PAYMOB_IDS: set[tuple[str, str]] = {
     ("app/services/template_parameters.py", "131008"),
     ("app/services/campaign_service.py", "131049"),
     ("app/services/campaign_service.py", "131026"),
+    # Meta's "Unable to upload the media used in the message" (HM-06).
+    ("app/services/campaign_service.py", "131053"),
 }
 
 BASE = {

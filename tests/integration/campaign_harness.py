@@ -21,6 +21,7 @@ Graph error envelope (developers.facebook.com/docs/whatsapp/cloud-api/reference/
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from collections import Counter
@@ -34,9 +35,11 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.storage import MediaStorage, build_key
 from app.db.models.audit import AuditLog
 from app.db.models.billing import Plan, Subscription
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
+from app.db.models.campaign_media import CampaignHeaderMedia
 from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Contact,
@@ -46,6 +49,7 @@ from app.db.models.conversation import (
     Message,
     MessageOrigin,
 )
+from app.db.models.media import MediaStorageState
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEvent, UsageEventType
 from app.db.models.user import User
@@ -80,6 +84,9 @@ def harness_settings(database_url: str, **overrides: Any) -> Settings:
 
 
 Behaviour = Callable[[dict[str, Any], int], Awaitable[httpx.Response]]
+#: How Meta answers the n-th upload (1-based): a response, or an exception raised
+#: at the transport (a connect error never reaches Meta).
+UploadBehaviour = Callable[[int], Awaitable[httpx.Response]]
 
 
 def accepted(payload: dict[str, Any], n: int) -> httpx.Response:
@@ -116,8 +123,54 @@ class FakeMeta:
     stall: dict[int, float] = field(default_factory=dict)
     requests: list[dict[str, Any]] = field(default_factory=list)
     on_request: Callable[[dict[str, Any], int], Awaitable[None]] | None = None
+    #: `POST /{phone-number-id}/media`, counted apart from sends (HM-04): Meta's
+    #: "Media" upload, answering `{"id": ...}`.
+    uploads: list[dict[str, Any]] = field(default_factory=list)
+    upload_behaviour: UploadBehaviour | None = None
+    #: Seconds to wait before answering particular upload numbers (1-based).
+    upload_stall: dict[int, float] = field(default_factory=dict)
+    on_upload: Callable[[int], Awaitable[None]] | None = None
+
+    async def upload(self, request: httpx.Request, *, worker: str) -> httpx.Response:
+        n = len(self.uploads) + 1
+        body = request.content
+        self.uploads.append(
+            {
+                "worker": worker,
+                "phone_number_id": request.url.path.rstrip("/").split("/")[-2],
+                "n": n,
+                "bytes": len(body),
+                "body": body,
+            }
+        )
+        if self.on_upload is not None:
+            await self.on_upload(n)
+        delay = self.upload_stall.get(n, 0.0)
+        if delay:
+            await asyncio.sleep(delay)
+        if self.upload_behaviour is not None:
+            return await self.upload_behaviour(n)
+        return httpx.Response(200, json={"id": f"hm{n:04d}{uuid.uuid4().hex[:6]}"})
+
+    def header_ids(self) -> list[str | None]:
+        """The header media id each send carried, in order (None for no media header)."""
+        found: list[str | None] = []
+        for entry in self.requests:
+            template = entry["payload"].get("template") or {}
+            media_id = None
+            for component in template.get("components") or []:
+                if component.get("type") != "header":
+                    continue
+                for parameter in component.get("parameters") or []:
+                    kind = parameter.get("type")
+                    if isinstance(parameter.get(kind), dict):
+                        media_id = parameter[kind].get("id")
+            found.append(media_id)
+        return found
 
     async def handle(self, request: httpx.Request, *, worker: str) -> httpx.Response:
+        if request.url.path.rstrip("/").endswith("/media"):
+            return await self.upload(request, worker=worker)
         payload = json.loads(request.content or b"{}")
         n = len(self.requests) + 1
         self.requests.append(
@@ -161,6 +214,7 @@ def worker(
     name: str,
     lease_seconds: float = 300.0,
     claim_limit: int = 5,
+    storage: MediaStorage | None = None,
     **settings_overrides: Any,
 ) -> tuple[CampaignWorker, Database]:
     """One replica: its own `Database`, its own HTTP pool to the counting transport.
@@ -182,6 +236,7 @@ def worker(
             messaging_factory=messaging,
             lease_seconds=lease_seconds,
             claim_limit=claim_limit,
+            storage=storage,
         ),
         database,
     )
@@ -252,6 +307,40 @@ async def seed(
             contact_ids.append(contact.id)
         await session.commit()
         return Workspace(tenant.id, account.id, template.id, contact_ids)
+
+
+#: A small PNG, as a campaign header file's bytes (HM-02).
+HEADER_PNG = b"\x89PNG\r\n\x1a\n" + b"a spring sale photograph" * 32
+
+
+async def store_file(
+    database: Database,
+    storage: MediaStorage,
+    workspace: Workspace,
+    *,
+    content: bytes = HEADER_PNG,
+    kind: str = "image",
+    mime_type: str = "image/png",
+    filename: str | None = None,
+) -> uuid.UUID:
+    """A stored header file, as the upload route leaves one: object written, row `stored`."""
+    key = build_key(tenant_id=workspace.tenant_id, mime_type=mime_type)
+    await storage.put_at(key=key, data=content, mime_type=mime_type)
+    async with database.session_factory() as session:
+        row = CampaignHeaderMedia(
+            tenant_id=workspace.tenant_id,
+            kind=kind,
+            mime_type=mime_type,
+            byte_size=len(content),
+            filename=filename,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            storage_key=key,
+            storage_state=MediaStorageState.STORED,
+            upload_started_at=datetime.now(UTC),
+        )
+        session.add(row)
+        await session.commit()
+        return row.id
 
 
 async def compose(
@@ -412,6 +501,7 @@ async def ledger(database: Database, campaign_id: uuid.UUID) -> Ledger:
 
 __all__ = [
     "BODY_ONLY",
+    "HEADER_PNG",
     "USER_DOMAIN",
     "FakeMeta",
     "Ledger",
@@ -424,5 +514,6 @@ __all__ = [
     "meta_error",
     "quiesce",
     "seed",
+    "store_file",
     "worker",
 ]

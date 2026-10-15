@@ -1580,6 +1580,25 @@ groups:
             have the workspace reschedule the campaign.
           runbook: docs/RUNBOOK.md
 
+      - alert: CampaignHeaderMediaRefused
+        # Meta refused a campaign's header file - on upload, or on a send twice
+        # after uploading it again - and the campaign failed
+        # header_media_refused (HM-06). The template is not paused; the file is.
+        expr: sum(increase(wasla_campaign_stops_total{reason="header_media_refused"}[1h])) > 0
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "A campaign failed because Meta refused its header file"
+          description: >-
+            A campaign's header image, video or document was refused by Meta
+            and the campaign failed with status_reason header_media_refused.
+            No recipient's attempts were spent. Read the campaign's last_error
+            for Meta's code, have the workspace upload a file Meta accepts and
+            compose the campaign again (docs/RUNBOOK.md, "Campaigns are not
+            sending").
+          runbook: docs/RUNBOOK.md
+
       - alert: CampaignsPausedRepeatedBatchFailure
         # Every recent batch of a campaign raised (CMP-20); it was paused
         # repeated_batch_failure instead of being retried for ever.

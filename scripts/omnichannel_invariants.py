@@ -493,7 +493,7 @@ _REDUCTION_DISABLE = "('capacity_reduction', 'capacity_reduction_automatic')"
 _DISABLED = "('channel_connection_disabled', 'whatsapp_account_disabled')"
 _RELEASED = "('channel_connection_released', 'whatsapp_account_released')"
 
-# Campaigns (CR-01..CR-07, ADR-134..ADR-143): what the campaigns audit counted
+# Campaigns (CR-01..CR-10, ADR-134..ADR-144): what the campaigns audit counted
 # by hand after its probes, kept here so a restore or a deployment can be
 # checked the same way. Every one is zero on a healthy database.
 CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
@@ -558,6 +558,35 @@ CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
         " AND k.contact_id = r.contact_id AND k.channel = cc.channel"
         " WHERE r.status = 'sent' AND k.marketing_opt_out_at < r.sent_at"
         " AND (k.resumed_at IS NULL OR k.resumed_at < k.marketing_opt_out_at)",
+    ),
+    # CR-08: a live campaign whose template's header is an image, a video or a
+    # document, with no header file or one of another kind (HM-03): it would
+    # be sent without the header Meta approved, or refused for everybody.
+    Check(
+        "cr08_live_media_header_campaign_without_a_matching_file",
+        "SELECT count(*) FROM campaigns c JOIN whatsapp_templates w ON w.id = c.template_id"
+        " CROSS JOIN LATERAL (SELECT upper(e ->> 'format') AS format FROM jsonb_array_elements("
+        "CASE WHEN jsonb_typeof(w.components) = 'array' THEN w.components ELSE '[]'::jsonb END"
+        ") e WHERE upper(e ->> 'type') = 'HEADER' LIMIT 1) h"
+        " LEFT JOIN campaign_header_media a ON a.tenant_id = c.tenant_id"
+        " AND a.id = c.header_media_id"
+        " WHERE c.status IN ('scheduled', 'running', 'paused')"
+        " AND h.format IN ('IMAGE', 'VIDEO', 'DOCUMENT')"
+        " AND (c.header_media_id IS NULL OR a.kind IS DISTINCT FROM lower(h.format))",
+    ),
+    # CR-09: Meta's id for a campaign's header file uploaded through another
+    # number than the one the campaign sends from (HM-04, HM-05).
+    Check(
+        "cr09_header_media_uploaded_through_another_number",
+        "SELECT count(*) FROM campaigns c WHERE c.header_provider_media_id IS NOT NULL"
+        " AND c.header_provider_account_id IS DISTINCT FROM c.account_id",
+    ),
+    # CR-10: a campaign naming another workspace's header file - defence in
+    # depth beside `fk_campaigns_tenant_header_media` (HM-02).
+    Check(
+        "cr10_campaign_naming_another_workspaces_header_file",
+        "SELECT count(*) FROM campaigns c JOIN campaign_header_media a"
+        " ON a.id = c.header_media_id WHERE a.tenant_id <> c.tenant_id",
     ),
 )
 
@@ -788,7 +817,7 @@ async def violations(
 async def campaign_violations(
     connection: AsyncConnection, *, read_only: bool = True
 ) -> dict[str, int]:
-    """The campaign invariants alone (CR-01..CR-07). All zero on a healthy database."""
+    """The campaign invariants alone (CR-01..CR-10). All zero on a healthy database."""
     return await _counts(connection, CAMPAIGN_INVARIANTS, read_only=read_only)
 
 

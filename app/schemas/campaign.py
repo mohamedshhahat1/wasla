@@ -34,6 +34,7 @@ from app.db.models.campaign import (
     RecipientReason,
     RecipientStatus,
 )
+from app.db.models.campaign_media import CampaignHeaderMedia, HeaderMediaKind
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
 from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import Contact
@@ -106,6 +107,10 @@ class CampaignCreateRequest(_Payload):
         default_factory=list,
         max_length=MAX_TEMPLATE_BUTTONS,
     )
+    # The file a template with an IMAGE, VIDEO or DOCUMENT header is sent with:
+    # an id from `POST /campaigns/header-media` (HM-02). Required by such a
+    # template, refused by any other; fixed once the campaign is composed.
+    header_media_id: uuid.UUID | None = None
 
 
 class AudienceRequest(_Payload):
@@ -150,6 +155,51 @@ class OptOutRequest(_Payload):
     source: OptOutSource = OptOutSource.TEAM
 
 
+class HeaderMediaRead(BaseModel):
+    """A campaign header file as the API shows it (HM-02, HM-08).
+
+    What a colleague needs to recognise the file and nothing else: no storage
+    key, no link, and never Meta's id for it.
+    """
+
+    id: uuid.UUID
+    kind: HeaderMediaKind
+    mime_type: str
+    size_bytes: int
+    # A document's name; null for an image or a video.
+    filename: str | None
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, asset: CampaignHeaderMedia) -> Self:
+        return cls(
+            id=asset.id,
+            kind=HeaderMediaKind(asset.kind),
+            mime_type=asset.mime_type,
+            size_bytes=asset.byte_size,
+            filename=asset.filename,
+            created_at=asset.created_at,
+        )
+
+
+class HeaderMediaUploadRead(HeaderMediaRead):
+    """The answer to an upload: the file as stored, with its SHA-256."""
+
+    sha256: str
+
+    @classmethod
+    def from_model(cls, asset: CampaignHeaderMedia) -> Self:
+        return cls(
+            id=asset.id,
+            kind=HeaderMediaKind(asset.kind),
+            mime_type=asset.mime_type,
+            size_bytes=asset.byte_size,
+            filename=asset.filename,
+            created_at=asset.created_at,
+            sha256=asset.content_hash,
+        )
+
+
 class CampaignRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -178,12 +228,20 @@ class CampaignRead(BaseModel):
     # `template_withdrawn`, `credential_refused` and the rest of
     # `CampaignStopReason`. Null while it is sending, or done.
     status_reason: CampaignStopReason | None = None
+    # The header file it is sent with (HM-08), or null for a template whose
+    # header is text or absent. Meta's id for it is never shown.
+    header_media: HeaderMediaRead | None = None
     created_at: datetime
     updated_at: datetime
 
     @classmethod
-    def from_model(cls, campaign: Campaign) -> Self:
-        return cls.model_validate(campaign)
+    def from_model(
+        cls, campaign: Campaign, *, header_media: CampaignHeaderMedia | None = None
+    ) -> Self:
+        read = cls.model_validate(campaign)
+        if header_media is not None:
+            read.header_media = HeaderMediaRead.from_model(header_media)
+        return read
 
 
 class RecipientRead(BaseModel):

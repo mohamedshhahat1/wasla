@@ -92,7 +92,7 @@ from app.core.filenames import require_storable_filename
 from app.core.logging import get_logger
 from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
-from app.core.storage import EXTENSIONS, MediaStorage, StorageError, build_key
+from app.core.storage import EXTENSIONS, MediaStorage, build_key, write_object
 from app.core.telemetry import record_opt_outs
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
@@ -277,7 +277,7 @@ def _media_family(kind: MediaClass) -> str:
     return MEDIA_FAMILIES[kind]
 
 
-def _safe_filename(filename: str | None, *, mime_type: str) -> str:
+def safe_upload_filename(filename: str | None, *, mime_type: str) -> str:
     """A filename Meta will accept and a filesystem cannot be hurt by.
 
     A name reaching here came from a request body. It is shown to the recipient
@@ -578,7 +578,7 @@ class MessagingService:
         if storage is not None:
             await self._entitlements.require(LimitKey.STORAGE_BYTES, additional=len(content))
 
-        upload_name = _safe_filename(display_name, mime_type=canonical)
+        upload_name = safe_upload_filename(display_name, mime_type=canonical)
 
         message = await self._dispatch(
             conversation_id=conversation_id,
@@ -611,6 +611,58 @@ class MessagingService:
         )
         await self._audit_attachment_sent(message, sent_by_id=sent_by_id, origin=origin)
         return message
+
+    async def upload_header_file(
+        self,
+        *,
+        connection_id: uuid.UUID,
+        content: bytes,
+        mime_type: str,
+        filename: str,
+    ) -> str:
+        """Upload a campaign's header file to the provider and return its id (HM-04, ADR-144).
+
+        The same upload an attachment makes - the connection's adapter, its
+        sender, `prepare` - so there is one provider upload path. Through the
+        connection's **own** credential (`adapter.sender` resolves it with
+        `CredentialService`): a workspace token this process cannot decrypt
+        raises `CredentialDecryptionError` rather than falling back to the
+        platform's (ADR-034). The provider's limits for the family are checked
+        first (OMNI-045). The call is made with the session released: no
+        transaction and no connection are held across it (ADR-080), so
+        everything staged before it is committed.
+
+        Delivers nothing: an upload is a file Meta holds, not a message. Its
+        failures are the client's classified ones (`WhatsAppClient.upload_media`).
+        """
+        connection = await self._connections.require_by_id(connection_id)
+        adapter = self._channels.adapter_for(connection.channel)
+        family = _media_family(
+            resolve_media_type(claimed=mime_type, prefix=content[:SNIFF_BYTES]).kind
+        )
+        require_sendable_media(
+            family=family, mime_type=mime_type, byte_size=len(content), policy=adapter.policy
+        )
+        media = MediaContent(
+            family=family, content=content, mime_type=mime_type, filename=filename, caption=None
+        )
+        async with (
+            self._pool() as http,
+            adapter.sender(
+                session=self._session,
+                connection=connection,
+                settings=self._settings,
+                http=http,
+                credentials=self._credentials,
+            ) as sender,
+            # Entered after the sender: it reads the number's account first.
+            released(self._session),
+        ):
+            prepared = await sender.prepare(media)
+        if prepared.reference is None or prepared.reference_kind != "upload":
+            # A channel that sends by URL has no upload id to give (OMNI-040).
+            raise ValidationError("This channel cannot send a campaign header file.")
+        return prepared.reference
 
     async def _audit_attachment_sent(
         self,
@@ -761,11 +813,7 @@ class MessagingService:
         session is forbidden - and the row that records what happened is on the
         other side of that block.
         """
-        try:
-            await storage.put_at(key=key, data=content, mime_type=mime_type)
-        except StorageError:
-            return False
-        return True
+        return await write_object(storage, key=key, data=content, mime_type=mime_type)
 
     async def _dispatch(
         self,

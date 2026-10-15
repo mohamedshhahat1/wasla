@@ -129,6 +129,10 @@ PURGED_TABLES: tuple[str, ...] = (
     "messages",
     "conversations",
     "campaigns",
+    # A campaign's header files (HM-07): after `campaigns`, which name them,
+    # and through the ledger like `message_media`, so their objects are
+    # deleted once the rows are.
+    "campaign_header_media",
     "lead_activities",
     "lead_notes",
     "leads",
@@ -212,17 +216,19 @@ PURGE_SESSION_BOUNDS: dict[str, str] = {
     "lock_timeout": "30s",
 }
 
-# The table whose deletion also records what it leaves in the object store.
+# The tables whose deletion also records what they leave in the object store.
 MEDIA_TABLE = "message_media"
+MEDIA_TABLES: frozenset[str] = frozenset({MEDIA_TABLE, "campaign_header_media"})
 
-# `message_media` is deleted by this statement rather than the generic one, so
-# the keys it held are recorded in the same transaction - taken from the rows
-# the DELETE actually removed, not from a read beforehand that an upload could
-# commit between. A key whose upload was still in flight is not deleted before
-# `:deferred`; see `app.db.models.media_purge`.
-_MEDIA_WITH_LEDGER = text("""
+# Each of `MEDIA_TABLES` is deleted by this statement rather than the generic
+# one, so the keys it held are recorded in the same transaction - taken from the
+# rows the DELETE actually removed, not from a read beforehand that an upload
+# could commit between. A key whose upload was still in flight is not deleted
+# before `:deferred`; see `app.db.models.media_purge`. `{table}` is one of
+# `MEDIA_TABLES`, never a caller's value.
+_MEDIA_WITH_LEDGER = """
     WITH gone AS (
-        DELETE FROM message_media WHERE tenant_id = :tenant_id
+        DELETE FROM {table} WHERE tenant_id = :tenant_id
         RETURNING storage_key, storage_state
     ),
     recorded AS (
@@ -239,7 +245,7 @@ _MEDIA_WITH_LEDGER = text("""
         RETURNING 1
     )
     SELECT (SELECT count(*) FROM gone), (SELECT count(*) FROM recorded)
-    """)
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,10 +330,10 @@ class WorkspacePurgeService:
         deleted = 0
         recorded = 0
         for table in PURGED_TABLES:
-            if table == MEDIA_TABLE:
+            if table in MEDIA_TABLES:
                 gone, kept = (
                     await self._session.execute(
-                        _MEDIA_WITH_LEDGER,
+                        text(_MEDIA_WITH_LEDGER.format(table=table)),
                         {
                             "tenant_id": tenant.id,
                             "now": moment,

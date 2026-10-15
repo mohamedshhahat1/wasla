@@ -2147,6 +2147,30 @@ tests:
       alertname: CampaignsPausedProviderUnreachable
       exp_alerts: []
   - interval: 1m
+    name: a refused header file warns; a provider-unreachable stop does not raise it
+    input_series:
+    - series: wasla_campaign_stops_total{job="wasla-worker", reason="header_media_refused"}
+      values: 0x10 1x100
+    - series: wasla_campaign_stops_total{job="wasla-worker", reason="header_media_unavailable"}
+      values: 0+1x120
+    alert_rule_test:
+    - eval_time: 5m
+      alertname: CampaignHeaderMediaRefused
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: CampaignHeaderMediaRefused
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: campaigns
+        exp_annotations:
+          summary: A campaign failed because Meta refused its header file
+          description: A campaign's header image, video or document was refused by Meta and the campaign failed with status_reason header_media_refused. No recipient's attempts were spent. Read the campaign's last_error for Meta's code, have the workspace upload a file Meta accepts and compose the campaign again (docs/RUNBOOK.md, "Campaigns are not sending").
+          runbook: docs/RUNBOOK.md
+    - eval_time: 100m
+      alertname: CampaignHeaderMediaRefused
+      exp_alerts: []
+  - interval: 1m
     name: a repeated-batch-failure pause warns and drains
     input_series:
     - series: wasla_campaign_stops_total{job="wasla-worker", reason="repeated_batch_failure"}

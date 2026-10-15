@@ -53,6 +53,11 @@ EXEMPT: Final[dict[tuple[str, str], str]] = {
         "while the body is read, and by the workspace's storage entitlement "
         "before the object is written."
     ),
+    ("Body_upload_header_media_api_v1_campaigns_header_media_post", "file"): (
+        "A campaign header file, multipart (HM-02). Bounded by MAX_UPLOAD_BYTES while "
+        "the body is read, by Meta's limit for its kind, and by the workspace's storage "
+        "entitlement before the object is written."
+    ),
 }
 
 

@@ -118,9 +118,17 @@ class CampaignStopReason(StrEnum):
     PROVIDER_UNREACHABLE = "provider_unreachable"
     #: Every recent batch raised (CMP-20).
     REPEATED_BATCH_FAILURE = "repeated_batch_failure"
+    #: The header's stored file is gone or is not what was stored (HM-06).
+    HEADER_MEDIA_UNAVAILABLE = "header_media_unavailable"
+    #: Meta refused the header's file, on upload or on a send twice (HM-06).
+    HEADER_MEDIA_REFUSED = "header_media_refused"
 
 
 MAX_STOP_REASON_LENGTH: Final = 40
+
+# Meta's media ids are short numeric strings; the bound is the one inbound
+# handles use (`MAX_MEDIA_HANDLE_LENGTH`).
+MAX_PROVIDER_MEDIA_ID_LENGTH: Final = 255
 
 
 class RecipientReason(StrEnum):
@@ -250,6 +258,14 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_campaigns_tenant_id_created_at", "tenant_id", "created_at"),
         Index("ix_campaigns_account_id", "account_id"),
         Index("ix_campaigns_template_id", "template_id"),
+        # Which campaigns name an asset: retention keeps a live campaign's
+        # file (HM-07), and the asset's foreign key is checked through it.
+        # Partial, because most campaigns have no media header. 0107.
+        Index(
+            "ix_campaigns_header_media_id",
+            "header_media_id",
+            postgresql_where=text("header_media_id IS NOT NULL"),
+        ),
         # The worker's only query: campaigns whose moment has come, soonest
         # first. Partial, because a completed campaign is history and scanning
         # it would make every sweep slower as the table grows.
@@ -281,6 +297,31 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
             name="fk_campaigns_tenant_account",
             ondelete="CASCADE",
+        ),
+        # The header's file is one of the campaign's own workspace (HM-02).
+        # No cascade: an asset a campaign names is not deleted from under it;
+        # the workspace purge deletes campaigns first (0107).
+        ForeignKeyConstraint(
+            ["tenant_id", "header_media_id"],
+            ["campaign_header_media.tenant_id", "campaign_header_media.id"],
+            name="fk_campaigns_tenant_header_media",
+        ),
+        # The connection Meta's media id was uploaded through, of this
+        # workspace (HM-04, CR-09).
+        ForeignKeyConstraint(
+            ["tenant_id", "header_provider_account_id"],
+            ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
+            name="fk_campaigns_tenant_header_provider_account",
+            ondelete="CASCADE",
+        ),
+        # Meta's id, when it is recorded, comes with when and through which
+        # connection it was uploaded, and only for a campaign with an asset.
+        CheckConstraint(
+            "(header_provider_media_id IS NULL AND header_provider_uploaded_at IS NULL "
+            "AND header_provider_account_id IS NULL) "
+            "OR (header_provider_media_id IS NOT NULL AND header_provider_uploaded_at IS NOT NULL "
+            "AND header_provider_account_id IS NOT NULL AND header_media_id IS NOT NULL)",
+            name="header_provider_complete",
         ),
     )
 
@@ -362,6 +403,21 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # `repeated_batch_failure` instead of being retried for ever.
     consecutive_batch_failures: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # The file a media-header template is sent with (HM-02). Fixed at
+    # composition: nothing changes it afterwards.
+    header_media_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # What Meta calls that file, uploaded once per campaign and connection by
+    # the worker holding the campaign's lease (HM-04), and when - re-uploaded
+    # before Meta forgets it (HM-05). Never in a response, a log or the audit.
+    header_provider_media_id: Mapped[str | None] = mapped_column(
+        String(MAX_PROVIDER_MEDIA_ID_LENGTH), nullable=True
+    )
+    header_provider_uploaded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    header_provider_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
 
     @property

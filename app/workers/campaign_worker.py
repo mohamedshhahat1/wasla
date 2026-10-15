@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import record_campaign_stop
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.campaign import Campaign, CampaignStopReason
@@ -95,6 +96,7 @@ class CampaignWorker:
         claim_limit: int = DEFAULT_CAMPAIGN_CLAIM_LIMIT,
         messaging_factory: MessagingFactory | None = None,
         lease_seconds: float = CLAIM_LEASE_SECONDS,
+        storage: MediaStorage | None = None,
     ) -> None:
         self._database = database
         self._settings = settings
@@ -102,6 +104,9 @@ class CampaignWorker:
         self._claim_limit = claim_limit
         self._lease = timedelta(seconds=lease_seconds)
         self._messaging_factory = messaging_factory
+        # Where campaign header files are read from before their upload to
+        # Meta (HM-04); one store for the worker's life.
+        self._storage = storage if storage is not None else build_media_storage(settings)
         self._running = False
         # Set when stop() is called, so a sleeping worker wakes at once instead
         # of finishing its interval.
@@ -327,6 +332,10 @@ class CampaignWorker:
             default_plan_code=self._settings.default_plan_code,
             provider_unreachable_pause=timedelta(
                 hours=self._settings.campaign_provider_unreachable_pause_hours
+            ),
+            storage=self._storage,
+            header_media_refresh=timedelta(
+                seconds=self._settings.campaign_header_media_refresh_seconds
             ),
         )
         return await service.dispatch_batch(campaign, now=now, lease=lease)

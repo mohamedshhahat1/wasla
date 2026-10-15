@@ -584,6 +584,12 @@ class Settings(BaseSettings):
     # How many batches in a row may raise out of a campaign's sweep before it
     # is paused `repeated_batch_failure` rather than retried for ever (CMP-20).
     campaign_batch_failure_pause_after: int = Field(default=5, ge=1, le=1_000)
+    # How old Meta's id for a campaign's header file may be before the worker
+    # uploads the file again (HM-05). Meta: "Media IDs returned by the API
+    # expire after 30 days" - so 25 days, five to spare. Bounded below that.
+    campaign_header_media_refresh_seconds: int = Field(
+        default=25 * 24 * 3600, ge=60, le=29 * 24 * 3600
+    )
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

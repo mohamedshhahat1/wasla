@@ -211,6 +211,42 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
             statement = statement.values(status=Campaign.status)
         return (await self.session.execute(statement)).scalar_one_or_none() is not None
 
+    async def record_header_upload(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        lease_token: uuid.UUID | None,
+        provider_media_id: str,
+        uploaded_at: datetime,
+        account_id: uuid.UUID,
+    ) -> bool:
+        """Write Meta's id for the campaign's header file - only while the claim is the caller's.
+
+        One conditional statement (HM-04), the rule `record_batch_failure`
+        follows: the campaign is still live and, with a `lease_token`, still
+        carries this worker's claim. A worker whose lease was taken over while
+        it uploaded writes nothing, and its upload is never sent: an unused
+        file at Meta, which expires (HM-04).
+        """
+        statement = (
+            update(Campaign)
+            .where(
+                Campaign.id == campaign_id,
+                self._tenant_filter(),
+                Campaign.status.in_([CampaignStatus.SCHEDULED, CampaignStatus.RUNNING]),
+            )
+            .values(
+                header_provider_media_id=provider_media_id,
+                header_provider_uploaded_at=uploaded_at,
+                header_provider_account_id=account_id,
+            )
+            .returning(Campaign.id)
+            .execution_options(synchronize_session=False)
+        )
+        if lease_token is not None:
+            statement = statement.where(Campaign.lease_token == lease_token)
+        return (await self.session.execute(statement)).scalar_one_or_none() is not None
+
     async def require_by_id(self, campaign_id: uuid.UUID) -> Campaign:
         return await self._require(self._select().where(Campaign.id == campaign_id))
 
