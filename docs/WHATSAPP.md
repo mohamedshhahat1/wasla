@@ -213,13 +213,14 @@ The Cloud API send endpoint accepts **no idempotency key**, so a retry can dupli
 
 | Failure | Retried in the client | Raises | May a caller send again? |
 | --- | --- | --- | --- |
-| `429`, or a throttling code (4, 80007, 130429, 131056, 131057) at any status | Yes, with backoff | `RateLimitedError` | Yes — rejected outright, nothing was sent; the connection reads `rate_limited` and sweeps wait |
-| Connection error | Yes, with backoff | `SendNotAttemptedError` | Yes — no connection, so no request arrived |
+| `429`, or a throttling code (4, 80007, 130429, 131057) at any status | Yes, with backoff | `RateLimitedError` | Yes — rejected outright, nothing was sent; the connection reads `rate_limited` and sweeps wait |
+| `131056` (pair rate limit: this number to this person) | No | `PairRateLimitedError` (a `RateLimitedError`) | Yes, later — a campaign defers only that person (CMP-18); other senders wait as for a throttle |
+| Connection error, connect timeout, pool timeout | Yes, with backoff | `ProviderUnreachableError` (a `SendNotAttemptedError`) | Yes — no request was written; a campaign waits without spending attempts (CMP-07) |
 | `401`, or Meta `code` 0 or 190 | No | `ProviderAuthError` | Yes for this message — but the credential is refused for the whole number |
 | A connection-level code (3, 10, 200-299, 131005, 368, 131031, 133010) at any status | No | `ProviderConnectionRefusedError` | Yes for this message — the number cannot send at all: it reads `permission_missing` and sweeps stop |
 | `131050` (the customer stopped marketing messages) | No | `RecipientOptedOutError` | No — the contact is opted out (`provider_refusal`) |
 | Meta template codes | No | `TemplateWithdrawnError` | Yes for this message — the template is marked `paused` locally |
-| Other `4xx` | No | `SendNotAttemptedError` | Yes — Meta read it and declined; nothing was delivered |
+| Other `4xx` | No | `SendNotAttemptedError`, with `provider_code` | Yes — Meta read it and declined; nothing was delivered. The code is kept on `messages.failure_code`: a campaign fails once on 132000/132012/131008 and fails only that person on 131049/131026 (CMP-05, CMP-06) |
 
 The class is decided by Meta's error **code** first and the HTTP status only when the body names none (ADR-130, `app/integrations/meta/errors.py`): Meta documents its throttling and connection codes without promising a status, and a `130429` arriving as a `400` used to fail every campaign recipient. `wasla_provider_errors_total{provider, class}` counts each class.
 | `5xx` | No | `UncertainDeliveryError` | **No** — may have been accepted |
@@ -269,6 +270,22 @@ python -m app.workers.queues unresolved-sends
 `wasla_unresolved_outbound_messages` counts them and `wasla_oldest_unresolved_outbound_age_seconds` says whether the oldest is a send in flight or one that broke an hour ago; `UnresolvedOutboundSends` alerts on the second. `docs/RUNBOOK.md` has the procedure. On a healthy deployment all three read zero, and none of them resends anything — a design that refuses to guess is only honest if somebody is told there is something to decide.
 
 A follow-up or a campaign recipient whose send ended `requested` is recorded as failed with "WhatsApp did not confirm this message, so it was not sent again", and is never retried. An explicit rejection is different: nothing was delivered, so the existing retry policy applies unchanged.
+
+## Failed statuses and template status events
+
+A `failed` status's `errors[0].code` is kept on `messages.failure_code` (CMP-10,
+ADR-142). On a campaign or marketing-template message, `131050` records the
+opt-out on the conversation's channel (`via=provider_status`); `132001`,
+`132015` and `132016` write the template back to `paused` - template pacing
+fails held messages with `132015`. Delivery evidence still outranks a failure
+report (MSG-14).
+
+`message_template_status_update` is parsed (CMQ-05): the event names the
+WhatsApp Business Account (`entry.id`), and every registry row for that
+account's (name, language) takes the status a sync would give the same word.
+An event older than the row's last write, an unmapped word, or a template the
+registry does not hold changes nothing. **The field must be subscribed in the
+Meta App** - an operator's action; until then nothing arrives.
 
 ## Status reconciliation
 

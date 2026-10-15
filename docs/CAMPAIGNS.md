@@ -69,23 +69,52 @@ A list computed as the campaign ran would change under its feet: a contact who w
 ## How a campaign sends
 
 ```
-scheduled, and its moment has come
+scheduled or running, due, and its lease (next_send_at) has run out
     |
-claimed with FOR UPDATE SKIP LOCKED
+claimed with FOR UPDATE SKIP LOCKED; next_send_at := lease, lease_token := new  -> COMMIT
     |
-number still active? template still approved? -- no --> FAILED, reason recorded
+re-taken by id only while the row still carries this sweep's lease_token (ADR-134)
     |
-claim the next batch of pending recipients (also SKIP LOCKED)
+workspace served? subscription not suspended? -- no --> PAUSED, status_reason (ADR-135)
+number active? template approved, MARKETING, parameters fit? -- no --> FAILED, status_reason
     |
-for each: opted out? -- yes --> SKIPPED, never retried
-    |                            (a policy outcome, not an error)
+claim the next batch of pending recipients not deferred (also SKIP LOCKED)
     |
-    send the approved template; record the message row
+for each recipient:
+    hold: campaign still scheduled/running and still this worker's? renew the lease
+          -- no --> stop here (a pause, a cancel, or a lost lease)
+    workspace still served? -- no --> PAUSED, stop here
+    take: still pending and nobody else's? (one SELECT ... FOR UPDATE SKIP LOCKED,
+          the row re-read) -- no --> skip this person, no send, no attempt
+    opted out on this channel? -- yes --> SKIPPED opted_out, never retried
+    linked to a message that may have left? -- yes --> FAILED delivery_unconfirmed
+    send the template with every component it needs; record the message row
     |
-write next_send_at = now + batch / messages_per_minute
+write next_send_at = batch end + batch / messages_per_minute; clear lease_token
     |
-nobody left? -- yes --> COMPLETED
+nobody left (deferred people still count)? -- yes --> COMPLETED
 ```
+
+**One owner per recipient, whatever the number of workers** ([ADR-134](../DECISIONS.md), CMP-01). A batch's row locks end at its first send commit ([ADR-093](../DECISIONS.md)), so ownership is re-established before every person in two single statements: `hold` (the campaign is live and still carries this worker's `lease_token`, and the lease is renewed) and `take` (the recipient is still pending and not locked by another worker, re-read from the database). The lease therefore has to outlast one send - worst case 3 x 10 s plus 2 x 45 s of throttle waits, 120 s - not a batch; `CLAIM_LEASE_SECONDS` is 300. A lease that does run out is re-taken with a new token; the stalled worker stops at its next recipient, and the one send it had in flight was linked to its recipient before Meta was asked, so the new owner abandons rather than resends it. Campaign replicas are safe to run from this release on.
+
+**What counts as sent.** The recipient row moves to `SENT` in the transaction that meters the send; the per-recipient claim is what makes that pair safe from double counting across workers. The invariant `cr02_campaign_meters_differ_from_recipients_sent` checks it.
+
+**Meta's answers** ([ADR-139](../DECISIONS.md)):
+
+| Answer | What happens |
+| --- | --- |
+| 2xx with a message id | `SENT` |
+| 2xx without one, 5xx, read timeout, reset | uncertain: `FAILED delivery_unconfirmed`, never resent |
+| 132000 / 132012 / 131008 (parameters) | campaign `FAILED template_parameters_refused` after one request; the template is not paused |
+| 132001 / 132015 / 132016 (template) | registry `PAUSED`; campaign `FAILED template_withdrawn`; nobody else asked |
+| 131049 (per-user marketing limit) | that person `FAILED marketing_limit_per_user` at once - Meta says wait 24 h |
+| 131026 (undeliverable) | that person `FAILED undeliverable` at once |
+| 131050 (stopped marketing) | that person `SKIPPED`, opt-out recorded on the channel |
+| 131056 (pair rate limit) | that person deferred a minute (`not_before`), attempts kept; the rest go on |
+| 429 / 130429 / 4 / 80007 | the client retries, then the campaign waits; no attempts spent |
+| 401 / 190 / 368 and connection codes | campaign `FAILED credential_refused` / `connection_refused` after one request |
+| a bare 403 | per message (the classifier, OMNI-035): retried until the attempts run out |
+| no connection at all (connect error, connect or pool timeout) | the campaign waits a minute, no attempts spent; `PAUSED provider_unreachable` after `CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS` |
 
 **The rate limit is a timestamp on the row, never a sleep** ([ADR-026](../DECISIONS.md)). A sleep would hold the campaign's lock while doing nothing, would not survive a restart — the replacement would start by sending immediately, exactly during a rolling deployment — and would not compose across replicas, because two workers each pacing correctly produce twice the rate.
 
@@ -95,12 +124,14 @@ The worker holds one HTTP connection pool per sweep, so a batch of fifty is fift
 
 ## Stopping
 
-`PAUSED` and `CANCELLED` are deliberately different states.
+`PAUSED` and `CANCELLED` are deliberately different states. Every pause or failure records `status_reason`, from a closed vocabulary (`CampaignStopReason`): `workspace_suspended`, `workspace_deleted`, `subscription_suspended`, `admin_paused`, `template_removed`, `template_not_approved`, `template_withdrawn`, `template_category`, `template_parameters_refused`, `connection_disabled`, `credential_refused`, `connection_refused`, `provider_unreachable`, `repeated_batch_failure`. It is the one field that says why a campaign is not sending; `last_error` keeps its sentence for a person.
+
+**A workspace that is not served does not broadcast** ([ADR-135](../DECISIONS.md), CMP-02, CMQ-11). Suspension by the platform, deletion by the owner, and a subscription suspended for an unpaid invoice pause the workspace's scheduled and running campaigns in the same transaction, one audit entry each. The worker asks the same "served" predicate the follow-up gate asks (`app/services/workspace_serving.py`) before every batch and every recipient, so a transition it could not see still stops it at the next person. `past_due` is the grace and keeps sending. Restoring a workspace or settling the invoice resumes nothing: an admin reschedules, and the reservation is taken again then.
 
 - **Paused** is stopped and resumable. The remaining recipients keep waiting; scheduling again resumes.
 - **Cancelled** is finished. What was sent stays sent, and the rest never goes.
 
-Somebody watching a broadcast go out and having second thoughts needs an action that is not destructive, which is what pause is for. `FAILED` is different again: it means the campaign could not run at all — its template was withdrawn, its number was disabled, no WhatsApp credential is configured — as distinct from one that ran and had some recipients fail, which completes.
+Somebody watching a broadcast go out and having second thoughts needs an action that is not destructive, which is what pause is for - and it stops at the next recipient, not after the claimed batch (CMP-08). `FAILED` is different again: it means the campaign could not run at all — its template was withdrawn, its number was disabled, no WhatsApp credential is configured — as distinct from one that ran and had some recipients fail, which completes.
 
 **A failed campaign can be scheduled again**, because every condition that fails one is something a workspace fixes and then wants to carry on from. Its remaining recipients are still pending and still have not been written to, so resuming sends to them and to nobody twice. What `FAILED` keeps that `PAUSED` does not is `last_error` — the reason it stopped.
 
@@ -108,9 +139,11 @@ It can also be **cancelled**, which a completed or already-cancelled campaign ca
 
 A missing platform credential fails the campaign rather than each recipient in turn. The client refuses to be built without a token, so no attempt is made and nothing increments; treating it per-recipient would retry forever without exhausting anyone's attempts, staging a message row per recipient per sweep on a deployment that cannot send at all.
 
-**A credential Meta *refuses* is handled the same way**, and used not to be. A `401`, `403` or Meta's own `code 190` means the number's token is expired or revoked, which is true of every recipient in the audience — so the campaign stops once with a clear reason rather than burning one attempt budget per person discovering the same dead token, and ending with ten thousand individually-failed recipients and no single explanation.
+**A credential Meta *refuses* is handled the same way**, and used not to be. A `401` or Meta's own `code 190` means the number's token is expired or revoked, which is true of every recipient in the audience - so the campaign stops once with a clear reason rather than burning one attempt budget per person discovering the same dead token. A bare `403` with no code is not one of them: Meta uses it for refusals that are sometimes about one message, so it is per-message (CMP-16; `app/integrations/meta/errors.py`). The person in flight at the refusal provably received nothing, so on resume they are sent, not abandoned (CMP-11, [ADR-140](../DECISIONS.md)).
 
-**Cancelling stops the claimed batch too**, at the next recipient. The status is re-read from the database once per recipient rather than off the campaign object, because `cancel()` runs in a different request and a different transaction. What was already sent stays sent — the only honest answer once a message has reached somebody's phone. The re-read is deliberately not locked: the send commits part-way through, so a lock taken there would be dropped at the first send and would buy nothing, and holding one across a Graph API call is the trade [ADR-093](../DECISIONS.md) exists to refuse.
+**A batch that keeps raising** is counted (`consecutive_batch_failures`) and paused `repeated_batch_failure` after `CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` in a row (CMP-20), instead of being retried every lease for ever.
+
+**Cancelling and pausing stop the claimed batch too**, at the next recipient. The campaign is re-read from the database once per recipient (`hold`) rather than off the campaign object, because `cancel()` and `pause()` run in other transactions. What was already sent stays sent - the only honest answer once a message has reached somebody's phone. The lock `hold` takes lasts only until the next send intent commits, never across a Graph API call ([ADR-093](../DECISIONS.md)).
 
 ## Marketing opt-out
 
@@ -122,7 +155,9 @@ Recorded **per contact and channel** (`contact_channel_consents`, ADR-131 / ENT-
 
 Honoured on the inbound path, in the same transaction that stores the message. That closes a real window: between the message arriving and a worker reading it, a campaign sweep could write to somebody who has already said no, and nothing takes that message back.
 
-The matcher is as crude as it can be, and the crudeness is the design. It fires only when the **entire** message is one of a short list of words that mean nothing else — `stop`, `unsubscribe`, `الغاء`, `ايقاف` and a few more. "stop" is a refusal; "stop by the shop tomorrow" is not, and a matcher that looked for the word anywhere would confuse the two constantly.
+The matcher is as crude as it can be, and the crudeness is the design. It fires only when the **entire** message is one of a short list of words that mean nothing else - `stop`, `unsubscribe`, `opt-out`, `unsub`, `stop please`, `please stop`, `remove me`, `الغاء`, `ايقاف`, `اوقف`, `ستوب`, `لا ترسل` and a few more (CMP-12, CMQ-12) - or one of them said more than once ("STOP STOP"), compared word for word. "stop" is a refusal; "stop by the shop tomorrow" is not, and a matcher that looked for the word anywhere would confuse the two constantly. `كفاية`, `وقف`, `بطل رسايل` and "unsubscribe me" are deliberately left out.
+
+**Meta's later word counts too** (CMP-10, [ADR-142](../DECISIONS.md)). A marketing or campaign message Meta accepted and later reported `failed` with 131050 records the opt-out on the conversation's channel, `via=provider_status`.
 
 The asymmetry sets the boundary. A false positive stops marketing to somebody who did not quite mean it, which a colleague undoes in a moment and the customer can always write again. A false negative keeps promoting to somebody who has asked twice, which is how a business loses its number.
 
@@ -138,6 +173,7 @@ The rule is applied unevenly on purpose, and the line is whether the customer as
 | Follow-up | **Yes**, re-checked at dispatch | Unsolicited and automated; nobody asked for it, and it arrives *because* the conversation went quiet |
 | AI reply | No | Answering a question the customer just asked |
 | Manual human reply | No | A colleague replying in a live conversation |
+| Manual **marketing** template | **Yes**, and admin-only | Sent by hand, it was a broadcast that ignored opt-out (CMQ-02, [ADR-141](../DECISIONS.md)); utility and authentication templates are unchanged |
 
 **It does not silence the agent.** Someone refusing marketing is not refusing an answer, and deciding otherwise from one word would leave people talking to nobody.
 
@@ -153,10 +189,11 @@ A follow-up refused this way is `SKIPPED`, not failed. Consent does not come bac
 | --- | --- |
 | `pending`, `sent`, `failed`, `skipped` | The recipient rows |
 | `delivered`, `read` | The message rows a delivery webhook advances |
+| `failed_after_send` | Recipients `sent` whose message Meta later reported `failed` (CMP-10) |
 
 A message Meta accepted is `sent`; whether it arrived is Meta's news to bring. A read message was also delivered, so `delivered` includes it — counting the two statuses separately would undercount delivery by everyone who read it.
 
-`skipped` carries its reason on the recipient row, which is what tells a workspace somebody was left out because they had opted out rather than because something broke.
+Every recipient that did not end `sent` carries `reason_code` (CMP-13): `opted_out`, `contact_gone`, `other_connection`, `identity_changed`, `channel_not_in_plan`, `recipient_opted_out_at_provider`, `marketing_limit_per_user`, `undeliverable`, `delivery_unconfirmed`, `attempts_exhausted`, `template_parameters_refused`. `last_error` keeps the sentence. Rows recorded before reason codes have none.
 
 ## API
 
@@ -172,7 +209,7 @@ A message Meta accepted is `sent`; whether it arrived is Meta's news to bring. A
 | `POST /api/v1/campaigns/{id}/pause` | admin | Stop, reversibly |
 | `POST /api/v1/campaigns/{id}/cancel` | admin | Stop, finally |
 | `GET /api/v1/campaigns/{id}/statistics` | member | Outcomes and delivery |
-| `GET /api/v1/campaigns/{id}/recipients` | member | Who it reached, and who it did not |
+| `GET /api/v1/campaigns/{id}/recipients` | member | Who it reached, and who it did not - by `cursor`, filtered by `status` and `reason` |
 | `POST /api/v1/contacts/{id}/opt-out` | member | Record a refusal on one channel (`channel` required) |
 | `DELETE /api/v1/contacts/{id}/opt-out?channel=…` | admin | Undo one recorded in error, on that channel |
 
@@ -184,14 +221,20 @@ Lifecycle changes are named transitions rather than a `PATCH` on `status`. Statu
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `WORKER_KINDS` | all | Include `campaign` to run the sending loop; a workspace mid-broadcast is the case that most wants a replica of its own |
+| `WORKER_KINDS` | all | Include `campaign` to run the sending loop. Several replicas are safe (ADR-134) |
+| `CONNECTION_SENDS_PER_MINUTE` | unset | One number's sending allowance, shared by every sender on it ([ADR-123](../DECISIONS.md)); `channel_connections.sends_per_minute` overrides it per number (0090). Unset, a campaign is paced by its own rate alone |
+| `CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS` | 6 | How long Meta may be unreachable before a waiting campaign is paused |
+| `CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` | 5 | Batches in a row that may raise before a campaign is paused |
 
 There is no campaign-specific credential. Sends use the platform Meta token, as every other outbound path does ([ADR-009](../DECISIONS.md)).
 
 ## Known limits
 
 - **No per-recipient personalisation.** A campaign's template variables are one list for the whole send. Filling `{{1}}` with each customer's name needs a source of per-recipient facts that nothing here has yet.
-- **The rate is per campaign, not per number.** Two campaigns running at once on one number can exceed either one's rate. A per-number budget needs a shared counter, and a workspace that starts two simultaneous broadcasts has made a decision this system can surface but should not silently override.
+- **The rate is per campaign unless a number has an allowance.** Two campaigns running at once on one number can exceed either one's rate while `CONNECTION_SENDS_PER_MINUTE` is unset; with it set (or a per-number override), they share the number's allowance and wait for it without spending attempts.
+- **Meta's portfolio messaging limit is not read or enforced** (CMP-17, EXT-CMP-01). Meta counts unique users messaged outside a customer-service window in a moving 24 hours, shared by every number of the business portfolio, with tiers of 250 (new), 2,000, 10,000, 100,000 and unlimited. A 50,000-person campaign on a 250-tier portfolio will be refused beyond the tier, with an error Meta does not document; keep first campaigns under the tier. Reading the limit and warning at scheduling is CMQ-06.
+- **Templates with a media header cannot be sent by a campaign yet** - composition refuses them (CMP-05). Text headers, body (positional or named) and URL and copy-code buttons are filled.
+- **Workspace time zone.** A `scheduled_at` must carry its UTC offset (CMP-15); there are no quiet hours (CMQ-04).
 - **No import, deliberately.** See [ADR-025](../DECISIONS.md). Adding one means answering the consent question, not writing a CSV parser.
 - **No campaign analytics events.** Counts come from the recipient and message rows; the analytics event table arrives in Phase 12, and writing a second shape now would mean migrating two later.
 - **Nothing sweeps completed campaigns.** Recipient rows accumulate for the life of the workspace. They are the record of who was written to and when, so a retention policy is a product decision rather than a cleanup job.
