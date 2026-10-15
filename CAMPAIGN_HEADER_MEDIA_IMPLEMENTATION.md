@@ -15,7 +15,7 @@ continues from the first phase that is not committed.
 | 3 | Composition and preview | committed | (this commit, with Phase 2) | as Phase 2; `test_campaign_templates.py` 82 with docs |
 | 4 | Worker: upload once under the lease, header, refresh | committed | (this commit) | `test_campaign_header_media.py` 23 passed model-built; with the API, templates and docs 106 passed migration-built; campaign/outbound/messaging/unit regression 3,680 passed after 3 guard tests acknowledged |
 | 5 | Every failure campaign-level | committed | (this commit, with Phase 4) | as Phase 4; client upload classes 14 passed |
-| 6 | Retention and lifecycle | not started | | |
+| 6 | Retention and lifecycle | committed | (this commit) | lifecycle 11 passed; media/retention/upload/purge suites 294 passed |
 | 7 | Observability, invariants, docs, ADR | not started | | |
 | 8 | Mutation | not started | | |
 | 9 | Full lanes, CI jobs, after-probes | not started | | |

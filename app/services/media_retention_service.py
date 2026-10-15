@@ -53,7 +53,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage, StorageError
+from app.db.models.campaign_media import CampaignHeaderMedia
 from app.db.models.media import MediaStorageState, MessageMedia
+from app.repositories.campaign_media_repository import PlatformCampaignMediaRepository
 from app.repositories.media_repository import PlatformMediaRepository
 
 logger = get_logger(__name__)
@@ -90,6 +92,7 @@ class MediaRetentionService:
         self._session = session
         self._storage = storage
         self._media = PlatformMediaRepository(session)
+        self._header_files = PlatformCampaignMediaRepository(session)
 
     async def claim(
         self,
@@ -97,7 +100,7 @@ class MediaRetentionService:
         now: datetime | None = None,
         retention_days: int,
         limit: int,
-    ) -> list[MessageMedia]:
+    ) -> list[MessageMedia | CampaignHeaderMedia]:
         """Mark files past their retention as being removed, and commit that.
 
         Returns the rows to purge, which includes anything an earlier pass had
@@ -124,7 +127,17 @@ class MediaRetentionService:
         moment = now or datetime.now(UTC)
         cutoff = moment - timedelta(days=retention_days)
 
-        rows = await self._media.due_for_purge(cutoff=cutoff, limit=limit)
+        rows: list[MessageMedia | CampaignHeaderMedia] = list(
+            await self._media.due_for_purge(cutoff=cutoff, limit=limit)
+        )
+        if len(rows) < limit:
+            # A campaign's header files, by the same age - **never one a
+            # draft, scheduled, running or paused campaign names** (HM-07):
+            # its picture is still to be sent. A completed, cancelled or
+            # failed campaign's file, or one no campaign names, expires.
+            rows.extend(
+                await self._header_files.due_for_purge(cutoff=cutoff, limit=limit - len(rows))
+            )
         for media in rows:
             if media.purge_started_at is None:
                 media.purge_started_at = moment
@@ -132,7 +145,7 @@ class MediaRetentionService:
         await self._session.commit()
         return rows
 
-    async def purge(self, media: MessageMedia) -> bool:
+    async def purge(self, media: MessageMedia | CampaignHeaderMedia) -> bool:
         """Remove one claimed file's object and finish its row.
 
         Returns whether the object is now gone. Idempotent in both directions:
@@ -226,7 +239,9 @@ class MediaRetentionService:
         otherwise invisible: the rows are claimed, the sweep reports itself as
         having run, and the volume does not shrink.
         """
-        return await self._media.pending_purge_count()
+        return (
+            await self._media.pending_purge_count() + await self._header_files.pending_purge_count()
+        )
 
     async def reconcile(self, *, limit: int) -> int:
         """Finish rows a previous pass claimed and never completed.
@@ -243,7 +258,11 @@ class MediaRetentionService:
         that rule would eventually delete a live file whose row it had failed to
         read. See ADR-078 for what is left open and why.
         """
-        rows = await self._media.claimed_but_unfinished(limit=limit)
+        rows: list[MessageMedia | CampaignHeaderMedia] = list(
+            await self._media.claimed_but_unfinished(limit=limit)
+        )
+        if len(rows) < limit:
+            rows.extend(await self._header_files.claimed_but_unfinished(limit=limit - len(rows)))
         finished = 0
         for media in rows:
             if await self.purge(media):

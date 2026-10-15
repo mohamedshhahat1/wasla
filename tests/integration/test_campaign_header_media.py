@@ -20,7 +20,6 @@ media (Error codes).
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -33,11 +32,10 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select, update
 
-from app.core.storage import LocalMediaStorage, MediaStorage, build_key
+from app.core.storage import LocalMediaStorage, MediaStorage
 from app.db.models import Tenant, TenantStatus
 from app.db.models.campaign import Campaign, CampaignStatus, CampaignStopReason
 from app.db.models.campaign_media import CampaignHeaderMedia
-from app.db.models.media import MediaStorageState
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import TemplateStatus, WhatsAppTemplate
 from app.db.session import Database
@@ -54,6 +52,7 @@ from tests.integration.campaign_harness import (
     meta_error,
     quiesce,
     seed,
+    store_file,
     worker,
 )
 
@@ -92,36 +91,6 @@ async def world(
         await quiesce(database)
         await erase(database)
         await database.dispose()
-
-
-async def store_file(
-    database: Database,
-    storage: MediaStorage,
-    workspace: Workspace,
-    *,
-    content: bytes = PNG,
-    kind: str = "image",
-    mime_type: str = "image/png",
-    filename: str | None = None,
-) -> uuid.UUID:
-    """A stored header file, as the upload route leaves one: object written, row `stored`."""
-    key = build_key(tenant_id=workspace.tenant_id, mime_type=mime_type)
-    await storage.put_at(key=key, data=content, mime_type=mime_type)
-    async with database.session_factory() as session:
-        row = CampaignHeaderMedia(
-            tenant_id=workspace.tenant_id,
-            kind=kind,
-            mime_type=mime_type,
-            byte_size=len(content),
-            filename=filename,
-            content_hash=hashlib.sha256(content).hexdigest(),
-            storage_key=key,
-            storage_state=MediaStorageState.STORED,
-            upload_started_at=datetime.now(UTC),
-        )
-        session.add(row)
-        await session.commit()
-        return row.id
 
 
 async def _campaign(database: Database, campaign_id: uuid.UUID) -> Campaign:

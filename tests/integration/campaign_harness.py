@@ -21,6 +21,7 @@ Graph error envelope (developers.facebook.com/docs/whatsapp/cloud-api/reference/
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from collections import Counter
@@ -34,10 +35,11 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.storage import MediaStorage
+from app.core.storage import MediaStorage, build_key
 from app.db.models.audit import AuditLog
 from app.db.models.billing import Plan, Subscription
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
+from app.db.models.campaign_media import CampaignHeaderMedia
 from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Contact,
@@ -47,6 +49,7 @@ from app.db.models.conversation import (
     Message,
     MessageOrigin,
 )
+from app.db.models.media import MediaStorageState
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEvent, UsageEventType
 from app.db.models.user import User
@@ -306,6 +309,40 @@ async def seed(
         return Workspace(tenant.id, account.id, template.id, contact_ids)
 
 
+#: A small PNG, as a campaign header file's bytes (HM-02).
+HEADER_PNG = b"\x89PNG\r\n\x1a\n" + b"a spring sale photograph" * 32
+
+
+async def store_file(
+    database: Database,
+    storage: MediaStorage,
+    workspace: Workspace,
+    *,
+    content: bytes = HEADER_PNG,
+    kind: str = "image",
+    mime_type: str = "image/png",
+    filename: str | None = None,
+) -> uuid.UUID:
+    """A stored header file, as the upload route leaves one: object written, row `stored`."""
+    key = build_key(tenant_id=workspace.tenant_id, mime_type=mime_type)
+    await storage.put_at(key=key, data=content, mime_type=mime_type)
+    async with database.session_factory() as session:
+        row = CampaignHeaderMedia(
+            tenant_id=workspace.tenant_id,
+            kind=kind,
+            mime_type=mime_type,
+            byte_size=len(content),
+            filename=filename,
+            content_hash=hashlib.sha256(content).hexdigest(),
+            storage_key=key,
+            storage_state=MediaStorageState.STORED,
+            upload_started_at=datetime.now(UTC),
+        )
+        session.add(row)
+        await session.commit()
+        return row.id
+
+
 async def compose(
     database: Database,
     workspace: Workspace,
@@ -464,6 +501,7 @@ async def ledger(database: Database, campaign_id: uuid.UUID) -> Ledger:
 
 __all__ = [
     "BODY_ONLY",
+    "HEADER_PNG",
     "USER_DOMAIN",
     "FakeMeta",
     "Ledger",
@@ -476,5 +514,6 @@ __all__ = [
     "meta_error",
     "quiesce",
     "seed",
+    "store_file",
     "worker",
 ]

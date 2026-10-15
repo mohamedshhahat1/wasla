@@ -157,6 +157,26 @@ class PlatformCampaignMediaRepository:
         )
         return list((await self._session.execute(statement)).scalars())
 
+    async def pending_upload_count(self) -> int:
+        return int(
+            await self._session.scalar(
+                select(func.count())
+                .select_from(CampaignHeaderMedia)
+                .where(CampaignHeaderMedia.storage_state == MediaStorageState.PENDING)
+            )
+            or 0
+        )
+
+    async def mismatched_count(self) -> int:
+        return int(
+            await self._session.scalar(
+                select(func.count())
+                .select_from(CampaignHeaderMedia)
+                .where(CampaignHeaderMedia.storage_state == MediaStorageState.MISMATCHED)
+            )
+            or 0
+        )
+
     async def pending_purge_count(self) -> int:
         return int(
             await self._session.scalar(
