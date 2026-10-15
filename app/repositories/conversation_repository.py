@@ -823,16 +823,20 @@ class MessageRepository(TenantScopedRepository[Message]):
         message.delivery_state = MessageDeliveryState.SENT
         return message
 
-    async def mark_failed(self, message: Message, *, reason: str) -> Message:
+    async def mark_failed(
+        self, message: Message, *, reason: str, code: int | None = None
+    ) -> Message:
         """Record a send that provably delivered nothing.
 
         Only reached where that is known - Meta declined the request, or the
         request never left. A send whose outcome is unknown is left in
         `REQUESTED`, because `FAILED` is a claim about the customer's phone
-        that nobody is in a position to make.
+        that nobody is in a position to make. `code` is the provider's own
+        error code, when it named one (CMP-05).
         """
         message.status = MessageStatus.FAILED
         message.failure_reason = reason[:500]
+        message.failure_code = code
         message.delivery_state = MessageDeliveryState.UNDELIVERED
         return message
 

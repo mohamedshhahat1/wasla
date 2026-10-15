@@ -150,6 +150,13 @@ async def _account(session: AsyncSession, *, tenant: Tenant, suffix: str = "a") 
     return account
 
 
+def _body(variables: int) -> str:
+    """A body with exactly `variables` placeholders, as Meta's sync would store it."""
+    if not variables:
+        return "Hello."
+    return "Hello " + " ".join("{{" + str(index) + "}}" for index in range(1, variables + 1))
+
+
 async def _template(
     session: AsyncSession,
     *,
@@ -165,8 +172,9 @@ async def _template(
         name=name,
         language="ar_EG",
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": _body(variables)}],
         status=status,
-        body_text="Hello {{1}}" if variables else "Hello.",
+        body_text=_body(variables),
         variable_count=variables,
     )
     session.add(template)

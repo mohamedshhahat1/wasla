@@ -265,7 +265,7 @@ class TemplateWithdrawnError(SendNotAttemptedError):
     message = "WhatsApp has withdrawn this template."
 
     def __init__(self, *, code: int) -> None:
-        super().__init__(self.message)
+        super().__init__(self.message, provider_code=code)
         self.code = code
 
 
@@ -1047,7 +1047,12 @@ class WhatsAppClient:
                     # writing down: the caller marks the registry so the next
                     # send of it is refused locally (MSG-24).
                     raise TemplateWithdrawnError(code=error_code)
-                raise SendNotAttemptedError("WhatsApp rejected the message.")
+                # Meta's code travels with the refusal, so a caller can tell a
+                # campaign-wide fact (132000: the template's parameters) from
+                # one person's (131049) without reading prose (CMP-05, CMP-06).
+                raise SendNotAttemptedError(
+                    "WhatsApp rejected the message.", provider_code=error_code
+                )
 
             if response.status_code >= SERVER_ERROR_FLOOR:
                 # 5xx is not retried, and it is not a refusal either: Meta may

@@ -400,6 +400,7 @@ async def _campaign(session: AsyncSession, tenant: Tenant, account: WhatsAppAcco
         name=TEMPLATE_NAME,
         language=TEMPLATE_LANGUAGE,
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": "Hello."}],
         status=TemplateStatus.APPROVED,
     )
     session.add(template)

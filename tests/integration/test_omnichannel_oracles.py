@@ -326,6 +326,7 @@ async def test_no_write_path_breaks_an_invariant(
         name="oracle",
         language="en",
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": "Hello."}],
         status=TemplateStatus.APPROVED,
     )
     db_session.add(template)

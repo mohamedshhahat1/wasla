@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Any, Final
+from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,6 +70,7 @@ from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import Contact, Message, MessageOrigin, MessageStatus
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
+from app.integrations.whatsapp.client import TEMPLATE_WITHDRAWN_CODES
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
     AudienceFilter,
@@ -93,8 +94,15 @@ from app.services.entitlement_service import (
     EntitlementService,
     hold_limit_lock,
 )
-from app.services.messaging_service import MessagingService
+from app.services.messaging_service import MessagingService, TemplateRefusedError
 from app.services.opt_out import record_opt_out, record_resume
+from app.services.template_parameters import (
+    TEMPLATE_PARAMETER_CODES,
+    CampaignParameters,
+    parameter_spec,
+    send_components,
+)
+from app.services.template_parameters import refusal as parameter_refusal
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -109,6 +117,10 @@ MAX_AUDIENCE_SIZE: Final = 50_000
 # not include the campaign's channel (CMP-24): a 402, like every other plan
 # refusal, because the answer is an upgrade, not a permission.
 CHANNEL_NOT_IN_PLAN_CODE: Final = "channel_not_in_plan"
+
+# The stable error code a campaign on a template that is not marketing is
+# refused with at composition (CMP-09).
+TEMPLATE_CATEGORY_CODE: Final = "template_category"
 
 # How far ahead a campaign may be scheduled. The lower bound is zero: sending
 # now is a legitimate thing to ask for, unlike a follow-up, which exists
@@ -261,8 +273,17 @@ class CampaignService:
         variables: list[str] | None = None,
         messages_per_minute: int = DEFAULT_MESSAGES_PER_MINUTE,
         created_by_id: uuid.UUID | None = None,
+        header_variables: list[str] | None = None,
+        button_parameters: dict[int, str] | None = None,
     ) -> Campaign:
-        """Compose a draft. Nothing is sent and no audience exists yet."""
+        """Compose a draft. Nothing is sent and no audience exists yet.
+
+        **A marketing template only** (CMP-09, ADR-138), and **every parameter
+        its components need** (CMP-05, ADR-137): the body's variables, a text
+        header's, and each dynamic button's - or a refusal naming the
+        component, before anyone is written to. A template whose components
+        are not known, or that needs a media header, is refused too.
+        """
         account = await self._accounts.require_by_id(account_id)
         if not account.is_active:
             raise ValidationError("This WhatsApp number is disabled.")
@@ -280,23 +301,36 @@ class CampaignService:
             # and kept because a campaign is the one caller where "unknown to
             # the registry" must not mean "allowed".
             raise ValidationError("A campaign needs a template WhatsApp has approved.")
-
-        supplied = list(variables or [])
-        if len(supplied) != template.variable_count:
+        if not template.is_marketing:
+            # A broadcast is marketing, which is what the model always said and
+            # nothing enforced. A utility or authentication template sent to
+            # thousands is miscategorised traffic Meta prices and polices as
+            # such; an unknown category must not read as marketing.
             raise ValidationError(
-                f"This template expects {template.variable_count} variable(s); "
-                f"{len(supplied)} were supplied."
+                f"A campaign needs a marketing template; this one is "
+                f"{template.category.value}.",
+                error_code=TEMPLATE_CATEGORY_CODE,
             )
+
+        supplied = CampaignParameters(
+            body=tuple(variables or ()),
+            header=tuple(header_variables or ()),
+            buttons=dict(button_parameters or {}),
+        )
+        refused = parameter_refusal(parameter_spec(template.components), supplied)
+        if refused is not None:
+            raise refused
 
         campaign = self._campaigns.create(
             account_id=account_id,
             template_id=template_id,
             name=_validated_name(name),
             description=description,
-            variables=supplied or None,
+            variables=list(supplied.body) or None,
             messages_per_minute=_validated_rate(messages_per_minute),
             created_by_id=created_by_id,
         )
+        campaign.template_parameters = supplied.as_dict()
         # Flushed so the caller can read the generated id and the timestamps.
         # Without it a route serialising this row answers 500: the primary key
         # default and the server defaults are applied at flush, and the request
@@ -712,6 +746,15 @@ class CampaignService:
                 # staged, so the recipient is untouched; the campaign waits.
                 throttled_until = moment + PAUSED_RECHECK
                 break
+            except _CampaignWideRefusalError as refusal:
+                # The template is refused for everybody (CMP-05, CMP-19): the
+                # campaign fails once with the reason and Meta's code, and the
+                # recipients after this one are never asked.
+                if not await self._campaigns.hold(
+                    campaign.id, lease_token=token, lease_until=lease_until()
+                ):
+                    return await self._stopped(campaign, sent=sent, failed=failed, skipped=skipped)
+                return await self._fail(campaign, refusal.detail, reason=refusal.reason)
             except (DependencyUnavailableError, ProviderConnectionRefusedError) as error:
                 # A credential that is missing, or one Meta refuses. Neither is
                 # this recipient's problem and neither is fixable by trying the
@@ -829,6 +872,22 @@ class CampaignService:
                 CampaignStopReason.TEMPLATE_NOT_APPROVED,
                 refusal or "WhatsApp has not approved this template.",
             )
+        if not template.is_marketing:
+            # Re-checked per batch (CMP-09): a sync can recategorise a template
+            # after the campaign was composed.
+            return (
+                CampaignStopReason.TEMPLATE_CATEGORY,
+                f"This campaign's template is now {template.category.value}; "
+                "a campaign sends marketing templates only.",
+            )
+        refused = parameter_refusal(
+            parameter_spec(template.components),
+            CampaignParameters.from_campaign(campaign.variables, campaign.template_parameters),
+        )
+        if refused is not None:
+            # A sync changed what the template needs since composition: Meta
+            # would refuse every recipient for it, so the campaign stops once.
+            return (CampaignStopReason.TEMPLATE_PARAMETERS_REFUSED, refused.message)
         return None
 
     async def _unserved_reason(self) -> CampaignStopReason | None:
@@ -966,12 +1025,26 @@ class CampaignService:
             recipient.message_id = message.id
 
         template = await self._templates.require_by_id(campaign.template_id)
+        spec = parameter_spec(template.components)
+        if spec is None:  # pragma: no cover - `_blocking_reason` refused it first
+            raise _CampaignWideRefusalError(
+                CampaignStopReason.TEMPLATE_PARAMETERS_REFUSED,
+                "This template's components are not known yet.",
+            )
         try:
             message = await messaging.send_template(
                 conversation_id=conversation.id,
                 name=template.name,
                 language=template.language,
-                components=_components(campaign.variables),
+                # Every component the template's spec needs - header, body,
+                # buttons - in Meta's shape (CMP-05). The body alone was sent
+                # before, and Meta refused every recipient for the rest.
+                components=send_components(
+                    spec,
+                    CampaignParameters.from_campaign(
+                        campaign.variables, campaign.template_parameters
+                    ),
+                ),
                 sent_by_id=campaign.created_by_id,
                 link=link,
                 # Recorded as a campaign rather than inferred from
@@ -991,6 +1064,14 @@ class CampaignService:
         except (ConnectionThrottledError, ChannelPausedError):
             # Not this recipient's failure: `dispatch_batch` waits for the window.
             raise
+        except TemplateRefusedError as error:
+            # The registry refuses the template - withdrawn by Meta through
+            # another send since this batch began. Nothing was staged and this
+            # recipient spends nothing; every later one would meet the same
+            # refusal, so the campaign stops here (CMP-19).
+            raise _CampaignWideRefusalError(
+                CampaignStopReason.TEMPLATE_WITHDRAWN, error.message
+            ) from error
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             return self._fail_recipient(recipient, str(error))
 
@@ -1005,7 +1086,29 @@ class CampaignService:
 
         if message.status is MessageStatus.FAILED:
             # The messaging service records a rejected send rather than raising,
-            # so a refusal arrives as a row state.
+            # so a refusal arrives as a row state - with Meta's code on it.
+            code = message.failure_code
+            if code in TEMPLATE_PARAMETER_CODES or code in TEMPLATE_WITHDRAWN_CODES:
+                # **A fact about the template, not this person** (CMP-05,
+                # CMP-19). Meta refuses the parameters (132000, 132012,
+                # 131008) or the template itself (132001, 132015, 132016)
+                # for everybody, so the one asked spends its attempt and the
+                # campaign stops: one request, not one per recipient. A
+                # parameter refusal does not pause the template, which still
+                # works with the right parameters (M25).
+                self._fail_recipient(recipient, message.failure_reason or "Rejected by WhatsApp.")
+                raise _CampaignWideRefusalError(
+                    (
+                        CampaignStopReason.TEMPLATE_PARAMETERS_REFUSED
+                        if code in TEMPLATE_PARAMETER_CODES
+                        else CampaignStopReason.TEMPLATE_WITHDRAWN
+                    ),
+                    (
+                        f"WhatsApp refused this template's parameters (code {code})."
+                        if code in TEMPLATE_PARAMETER_CODES
+                        else f"WhatsApp refused this template (code {code})."
+                    ),
+                )
             return self._fail_recipient(
                 recipient, message.failure_reason or "Rejected by WhatsApp."
             )
@@ -1188,21 +1291,17 @@ class CampaignService:
         return contact
 
 
-def _components(variables: list[str] | None) -> list[dict[str, Any]] | None:
-    """The template body's parameters, in Meta's shape.
+class _CampaignWideRefusalError(Exception):
+    """A refusal that is about the campaign's template, raised out of one recipient's send.
 
-    None when there are no variables: sending an empty component list is not the
-    same as sending none, and Meta rejects the former on a template with no
-    placeholders.
+    `dispatch_batch` fails the campaign once with its reason, rather than
+    letting every remaining recipient discover it (CMP-05, CMP-19).
     """
-    if not variables:
-        return None
-    return [
-        {
-            "type": "body",
-            "parameters": [{"type": "text", "text": value} for value in variables],
-        }
-    ]
+
+    def __init__(self, reason: CampaignStopReason, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
 
 
 def _validated_name(name: str) -> str:

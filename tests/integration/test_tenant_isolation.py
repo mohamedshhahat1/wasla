@@ -206,6 +206,7 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
         name=f"{slug}_reminder",
         language="en",
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": "Hello."}],
         status=TemplateStatus.APPROVED,
     )
     lead = Lead(

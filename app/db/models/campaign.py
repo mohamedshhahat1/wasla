@@ -256,6 +256,11 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # per-recipient personalisation needs a source of per-recipient facts that
     # nothing here has yet.
     variables: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # The header's and the buttons' send-time parameters, for a template whose
+    # stored components need them (CMP-05): `{"header": [...], "buttons":
+    # [{"index", "value"}]}`. Null for a body-only template. Bounded by the
+    # request schema, like `variables`.
+    template_parameters: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     audience: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     audience_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -83,6 +83,8 @@ async def create_campaign(
         variables=list(payload.variables),
         messages_per_minute=payload.messages_per_minute,
         created_by_id=workspace.user.id,
+        header_variables=list(payload.header_variables),
+        button_parameters={entry.index: entry.value for entry in payload.button_parameters},
     )
     return CampaignRead.from_model(campaign)
 

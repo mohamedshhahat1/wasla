@@ -132,7 +132,12 @@ logger = get_logger(__name__)
 
 # WhatsApp's limit and window live with WhatsApp's policy now (OMNI-008), and
 # are importable from here under the names the request schema and tests use.
-__all__ = ["SERVICE_WINDOW", "WHATSAPP_TEXT_MAX_CHARS", "MessagingService"]
+__all__ = [
+    "SERVICE_WINDOW",
+    "WHATSAPP_TEXT_MAX_CHARS",
+    "MessagingService",
+    "TemplateRefusedError",
+]
 
 # What a message records when the provider refused the connection's credential.
 # A fixed sentence: the failure reason is returned by the API and read by a
@@ -146,6 +151,17 @@ PROVIDER_THROTTLED = "The provider is rate limiting this connection."
 
 # The sentence a send on a paused connection is refused with, per channel.
 _DISABLED: Final[dict[Channel, str]] = {Channel.WHATSAPP: "This WhatsApp number is disabled."}
+
+
+class TemplateRefusedError(ValidationError):
+    """The registry refuses this template, before anything was staged (MSG-10, CMP-19).
+
+    About the template rather than the recipient: a campaign stops on it once
+    instead of spending an attempt per remaining person discovering it.
+    """
+
+    error_code = "template_refused"
+
 
 # A caller tying its own row to this send, inside the transaction that commits
 # the intent. Synchronous and staging-only, like `UsageRecorder.record`: it must
@@ -382,7 +398,10 @@ class MessagingService:
         template = await self._templates.find_anywhere(name=name, language=language)
         refusal = refusal_reason_for(template)
         if refusal is not None:
-            raise ValidationError(refusal)
+            # Its own type, so a bulk sender can tell the template's refusal -
+            # which every later recipient would meet too - from this one
+            # message's (CMP-19). Still a `ValidationError` to everyone else.
+            raise TemplateRefusedError(refusal)
         if template is not None and template.category is TemplateCategory.AUTHENTICATION:
             await self._refuse_authentication_to_a_business_scoped_id(conversation_id)
 
@@ -895,7 +914,7 @@ class MessagingService:
                 language=template_language,
                 code=outcome.code,
             )
-            return await self._undelivered(message, reason=str(outcome))
+            return await self._undelivered(message, reason=str(outcome), code=outcome.code)
 
         if isinstance(outcome, ProviderAuthError):
             # Nothing was delivered, so the row is recorded honestly as
@@ -929,7 +948,7 @@ class MessagingService:
             # The provider says the person stopped marketing messages: nothing
             # was delivered, and their consent on this channel now says so
             # too, through the one opt-out writer (OMNI-046, ENT-19).
-            await self._undelivered(message, reason=str(outcome))
+            await self._undelivered(message, reason=str(outcome), code=outcome.provider_code)
             if await record_opt_out(
                 self._session,
                 tenant_id=self._tenant_id,
@@ -984,7 +1003,9 @@ class MessagingService:
             return message
 
         if isinstance(outcome, Exception):
-            return await self._undelivered(message, reason=str(outcome))
+            return await self._undelivered(
+                message, reason=str(outcome), code=getattr(outcome, "provider_code", None)
+            )
 
         now = datetime.now(UTC)
         await self._messages.mark_sent(
@@ -1045,14 +1066,18 @@ class MessagingService:
             },
         )
 
-    async def _undelivered(self, message: Message, *, reason: str) -> Message:
+    async def _undelivered(
+        self, message: Message, *, reason: str, code: int | None = None
+    ) -> Message:
         """Nothing was delivered, and that is known rather than assumed.
 
         Recorded, not raised: the caller gets the message back in failed state,
         and the row survives the commit. A caller that wants to try again may -
-        as a *new* message, because this one is finished.
+        as a *new* message, because this one is finished. `code` is the
+        provider's own error code, which a campaign reads to tell a refusal of
+        the template from a refusal of one person (CMP-05, CMP-06).
         """
-        await self._messages.mark_failed(message, reason=reason)
+        await self._messages.mark_failed(message, reason=reason, code=code)
         logger.warning(
             "channel.outbound_failed",
             extra={

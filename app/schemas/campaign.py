@@ -46,6 +46,7 @@ from app.services.entitlement_terms import ordered
 # this is a bound on a request body, not a statement about templates.
 MAX_TEMPLATE_VARIABLES = 20
 MAX_VARIABLE_LENGTH = 1024
+MAX_TEMPLATE_BUTTONS = 10
 # A campaign description is a note to whoever runs the campaign next, and the
 # column is `Text` - so nothing but this decides how long it may be. Two
 # thousand characters is several paragraphs, which is more than anybody writes
@@ -60,6 +61,14 @@ class _Payload(BaseModel):
     """Request bodies reject unknown fields rather than ignoring them."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class ButtonParameterRequest(_Payload):
+    """A dynamic button's send-time value: a URL suffix, or a code to copy (CMP-05)."""
+
+    # Meta allows up to ten buttons on a template.
+    index: int = Field(ge=0, le=MAX_TEMPLATE_BUTTONS - 1)
+    value: str = Field(min_length=1, max_length=MAX_VARIABLE_LENGTH)
 
 
 class CampaignCreateRequest(_Payload):
@@ -82,6 +91,19 @@ class CampaignCreateRequest(_Payload):
         default=DEFAULT_MESSAGES_PER_MINUTE,
         ge=MIN_MESSAGES_PER_MINUTE,
         le=MAX_MESSAGES_PER_MINUTE,
+    )
+    # A text header's variables, in placeholder order (CMP-05). Validated
+    # against the template's stored components in the service; a media header
+    # is refused there.
+    header_variables: list[Annotated[str, Field(max_length=MAX_VARIABLE_LENGTH)]] = Field(
+        default_factory=list,
+        max_length=MAX_TEMPLATE_VARIABLES,
+    )
+    # One value per dynamic button - a URL button whose URL ends in a
+    # placeholder, or a copy-code button (CMP-05).
+    button_parameters: list[ButtonParameterRequest] = Field(
+        default_factory=list,
+        max_length=MAX_TEMPLATE_BUTTONS,
     )
 
 
@@ -137,6 +159,9 @@ class CampaignRead(BaseModel):
     description: str | None
     status: CampaignStatus
     variables: list[str] | None
+    # The header's and the buttons' send-time parameters (CMP-05), when the
+    # template needs any: `{"header": [...], "buttons": [{"index", "value"}]}`.
+    template_parameters: dict[str, Any] | None = None
     audience: dict[str, Any] | None
     audience_size: int
     messages_per_minute: int
@@ -307,6 +332,7 @@ __all__ = [
     "AudiencePreviewRequest",
     "AudiencePreviewResponse",
     "AudienceRequest",
+    "ButtonParameterRequest",
     "CampaignCreateRequest",
     "CampaignRead",
     "CampaignScheduleRequest",

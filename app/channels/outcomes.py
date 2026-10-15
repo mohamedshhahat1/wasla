@@ -34,7 +34,16 @@ class SendNotAttemptedError(ExternalServiceError):
     caller may record the send as undelivered and, if it wants to, make a new
     one - which is a decision it cannot safely take after any other failure
     (ADR-093).
+
+    `provider_code` is the provider's own numeric error code when it named one
+    - Meta's 132000, 131049 and the rest. A published, fixed vocabulary, so it
+    is safe to record and act on where the provider's prose is not (CMP-05,
+    CMP-06, ADR-139).
     """
+
+    def __init__(self, message: str | None = None, *, provider_code: int | None = None) -> None:
+        super().__init__(message)
+        self.provider_code = provider_code
 
 
 class RecipientOptedOutError(SendNotAttemptedError):
@@ -46,6 +55,23 @@ class RecipientOptedOutError(SendNotAttemptedError):
     """
 
     message = "The customer has stopped receiving marketing messages."
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message, provider_code=131050)
+
+
+class ProviderUnreachableError(SendNotAttemptedError):
+    """The provider could not be reached at all: no request was written (CMP-07).
+
+    A refused or failed connection, a name that did not resolve. Provably
+    nothing was delivered, and nothing about this recipient caused it: every
+    other recipient meets the same outage. A bulk sender waits for it to pass
+    rather than spending each recipient's attempts on it, which is how a Meta
+    outage used to cost a campaign its whole audience (audit P06: 27 requests,
+    everyone failed after three attempts).
+    """
+
+    message = "The provider could not be reached."
 
 
 class UncertainDeliveryError(ExternalServiceError):
@@ -99,6 +125,7 @@ class ProviderAuthError(ProviderConnectionRefusedError):
 __all__ = [
     "ProviderAuthError",
     "ProviderConnectionRefusedError",
+    "ProviderUnreachableError",
     "RecipientOptedOutError",
     "SendNotAttemptedError",
     "UncertainDeliveryError",

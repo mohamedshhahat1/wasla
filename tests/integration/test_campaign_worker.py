@@ -129,6 +129,7 @@ async def _sending_campaign(
         name="offer",
         language="ar_EG",
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": "Hello."}],
         status=template_status,
         body_text="Hello.",
         variable_count=0,

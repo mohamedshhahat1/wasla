@@ -239,6 +239,7 @@ async def _campaign(session: AsyncSession, tenant: Tenant, account: WhatsAppAcco
         name="restock",
         language="en",
         category=TemplateCategory.MARKETING,
+        components=[{"type": "BODY", "text": "Hello."}],
         status=TemplateStatus.APPROVED,
     )
     session.add(template)
