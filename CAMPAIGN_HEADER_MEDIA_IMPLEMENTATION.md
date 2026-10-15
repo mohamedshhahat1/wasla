@@ -17,7 +17,7 @@ continues from the first phase that is not committed.
 | 5 | Every failure campaign-level | committed | (this commit, with Phase 4) | as Phase 4; client upload classes 14 passed |
 | 6 | Retention and lifecycle | committed | (this commit) | lifecycle 11 passed; media/retention/upload/purge suites 294 passed |
 | 7 | Observability, invariants, docs, ADR | committed | (this commit) | campaign invariants + oracles 15 passed (migration-built); promtool 75 rules + unit tests SUCCESS, amtool valid; docs truth + unit 3,455 passed |
-| 8 | Mutation | not started | | |
+| 8 | Mutation | committed | 50a9df3 (+ this record) | control 118 passed; M-H01..M-H14: 13 KILLED, M-H02 REDUNDANT GUARD (M-H02+LOCK KILLED, LOCK-alone survives); regression M-C01+M08, M-C12..15, M-C18, M-C24 KILLED; worktree clean |
 | 9 | Full lanes, CI jobs, after-probes | not started | | |
 | 10 | Final report | not started | | |
 
