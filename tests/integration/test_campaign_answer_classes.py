@@ -51,7 +51,7 @@ def always(response: Callable[[dict[str, Any], int], httpx.Response]) -> Answer:
     return answer
 
 
-def raising(error: type[Exception]) -> Answer:
+def raising(error: type[httpx.TransportError]) -> Answer:
     async def answer(payload: dict[str, Any], n: int) -> httpx.Response:
         raise error("harness", request=httpx.Request("POST", "https://graph.facebook.com"))
 
@@ -311,7 +311,7 @@ async def test_a_pair_limit_defers_that_person_and_the_rest_go_on(
 
 @pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout])
 async def test_an_unreachable_meta_costs_time_not_the_audience(
-    world: tuple[FakeMeta, CampaignWorker, Database], error: type[Exception]
+    world: tuple[FakeMeta, CampaignWorker, Database], error: type[httpx.TransportError]
 ) -> None:
     """CMP-07: audit - 27 transport attempts, every recipient failed after three.
 
