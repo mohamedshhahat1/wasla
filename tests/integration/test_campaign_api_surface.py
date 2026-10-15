@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -20,11 +20,23 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import ValidationError
 from app.db.models.audit import AuditAction, AuditLog
-from app.db.models.campaign import Campaign, CampaignRecipient, RecipientReason, RecipientStatus
+from app.db.models.campaign import (
+    Campaign,
+    CampaignRecipient,
+    OptOutSource,
+    OptOutVia,
+    RecipientReason,
+    RecipientStatus,
+)
+from app.db.models.channel import Channel
+from app.db.models.user import User
 from app.db.session import Database
-from app.repositories.campaign_repository import AudienceFilter
+from app.repositories.campaign_repository import AudienceFilter, CampaignRecipientRepository
 from app.services.campaign_service import NAIVE_SCHEDULE_CODE, CampaignService
+from app.services.opt_out import record_resume
+from tests.consent import consent_of
 from tests.integration.campaign_harness import (
+    USER_DOMAIN,
     FakeMeta,
     compose,
     erase,
@@ -169,3 +181,81 @@ async def test_the_database_bounds_the_send_rate(database: Database, rate: int) 
                 update(Campaign).where(Campaign.id == campaign_id).values(messages_per_minute=rate)
             )
             await session.flush()
+
+
+async def test_the_service_refuses_a_rate_above_the_ceiling(database: Database) -> None:
+    """M18: the service's own bound, not only the request schema's and the column's."""
+    workspace = await seed(database, recipients=1)
+    async with database.session_factory() as session:
+        with pytest.raises(ValidationError):
+            await CampaignService(session=session, tenant_id=workspace.tenant_id).create(
+                account_id=workspace.account_id,
+                template_id=workspace.template_id,
+                name="Too fast",
+                messages_per_minute=601,
+            )
+
+
+async def test_the_recipient_listing_is_tenant_scoped_on_its_own(database: Database) -> None:
+    """M24: another workspace's campaign id lists nothing, even past the service's lookup."""
+    mine = await seed(database, recipients=3)
+    theirs = await seed(database, recipients=1)
+    campaign_id = await compose(database, mine, schedule=False)
+    async with database.session_factory() as session:
+        rows = await CampaignRecipientRepository(
+            session, tenant_id=theirs.tenant_id
+        ).list_for_campaign(campaign_id)
+    assert rows == []
+
+
+async def test_an_admin_pause_is_audited_with_its_actor(database: Database) -> None:
+    """CMP-14: stopping a broadcast part-way names who did it."""
+    workspace = await seed(database, recipients=2)
+    campaign_id = await compose(database, workspace)
+    async with database.session_factory() as session:
+        admin = User(email=f"pauser-{uuid.uuid4().hex[:8]}{USER_DOMAIN}", hashed_password="x")
+        session.add(admin)
+        await session.flush()
+        await CampaignService(session=session, tenant_id=workspace.tenant_id).pause(
+            campaign_id, actor=admin
+        )
+        await session.commit()
+        admin_id = admin.id
+    async with database.session_factory() as session:
+        entries = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.target_id == campaign_id,
+                        AuditLog.action == AuditAction.CAMPAIGN_PAUSED,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [(entry.actor_id, entry.meta) for entry in entries] == [
+        (admin_id, {"reason": "admin_paused"})
+    ]
+
+
+async def test_a_newer_resume_is_never_overwritten_by_an_older_one(database: Database) -> None:
+    """M13: newer resume evidence wins at the writer, whatever order it arrives in (OMNI-030)."""
+    workspace = await seed(database, recipients=1)
+    newer = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
+    async with database.session_factory() as session:
+        for at in (newer, newer - timedelta(days=3)):
+            await record_resume(
+                session,
+                tenant_id=workspace.tenant_id,
+                contact_id=workspace.contact_ids[0],
+                channel=Channel.WHATSAPP,
+                source=OptOutSource.CUSTOMER,
+                via=OptOutVia.PROVIDER_PREFERENCE,
+                at=at,
+            )
+        await session.commit()
+    async with database.session_factory() as session:
+        consent = await consent_of(session, workspace.contact_ids[0], Channel.WHATSAPP)
+    assert consent is not None
+    assert consent.resumed_at == newer

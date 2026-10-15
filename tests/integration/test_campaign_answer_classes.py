@@ -296,6 +296,10 @@ async def test_a_pair_limit_defers_that_person_and_the_rest_go_on(
     assert dict(after_first.recipients) == {"pending/attempts=0": 1, "sent/attempts=0": 2}
     assert after_first.status is CampaignStatus.RUNNING
 
+    # Inside the deferral, the person is not asked again (M-C23).
+    await each.run_once(now=start + timedelta(seconds=30))
+    assert len(meta.requests) == 3
+
     await each.run_once(now=start + timedelta(seconds=400))
 
     assert len(meta.requests) == 4

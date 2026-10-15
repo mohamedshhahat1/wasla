@@ -245,3 +245,55 @@ async def test_many_workers_on_many_campaigns_send_everyone_once(
         await erase(first_db)
         for _, database in pool:
             await database.dispose()
+
+
+async def test_a_worker_between_its_checks_and_its_send_is_not_overtaken(
+    prepared_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-recipient claim, alone (M-C01): the stale-snapshot window the audit located.
+
+    Worker A has passed its lease check for its third recipient and is held
+    before the send - here, in the consent read - past its lease. B re-takes
+    the campaign and claims the batch. Without the per-recipient claim, B's
+    batch held recipient 3 as a pending, unlinked snapshot while A went on to
+    send it, and B sent it again. With it, A holds recipient 3's row from its
+    check to its send intent, so B never claims it.
+    """
+    from app.repositories.consent_repository import ContactConsentRepository
+
+    meta = FakeMeta(latency=0.01)
+    a, db_a = worker(prepared_database, meta, name="a", lease_seconds=0.5)
+    b, db_b = worker(prepared_database, meta, name="b", lease_seconds=0.5)
+    original = ContactConsentRepository.accepts_marketing
+    calls = {"n": 0}
+    held = asyncio.Event()
+
+    async def slow_third(self: ContactConsentRepository, *args: object, **kwargs: object) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            held.set()
+            await asyncio.sleep(1.5)
+        return await original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    try:
+        await quiesce(db_a)
+        workspace = await seed(db_a, recipients=10)
+        campaign = await compose(db_a, workspace)
+        monkeypatch.setattr(ContactConsentRepository, "accepts_marketing", slow_third)
+
+        running = asyncio.create_task(a.run_once())
+        await held.wait()
+        await asyncio.sleep(0.8)
+        await b.run_once()
+        await running
+        await _drain(a, b)
+
+        assert meta.received_twice() == 0, meta.per_recipient().most_common(3)
+        assert len(meta.requests) == 10
+        row = await ledger(db_a, campaign)
+        assert row.meters == row.sent == 10
+    finally:
+        await quiesce(db_a)
+        await erase(db_a)
+        await db_a.dispose()
+        await db_b.dispose()

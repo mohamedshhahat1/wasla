@@ -26,6 +26,7 @@ from app.db.models.campaign import (
     CampaignStatus,
     CampaignStopReason,
     RecipientReason,
+    RecipientStatus,
 )
 from app.db.models.conversation import (
     Conversation,
@@ -150,7 +151,12 @@ async def test_a_send_refused_by_the_credential_is_sent_on_resume(
     assert row.status is CampaignStatus.COMPLETED
 
 
-async def _requested(database: Database, workspace: Workspace, campaign_id: uuid.UUID) -> str:
+async def _linked(
+    database: Database,
+    workspace: Workspace,
+    campaign_id: uuid.UUID,
+    state: MessageDeliveryState = MessageDeliveryState.REQUESTED,
+) -> str:
     """Leave one recipient as a crash between TX1/REQUESTED and Meta's answer would."""
     async with database.session_factory() as session:
         recipient = (
@@ -187,7 +193,7 @@ async def _requested(database: Database, workspace: Workspace, campaign_id: uuid
             origin=MessageOrigin.CAMPAIGN,
         )
         await session.flush()
-        message.delivery_state = MessageDeliveryState.REQUESTED
+        message.delivery_state = state
         recipient.message_id = message.id
         recipient.conversation_id = conversation.id
         await session.commit()
@@ -205,7 +211,7 @@ async def test_a_send_that_may_have_left_is_never_re_armed(
     meta, each, database = world
     workspace = await seed(database, recipients=3)
     campaign_id = await compose(database, workspace)
-    abandoned = await _requested(database, workspace, campaign_id)
+    abandoned = await _linked(database, workspace, campaign_id)
 
     await each.run_once()
 
@@ -295,3 +301,27 @@ async def test_pacing_counts_from_when_the_batch_ended(
     assert row.next_send_at is not None
     # Five sends took about a second; the minute the rate grants starts after them.
     assert row.next_send_at - start >= timedelta(minutes=1, seconds=0.9)
+
+
+async def test_a_linked_send_that_provably_never_left_is_re_armed(
+    world: tuple[FakeMeta, CampaignWorker, Database],
+) -> None:
+    """CMP-11 for a row written before the credential path unlinked it (kills M-C26).
+
+    Pending and linked to an UNDELIVERED message - Meta read the request and
+    refused it - so the person is sent, attempts unchanged.
+    """
+    meta, each, database = world
+    workspace = await seed(database, recipients=3)
+    campaign_id = await compose(database, workspace)
+    rearmed = await _linked(database, workspace, campaign_id, MessageDeliveryState.UNDELIVERED)
+
+    await each.run_once()
+
+    assert len(meta.requests) == 3
+    assert meta.received_twice() == 0
+    async with database.session_factory() as session:
+        row = await session.get(CampaignRecipient, uuid.UUID(rearmed))
+        assert row is not None
+        assert row.status is RecipientStatus.SENT
+        assert row.attempts == 0
