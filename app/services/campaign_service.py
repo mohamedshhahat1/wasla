@@ -30,6 +30,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +46,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.core.telemetry import record_campaign_event
 from app.db.models.audit import AuditAction
 from app.db.models.billing import LimitKey
 from app.db.models.campaign import (
@@ -124,6 +126,19 @@ SCHEDULABLE_FROM: Final[frozenset[CampaignStatus]] = frozenset(
 ALREADY_OVER: Final[frozenset[CampaignStatus]] = frozenset(
     {CampaignStatus.COMPLETED, CampaignStatus.CANCELLED},
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignLease:
+    """The claim a worker holds on one campaign while it sends a batch (CMP-01, ADR-134).
+
+    `token` is what `claim_due` wrote on the row; `duration` is how long each
+    renewal extends it. Renewed before every recipient, so it has to outlast
+    one send - not a batch, and not a sweep of five batches.
+    """
+
+    token: uuid.UUID
+    duration: timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +404,8 @@ class CampaignService:
         campaign.status = CampaignStatus.SCHEDULED
         campaign.scheduled_at = max(when, now)
         campaign.next_send_at = None
+        # A fresh schedule is owned by nobody until a sweep claims it.
+        campaign.lease_token = None
         campaign.last_error = None
         # Writing to thousands of people who did not just say something is the
         # single most consequential thing a workspace can do here, so who
@@ -459,6 +476,7 @@ class CampaignService:
         *,
         now: datetime | None = None,
         batch_limit: int = DEFAULT_RECIPIENT_BATCH,
+        lease: CampaignLease | None = None,
     ) -> BatchOutcome:
         """Send the next batch of one campaign, then set when it may send again.
 
@@ -466,8 +484,30 @@ class CampaignService:
         is re-asked here rather than trusted from composition time, because a
         campaign scheduled last night is a campaign whose number may have been
         disabled and whose template may have been paused since.
+
+        **Ownership is re-established for every recipient** (CMP-01, ADR-134).
+        The batch's row locks end at the first send commit (ADR-093 TX1), so
+        before each person this asks two things in two single statements: is
+        the campaign still live and still this worker's (`hold`, which also
+        renews the lease), and is this recipient still pending and nobody
+        else's (`take`, which locks it and re-reads it). Either answering no
+        means this worker sends nothing for that person. `lease` is the
+        worker's claim; without one - a caller driving a single batch - the
+        liveness check still runs and only the token is not compared.
         """
         moment = now or datetime.now(UTC)
+        started = perf_counter()
+
+        def clock() -> datetime:
+            # The sweep's own clock, advanced by the time this batch has
+            # taken: a test's `now` stays meaningful, and a long batch does not
+            # date its lease renewals and its pacing from when it began.
+            return moment + timedelta(seconds=perf_counter() - started)
+
+        def lease_until() -> datetime | None:
+            return clock() + lease.duration if lease is not None else None
+
+        token = lease.token if lease is not None else None
 
         if campaign.is_finished or campaign.status is CampaignStatus.PAUSED:
             return BatchOutcome(campaign.id, campaign.status)
@@ -498,32 +538,36 @@ class CampaignService:
         # Asked once per batch: the plan in force does not change per person.
         in_plan = await self._channel_in_plan(campaign)
         for recipient in claimed:
-            if await self._campaigns.is_cancelled(campaign.id):
-                # A cancel landing mid-batch now stops at the next recipient
-                # rather than after the whole claimed batch (MSG-22). Bounded
-                # improvement, not a redesign: what was already sent stays
-                # sent, which is the documented intent and the only honest
-                # answer once a message has reached a customer.
+            if not await self._campaigns.hold(
+                campaign.id, lease_token=token, lease_until=lease_until()
+            ):
+                # Paused, cancelled, or no longer this worker's, since the
+                # previous recipient. A cancel or a pause landing mid-batch
+                # stops at the next person rather than after the whole claimed
+                # batch (MSG-22, CMP-08); what was already sent stays sent,
+                # which is the only honest answer once a message has reached a
+                # customer. A worker whose lease was taken over sends nothing
+                # more (CMP-01).
                 #
-                # Read from the database rather than off `campaign`, because
-                # `cancel()` runs in a different transaction and this object is
-                # a snapshot taken before the batch began. One indexed scalar
-                # per recipient, against a Graph API call - which is why it is
-                # affordable here and would not be in a tighter loop.
-                #
-                # Deliberately not a locked read. The send commits part-way
-                # through, so a lock taken here would be dropped at the first
-                # send and would buy nothing, and holding one across a provider
-                # call is the trade ADR-093 exists to refuse.
+                # One conditional statement on the row as it is now, never the
+                # snapshot `campaign` was loaded as: `pause()` and `cancel()`
+                # commit in other transactions. The lock it takes lasts until
+                # the next send intent commits - milliseconds, never across a
+                # provider call (ADR-093).
+                return await self._stopped(campaign, sent=sent, failed=failed, skipped=skipped)
+            if await self._recipients.take(recipient) is None:
+                # Another worker owns this person right now, or finished them
+                # since the batch was claimed (CMP-01). Not this worker's to
+                # send, and no attempt is spent.
                 logger.info(
-                    "campaign.batch_stopped_by_cancel",
+                    "campaign.recipient_owned_elsewhere",
                     extra={
-                        "event": "campaign.batch_stopped_by_cancel",
+                        "event": "campaign.recipient_owned_elsewhere",
                         "campaign_id": str(campaign.id),
-                        "sent": sent,
                     },
                 )
-                break
+                await record_campaign_event("recipient_owned_elsewhere")
+                continue
             if not in_plan:
                 # ENT-16: a channel the plan in force does not include sends
                 # nothing automated. A policy outcome, never retried.
@@ -561,6 +605,10 @@ class CampaignService:
                 # pending. The campaign has stopped, so nothing will pick it up
                 # until somebody restarts the campaign - which is the point at
                 # which the credential has been fixed.
+                if not await self._campaigns.hold(
+                    campaign.id, lease_token=token, lease_until=lease_until()
+                ):
+                    return await self._stopped(campaign, sent=sent, failed=failed, skipped=skipped)
                 return self._fail(campaign, str(error))
             if outcome is RecipientStatus.SENT:
                 sent += 1
@@ -568,6 +616,13 @@ class CampaignService:
                 skipped += 1
             else:
                 failed += 1
+
+        if not await self._campaigns.hold(campaign.id, lease_token=token, lease_until=None):
+            # Paused, cancelled or taken over while the last recipient was
+            # in flight: the campaign's state is someone else's to write now.
+            # Without this, a `_complete` here overwrote a cancel that landed
+            # after the last send.
+            return await self._stopped(campaign, sent=sent, failed=failed, skipped=skipped)
 
         # Rate limiting, stored rather than slept. A sleep would hold the lock
         # and would not survive a restart; a timestamp does both.
@@ -577,6 +632,8 @@ class CampaignService:
         if throttled_until is not None and throttled_until > campaign.next_send_at:
             # Its own rate, or the connection's window - whichever is later.
             campaign.next_send_at = throttled_until
+        # The batch is over, and with it this worker's claim.
+        campaign.lease_token = None
 
         remaining = await self._recipients.pending_count(campaign.id)
         if remaining == 0:
@@ -757,8 +814,11 @@ class CampaignService:
         # answer different questions. The messaging service already counted it
         # as a message sent, which is what a messaging allowance is spent from;
         # this counts it as campaign traffic, which is what a workspace looks at
-        # when a broadcast costs more than it expected. The recipient row is
-        # what makes the pair safe from double counting: it moves to SENT in
+        # when a broadcast costs more than it expected. What makes the pair
+        # safe from double counting is the per-recipient claim (`take`), not
+        # the row's state alone: with two workers the row once read `sent`
+        # once while two copies - and two meters - had gone (CMP-01). The
+        # claim lets one worker send this person; the row moves to SENT in
         # this same transaction and is never claimed again.
         self._usage.record(
             UsageEventType.CAMPAIGN_MESSAGE,
@@ -802,10 +862,41 @@ class CampaignService:
         # the campaign's own rate limit already spaces the attempts out.
         return RecipientStatus.PENDING
 
+    async def _stopped(
+        self, campaign: Campaign, *, sent: int, failed: int, skipped: int
+    ) -> BatchOutcome:
+        """A batch that ended because the campaign is no longer this worker's to send.
+
+        Nothing is written to the campaign: whoever paused, cancelled or took
+        it over owns its state now. The recipients this batch already settled
+        are flushed with the session as usual.
+        """
+        status = await self._campaigns.current_status(campaign.id)
+        logger.info(
+            "campaign.batch_stopped",
+            extra={
+                "event": "campaign.batch_stopped",
+                "campaign_id": str(campaign.id),
+                "status": status.value if status is not None else None,
+                "sent": sent,
+            },
+        )
+        if status in (CampaignStatus.SCHEDULED, CampaignStatus.RUNNING):
+            # Still live, so the claim itself was lost (CMP-01).
+            await record_campaign_event("lease_lost")
+        return BatchOutcome(
+            campaign_id=campaign.id,
+            status=status or campaign.status,
+            sent=sent,
+            failed=failed,
+            skipped=skipped,
+        )
+
     def _complete(self, campaign: Campaign, now: datetime) -> BatchOutcome:
         campaign.status = CampaignStatus.COMPLETED
         campaign.completed_at = now
         campaign.next_send_at = None
+        campaign.lease_token = None
         logger.info("campaign.completed", extra={"campaign_id": str(campaign.id)})
         return BatchOutcome(campaign.id, CampaignStatus.COMPLETED)
 
@@ -813,6 +904,7 @@ class CampaignService:
         campaign.status = CampaignStatus.FAILED
         campaign.last_error = detail[:MAX_ERROR_LENGTH]
         campaign.next_send_at = None
+        campaign.lease_token = None
         logger.warning(
             "campaign.blocked",
             extra={"campaign_id": str(campaign.id), "detail": detail},

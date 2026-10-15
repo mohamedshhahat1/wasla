@@ -226,6 +226,12 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # its allowance, which is how the rate limit survives a restart: a worker
     # that dies does not hand the next one permission to send a burst.
     next_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Which claim currently owns this campaign's sending (CMP-01, ADR-134). Set
+    # by the sweep's claim together with the lease in `next_send_at`, renewed
+    # per recipient, and cleared when the batch ends. A worker proceeds only
+    # while the row still carries its own token, so a worker whose lease was
+    # taken over stops at its next recipient rather than working on.
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

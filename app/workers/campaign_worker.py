@@ -30,6 +30,7 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +44,7 @@ from app.repositories.campaign_repository import (
     DEFAULT_CAMPAIGN_CLAIM_LIMIT,
     DueCampaignClaim,
 )
-from app.services.campaign_service import BatchOutcome, CampaignService
+from app.services.campaign_service import BatchOutcome, CampaignLease, CampaignService
 from app.services.messaging_service import MessagingService
 
 logger = get_logger(__name__)
@@ -55,10 +56,18 @@ logger = get_logger(__name__)
 POLL_SECONDS = 15.0
 
 # How long a claimed campaign is left alone before the sweep may take it again.
-# Long enough for one batch of sends against a slow Meta, short enough that a
-# worker killed mid-batch does not stall the campaign for an hour.
-# `dispatch_batch` overwrites it with the rate limiter's own figure when the
-# batch finishes, so this value only ever applies to a batch in flight.
+# Short enough that a worker killed mid-batch does not stall the campaign for an
+# hour. `dispatch_batch` overwrites it with the rate limiter's own figure when
+# the batch finishes, so this value only ever applies to a batch in flight.
+#
+# **Renewed before every recipient** (CMP-01, ADR-134), so it must outlast one
+# send, not a batch. The worst single send the client allows: three attempts of
+# at most 10 s each (`REQUEST_TIMEOUT_SECONDS`) and two waits of at most 30 s
+# `Retry-After` plus 50 % jitter (`MAX_RETRY_AFTER_SECONDS`, `RETRY_JITTER`) -
+# 3 x 10 + 2 x 45 = 120 s. Three hundred is two and a half times that. A lease
+# that does run out - a stalled process - is re-taken with a new token, and the
+# stalled worker stops at its next recipient; the per-recipient claim keeps the
+# one in flight from being sent twice.
 CLAIM_LEASE_SECONDS = 300.0
 
 # How the worker obtains something to send with. Injected rather than built
@@ -140,14 +149,28 @@ class CampaignWorker:
                 limit=self._claim_limit,
                 lease_until=moment + self._lease,
             )
-            identifiers = [row.id for row in claimed]
+            # Each row's own claim token travels with its id (CMP-01): the
+            # batch proceeds only while the row still carries it.
+            leases = [(row.id, row.lease_token) for row in claimed]
 
-        if not identifiers:
+        if not leases:
             return 0
 
+        started = perf_counter()
         async with build_http_client() as http:
-            for campaign_id in identifiers:
-                if await self._send_one(campaign_id, http=http, now=moment):
+            for campaign_id, token in leases:
+                if token is None:  # pragma: no cover - claim_due always writes one
+                    continue
+                # The sweep's clock, advanced by the time earlier campaigns of
+                # this sweep took, so the lease renewal below is measured from
+                # now rather than from the start of a long sweep.
+                at = moment + timedelta(seconds=perf_counter() - started)
+                if await self._send_one(
+                    campaign_id,
+                    lease=CampaignLease(token=token, duration=self._lease),
+                    http=http,
+                    now=at,
+                ):
                     handled += 1
 
         logger.info("campaign.sweep_completed", extra={"handled": handled})
@@ -157,6 +180,7 @@ class CampaignWorker:
         self,
         campaign_id: uuid.UUID,
         *,
+        lease: CampaignLease,
         http: httpx.AsyncClient,
         now: datetime,
     ) -> bool:
@@ -164,14 +188,19 @@ class CampaignWorker:
 
         Re-read under a row lock rather than carried over from the claim: that
         transaction has committed, so its object is a snapshot and the campaign
-        may have been paused or cancelled since.
+        may have been paused or cancelled since. Re-read **only while the row
+        still carries this sweep's claim** (CMP-01): a lease that ran out while
+        an earlier campaign of the sweep was sending may have been re-taken by
+        another replica, and the campaign is then that replica's.
         """
         async with self._database.session() as session:
-            campaign = await DueCampaignClaim(session).claim_by_id(campaign_id)
+            campaign = await DueCampaignClaim(session).claim_by_id(
+                campaign_id, lease_token=lease.token, lease_until=now + lease.duration
+            )
             if campaign is None:
                 return False
             try:
-                outcome = await self._send_batch(session, campaign, http=http, now=now)
+                outcome = await self._send_batch(session, campaign, lease=lease, http=http, now=now)
             except Exception:
                 # Contained to the one campaign. A single broken row must not
                 # strand every other workspace's sends.
@@ -193,6 +222,7 @@ class CampaignWorker:
         session: AsyncSession,
         campaign: Campaign,
         *,
+        lease: CampaignLease,
         http: httpx.AsyncClient,
         now: datetime,
     ) -> BatchOutcome:
@@ -218,7 +248,7 @@ class CampaignWorker:
             messaging=messaging,
             default_plan_code=self._settings.default_plan_code,
         )
-        return await service.dispatch_batch(campaign, now=now)
+        return await service.dispatch_batch(campaign, now=now, lease=lease)
 
 
 __all__ = ["POLL_SECONDS", "CampaignWorker"]

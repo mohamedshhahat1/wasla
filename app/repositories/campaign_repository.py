@@ -18,10 +18,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.core.pagination import Cursor
+from app.core.telemetry import record_campaign_event
 from app.db.models.campaign import (
     Campaign,
     CampaignRecipient,
@@ -32,6 +34,8 @@ from app.db.models.conversation import Contact, Conversation, Message, MessageSt
 from app.db.models.lead import Lead, LeadStatus
 from app.repositories.base import BaseRepository, TenantScopedRepository
 from app.repositories.consent_repository import refused
+
+logger = get_logger(__name__)
 
 # How many campaigns one sweep takes on. Small: each one then sends a batch, and
 # a worker holding twenty campaigns' rows locked while it talks to Meta is
@@ -126,6 +130,53 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
             )
         )
         return status is CampaignStatus.CANCELLED
+
+    async def current_status(self, campaign_id: uuid.UUID) -> CampaignStatus | None:
+        """The campaign's status as committed now, never as a loaded object remembers it."""
+        status: CampaignStatus | None = await self.session.scalar(
+            select(Campaign.status).where(Campaign.id == campaign_id, self._tenant_filter())
+        )
+        return status
+
+    async def hold(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        lease_token: uuid.UUID | None,
+        lease_until: datetime | None,
+    ) -> bool:
+        """Whether this worker may go on sending this campaign, renewing its lease if so.
+
+        One conditional statement (CMP-01, CMP-08): the campaign is still
+        `scheduled` or `running` - a pause or a cancel committed since the
+        previous recipient answers False - and, with a `lease_token`, still
+        carries this worker's claim. Asked before every recipient, so a pause
+        stops the batch at the next person rather than after all of them, and a
+        worker whose lease was taken over sends nothing more.
+
+        The renewal is what lets a lease be shorter than a batch: it has to
+        outlast one recipient's send, not fifty. The row stays locked until
+        the send intent commits, so a concurrent pause waits for that commit
+        and is seen at the next recipient.
+        """
+        statement = (
+            update(Campaign)
+            .where(
+                Campaign.id == campaign_id,
+                self._tenant_filter(),
+                Campaign.status.in_([CampaignStatus.SCHEDULED, CampaignStatus.RUNNING]),
+            )
+            .returning(Campaign.id)
+            .execution_options(synchronize_session=False)
+        )
+        if lease_token is not None:
+            statement = statement.where(Campaign.lease_token == lease_token)
+        if lease_until is not None:
+            statement = statement.values(next_send_at=lease_until)
+        else:
+            # A no-op write that still takes the row lock and answers.
+            statement = statement.values(status=Campaign.status)
+        return (await self.session.execute(statement)).scalar_one_or_none() is not None
 
     async def require_by_id(self, campaign_id: uuid.UUID) -> Campaign:
         return await self._require(self._select().where(Campaign.id == campaign_id))
@@ -285,6 +336,38 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         result = await self.session.execute(statement)
         return list(result.scalars().all())
 
+    async def take(self, recipient: CampaignRecipient) -> CampaignRecipient | None:
+        """Own one pending recipient for one send, or None if that is not this worker's to do.
+
+        **The decisive guard against a second copy across workers** (CMP-01,
+        ADR-134). `claim_pending` locks the batch, but those locks end at the
+        first send commit (ADR-093 TX1), and the rest of the batch is then a
+        set of in-memory snapshots. This re-reads the row in one statement that
+        both checks and locks it: still `pending`, and not locked by another
+        worker that is between its own check and its send intent. The row is
+        refreshed from the database (`populate_existing`), so every decision
+        after this - including the abandon rule for a pending row that already
+        names a message - is taken from the row as it is, never from the
+        snapshot.
+
+        The lock is held until the send intent commits, by which time the row
+        names its message; a second worker reaching it afterwards sees that
+        link and abandons rather than sends. None means another worker owns
+        it, or finished it: skipped with no send and no attempt spent.
+        """
+        statement = (
+            select(CampaignRecipient)
+            .where(
+                CampaignRecipient.id == recipient.id,
+                CampaignRecipient.campaign_id == recipient.campaign_id,
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.status == RecipientStatus.PENDING,
+            )
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        )
+        return (await self.session.execute(statement)).scalars().one_or_none()
+
     async def statistics(self, campaign_id: uuid.UUID) -> CampaignStatistics:
         """Counts per outcome, plus what Meta has since said about delivery.
 
@@ -427,18 +510,44 @@ class DueCampaignClaim(BaseRepository[Campaign]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session)
 
-    async def claim_by_id(self, campaign_id: uuid.UUID) -> Campaign | None:
+    async def claim_by_id(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        lease_token: uuid.UUID | None = None,
+        lease_until: datetime | None = None,
+    ) -> Campaign | None:
         """Re-take one claimed campaign in a transaction of its own.
 
         The batch claim below hands back identifiers rather than rows to work
         with, because its transaction has committed by the time any batch is
         sent and an object from it is a snapshot. This reads the row again under
         its own lock, so a campaign paused in between is seen as paused.
+
+        **Only while the claim is still the caller's** (CMP-01). With a
+        `lease_token`, the row must still carry it: a campaign whose lease ran
+        out while this worker was busy with an earlier campaign of its sweep,
+        and which another replica has claimed since, answers None here and is
+        left to that replica. `lease_until` renews the lease from this moment,
+        because the claim that set it may have been minutes ago.
         """
-        statement = (
-            select(Campaign).where(Campaign.id == campaign_id).with_for_update(skip_locked=True)
+        statement = select(Campaign).where(Campaign.id == campaign_id)
+        if lease_token is not None:
+            statement = statement.where(Campaign.lease_token == lease_token)
+        campaign = (
+            (
+                await self.session.execute(
+                    statement.with_for_update(skip_locked=True).execution_options(
+                        populate_existing=True
+                    )
+                )
+            )
+            .scalars()
+            .one_or_none()
         )
-        return (await self.session.execute(statement)).scalars().one_or_none()
+        if campaign is not None and lease_until is not None:
+            campaign.next_send_at = lease_until
+        return campaign
 
     async def claim_due(
         self,
@@ -459,6 +568,16 @@ class DueCampaignClaim(BaseRepository[Campaign]):
         which is what keeps the guarantee once the lock is gone (ADR-093). It is
         the same column the query above filters on, so the lease is the rate
         limiter's own mechanism applied a moment earlier rather than a new one.
+
+        **Both kinds honour the lease** (CMP-01). A scheduled campaign stays
+        `scheduled` until its first send commits, so a branch that matched it
+        on `scheduled_at` alone handed a campaign another replica had just
+        leased to a second one. `schedule()` clears `next_send_at`, so a newly
+        scheduled campaign is due at once, as before.
+
+        Each claimed row gets a fresh `lease_token`, which the worker carries
+        to `claim_by_id` and to every recipient: a lease that runs out and is
+        re-taken changes the token, and the earlier holder stops.
         """
         statement = (
             select(Campaign)
@@ -469,14 +588,12 @@ class DueCampaignClaim(BaseRepository[Campaign]):
                         Campaign.scheduled_at.is_not(None),
                         Campaign.scheduled_at <= now,
                     ),
-                    and_(
-                        Campaign.status == CampaignStatus.RUNNING,
-                        or_(
-                            Campaign.next_send_at.is_(None),
-                            Campaign.next_send_at <= now,
-                        ),
-                    ),
-                )
+                    Campaign.status == CampaignStatus.RUNNING,
+                ),
+                or_(
+                    Campaign.next_send_at.is_(None),
+                    Campaign.next_send_at <= now,
+                ),
             )
             .order_by(Campaign.scheduled_at.nulls_last(), Campaign.id)
             .limit(limit)
@@ -486,7 +603,18 @@ class DueCampaignClaim(BaseRepository[Campaign]):
         claimed = list(result.scalars().all())
         if lease_until is not None:
             for row in claimed:
+                if row.lease_token is not None:
+                    # A batch ends by clearing its token, so one still set is
+                    # a lease that ran out under a worker that stopped, or
+                    # stalled, mid-batch. Counted: in normal operation it is
+                    # a crash, and anything more is a lease too short.
+                    logger.warning(
+                        "campaign.lease_taken_over",
+                        extra={"event": "campaign.lease_taken_over", "campaign_id": str(row.id)},
+                    )
+                    await record_campaign_event("lease_taken_over")
                 row.next_send_at = lease_until
+                row.lease_token = uuid.uuid4()
             await self.session.flush()
         return claimed
 

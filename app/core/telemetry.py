@@ -459,6 +459,37 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Refused provider requests by provider and error class.",
         ("provider", "class"),
     ),
+    # Campaign recipients by how their send ended (CMP-23): sent, skipped by
+    # policy, failed, abandoned because the outcome could not be known, or
+    # deferred (pair rate limit, CMP-18). Closed; no campaign or contact.
+    "wasla_campaign_sends_total": (
+        "Campaign recipients by how their send ended.",
+        ("outcome",),
+    ),
+    # Campaigns stopped - paused or failed by the system, or paused by an
+    # admin - by `status_reason` (CMP-02, CMP-07, CMP-20). Closed vocabulary
+    # (`CampaignStopReason`).
+    "wasla_campaign_stops_total": (
+        "Campaigns paused or failed, by the reason recorded on the campaign.",
+        ("reason",),
+    ),
+    # The two-worker guards (CMP-01): a lease re-taken after it ran out, a
+    # worker that found its lease gone and stopped, and a recipient the
+    # per-recipient claim refused because another worker owned it. In normal
+    # operation all three stay near zero; a rising `recipient_owned_elsewhere`
+    # is two workers overlapping on one campaign, which the claim made safe
+    # and which is still worth knowing about.
+    "wasla_campaign_events_total": (
+        "Campaign ownership events: lease takeovers, leases lost, recipients owned elsewhere.",
+        ("event",),
+    ),
+    # Template registry status changes, by what reported them (CMP-10,
+    # CMQ-05): a refused send, a provider `failed` status, or Meta's
+    # template status webhook.
+    "wasla_template_status_updates_total": (
+        "Template registry status changes, by the source that reported them.",
+        ("source",),
+    ),
     "wasla_http_body_too_large_total": (
         "Request bodies refused for size before reaching a route, by route group.",
         ("route_group",),
@@ -1090,6 +1121,64 @@ async def record_opt_outs(by_via: Mapping[str, int]) -> None:
         await _increment_by(
             "wasla_opt_outs_total", {"via": via if via in OPT_OUT_VIAS else "other"}, count
         )
+
+
+#: The closed domains of the campaign counters. `app.core` imports no model,
+#: so they are restated; tests hold them equal to `CampaignStopReason` and the
+#: outcomes `CampaignService` records.
+CAMPAIGN_SEND_OUTCOMES: Final = frozenset({"sent", "skipped", "failed", "abandoned", "deferred"})
+CAMPAIGN_STOP_REASONS: Final = frozenset(
+    {
+        "workspace_suspended",
+        "workspace_deleted",
+        "subscription_suspended",
+        "admin_paused",
+        "template_removed",
+        "template_not_approved",
+        "template_withdrawn",
+        "template_category",
+        "template_parameters_refused",
+        "connection_disabled",
+        "credential_refused",
+        "connection_refused",
+        "provider_unreachable",
+        "repeated_batch_failure",
+    }
+)
+CAMPAIGN_EVENTS: Final = frozenset({"lease_taken_over", "lease_lost", "recipient_owned_elsewhere"})
+TEMPLATE_STATUS_SOURCES: Final = frozenset({"send_writeback", "status_webhook", "template_webhook"})
+
+
+async def record_campaign_send(outcome: str) -> None:
+    """One campaign recipient's send outcome (CMP-23). Best-effort."""
+    await _increment(
+        "wasla_campaign_sends_total",
+        {"outcome": outcome if outcome in CAMPAIGN_SEND_OUTCOMES else "other"},
+    )
+
+
+async def record_campaign_stop(reason: str) -> None:
+    """One campaign paused or failed, by its recorded reason. Best-effort."""
+    await _increment(
+        "wasla_campaign_stops_total",
+        {"reason": reason if reason in CAMPAIGN_STOP_REASONS else "other"},
+    )
+
+
+async def record_campaign_event(event: str) -> None:
+    """One campaign ownership event (CMP-01). Best-effort."""
+    await _increment(
+        "wasla_campaign_events_total",
+        {"event": event if event in CAMPAIGN_EVENTS else "other"},
+    )
+
+
+async def record_template_status_update(source: str) -> None:
+    """One template registry status change, by its source (CMP-10, CMQ-05). Best-effort."""
+    await _increment(
+        "wasla_template_status_updates_total",
+        {"source": source if source in TEMPLATE_STATUS_SOURCES else "other"},
+    )
 
 
 #: The closed domain of `wasla_provider_errors_total{class}` - `MetaErrorClass`,
