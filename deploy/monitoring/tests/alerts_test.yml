@@ -2075,3 +2075,96 @@ tests:
     - eval_time: 100m
       alertname: AITurnLateChargeSpike
       exp_alerts: []
+  # ------------------------------------------------------------ campaigns
+  - interval: 1m
+    name: a campaign overdue for a sweep warns after fifteen minutes and clears when swept
+    input_series:
+    - series: wasla_campaigns_stuck{job="wasla-api"}
+      values: 0x10 2x40 0x40
+    alert_rule_test:
+    - eval_time: 20m
+      alertname: CampaignsStuck
+      exp_alerts: []
+    - eval_time: 40m
+      alertname: CampaignsStuck
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: campaigns
+        exp_annotations:
+          summary: Campaigns are due and no worker is sending them
+          description: Scheduled or running campaigns have been overdue for a sweep for more than half an hour. Check that a worker runs with WORKER_KINDS including campaign, its heartbeat, and campaign.sweep_failed in its logs (docs/RUNBOOK.md, "Campaigns are not sending").
+          runbook: docs/RUNBOOK.md
+    - eval_time: 80m
+      alertname: CampaignsStuck
+      exp_alerts: []
+  - interval: 1m
+    name: a recipient owned by another worker warns; lease takeovers alone do not
+    input_series:
+    - series: wasla_campaign_events_total{job="wasla-worker", event="recipient_owned_elsewhere"}
+      values: 0x10 1x100
+    - series: wasla_campaign_events_total{job="wasla-worker", event="lease_taken_over"}
+      values: 0+1x120
+    alert_rule_test:
+    - eval_time: 5m
+      alertname: CampaignRecipientOwnedElsewhere
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: CampaignRecipientOwnedElsewhere
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: campaigns
+        exp_annotations:
+          summary: Two campaign workers overlapped on one campaign
+          description: 'The per-recipient claim refused recipients another campaign worker owned within the last hour. No customer received a second copy, but leases are being taken over while a worker is still sending: check the replicas'' clocks, CLAIM_LEASE_SECONDS against the slowest send, and campaign.lease_taken_over in the logs.'
+          runbook: docs/RUNBOOK.md
+    - eval_time: 100m
+      alertname: CampaignRecipientOwnedElsewhere
+      exp_alerts: []
+  - interval: 1m
+    name: a provider-unreachable pause warns; an admin's pause never does
+    input_series:
+    - series: wasla_campaign_stops_total{job="wasla-worker", reason="provider_unreachable"}
+      values: 0x10 1x100
+    - series: wasla_campaign_stops_total{job="wasla-api", reason="admin_paused"}
+      values: 0+1x120
+    alert_rule_test:
+    - eval_time: 5m
+      alertname: CampaignsPausedProviderUnreachable
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: CampaignsPausedProviderUnreachable
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: campaigns
+        exp_annotations:
+          summary: Campaigns were paused because Meta could not be reached
+          description: A campaign was paused after Meta stayed unreachable for longer than CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS. No recipient's attempts were spent. Check outbound connectivity to graph.facebook.com, then have the workspace reschedule the campaign.
+          runbook: docs/RUNBOOK.md
+    - eval_time: 100m
+      alertname: CampaignsPausedProviderUnreachable
+      exp_alerts: []
+  - interval: 1m
+    name: a repeated-batch-failure pause warns and drains
+    input_series:
+    - series: wasla_campaign_stops_total{job="wasla-worker", reason="repeated_batch_failure"}
+      values: 0x10 1x100
+    alert_rule_test:
+    - eval_time: 5m
+      alertname: CampaignsPausedRepeatedBatchFailure
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: CampaignsPausedRepeatedBatchFailure
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: campaigns
+        exp_annotations:
+          summary: A campaign was paused after its batches kept failing
+          description: A campaign's batches raised CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER times in a row and it was paused. Find campaign.batch_failed with its error_type in the worker logs; fix the cause, then reschedule.
+          runbook: docs/RUNBOOK.md
+    - eval_time: 100m
+      alertname: CampaignsPausedRepeatedBatchFailure
+      exp_alerts: []

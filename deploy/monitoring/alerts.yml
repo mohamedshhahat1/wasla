@@ -1518,6 +1518,83 @@ groups:
             the longest turn, or find what is making turns slow.
           runbook: docs/RUNBOOK.md
 
+  # --------------------------------------------------------------- campaigns
+  #
+  # CMP-01, CMP-02, CMP-07, CMP-20, CMP-23. Bounded labels only: an event, a
+  # status_reason - never a workspace, campaign, connection or phone.
+  - name: wasla-campaigns
+    interval: 30s
+    rules:
+      - alert: CampaignsStuck
+        # Scheduled or running campaigns overdue for a sweep by more than
+        # fifteen minutes, counted at scrape time. A sweep moves next_send_at
+        # forward at once; one that stays in the past is a campaign worker that
+        # is not running or cannot claim.
+        expr: max(wasla_campaigns_stuck) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "Campaigns are due and no worker is sending them"
+          description: >-
+            Scheduled or running campaigns have been overdue for a sweep for
+            more than half an hour. Check that a worker runs with
+            WORKER_KINDS including campaign, its heartbeat, and
+            campaign.sweep_failed in its logs (docs/RUNBOOK.md, "Campaigns are
+            not sending").
+          runbook: docs/RUNBOOK.md
+
+      - alert: CampaignRecipientOwnedElsewhere
+        # The per-recipient claim refused a recipient another worker owned
+        # (CMP-01). Nobody received two copies - that is what the claim is
+        # for - but two workers overlapped on one campaign, which only a lease
+        # shorter than a send, or clock skew between replicas, explains.
+        expr: sum(increase(wasla_campaign_events_total{event="recipient_owned_elsewhere"}[1h])) > 0
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "Two campaign workers overlapped on one campaign"
+          description: >-
+            The per-recipient claim refused recipients another campaign worker
+            owned within the last hour. No customer received a second copy,
+            but leases are being taken over while a worker is still sending:
+            check the replicas' clocks, CLAIM_LEASE_SECONDS against the
+            slowest send, and campaign.lease_taken_over in the logs.
+          runbook: docs/RUNBOOK.md
+
+      - alert: CampaignsPausedProviderUnreachable
+        # A campaign waited out a Meta outage longer than the bound and was
+        # paused provider_unreachable (CMP-07). It will not resume by itself.
+        expr: sum(increase(wasla_campaign_stops_total{reason="provider_unreachable"}[1h])) > 0
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "Campaigns were paused because Meta could not be reached"
+          description: >-
+            A campaign was paused after Meta stayed unreachable for longer than
+            CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS. No recipient's attempts
+            were spent. Check outbound connectivity to graph.facebook.com, then
+            have the workspace reschedule the campaign.
+          runbook: docs/RUNBOOK.md
+
+      - alert: CampaignsPausedRepeatedBatchFailure
+        # Every recent batch of a campaign raised (CMP-20); it was paused
+        # repeated_batch_failure instead of being retried for ever.
+        expr: sum(increase(wasla_campaign_stops_total{reason="repeated_batch_failure"}[1h])) > 0
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "A campaign was paused after its batches kept failing"
+          description: >-
+            A campaign's batches raised CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER times
+            in a row and it was paused. Find campaign.batch_failed with its
+            error_type in the worker logs; fix the cause, then reschedule.
+          runbook: docs/RUNBOOK.md
+
   # --------------------------------------------------------------- database
   #
   # DB-023. The server's own view of the database, read by the API at scrape

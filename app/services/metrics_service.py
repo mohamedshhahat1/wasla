@@ -57,6 +57,7 @@ from app.repositories.agent_turn_repository import (
     ExpiredHoldSweep,
     OwedReleaseSweep,
 )
+from app.repositories.campaign_repository import DueCampaignClaim
 from app.repositories.channel_capacity_repository import PlatformCapacityReductionRepository
 from app.repositories.channel_event_repository import InboundEventSweep
 from app.repositories.channel_repository import ConnectionHealthCensus
@@ -112,6 +113,10 @@ DEPTH_GAUGES: tuple[tuple[str, str, str], ...] = (
 # the worker's numbers in Redis, but a pool is a level rather than a total and
 # a stale level is worse than a missing one). See ADR-085.
 API_ROLE: Final = "api"
+
+# How long a live campaign may stay due before it counts as stuck (CMP-23):
+# a sweep runs every fifteen seconds, and a lease is five minutes.
+STUCK_CAMPAIGN_AFTER: Final = timedelta(minutes=15)
 
 # `pool.overflow()` is deliberately not published. Its value is
 # `open_connections - pool_size`, so it reads `-5` on a cold pool of five and
@@ -184,7 +189,51 @@ class MetricsService:
         lines.extend(await self._messaging_lines(now=now))
         lines.extend(await self._media_lines(now=now))
         lines.extend(await self._entitlement_lines(now=now))
+        lines.extend(await self._campaign_lines(now=now))
         return self._registry.render(extra=lines)
+
+    async def _campaign_lines(self, *, now: datetime | None) -> list[str]:
+        """Campaigns that should be sending and are not (CMP-23).
+
+        A scheduled or running campaign whose moment came more than
+        `STUCK_CAMPAIGN_AFTER` ago and that no sweep has taken since - its
+        `next_send_at` (or, never claimed, `scheduled_at`) stays in the past.
+        A sweep that runs moves it forward at once, to a lease or to the rate's
+        next slot; a reading above zero is a campaign worker that is not
+        running or cannot claim. `CampaignsStuck` alerts on it.
+
+        No labels: which campaign is the database's question.
+        """
+        database = self._database
+        if database is None:
+            return []
+        moment = now or datetime.now(UTC)
+        try:
+            async with database.session() as session:
+                count, oldest = await DueCampaignClaim(session).stuck(
+                    before=moment - STUCK_CAMPAIGN_AFTER, now=moment
+                )
+        except Exception:
+            logger.warning(
+                "metrics.campaign_read_failed",
+                extra={"event": "metrics.campaign_read_failed"},
+            )
+            return []
+        lines: list[str] = []
+        for name, help_text, value in (
+            (
+                "wasla_campaigns_stuck",
+                "Scheduled or running campaigns overdue for a sweep by more than fifteen minutes.",
+                float(count),
+            ),
+            (
+                "wasla_campaigns_stuck_oldest_age_seconds",
+                "How long the most overdue campaign has waited for a sweep.",
+                oldest,
+            ),
+        ):
+            lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        return lines
 
     async def _entitlement_lines(self, *, now: datetime | None) -> list[str]:
         """AI turn holds and channel capacity across the deployment (ADR-131).

@@ -624,6 +624,21 @@ class DueCampaignClaim(BaseRepository[Campaign]):
             campaign.next_send_at = lease_until
         return campaign
 
+    async def stuck(self, *, before: datetime, now: datetime) -> tuple[int, float]:
+        """Live campaigns overdue since `before`, and the longest wait in seconds (CMP-23)."""
+        due = func.coalesce(Campaign.next_send_at, Campaign.scheduled_at)
+        row = (
+            await self.session.execute(
+                select(func.count(), func.min(due)).where(
+                    Campaign.status.in_([CampaignStatus.SCHEDULED, CampaignStatus.RUNNING]),
+                    due.is_not(None),
+                    due < before,
+                )
+            )
+        ).one()
+        count, earliest = int(row[0] or 0), row[1]
+        return count, max((now - earliest).total_seconds(), 0.0) if earliest else 0.0
+
     async def record_batch_failure(
         self,
         campaign_id: uuid.UUID,
