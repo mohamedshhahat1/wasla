@@ -8,6 +8,7 @@
 | Branch / worktree | `campaigns-header-media-20261015` at `E:\wasla-campaign-media` |
 | Alembic | `0106` → **`0107`** (single head) |
 | ADR | **ADR-144**; ADR-137 and ADR-134 amended |
+| Final code head | **`14081fe`** (CMV-01 test fix, section 24); first verified head `1f86c63` |
 | Pushed / merged / deployed | No (Part B of the stage merges and pushes) |
 | Meta / production | Not touched. No upload, send or template sync against real Meta |
 
@@ -454,5 +455,37 @@ sends one id to everyone; two and four workers upload once and nobody receives
 twice; every header failure is campaign-level and costs at most one request
 (two for the documented re-upload-once case); LOCATION and GIF stay refused;
 every meaningful mutant is killed and the remediation's regression mutants are
-still killed; both full lanes are 0 failed on `1f86c63`, the final code of the
-branch (the report commit after it changes only this file).
+still killed; both full lanes are 0 failed on `14081fe`, the final code of the
+branch (section 24; the report commit after it changes only this file).
+
+## 24. Addendum - CMV-01, found by Part B, fixed here
+
+Part B's first independent verification of `6d9728e` passed its lanes, the
+populated upgrade, APP-E2E and the kept-data sweep, but the **control** of its
+mutation spot-check, run while the kept-data sweep loaded the machine, failed
+one test: `test_many_workers_upload_once_and_send_everyone_once[4]` - **2
+uploads** where it asserted 1.
+
+**Cause (reproduced, a test defect).** The test used a 0.2 s lease and one
+600-a-minute batch. Under CPU load an upload outlasted the lease; another
+worker took the campaign over and uploaded again - exactly the takeover case
+HM-04 allows (at most two uploads, one id sent; `test_a_lease_taken_over_during_the_upload...`).
+The application behaved as specified; the test was stricter than its own
+lease. Reproduced in **3 of 5** runs with six CPU-bound processes beside it.
+
+**Fix (`14081fe`, test-only).** Every worker sweeps each round of a
+three-batch campaign (rate 10) with a 5 s lease, which outlasts an upload as
+the production 300 s lease does: one upload in all, every batch reusing the
+recorded id, nobody twice. **5 of 5** under the same load (with the takeover
+and held-before-upload tests).
+
+Re-run on `14081fe` (both full lanes, as the brief requires after a fix):
+
+| Lane | Head | Collected | Passed | Failed | Skipped | Time (UTC) |
+| --- | --- | --- | --- | --- | --- | --- |
+| MODEL-BUILT (`wasla-cmh-pg`) | `14081fe` | 7,053 | **7,035** | **0** | 18 | 20:37:49 → 21:30:35 |
+| MIGRATION-BUILT (`wasla-cmh-pg2`) | `14081fe` | 7,053 | **7,039** | **0** | 14 | 20:37:51 → 21:30:35 |
+
+Races on `14081fe`, three consecutive runs: **48 passed** x3. Skips: the known
+set, unchanged. The mutation matrix (section 14) needs no re-run: no mutant's
+killer is this test, and the code under every mutant is unchanged.
