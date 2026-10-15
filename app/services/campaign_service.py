@@ -42,6 +42,7 @@ from app.channels.throughput import ConnectionThrottledError
 from app.core.exceptions import (
     DependencyUnavailableError,
     ExternalServiceError,
+    PlanLimitExceededError,
     RateLimitedError,
     ValidationError,
 )
@@ -90,6 +91,7 @@ from app.services.audit_service import AuditTrail
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
     EntitlementService,
+    hold_limit_lock,
 )
 from app.services.messaging_service import MessagingService
 from app.services.opt_out import record_opt_out, record_resume
@@ -102,6 +104,11 @@ logger = get_logger(__name__)
 # the rate limit governs that — but a bound on how much one materialisation
 # writes in a single transaction, and a number a workspace has to ask to exceed.
 MAX_AUDIENCE_SIZE: Final = 50_000
+
+# The stable error code a schedule is refused with when the plan in force does
+# not include the campaign's channel (CMP-24): a 402, like every other plan
+# refusal, because the answer is an upgrade, not a permission.
+CHANNEL_NOT_IN_PLAN_CODE: Final = "channel_not_in_plan"
 
 # How far ahead a campaign may be scheduled. The lower bound is zero: sending
 # now is a legitimate thing to ask for, unlike a follow-up, which exists
@@ -323,10 +330,23 @@ class CampaignService:
 
         Draft only. Rebuilding the list of a campaign that has already sent to
         some of it would either duplicate those people or silently drop them.
+
+        **Draft under the row lock, and under the allowance's lock** (CMP-04,
+        ADR-136). The status was an unlocked read, so a wider audience could
+        commit after another admin had scheduled - and reserved for - the
+        narrower one, leaving a scheduled campaign owing more than it had
+        reserved (audit P11b: 200 pending against 10). `schedule()` locks the
+        same row, so the two are ordered: materialised first, the schedule
+        counts every recipient; scheduled first, this is refused.
         """
-        campaign = await self._campaigns.require_by_id(campaign_id)
+        campaign = await self._campaigns.lock_by_id(campaign_id)
         if campaign.status is not CampaignStatus.DRAFT:
             raise ValidationError("An audience can only be set while the campaign is a draft.")
+        # The campaign allowance's lock, taken after the row's as `schedule`
+        # takes them, so nothing that reads promised recipients interleaves.
+        await hold_limit_lock(
+            self._session, tenant_id=self._tenant_id, key=LimitKey.PERIOD_CAMPAIGN_MESSAGES
+        )
 
         members = await self._audience.list_eligible_members(
             account_id=campaign.account_id,
@@ -375,7 +395,9 @@ class CampaignService:
         audience and wants it to go. The worker still does the sending, so even
         "now" never blocks a request behind ten thousand messages.
         """
-        campaign = await self._campaigns.require_by_id(campaign_id)
+        # Locked, and read as it is now (CMP-04): an audience being
+        # materialised holds this row until it commits, and is then counted.
+        campaign = await self._campaigns.lock_by_id(campaign_id)
         if campaign.status not in SCHEDULABLE_FROM:
             raise ValidationError(f"A {campaign.status.value} campaign cannot be scheduled.")
 
@@ -384,17 +406,31 @@ class CampaignService:
             raise ValidationError("This campaign has nobody left to send to.")
 
         if self._entitlements is not None:
+            # The request's own entitlement service, which carries the
+            # deployment's default plan for a workspace on none.
+            if not await self._entitlements.channel_in_plan(await self._channel_of(campaign)):
+                # A campaign whose every copy would be skipped as
+                # `channel_not_in_plan` is refused here, before it reserves
+                # anything (CMP-24, ENT-16). The per-batch check stays: a plan
+                # can change after scheduling.
+                raise PlanLimitExceededError(
+                    "The plan in force does not include this campaign's channel.",
+                    error_code=CHANNEL_NOT_IN_PLAN_CODE,
+                )
             # Checked for the whole audience at once, before a single message
             # goes out. Refusing halfway through a broadcast would leave a
             # workspace having written to some of its customers and not others,
             # which is worse than refusing it outright (ADR-030).
             # Under the workspace's lock for this allowance, counting what
-            # other live campaigns have already been promised (BILL-08): two
-            # campaigns scheduled together used to fit into one remainder.
+            # other live campaigns have already been promised (BILL-08) - and
+            # **both counts are read after the lock is taken** (CMP-03): they
+            # are handed over as coroutine functions, not evaluated here.
+            # Evaluated as arguments, the read ran before the lock and two
+            # campaigns scheduled together both fitted into one remainder.
             await self._entitlements.reserve_period(
                 LimitKey.PERIOD_CAMPAIGN_MESSAGES,
-                additional=pending,
-                reserved=await self._recipients.pending_in_other_live_campaigns(campaign.id),
+                additional=lambda: self._recipients.pending_count(campaign.id),
+                reserved=lambda: self._recipients.pending_in_other_live_campaigns(campaign.id),
             )
 
         now = datetime.now(UTC)

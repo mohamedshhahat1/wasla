@@ -131,6 +131,21 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
         )
         return status is CampaignStatus.CANCELLED
 
+    async def lock_by_id(self, campaign_id: uuid.UUID) -> Campaign:
+        """One campaign, locked until the transaction ends and read as it is now.
+
+        `schedule()` and `set_audience()` both take it (CMP-04), so a
+        materialisation and a schedule of one campaign are ordered rather than
+        interleaved. `populate_existing`, because a request may already hold
+        the row in its identity map as it was loaded.
+        """
+        return await self._require(
+            self._select()
+            .where(Campaign.id == campaign_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
     async def lock_live(self) -> list[Campaign]:
         """This workspace's scheduled and running campaigns, locked, as they are now.
 

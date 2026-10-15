@@ -24,7 +24,7 @@ import asyncio
 import json
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -37,6 +37,7 @@ from app.core.config import Settings
 from app.db.models.audit import AuditLog
 from app.db.models.billing import Plan, Subscription
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
+from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -57,7 +58,7 @@ from app.services.entitlement_service import EntitlementService
 from app.services.messaging_service import MessagingService
 from app.workers.campaign_worker import CampaignWorker
 from tests.billing_fixtures import erase_ledger
-from tests.channel_plans import allow_channels
+from tests.channel_plans import EVERY_CHANNEL, allow_channels
 
 PLATFORM_TOKEN = "harness-platform-token"
 
@@ -203,6 +204,7 @@ async def seed(
     limits: dict[str, int] | None = None,
     variable_count: int = 0,
     body_text: str = "Hello.",
+    channels: Iterable[Channel] = EVERY_CHANNEL,
 ) -> Workspace:
     """A workspace with one number, an approved template and N people who wrote first."""
     suffix = uuid.uuid4().hex[:10]
@@ -210,7 +212,7 @@ async def seed(
         tenant = Tenant(name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}")
         session.add(tenant)
         await session.flush()
-        await allow_channels(session, tenant.id, limits=limits)
+        await allow_channels(session, tenant.id, channels, limits=limits)
         account = WhatsAppAccount(
             tenant_id=tenant.id,
             phone_number_id=f"pn-{suffix}",

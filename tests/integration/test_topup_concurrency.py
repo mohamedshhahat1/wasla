@@ -533,13 +533,18 @@ async def test_a_grant_racing_ai_consumption_never_oversells(
 async def test_a_topup_racing_campaign_scheduling_never_over_promises(
     maker: async_sessionmaker[AsyncSession], world: World
 ) -> None:
-    """Spec 52, 75 (campaigns): three campaigns of four recipients race a +5
+    """Spec 52, 75 (campaigns): four campaigns of four recipients race a +5
     campaign top-up on a base of 8, through the real scheduling path and its
     reservation of other live campaigns' unsent recipients.
 
     Promised sends never exceed the effective limit in force when each
     campaign was scheduled - at most 13 - so at most three schedule, and a
     third only ever alongside the top-up.
+
+    Four campaigns, not three (CMP-21): with three, a reservation that ignored
+    every other live campaign still scheduled at most 3 x 4 = 12 <= 13, so the
+    assertion held whatever the reservation did. With four it would schedule
+    all four - 16 promised against 13 - and fail; mutant M21 is killed here.
     """
     async with maker() as session:
         account = WhatsAppAccount(
@@ -559,6 +564,7 @@ async def test_a_topup_racing_campaign_scheduling_never_over_promises(
             status=TemplateStatus.APPROVED,
             body_text="Hello.",
             variable_count=0,
+            components=[{"type": "BODY", "text": "Hello."}],
         )
         session.add(template)
         for index in range(4):
@@ -578,7 +584,7 @@ async def test_a_topup_racing_campaign_scheduling_never_over_promises(
         await session.flush()
         campaign_ids = []
         service = CampaignService(session=session, tenant_id=world.tenant_id)
-        for index in range(3):
+        for index in range(4):
             campaign = await service.create(
                 account_id=account.id,
                 template_id=template.id,
