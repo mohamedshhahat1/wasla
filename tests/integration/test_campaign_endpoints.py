@@ -139,7 +139,7 @@ class StubCampaigns:
         self.scheduled.append({"campaign_id": campaign_id, "scheduled_at": scheduled_at})
         return _campaign(CampaignStatus.SCHEDULED)
 
-    async def pause(self, campaign_id: uuid.UUID) -> Campaign:
+    async def pause(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
         self.paused.append(campaign_id)
         return _campaign(CampaignStatus.PAUSED)
 
