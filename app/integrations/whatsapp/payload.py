@@ -73,7 +73,11 @@ WHATSAPP_OBJECT: Final = "whatsapp_business_account"
 # template status updates, account updates, and the Coexistence fields
 # `history`, `smb_app_state_sync` and `smb_message_echoes` - is refused and
 # counted until something here handles it (ADR-120).
-SUPPORTED_FIELDS: Final = frozenset({"messages", USER_PREFERENCES_FIELD})
+# A template's status changing at Meta (CMQ-05): keyed by the business
+# account, not a phone number, and applied to the registry by
+# `template_status_events` rather than as an inbound event.
+TEMPLATE_STATUS_FIELD: Final = "message_template_status_update"
+SUPPORTED_FIELDS: Final = frozenset({"messages", USER_PREFERENCES_FIELD, TEMPLATE_STATUS_FIELD})
 
 # The width of `contacts.wa_id`. A phone number is at most fifteen digits
 # (E.164); anything past this column is not a number Meta issued.
@@ -409,6 +413,10 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                 refused[RefusalReason.UNSUPPORTED_FIELD] += 1
                 continue
 
+            if change_field == TEMPLATE_STATUS_FIELD:
+                # Not a conversation event: `template_status_events` reads it.
+                continue
+
             value = _mapping(change.get("value"))
             phone_number_id = _text(_mapping(value.get("metadata")).get("phone_number_id"))
             if phone_number_id is None:
@@ -488,6 +496,50 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                 )
 
     return _envelope(messages, statuses, refused, preferences)
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateStatusEvent:
+    """Meta reporting a template's new status (CMQ-05).
+
+    `{"event": "APPROVED" | "PAUSED" | ..., "message_template_id",
+    "message_template_name", "message_template_language", "reason"}` under the
+    business account's entry (`entry.id`, `entry.time`) - "Message templates",
+    developers.facebook.com, read 2026-10-13.
+    """
+
+    waba_id: str
+    name: str
+    language: str
+    event: str
+    at: datetime | None
+
+
+def template_status_events(payload: Mapping[str, Any]) -> list[TemplateStatusEvent]:
+    """Every well-formed `message_template_status_update` in one delivery."""
+    if payload.get("object") != WHATSAPP_OBJECT:
+        return []
+    found: list[TemplateStatusEvent] = []
+    for raw_entry in _sequence(payload.get("entry")):
+        entry = _mapping(raw_entry)
+        waba_id = _text(entry.get("id"))
+        at = _timestamp(entry.get("time"))
+        for raw_change in _sequence(entry.get("changes")):
+            change = _mapping(raw_change)
+            if change.get("field") != TEMPLATE_STATUS_FIELD:
+                continue
+            value = _mapping(change.get("value"))
+            name = _text(value.get("message_template_name"))
+            language = _text(value.get("message_template_language"))
+            event = _text(value.get("event"))
+            if waba_id is None or name is None or language is None or event is None:
+                continue
+            found.append(
+                TemplateStatusEvent(
+                    waba_id=waba_id, name=name, language=language, event=event, at=at
+                )
+            )
+    return found
 
 
 def _preferences(

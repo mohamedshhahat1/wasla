@@ -207,6 +207,10 @@ class OptOutVia(StrEnum):
     REPLAY = "replay"
     #: Recorded by a colleague through the API.
     TEAM = "team"
+    #: The provider accepted a send and later reported it failed because the
+    #: person stopped marketing messages (131050 on a `failed` status, CMP-10).
+    #: Last, because 0105 appends the label (`ALTER TYPE ... ADD VALUE`).
+    PROVIDER_STATUS = "provider_status"
 
 
 # Statuses in which a campaign is finished and will never send again.

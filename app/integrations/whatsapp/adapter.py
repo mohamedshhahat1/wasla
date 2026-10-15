@@ -177,6 +177,20 @@ def message_event(message: InboundMessage) -> InboundEvent:
     )
 
 
+def status_error_code(raw: Mapping[str, Any]) -> int | None:
+    """Meta's own code on a `failed` status: `errors[0].code` (CMP-10).
+
+    The status webhook's `errors[]` carries `code`, `title`, `message` and
+    `error_data` ("Webhooks components", read 2026-10-13); only the code - a
+    published, fixed vocabulary - is kept. Never the prose.
+    """
+    errors = raw.get("errors")
+    if not isinstance(errors, list) or not errors or not isinstance(errors[0], Mapping):
+        return None
+    code = errors[0].get("code")
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
 def status_event(status: DeliveryStatus) -> InboundEvent:
     """One WhatsApp delivery status as a neutral event.
 
@@ -192,7 +206,12 @@ def status_event(status: DeliveryStatus) -> InboundEvent:
         occurred_at=status.timestamp,
         message_id=status.message_id,
         status=(
-            StatusUpdate(status=mapped, provider_status=status.status, message_id=status.message_id)
+            StatusUpdate(
+                status=mapped,
+                provider_status=status.status,
+                message_id=status.message_id,
+                error_code=status_error_code(status.raw),
+            )
             if mapped is not None
             else None
         ),

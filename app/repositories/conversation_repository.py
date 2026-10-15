@@ -880,6 +880,7 @@ class MessageRepository(TenantScopedRepository[Message]):
         status: MessageStatus,
         at: datetime,
         failure_text: str | None = None,
+        failure_code: int | None = None,
     ) -> Message:
         """Move a message forward, and never backwards.
 
@@ -906,6 +907,11 @@ class MessageRepository(TenantScopedRepository[Message]):
             message.read_at = at
         elif status is MessageStatus.FAILED and message.failure_reason is None:
             message.failure_reason = failure_text or PROVIDER_REPORTED_FAILURE
+        if status is MessageStatus.FAILED and message.failure_code is None:
+            # The code is kept whichever way the ranking goes (CMP-10): a
+            # failure after delivery does not change the status, and what it
+            # says - 131050, 132015 - is still worth having on the row.
+            message.failure_code = failure_code
 
         if _STATUS_ORDER[status] > _STATUS_ORDER[message.status]:
             message.status = status

@@ -166,6 +166,9 @@ class StatusUpdate:
     provider_status: str
     message_id: str | None = None
     watermark: datetime | None = None
+    #: The provider's numeric error code on a `failed` report (CMP-10): what
+    #: an asynchronous opt-out or a paused template is recognised by.
+    error_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

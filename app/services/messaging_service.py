@@ -107,7 +107,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.media import MediaStatus, MediaStorageState
 from app.db.models.user import User
-from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus
+from app.db.models.whatsapp_template import TemplateCategory
 from app.db.session import released
 from app.integrations.whatsapp.client import TemplateWithdrawnError, build_http_client
 from app.integrations.whatsapp.policy import SERVICE_WINDOW, WHATSAPP_TEXT_MAX_CHARS
@@ -127,6 +127,7 @@ from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
 from app.services.opt_out import record_opt_out
+from app.services.provider_feedback import SEND_WRITEBACK, withdraw_template
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -1072,18 +1073,15 @@ class MessagingService:
         template that Meta un-pauses look permanently dead until somebody
         noticed.
         """
-        template = await self._templates.find_anywhere(name=name, language=language)
-        if template is None:
-            return
-        template.status = TemplateStatus.PAUSED
-        template.rejection_reason = f"WhatsApp refused this template (code {code})."
-        logger.warning(
-            "whatsapp.template_withdrawn",
-            extra={
-                "event": "whatsapp.template_withdrawn",
-                "template_id": str(template.id),
-                "meta_code": code,
-            },
+        # One write-back for both sources - a refused send here, a later
+        # `failed` status in the conversation service (CMP-10).
+        await withdraw_template(
+            self._session,
+            tenant_id=self._tenant_id,
+            name=name,
+            language=language,
+            code=code,
+            source=SEND_WRITEBACK,
         )
 
     async def _undelivered(

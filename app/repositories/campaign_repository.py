@@ -85,6 +85,8 @@ class CampaignStatistics:
     skipped: int = 0
     delivered: int = 0
     read: int = 0
+    #: Sent - Meta accepted them - and reported `failed` afterwards (CMP-10).
+    failed_after_send: int = 0
 
     @property
     def total(self) -> int:
@@ -451,6 +453,17 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         )
         by_message = {status: int(count) for status, count in delivery.all()}
         read = by_message.get(MessageStatus.READ, 0)
+        failed_after_send = await self.session.scalar(
+            select(func.count())
+            .select_from(CampaignRecipient)
+            .join(Message, Message.id == CampaignRecipient.message_id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == RecipientStatus.SENT,
+                Message.status == MessageStatus.FAILED,
+            )
+        )
 
         return CampaignStatistics(
             pending=tally.get(RecipientStatus.PENDING, 0),
@@ -462,6 +475,7 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
             # counting `delivered` alone would undercount by everyone who read it.
             delivered=by_message.get(MessageStatus.DELIVERED, 0) + read,
             read=read,
+            failed_after_send=int(failed_after_send or 0),
         )
 
 

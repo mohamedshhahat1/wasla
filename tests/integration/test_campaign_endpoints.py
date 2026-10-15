@@ -223,6 +223,7 @@ async def test_statistics_report_delivery_as_well_as_outcome(
         "delivered": 2,
         "read": 1,
         "total": 4,
+        "failed_after_send": 0,
     }
 
 

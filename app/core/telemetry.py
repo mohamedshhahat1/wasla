@@ -573,6 +573,7 @@ OPT_OUT_VIAS: Final = frozenset(
         "reply_action",
         "provider_preference",
         "provider_refusal",
+        "provider_status",
         "replay",
         "team",
     }

@@ -81,6 +81,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
+from app.db.models.whatsapp_template import TemplateStatus
 from app.integrations.whatsapp.client import (
     MARKETING_OPTED_OUT_CODE,
     PAIR_RATE_LIMIT_CODE,
@@ -951,7 +952,13 @@ class CampaignService:
         refusal = refusal_reason_for(template)
         if refusal is not None or not template.is_sendable:
             return (
-                CampaignStopReason.TEMPLATE_NOT_APPROVED,
+                # Paused or disabled by Meta is a withdrawal; pending or
+                # rejected was never an approval.
+                (
+                    CampaignStopReason.TEMPLATE_WITHDRAWN
+                    if template.status in (TemplateStatus.PAUSED, TemplateStatus.DISABLED)
+                    else CampaignStopReason.TEMPLATE_NOT_APPROVED
+                ),
                 refusal or "WhatsApp has not approved this template.",
             )
         if not template.is_marketing:

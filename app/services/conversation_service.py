@@ -49,6 +49,7 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.media_repository import MediaRepository
 from app.services.contact_identity_service import SenderResolution
+from app.services.provider_feedback import act_on_failed_status
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
@@ -313,12 +314,25 @@ class ConversationProjectionService:
             ):
                 # The provider's own time for the send (OMNI-042).
                 message.provider_sent_at = event.occurred_at
-            return self._messages.advance_status(
+            advanced = self._messages.advance_status(
                 message,
                 status=update.status,
                 at=at,
                 failure_text=provider_reported_failure(connection.channel),
+                failure_code=update.error_code,
             )
+            if update.status is MessageStatus.FAILED:
+                # What the code means beyond this message: an opt-out
+                # (131050), a paused template (132015) (CMP-10).
+                await act_on_failed_status(
+                    self._session,
+                    tenant_id=self._tenant_id,
+                    message=message,
+                    channel=connection.channel,
+                    code=update.error_code,
+                    at=at,
+                )
+            return advanced
         if update.message_id is not None:
             logger.info(
                 "channel.status_for_unknown_message",
