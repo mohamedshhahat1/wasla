@@ -174,13 +174,23 @@ async def test_thirty_people_one_upload_thirty_sends_one_id(
 async def test_many_workers_upload_once_and_send_everyone_once(
     prepared_database: str, storage: MediaStorage, replicas: int
 ) -> None:
+    """2 and 4 workers contend for every sweep of a three-batch campaign: one upload in all.
+
+    Each round, every worker sweeps at once; whichever claims the campaign
+    sends a batch of 10 and the rest find it leased. Later batches - possibly
+    on other workers - reuse the id the first recorded. The lease outlasts an
+    upload, as in production (300 s): a lease that runs out *during* an upload
+    is the takeover case, which may upload twice and sends one id
+    (`test_a_lease_taken_over_during_the_upload...`). A 0.2 s lease here made
+    this test see that case whenever the machine was loaded (CMV-01).
+    """
     meta = FakeMeta(latency=0.005)
     pool = [
         worker(
             prepared_database,
             meta,
             name=f"w{index}",
-            lease_seconds=0.2,
+            lease_seconds=5.0,
             claim_limit=2,
             storage=storage,
         )
@@ -189,23 +199,19 @@ async def test_many_workers_upload_once_and_send_everyone_once(
     database = pool[0][1]
     try:
         await quiesce(database)
-        _, _, campaign_id = await _media_campaign(database, storage, recipients=30, rate=600)
+        _, _, campaign_id = await _media_campaign(database, storage, recipients=30, rate=10)
+        start = datetime.now(UTC)
 
-        async def replica(index: int) -> None:
-            each, _ = pool[index]
-            await asyncio.sleep(0.02 * index)
-            for _ in range(40):
-                await each.run_once()
-                await asyncio.sleep(0.02)
-
-        await asyncio.gather(*(replica(index) for index in range(replicas)))
-        await _drain(*(each for each, _ in pool))
+        for round_ in range(4):
+            moment = start + timedelta(minutes=2 * round_)
+            await asyncio.gather(*(each.run_once(now=moment) for each, _ in pool))
 
         assert len(meta.uploads) == 1
         assert len(meta.requests) == 30
         assert meta.received_twice() == 0
         assert len(set(meta.header_ids())) == 1
         row = await ledger(database, campaign_id)
+        assert row.status is CampaignStatus.COMPLETED
         assert row.sent == 30 and row.meters == 30 and row.conversations_with_two == 0
     finally:
         await quiesce(database)
