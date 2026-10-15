@@ -2058,6 +2058,21 @@ with one of the new actions - because dropping it would lose why a campaign
 stopped or what was sent. Enum labels are never dropped. 0106's downgrade drops
 only the two constraints.
 
+### Campaign header media (0107)
+
+One additive migration (CAMPAIGN_HEADER_MEDIA_IMPLEMENTATION.md, ADR-144):
+
+| Revision | Adds |
+| --- | --- |
+| 0107 | table `campaign_header_media`; `campaigns.header_media_id`, `header_provider_media_id`, `header_provider_uploaded_at`, `header_provider_account_id` with `fk_campaigns_tenant_header_media`, `fk_campaigns_tenant_header_provider_account`, `ck_campaigns_header_provider_complete`; `status_reason` gains `header_media_unavailable`, `header_media_refused`; audit action `campaign_header_media_uploaded`; `ix_campaigns_header_media_id` (`CONCURRENTLY`) |
+
+Online in the same way as 0101-0106: the table is new and empty, the columns
+are nullable without a default, every constraint on `campaigns` is added `NOT
+VALID` then validated under a 15 s `lock_timeout`, the label and the index are
+built in autocommit blocks. **The downgrade refuses** (nothing changed) while
+any header file exists, any campaign names one or Meta's id for one, any
+campaign stopped for a header reason, or any audit entry records an upload.
+
 ---
 
 ### Platform entitlement operations (0099-0100)

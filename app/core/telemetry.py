@@ -1144,9 +1144,23 @@ CAMPAIGN_STOP_REASONS: Final = frozenset(
         "connection_refused",
         "provider_unreachable",
         "repeated_batch_failure",
+        "header_media_unavailable",
+        "header_media_refused",
     }
 )
-CAMPAIGN_EVENTS: Final = frozenset({"lease_taken_over", "lease_lost", "recipient_owned_elsewhere"})
+CAMPAIGN_EVENTS: Final = frozenset(
+    {
+        "lease_taken_over",
+        "lease_lost",
+        "recipient_owned_elsewhere",
+        # A campaign's header file uploaded to Meta: the first time, again
+        # because the id was older than the refresh age, and again because a
+        # send was answered "media unknown" (HM-04, HM-05, HM-06).
+        "header_media_uploaded",
+        "header_media_refreshed",
+        "header_media_reupload_on_send",
+    }
+)
 TEMPLATE_STATUS_SOURCES: Final = frozenset({"send_writeback", "status_webhook", "template_webhook"})
 
 
