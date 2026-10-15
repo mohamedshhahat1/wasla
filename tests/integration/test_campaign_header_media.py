@@ -637,3 +637,58 @@ async def test_metas_id_is_in_no_response_and_no_log_line(
             )
         ).scalars()
         assert all(provider_id not in str(meta_) for meta_ in trail)
+
+
+async def test_a_worker_held_before_its_upload_past_its_lease_uploads_once(
+    prepared_database: str, storage: MediaStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker held between its claim and its upload, past its lease: one upload in all (HM-04).
+
+    A is held after claiming its batch, before preparing the header, for longer
+    than its lease. The campaign row stays locked from `claim_by_id` until the
+    upload's first commit, so B cannot take it over in that window, and A's
+    `hold()` before the upload still finds its own token. Either way exactly
+    one worker uploads, once, and everybody is sent that id once. (Without the
+    row lock and without `hold()`, B takes over and A uploads a second copy:
+    the combined mutant that proves `hold()` an independent guard.)
+    """
+    from app.repositories.campaign_repository import CampaignRecipientRepository
+
+    meta = FakeMeta(latency=0.005)
+    a, db_a = worker(prepared_database, meta, name="a", lease_seconds=0.5, storage=storage)
+    b, db_b = worker(prepared_database, meta, name="b", lease_seconds=0.5, storage=storage)
+    original = CampaignRecipientRepository.claim_pending
+    calls = 0
+    held = asyncio.Event()
+
+    async def slow_first(self: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        claimed = await original(self, *args, **kwargs)
+        if calls == 1:
+            held.set()
+            await asyncio.sleep(1.2)
+        return claimed
+
+    monkeypatch.setattr(CampaignRecipientRepository, "claim_pending", slow_first)
+    try:
+        await quiesce(db_a)
+        _, _, campaign_id = await _media_campaign(db_a, storage, recipients=10)
+        running = asyncio.create_task(a.run_once())
+        await held.wait()
+        await asyncio.sleep(0.7)
+        await b.run_once()
+        await running
+        await _drain(a, b)
+
+        assert len(meta.uploads) == 1
+        uploader = meta.uploads[0]["worker"]
+        assert len(meta.requests) == 10 and meta.by_worker()[uploader] == 10
+        assert set(meta.header_ids()) == {meta.header_ids()[0]}
+        assert meta.received_twice() == 0
+        assert (await ledger(db_a, campaign_id)).sent == 10
+    finally:
+        await quiesce(db_a)
+        await erase(db_a)
+        await db_a.dispose()
+        await db_b.dispose()
