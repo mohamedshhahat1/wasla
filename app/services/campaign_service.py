@@ -884,10 +884,13 @@ class CampaignService:
                 # that cannot send at all; the second would burn the whole
                 # audience's attempts one person at a time (MSG-18).
                 #
-                # The recipient this happened to keeps its claim and is left
-                # pending. The campaign has stopped, so nothing will pick it up
-                # until somebody restarts the campaign - which is the point at
-                # which the credential has been fixed.
+                # The recipient this happened to is left pending, its attempts
+                # untouched. Its message is recorded UNDELIVERED - Meta read
+                # the request and refused it - so the link is cleared: on
+                # resume this person is sent, not abandoned as unconfirmed
+                # (CMP-11). The campaign has stopped, so nothing picks it up
+                # until somebody restarts it, once the credential is fixed.
+                recipient.message_id = None
                 if not await self._campaigns.hold(
                     campaign.id, lease_token=token, lease_until=lease_until()
                 ):
