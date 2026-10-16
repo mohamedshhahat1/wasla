@@ -491,6 +491,19 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Campaigns that began waiting by themselves, by reason.",
         ("reason",),
     ),
+    # A business portfolio's messaging limit Meta stated in a value Wasla does
+    # not recognise (LIM-01): treated as the lowest level, 250, never guessed
+    # upward. Unlabelled; any increase is alerted (MessagingLimitUnknown).
+    "wasla_campaign_messaging_limit_unknown_total": (
+        "Messaging limit values Meta stated that Wasla did not recognise.",
+        (),
+    ),
+    # Meta's `account_alerts`, by the documented limit-increase alert types
+    # and `other` (LIM-01).
+    "wasla_messaging_limit_alerts_total": (
+        "Account alerts from Meta, by alert type.",
+        ("alert_type",),
+    ),
     # Template registry status changes, by what reported them (CMP-10,
     # CMQ-05): a refused send, a provider `failed` status, or Meta's
     # template status webhook.
@@ -1204,6 +1217,28 @@ async def record_campaign_wait(reason: str) -> None:
     await _increment(
         "wasla_campaign_waits_total",
         {"reason": reason if reason in CAMPAIGN_WAIT_REASONS else "other"},
+    )
+
+
+MESSAGING_LIMIT_ALERT_TYPES: Final = frozenset(
+    {
+        "INCREASED_CAPABILITIES_ELIGIBILITY_DEFERRED",
+        "INCREASED_CAPABILITIES_ELIGIBILITY_FAILED",
+        "INCREASED_CAPABILITIES_ELIGIBILITY_NEED_MORE_INFO",
+    }
+)
+
+
+async def record_messaging_limit_unknown() -> None:
+    """One messaging limit value Wasla did not recognise (LIM-01). Best-effort."""
+    await _increment("wasla_campaign_messaging_limit_unknown_total", {})
+
+
+async def record_messaging_limit_alert(alert_type: str) -> None:
+    """One `account_alerts` delivery, by type (LIM-01). Best-effort."""
+    await _increment(
+        "wasla_messaging_limit_alerts_total",
+        {"alert_type": alert_type if alert_type in MESSAGING_LIMIT_ALERT_TYPES else "other"},
     )
 
 

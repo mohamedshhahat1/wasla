@@ -122,6 +122,7 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services import messaging_limit_service as portfolio_limits
 from app.services import workspace_serving as serving
 from app.services.audit_service import AuditTrail
 from app.services.campaign_header_media_service import (
@@ -245,6 +246,7 @@ class CampaignService:
         provider_unreachable_pause: timedelta | None = None,
         storage: MediaStorage | None = None,
         header_media_refresh: timedelta | None = None,
+        limits: portfolio_limits.MessagingLimitService | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -283,6 +285,9 @@ class CampaignService:
             if header_media_refresh is not None
             else DEFAULT_HEADER_MEDIA_REFRESH
         )
+        # Reads Meta's messaging limit before a schedule when the stored value
+        # is stale (LIM-01). A request supplies it; the worker never reads.
+        self._limits = limits
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
@@ -564,6 +569,22 @@ class CampaignService:
 
     # -------------------------------------------------------------- lifecycle
 
+    async def refresh_messaging_limit(self, campaign_id: uuid.UUID) -> None:
+        """Read the sending number's limit again if it is older than the refresh age (LIM-01).
+
+        Called by the schedule route before `schedule`, outside any lock: a
+        Graph call is never made under a row or advisory lock (ADR-093). A
+        read that fails leaves the stored value in force; one never read
+        leaves the schedule to refuse.
+        """
+        if self._limits is None:
+            return
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        account = await self._accounts.get_by_id(campaign.account_id)
+        if account is None:
+            return
+        await self._limits.refresh_if_stale(account)
+
     async def schedule(
         self,
         *,
@@ -586,6 +607,15 @@ class CampaignService:
         pending = await self._recipients.pending_count(campaign.id)
         if pending == 0:
             raise ValidationError("This campaign has nobody left to send to.")
+        if not (await portfolio_limits.limit_for_account(self._session, campaign.account_id)).known:
+            # **Never against a limit nobody has read** (LIM-01): Meta's
+            # messaging limit for this number's portfolio could not be read
+            # yet. Refused, and read again at the next attempt.
+            raise ValidationError(
+                "WhatsApp's messaging limit for this number could not be read yet. "
+                "Try again in a moment.",
+                error_code=portfolio_limits.LIMIT_UNKNOWN_CODE,
+            )
         if campaign.header_media_id is not None:
             # A header file retention has removed since composition (HM-07):
             # refused here, rather than scheduled to pause at its first batch.
@@ -848,6 +878,16 @@ class CampaignService:
         if quiet.contains(moment):
             return await self._wait(
                 campaign, CampaignWaitReason.QUIET_HOURS, until=quiet.ends_after(moment)
+            )
+        if not (await portfolio_limits.limit_for_account(self._session, campaign.account_id)).known:
+            # **Fail closed** (LIM-01): nobody has read Meta's messaging limit
+            # for this number's portfolio - a number connected before 0110,
+            # say, before the deploy step read it. Nothing is sent against an
+            # unknown limit; the campaign waits and looks again.
+            return await self._wait(
+                campaign,
+                CampaignWaitReason.LIMIT_UNKNOWN,
+                until=moment + LIMIT_UNKNOWN_RECHECK,
             )
 
         if campaign.status is CampaignStatus.SCHEDULED:
@@ -2058,6 +2098,10 @@ HEADER_MEDIA_REJECTED_CODE: Final = 131053
 # five days before (HM-05; `campaign_header_media_refresh_seconds`).
 DEFAULT_HEADER_MEDIA_REFRESH: Final = timedelta(days=25)
 DEFAULT_PROVIDER_UNREACHABLE_PAUSE: Final = timedelta(hours=6)
+# How often a campaign whose number's messaging limit was never read looks
+# again (LIM-01). The deploy step reads every connection's limit; this is what
+# a campaign does until it has.
+LIMIT_UNKNOWN_RECHECK: Final = timedelta(minutes=5)
 
 
 def _clear_wait(campaign: Campaign) -> None:

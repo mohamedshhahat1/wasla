@@ -173,4 +173,7 @@ markers = [
     # Without it a workspace's quiet hours never bind (tests/conftest.py):
     # suites run at any hour, and only these test the window (TZ-03).
     "quiet_hours: exercises the real quiet-hours window rather than daytime",
+    # Without it every number's messaging limit reads as known and unlimited
+    # (tests/conftest.py); only these exercise the limit and the ledger.
+    "messaging_limit: exercises Meta's real portfolio limit, ledger and budget",
 ]

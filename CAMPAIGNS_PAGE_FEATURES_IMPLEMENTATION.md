@@ -14,8 +14,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 |---|---|---|---|---|
 | 0 | Baseline, Meta's documentation, before-probes | committed | 1ca3e86 | p20, p21 at BASE_HEAD |
 | 1 | Workspace timezone, timezones API | committed | 5450912 | timezones unit + API, workspace lifecycle, route authorization, documentation truth, auth endpoints (89 passed); migration-built: schema parity, downgrade atomicity, every migration suite |
-| 2 | Quiet hours | committed | (this commit) | every campaign suite + unit (308 passed after the fixes below); quiet hours, settings API, timezones API; migration-built: schema parity, downgrade atomicity, quiet hours |
-| 3 | Meta messaging limit: read, store, webhooks | not started | | |
+| 2 | Quiet hours | committed | 2015b7d | every campaign suite + unit (308 passed after the fixes below); quiet hours, settings API, timezones API; migration-built: schema parity, downgrade atomicity, quiet hours |
+| 3 | Meta messaging limit: read, store, webhooks | committed | (this commit) | every campaign, WhatsApp and webhook suite + metric/doc/deployment checks (658 passed after the fixes below); messaging limit reads + values; migration-built: parity, downgrade atomicity, limit reads |
 | 4 | Ledger and the 80 % budget | not started | | |
 | 5 | Spreading, deadline, delivery plan, ETA | not started | | |
 | 6 | Per-contact cap, pacing, 131049 | not started | | |
@@ -172,3 +172,39 @@ repository's file-level `# ruff: noqa: F811` convention); three `TenantRepositor
 calls in `tests/unit/test_repositories.py` and `tests/integration/test_authorization.py`
 lacked the zone (mypy); the three new `timezone` request fields were plain `str` instead of
 `StorableText` (the NUL guard) - `tests/unit/test_request_text_storability.py` found it.
+
+## Phase 1 full model-built lane (on 5450912)
+
+`12 failed, 7047 passed, 18 skipped` in 40 min (concurrent targeted runs on the same server).
+Every one of the 12 is a defect of the Phase 1 commit already fixed in 2015b7d: seven in
+`test_authorization.py` and two in `test_repositories.py` (`TenantRepository.create` without
+the zone), three in `test_request_text_storability.py` (the zone fields did not refuse NUL).
+
+## Phase 3 notes (LIM-01, LIM-02)
+
+- Meta's value -> a number, one table (`messaging_limit_service.interpret`): `TIER_50`, `TIER_250`,
+  `TIER_2K`, `TIER_10K`, `TIER_100K`, `TIER_UNLIMITED`; the deprecated per-phone integers and -1.
+  Anything else (`UNTIERED`, `TIER_NOT_SET`, ...) is 250, `recognised = false`, counted
+  (`wasla_campaign_messaging_limit_unknown_total`).
+- Migration **0110**: `whatsapp_business_portfolios` (platform-level; keyed `(key_kind, meta_key)`
+  = the WABA, because Meta names no portfolio field on the WABA) and
+  `whatsapp_accounts.portfolio_id` (FK NOT VALID -> VALIDATE, partial index CONCURRENTLY).
+- The read: `MetaMessagingLimitReader` on **v24.0 for this one call** (`META_MESSAGING_LIMIT_API_VERSION`);
+  the global `META_API_VERSION` stays v21.0. With the number's own credential (ADR-034).
+- Read on connect and credential rotation (with the credential just proven) and on enable (stored
+  credential) - each **before** the capacity lock; on schedule when older than
+  `CAMPAIGN_MESSAGING_LIMIT_REFRESH_SECONDS` (route, before the schedule's row lock); and from the
+  `business_capability_update` webhook (entry id = WABA; ordered by time - an older delivery never
+  overwrites). `account_alerts` is recorded (log, `wasla_messaging_limit_alerts_total{alert_type}`)
+  and changes nothing.
+- Fail closed: a never-read limit refuses the schedule (422 `messaging_limit_unknown`) and makes a
+  running campaign wait (`waiting_reason = limit_unknown`, re-checked every 5 minutes).
+- Deploy step: `python -m scripts.read_messaging_limits` (idempotent; lists every number it could
+  not read; exit 1 if any).
+- Tests: `tests/conftest.py` gives unmarked tests a known, unlimited limit and an unreadable reader;
+  tests marked `messaging_limit` run the real reads, rows and gates. The fake Meta answers
+  `GET /{phone-number-id}?fields=whatsapp_business_manager_messaging_limit` in Meta's documented
+  shape and records each read (version, field, credential).
+- Intended test changes: `test_campaign_endpoints.py`'s service stub gained
+  `refresh_messaging_limit` (the schedule route now calls it); `test_whatsapp_models.py` expects
+  `ix_whatsapp_accounts_portfolio_id`.

@@ -134,6 +134,9 @@ class StubCampaigns:
         self.audiences.append({"campaign_id": campaign_id, "filters": filters})
         return _campaign()
 
+    async def refresh_messaging_limit(self, campaign_id: uuid.UUID) -> None:
+        """The schedule route reads the number's limit first when stale (LIM-01)."""
+
     async def schedule(
         self,
         *,

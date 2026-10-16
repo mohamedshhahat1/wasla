@@ -58,6 +58,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.membership_service import MembershipService
+from app.services.messaging_limit_service import MessagingLimitService
 from app.services.messaging_service import MessagingService
 from app.services.payment_method_service import PaymentMethodService
 from app.services.plan_catalog import PlanCatalog
@@ -186,6 +187,8 @@ def get_whatsapp_account_service(
         # The channel capacity guard resolves a workspace without a serving
         # subscription to this plan (ENT-08); from settings, never a request.
         default_plan_code=settings.default_plan_code,
+        # Meta's messaging limit, read on connect, rotation and enable (LIM-01).
+        limits=MessagingLimitService(session, settings=settings),
     )
 
 
@@ -365,6 +368,9 @@ def get_campaign_service(
             tenant_id=workspace.tenant.id,
             default_plan_code=settings.default_plan_code,
         ),
+        # Reads Meta's messaging limit again before a schedule, when stale
+        # (LIM-01).
+        limits=MessagingLimitService(session, settings=settings),
     )
 
 

@@ -242,7 +242,12 @@ async def schedule_campaign(
 
     Even "now" returns immediately: the worker does the sending, so no request
     is ever held open behind ten thousand messages.
+
+    Meta's messaging limit for the sending number is read again first when
+    the stored value is older than six hours (LIM-01); a number whose limit
+    was never read is refused, 422 `messaging_limit_unknown`.
     """
+    await campaigns.refresh_messaging_limit(campaign_id)
     campaign = await campaigns.schedule(
         campaign_id=campaign_id,
         scheduled_at=payload.scheduled_at,

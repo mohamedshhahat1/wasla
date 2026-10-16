@@ -77,7 +77,29 @@ WHATSAPP_OBJECT: Final = "whatsapp_business_account"
 # account, not a phone number, and applied to the registry by
 # `template_status_events` rather than as an inbound event.
 TEMPLATE_STATUS_FIELD: Final = "message_template_status_update"
-SUPPORTED_FIELDS: Final = frozenset({"messages", USER_PREFERENCES_FIELD, TEMPLATE_STATUS_FIELD})
+# A business portfolio's messaging limit changing, and Meta's alerts about the
+# account - a refused limit increase among them (LIM-01; "Messaging limits",
+# `business_capability_update` and `account_alerts` references, read
+# 2026-10-16). Keyed by the business account (`entry[].id`), like template
+# status, and applied by `MessagingLimitService` rather than as inbound events.
+CAPABILITY_FIELD: Final = "business_capability_update"
+ACCOUNT_ALERTS_FIELD: Final = "account_alerts"
+WABA_FIELDS: Final = frozenset({TEMPLATE_STATUS_FIELD, CAPABILITY_FIELD, ACCOUNT_ALERTS_FIELD})
+SUPPORTED_FIELDS: Final = frozenset({"messages", USER_PREFERENCES_FIELD}) | WABA_FIELDS
+# Meta's documented `alert_type`s for a limit increase that was not granted;
+# anything else is counted as `other`.
+LIMIT_ALERT_TYPES: Final = frozenset(
+    {
+        "INCREASED_CAPABILITIES_ELIGIBILITY_DEFERRED",
+        "INCREASED_CAPABILITIES_ELIGIBILITY_FAILED",
+        "INCREASED_CAPABILITIES_ELIGIBILITY_NEED_MORE_INFO",
+    }
+)
+
+# A WABA id is a numeric string well inside this; a messaging-limit value is
+# a short `TIER_*` word or a number.
+MAX_WABA_ID_LENGTH: Final = 64
+MAX_LIMIT_VALUE_LENGTH: Final = 40
 
 # The width of `contacts.wa_id`. A phone number is at most fifteen digits
 # (E.164); anything past this column is not a number Meta issued.
@@ -413,8 +435,9 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                 refused[RefusalReason.UNSUPPORTED_FIELD] += 1
                 continue
 
-            if change_field == TEMPLATE_STATUS_FIELD:
-                # Not a conversation event: `template_status_events` reads it.
+            if change_field in WABA_FIELDS:
+                # Not a conversation event: `template_status_events`,
+                # `capability_events` and `account_alert_events` read them.
                 continue
 
             value = _mapping(change.get("value"))
@@ -539,6 +562,80 @@ def template_status_events(payload: Mapping[str, Any]) -> list[TemplateStatusEve
                     waba_id=waba_id, name=name, language=language, event=event, at=at
                 )
             )
+    return found
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityEvent:
+    """A `business_capability_update`: the portfolio's new messaging limit (LIM-01).
+
+    `value` is Meta's: `max_daily_conversations_per_business` (a `TIER_*`
+    string, or an integer in Meta's own example) or, before it, the deprecated
+    `max_daily_conversation_per_phone` (an integer, -1 for unlimited).
+    """
+
+    waba_id: str
+    value: str | int
+    at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountAlertEvent:
+    """An `account_alerts` delivery, its `alert_type` folded into a closed set."""
+
+    waba_id: str
+    alert_type: str
+    at: datetime | None
+
+
+def _waba_changes(
+    payload: Mapping[str, Any], field: str
+) -> list[tuple[str, datetime | None, Mapping[str, Any]]]:
+    if payload.get("object") != WHATSAPP_OBJECT:
+        return []
+    found: list[tuple[str, datetime | None, Mapping[str, Any]]] = []
+    for raw_entry in _sequence(payload.get("entry")):
+        entry = _mapping(raw_entry)
+        waba_id = _bounded(entry.get("id"), MAX_WABA_ID_LENGTH)
+        at = _timestamp(entry.get("time"))
+        for raw_change in _sequence(entry.get("changes")):
+            change = _mapping(raw_change)
+            if change.get("field") != field or waba_id is None:
+                continue
+            found.append((waba_id, at, _mapping(change.get("value"))))
+    return found
+
+
+def capability_events(payload: Mapping[str, Any]) -> list[CapabilityEvent]:
+    """Every well-formed `business_capability_update` in one delivery."""
+    found: list[CapabilityEvent] = []
+    for waba_id, at, value in _waba_changes(payload, CAPABILITY_FIELD):
+        stated: Any = value.get("max_daily_conversations_per_business")
+        if stated is None:
+            stated = value.get("max_daily_conversation_per_phone")
+        if isinstance(stated, bool):
+            continue
+        if isinstance(stated, int):
+            found.append(CapabilityEvent(waba_id=waba_id, value=stated, at=at))
+            continue
+        text = _bounded(stated, MAX_LIMIT_VALUE_LENGTH)
+        if text is not None:
+            found.append(CapabilityEvent(waba_id=waba_id, value=text, at=at))
+    return found
+
+
+def account_alert_events(payload: Mapping[str, Any]) -> list[AccountAlertEvent]:
+    """Every `account_alerts` delivery, its type in `LIMIT_ALERT_TYPES` or `other`."""
+    found: list[AccountAlertEvent] = []
+    for waba_id, at, value in _waba_changes(payload, ACCOUNT_ALERTS_FIELD):
+        stated = _text(value.get("alert_type"))
+        found.append(
+            AccountAlertEvent(
+                waba_id=waba_id,
+                alert_type=stated if stated in LIMIT_ALERT_TYPES else "other",
+                at=at,
+            )
+        )
     return found
 
 

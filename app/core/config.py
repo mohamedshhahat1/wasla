@@ -590,6 +590,16 @@ class Settings(BaseSettings):
     campaign_header_media_refresh_seconds: int = Field(
         default=25 * 24 * 3600, ge=60, le=29 * 24 * 3600
     )
+    # The Graph API version the one read of a number's messaging limit is made
+    # on (LIM-01, ADR-146). `whatsapp_business_manager_messaging_limit` exists
+    # on v24.0 and newer (changelog 2025-10-08); this call names that version
+    # rather than raising `META_API_VERSION` for every request Wasla makes.
+    meta_messaging_limit_api_version: str = "v24.0"
+    # How old a number's stored messaging limit may be before scheduling a
+    # campaign on it reads it again (LIM-01). Six hours: Meta raises a
+    # portfolio's limit "within 6 hours" of qualifying, and a webhook says so
+    # sooner where it is subscribed.
+    campaign_messaging_limit_refresh_seconds: int = Field(default=6 * 3600, ge=60, le=7 * 24 * 3600)
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

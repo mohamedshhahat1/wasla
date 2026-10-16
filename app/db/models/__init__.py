@@ -135,6 +135,7 @@ from .lead import (
 from .media import UNRESOLVED_MEDIA_STATUSES, MediaStatus, MessageMedia
 from .media_purge import MediaPurgeObject
 from .membership import Membership
+from .messaging_limit import LimitSource, PortfolioKeyKind, WhatsAppBusinessPortfolio
 from .password_reset import PasswordResetToken
 from .payment_event import PaymentEvent
 from .payment_method import PaymentMethod, PaymentMethodStatus
@@ -288,6 +289,7 @@ __all__ = [
     "LeadSource",
     "LeadStatus",
     "LimitKey",
+    "LimitSource",
     "MediaPurgeObject",
     "MediaStatus",
     "Membership",
@@ -312,6 +314,7 @@ __all__ = [
     "PlanVersion",
     "PlanVersionMigration",
     "PlatformRole",
+    "PortfolioKeyKind",
     "RecipientStatus",
     "ScheduledChangeSource",
     "SentimentLabel",
@@ -339,6 +342,7 @@ __all__ = [
     "User",
     "WhatsAppAccount",
     "WhatsAppAccountStatus",
+    "WhatsAppBusinessPortfolio",
     "WhatsAppEvent",
     "WhatsAppEventKind",
     "WhatsAppEventState",
