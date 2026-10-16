@@ -47,8 +47,8 @@ SERVING_INDEXES = frozenset(
 
 
 SEED = (
-    "INSERT INTO tenants (id, name, slug, status) SELECT gen_random_uuid(), 'Plan ' || g,"
-    " :prefix || g, 'active' FROM generate_series(1, :workspaces) g",
+    "INSERT INTO tenants (id, name, slug, status, timezone) SELECT gen_random_uuid(),"
+    " 'Plan ' || g, :prefix || g, 'active', 'Africa/Cairo' FROM generate_series(1, :workspaces) g",
     "INSERT INTO whatsapp_accounts (id, tenant_id, phone_number_id, waba_id,"
     " display_phone_number, status) SELECT gen_random_uuid(), t.id, 'pn-' || t.slug,"
     " 'waba-' || t.slug, '+2010', 'active' FROM tenants t WHERE t.slug LIKE :prefix || '%'",

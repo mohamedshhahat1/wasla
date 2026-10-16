@@ -59,6 +59,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.telemetry import observe_lifecycle_event
+from app.core.timezones import validated as validated_timezone
 from app.db import advisory_locks
 from app.db.models import Membership, MembershipStatus, Tenant, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
@@ -157,7 +158,9 @@ class WorkspaceService:
 
     # ------------------------------------------------------------- creation
 
-    async def create(self, *, owner: User, name: str, slug: str) -> WorkspaceCreation:
+    async def create(
+        self, *, owner: User, name: str, slug: str, timezone: str
+    ) -> WorkspaceCreation:
         """Open a new workspace with this person as its owner.
 
         The operation registration always performed and nothing else could, and
@@ -187,7 +190,7 @@ class WorkspaceService:
 
         try:
             async with self._session.begin_nested():
-                creation = await self._create(owner=owner, name=name, slug=slug)
+                creation = await self._create(owner=owner, name=name, slug=slug, timezone=timezone)
         except IntegrityError as error:
             if TENANT_SLUG_CONSTRAINT in str(error.orig):
                 observe_lifecycle_event(operation="workspace_create", outcome="conflict")
@@ -197,8 +200,10 @@ class WorkspaceService:
         observe_lifecycle_event(operation="workspace_create", outcome="success")
         return creation
 
-    async def _create(self, *, owner: User, name: str, slug: str) -> WorkspaceCreation:
-        tenant = await self._tenants.create(name=name, slug=slug)
+    async def _create(
+        self, *, owner: User, name: str, slug: str, timezone: str
+    ) -> WorkspaceCreation:
+        tenant = await self._tenants.create(name=name, slug=slug, timezone=timezone)
         # Identifiers are assigned on flush, and the membership needs both.
         await self._session.flush()
 
@@ -329,8 +334,9 @@ class WorkspaceService:
         name: str | None = None,
         slug: str | None = None,
         automation_disclosure: dict[str, str] | None = None,
+        timezone: str | None = None,
     ) -> Tenant:
-        """Change a workspace's name, its disclosure wording, and - for an owner only - its address.
+        """Change a workspace's name, disclosure wording and time zone - and, for an owner, address.
 
         The two fields are split by authority rather than lumped together, and
         the split is the point. A name is a label: an administrator renaming the
@@ -339,10 +345,15 @@ class WorkspaceService:
         tickets name - so changing it silently redirects every one of those and
         frees the old address for somebody else to take. That is an owner's
         decision, and it is recorded.
+
+        **The time zone** (TZ-01) is an owner's or an administrator's, and is
+        recorded too - the old and the new name only. It moves where quiet
+        hours fall from the next batch on; it never moves a scheduled
+        campaign's `scheduled_at`, which is an absolute instant.
         """
         if actor_role not in (TenantRole.TENANT_OWNER, TenantRole.TENANT_ADMIN):
             raise PermissionDeniedError("This action requires a different role in this workspace.")
-        if name is None and slug is None and automation_disclosure is None:
+        if name is None and slug is None and automation_disclosure is None and timezone is None:
             raise ValidationError("Nothing to update.")
 
         if automation_disclosure is not None:
@@ -367,11 +378,18 @@ class WorkspaceService:
                 changed = {"previous_slug": tenant.slug, "slug": normalised}
                 tenant.slug = normalised
 
+        if timezone is not None:
+            chosen = validated_timezone(timezone)
+            if chosen != tenant.timezone:
+                changed["previous_timezone"] = tenant.timezone
+                changed["timezone"] = chosen
+                tenant.timezone = chosen
+
         await self._session.flush()
 
         if changed:
-            # Only the address change leaves a trail. Auditing a rename would
-            # add rows nobody filters on and bury the one entry that matters.
+            # The address and the time zone leave a trail. Auditing a rename
+            # would add rows nobody filters on and bury the entries that matter.
             AuditTrail(self._session, tenant_id=tenant.id).record(
                 AuditAction.WORKSPACE_UPDATED,
                 actor=actor,
@@ -387,7 +405,8 @@ class WorkspaceService:
                 "event": "workspace.updated",
                 "tenant_id": str(tenant.id),
                 "user_id": str(actor.id),
-                "address_changed": bool(changed),
+                "address_changed": "slug" in changed,
+                "timezone_changed": "timezone" in changed,
             },
         )
         return tenant

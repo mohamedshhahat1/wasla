@@ -24,6 +24,7 @@ from app.db.models.whatsapp import WhatsAppAccount
 from app.services.whatsapp_service import WhatsAppIngestionService
 from tests.consent import consent_of, opted_out_at
 from tests.integration.identity_lookup import contact_by_phone
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -36,7 +37,7 @@ CANCEL = "الغاء"
 
 
 async def _account(session: AsyncSession, *, slug: str) -> WhatsAppAccount:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
 

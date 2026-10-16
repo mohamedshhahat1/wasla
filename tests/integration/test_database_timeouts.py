@@ -81,8 +81,8 @@ async def test_a_blocked_lock_wait_ends_within_its_bound(
         async with holder.begin() as connection:
             await connection.execute(
                 text(
-                    "INSERT INTO tenants (id, name, slug, status)"
-                    " VALUES (:id, 'Lock', :s, 'active')"
+                    "INSERT INTO tenants (id, name, slug, status, timezone)"
+                    " VALUES (:id, 'Lock', :s, 'active', 'Africa/Cairo')"
                 ),
                 {"id": tenant_id, "s": f"lock-{tenant_id.hex[:10]}"},
             )

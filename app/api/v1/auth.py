@@ -84,6 +84,7 @@ async def register(
             full_name=payload.full_name,
             workspace_name=payload.workspace_name,
             workspace_slug=payload.workspace_slug,
+            timezone=payload.timezone,
         )
     except EmailAlreadyRegisteredError:
         await service.notify_existing_registration(payload.email)

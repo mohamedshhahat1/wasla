@@ -62,6 +62,12 @@ dependencies = [
     "opentelemetry-api>=1.44,<2",
     "opentelemetry-sdk>=1.44,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
+    # The IANA time zone database, as a package (TZ-01, ADR-145). A workspace's
+    # time zone is validated against it and its quiet hours are computed in
+    # it, and `zoneinfo` on Windows has no system database to fall back on -
+    # so the zones a workspace may choose, and their offsets, come from this
+    # one pinned copy on every platform (`app/core/timezones.py`).
+    "tzdata>=2026.2,<2028",
 ]
 
 [project.optional-dependencies]
@@ -138,6 +144,12 @@ exclude = "^alembic/versions/"
 # Insurance: the published wheel is typed, but a build without py.typed must
 # not turn into a strict-mode failure across the auth code.
 module = ["argon2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# tzdata is a data package with no py.typed marker. Only `IANA_VERSION` - a
+# string - is read from it; the zones themselves come through `zoneinfo`.
+module = ["tzdata"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -72,6 +72,13 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         nullable=True,
         default=None,
     )
+    # Where the workspace is, as an IANA zone name (TZ-01, ADR-145). Chosen at
+    # onboarding - every route that creates a workspace requires it - and the
+    # zone every time a campaign respects is computed in: quiet hours, the
+    # days a delivery plan spreads over, the local times a page shows.
+    # Validated against `app.core.timezones`; no default, so nothing creates a
+    # workspace without deciding. 0108 gave every earlier one `Africa/Cairo`.
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
     # The workspace's own wording of the automation disclosure, by language
     # (`{"en": ..., "ar": ...}`), where it has replaced Wasla's (OMNI-041).
     # Only the wording: the obligation itself cannot be switched off.

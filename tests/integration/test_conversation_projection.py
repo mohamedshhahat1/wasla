@@ -26,6 +26,7 @@ from app.repositories.conversation_repository import (
 )
 from app.services.whatsapp_service import WhatsAppIngestionService
 from tests.integration.identity_lookup import contact_by_phone
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -43,7 +44,7 @@ STATUS_AT = "1786000100"
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

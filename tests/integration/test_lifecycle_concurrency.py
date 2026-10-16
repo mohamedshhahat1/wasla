@@ -54,6 +54,7 @@ from app.db.session import Database
 from app.main import create_app
 from app.repositories.password_reset_repository import PasswordResetTokenRepository
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -184,7 +185,9 @@ async def _seed_user(
 
 
 async def _seed_workspace(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     return tenant
@@ -678,7 +681,7 @@ async def test_two_workspace_creations_with_one_slug_produce_one_winner(
                     payload = await _login(client, email)
                     response = await client.post(
                         f"{API}/workspaces",
-                        json={"name": "Contested", "slug": slug},
+                        json={"timezone": TEST_TIMEZONE, "name": "Contested", "slug": slug},
                         headers=_bearer(payload),
                     )
                     return response.status_code
@@ -828,7 +831,7 @@ async def test_two_simultaneous_creations_cannot_exceed_the_plan_limit(
                     await start.wait()
                     response = await client.post(
                         f"{API}/workspaces",
-                        json={"name": slug.title(), "slug": slug},
+                        json={"timezone": TEST_TIMEZONE, "name": slug.title(), "slug": slug},
                         headers=_bearer(payload),
                     )
                     return response.status_code

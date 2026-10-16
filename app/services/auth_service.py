@@ -37,6 +37,7 @@ from app.core.security import (
     verify_password,
 )
 from app.core.telemetry import observe_auth_event
+from app.core.timezones import validated as validated_timezone
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, Tenant, TenantRole, User
 from app.db.models.audit import AuditAction, AuditActorKind
@@ -129,10 +130,16 @@ class AuthService:
         password: str,
         workspace_name: str,
         workspace_slug: str,
+        timezone: str,
         full_name: str | None = None,
     ) -> AuthenticatedSession:
-        """Create an account atomically, translating only known uniqueness races."""
+        """Create an account atomically, translating only known uniqueness races.
+
+        `timezone` is the new workspace's IANA zone (TZ-01): validated before
+        anything is written, like the password.
+        """
         validate_password_strength(password)
+        timezone = validated_timezone(timezone)
         try:
             async with self._session.begin_nested():
                 return await self._register(
@@ -140,6 +147,7 @@ class AuthService:
                     password=password,
                     workspace_name=workspace_name,
                     workspace_slug=workspace_slug,
+                    timezone=timezone,
                     full_name=full_name,
                 )
         except ConflictError as error:
@@ -178,6 +186,7 @@ class AuthService:
         password: str,
         workspace_name: str,
         workspace_slug: str,
+        timezone: str,
         full_name: str | None,
     ) -> AuthenticatedSession:
         user = await self._users.create(
@@ -185,7 +194,9 @@ class AuthService:
             full_name=full_name,
             hashed_password=hash_password(password),
         )
-        tenant = await self._tenants.create(name=workspace_name, slug=workspace_slug)
+        tenant = await self._tenants.create(
+            name=workspace_name, slug=workspace_slug, timezone=timezone
+        )
         # Identifiers are assigned on flush, and the membership needs both.
         await self._session.flush()
 

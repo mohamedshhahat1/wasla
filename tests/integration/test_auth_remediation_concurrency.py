@@ -36,6 +36,7 @@ from app.main import create_app
 from app.repositories import TenantRepository, UserRepository
 from app.repositories.invitation_repository import InvitationRepository, InvitationTokenRepository
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -116,6 +117,7 @@ async def test_concurrent_duplicate_registration_is_created_with_matching_public
                 json={
                     "email": email,
                     "password": PASSWORD,
+                    "timezone": TEST_TIMEZONE,
                     "workspace_name": slug,
                     "workspace_slug": slug,
                 },
@@ -200,6 +202,7 @@ async def test_concurrent_workspace_slug_registration_is_controlled(
                 json={
                     "email": email,
                     "password": PASSWORD,
+                    "timezone": TEST_TIMEZONE,
                     "workspace_name": slug,
                     "workspace_slug": slug,
                 },
@@ -254,7 +257,7 @@ async def test_concurrent_invitation_acceptance_has_one_winner(
             is_active=True,
             email_verified_at=datetime.now(UTC),
         )
-        tenant = Tenant(name=slug, slug=slug)
+        tenant = Tenant(timezone=TEST_TIMEZONE, name=slug, slug=slug)
         setup.add_all([inviter, tenant])
         await setup.flush()
         setup.add(
@@ -358,7 +361,7 @@ async def test_invitation_acceptance_never_reactivates_a_deleted_identity(
             is_active=active_after_delete,
             deleted_at=datetime.now(UTC),
         )
-        tenant = Tenant(name=slug, slug=slug)
+        tenant = Tenant(timezone=TEST_TIMEZONE, name=slug, slug=slug)
         setup.add_all([user, tenant])
         await setup.flush()
         setup.add(
@@ -411,7 +414,7 @@ async def test_accept_and_revoke_race_has_exactly_one_state_winner(
     database = Database(_settings(prepared_database, email=False))
     maker = database.session_factory
     async with maker() as setup:
-        tenant = Tenant(name=slug, slug=slug)
+        tenant = Tenant(timezone=TEST_TIMEZONE, name=slug, slug=slug)
         setup.add(tenant)
         await setup.flush()
         invitation = TenantInvitation(
@@ -474,7 +477,7 @@ async def test_invitation_is_not_claimable_at_its_expiry_boundary(
 ) -> None:
     raw_token, token_hash = generate_invitation_token()
     del raw_token
-    tenant = Tenant(name="Expiry", slug=f"expiry-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Expiry", slug=f"expiry-{uuid.uuid4().hex[:10]}")
     db_session.add(tenant)
     await db_session.flush()
     expires_at = datetime.now(UTC)

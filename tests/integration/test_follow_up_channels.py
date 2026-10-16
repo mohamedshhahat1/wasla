@@ -42,6 +42,7 @@ from app.services.messaging_service import MessagingService
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 from tests.channel_plans import allow_channels
 from tests.integration.test_omnichannel_operations import _customer, _number, _tenant
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -59,7 +60,7 @@ def _registry(adapter: SyntheticAdapter) -> ChannelRegistry:
 
 async def _synthetic_conversation(session: AsyncSession, adapter: SyntheticAdapter) -> Conversation:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Nudges {tag}", slug=f"nudges-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Nudges {tag}", slug=f"nudges-{tag}")
     session.add(tenant)
     await session.flush()
     # A nudge goes out on a channel only the plan in force includes (ENT-16).

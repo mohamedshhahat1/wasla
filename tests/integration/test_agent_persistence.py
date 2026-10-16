@@ -22,6 +22,7 @@ from app.db.models.sentiment import SentimentLabel
 from app.db.models.tenant import Tenant
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.services.agent_service import UNSET, AgentService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -30,7 +31,7 @@ PROMPT = "You answer as the sales desk."
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

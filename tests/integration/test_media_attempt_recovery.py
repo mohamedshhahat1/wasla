@@ -62,6 +62,7 @@ from app.workers.queue import AgentQueue
 from app.workers.retry import RetryPolicy
 from tests.fakes import as_media_reader, as_whatsapp
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +129,9 @@ async def workspace(
     committing: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[tuple[uuid.UUID, uuid.UUID]]:
     async with committing() as session:
-        tenant = Tenant(name="Recovery", slug=f"recovery-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name="Recovery", slug=f"recovery-{uuid.uuid4().hex[:8]}"
+        )
         session.add(tenant)
         await session.flush()
         account = WhatsAppAccount(

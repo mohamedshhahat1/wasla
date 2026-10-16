@@ -68,7 +68,7 @@ head="$(sql "${PREFIX}-source" "SELECT version_num FROM alembic_version")"
 log "source at migration head ${head}"
 
 tenant() {
-    sql "${PREFIX}-source" "INSERT INTO tenants (id, name, slug, status) VALUES (gen_random_uuid(), '$1', '$1', 'active')"
+    sql "${PREFIX}-source" "INSERT INTO tenants (id, name, slug, status, timezone) VALUES (gen_random_uuid(), '$1', '$1', 'active', 'Africa/Cairo')"
 }
 
 tenant pitr-a

@@ -28,6 +28,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.workspace_purge_service import PURGED_TABLES
 from tests.fake_embeddings import FakeEmbeddings
 from tests.fakes import as_embeddings
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -36,7 +37,7 @@ SECRET_TEXT = "Wholesale margin is 42 percent. CONFIDENTIAL_BODY_MARKER."
 
 
 async def _tenant(session: AsyncSession) -> Tenant:
-    tenant = Tenant(name="Integrity", slug=f"int-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Integrity", slug=f"int-{uuid.uuid4().hex[:8]}")
     session.add(tenant)
     await session.flush()
     return tenant

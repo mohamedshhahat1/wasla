@@ -42,6 +42,7 @@ from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -89,7 +90,7 @@ def meta(monkeypatch: pytest.MonkeyPatch) -> Iterator[Meta]:
 
 async def _tenant(session: AsyncSession) -> Tenant:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Status {tag}", slug=f"status-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Status {tag}", slug=f"status-{tag}")
     session.add(tenant)
     await session.flush()
     return tenant

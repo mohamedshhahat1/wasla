@@ -40,6 +40,7 @@ from app.repositories.channel_repository import ChannelConnectionRepository
 from app.services import messaging_service as messaging_module
 from app.services.campaign_service import CampaignService
 from app.services.messaging_service import MessagingService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -89,7 +90,7 @@ def _settings(**overrides: object) -> Settings:
 
 async def _number(session: AsyncSession) -> tuple[Tenant, WhatsAppAccount]:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Throughput {tag}", slug=f"throughput-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Throughput {tag}", slug=f"throughput-{tag}")
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

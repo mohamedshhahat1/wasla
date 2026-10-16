@@ -46,6 +46,7 @@ from app.services.workspace_purge_service import (
     RETAINED_TABLES,
     WorkspacePurgeService,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -61,6 +62,7 @@ async def _tenant(
     purged_at: datetime | None = None,
 ) -> Tenant:
     tenant = Tenant(
+        timezone=TEST_TIMEZONE,
         name=slug.title(),
         slug=slug,
         status=TenantStatus.ACTIVE,

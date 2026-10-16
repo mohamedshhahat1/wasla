@@ -52,6 +52,7 @@ from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.plan_catalog import PlanCatalog
 from tests.billing_fixtures import add_owner, erase_ledger, price_terms
 from tests.paymob_orders import CARD_INTEGRATION_ID, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -119,7 +120,9 @@ async def world(engine: AsyncEngine) -> AsyncIterator[World]:
     now = datetime.now(UTC).replace(microsecond=0)
     tag = uuid.uuid4().hex[:10]
     async with maker() as session:
-        tenant = Tenant(id=built.tenant_id, name="Boundary", slug=f"boundary-{tag}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, id=built.tenant_id, name="Boundary", slug=f"boundary-{tag}"
+        )
         staff = User(
             id=built.staff_id,
             email=f"boundary-staff-{tag}@example.com",

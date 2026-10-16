@@ -48,6 +48,7 @@ from app.services.payment_method_service import PaymentMethodService, remember_s
 from tests.fakes import as_table
 from tests.payment_tokens import PROTECTOR, SETTINGS
 from tests.paymob_orders import MOTO_INTEGRATION_ID, order_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -115,7 +116,9 @@ async def _workspace(
     slug: str = "acme",
     status: SubscriptionStatus = SubscriptionStatus.PAST_DUE,
 ) -> tuple[Any, ...]:
-    tenant = Tenant(name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}"
+    )
     plan = Plan(
         code=f"pro-{uuid.uuid4().hex[:6]}",
         name="Pro",

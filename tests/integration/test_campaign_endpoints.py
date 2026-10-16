@@ -41,6 +41,7 @@ from app.db.models.campaign import (
     RecipientStatus,
 )
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -175,7 +176,13 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             tenant_id=TENANT_ID,
             role=role,
         ),
-        tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=TENANT_ID,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
 
 

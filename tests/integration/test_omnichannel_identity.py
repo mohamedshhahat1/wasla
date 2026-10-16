@@ -49,6 +49,7 @@ from app.services.channel_ingestion_service import IngestionOutcome
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.queue import AgentJob, AgentQueue
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -120,7 +121,7 @@ async def _workspace(
     session: AsyncSession, *, waba: str = WABA, phone_number_id: str | None = None
 ) -> tuple[Tenant, WhatsAppAccount]:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Identity {tag}", slug=f"identity-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Identity {tag}", slug=f"identity-{tag}")
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

@@ -95,6 +95,7 @@ from tests.integration.topup_harness import (
 )
 from tests.integration.topup_harness import workspace as topup_workspace
 from tests.media_harness import SessionHandle
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -191,7 +192,7 @@ async def _plans(session: AsyncSession) -> tuple[Plan, Plan]:
 async def _workspace(
     session: AsyncSession, plan: Plan, *, name: str = "Reduction Co"
 ) -> tuple[Tenant, User]:
-    tenant = Tenant(name=name, slug=f"reduce-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=name, slug=f"reduce-{uuid.uuid4().hex[:10]}")
     session.add(tenant)
     await session.flush()
     owner = await add_owner(session, tenant)

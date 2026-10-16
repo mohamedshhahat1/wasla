@@ -38,6 +38,7 @@ from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_media_reader, as_whatsapp, store_object
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -110,7 +111,7 @@ class StubReader:
 
 
 async def _conversation(session: AsyncSession, *, slug: str = "acme") -> tuple[Any, ...]:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
 

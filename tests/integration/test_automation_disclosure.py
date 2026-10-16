@@ -49,6 +49,7 @@ from tests.integration.ai_harness import (
     scripted,
     text_response,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -74,7 +75,9 @@ async def _page(ai_turns: TurnRunner) -> Page:
         },
     )
     async with ai_turns.database.session() as session:
-        tenant = Tenant(name="Disclosure", slug=f"disclosure-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name="Disclosure", slug=f"disclosure-{uuid.uuid4().hex[:10]}"
+        )
         session.add(tenant)
         await session.flush()
         # The AI answers on Messenger only under a plan that includes it (ENT-16).

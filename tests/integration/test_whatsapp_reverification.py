@@ -34,6 +34,7 @@ from app.integrations.whatsapp.ownership import NumberOwnershipError
 from app.repositories.whatsapp_repository import WhatsAppAccountDirectory
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from tests.fake_ownership import FakeOwnershipVerifier
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +43,9 @@ TOKEN = "EAAG-the-workspaces-own-credential"
 
 
 async def _tenant(session: AsyncSession, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     return tenant

@@ -60,6 +60,7 @@ from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import AgentJob, AgentQueue
 from tests.integration.ai_harness import wait_for_lock_waiter
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -209,7 +210,7 @@ async def _seed(
     which is exactly the state a webhook leaves behind when Redis refused it.
     Returns the workspace and the (conversation, message) pairs.
     """
-    tenant = Tenant(name="Turns", slug=f"turns-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Turns", slug=f"turns-{uuid.uuid4().hex[:8]}")
     session.add(tenant)
     await session.flush()
 

@@ -245,6 +245,14 @@ google_oauth_rate_limit = _limit_by_client(
     "auth:google",
     lambda settings: settings.rate_limit_auth_per_minute,
 )
+# The public reference data a signup form reads before any account exists -
+# the time zones (TZ-02). Counted by client address, on the workspace budget's
+# number and a counter of its own: the list is cheap, cached and the same for
+# everybody, and the limit only stops a script hammering it.
+public_rate_limit = _limit_by_client(
+    "public",
+    lambda settings: settings.rate_limit_workspace_per_minute,
+)
 workspace_rate_limit = _limit_by_workspace(
     "workspace",
     lambda settings: settings.rate_limit_workspace_per_minute,
@@ -257,6 +265,7 @@ campaign_rate_limit = _limit_by_workspace(
 AuthRateLimit = Annotated[RateLimitDecision | None, Depends(auth_rate_limit)]
 GoogleOAuthRateLimit = Annotated[RateLimitDecision | None, Depends(google_oauth_rate_limit)]
 WorkspaceRateLimit = Annotated[RateLimitDecision | None, Depends(workspace_rate_limit)]
+PublicRateLimit = Annotated[RateLimitDecision | None, Depends(public_rate_limit)]
 CampaignRateLimit = Annotated[RateLimitDecision | None, Depends(campaign_rate_limit)]
 
 __all__ = [
@@ -265,11 +274,13 @@ __all__ = [
     "AuthRateLimit",
     "CampaignRateLimit",
     "GoogleOAuthRateLimit",
+    "PublicRateLimit",
     "RateLimiterDep",
     "WorkspaceRateLimit",
     "auth_rate_limit",
     "campaign_rate_limit",
     "client_identity",
     "google_oauth_rate_limit",
+    "public_rate_limit",
     "workspace_rate_limit",
 ]

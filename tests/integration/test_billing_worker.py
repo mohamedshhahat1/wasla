@@ -48,6 +48,7 @@ from tests.fakes import as_database, as_redis_client
 from tests.integration.plan_catalogue import own_plan
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
 from tests.paymob_orders import order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -98,7 +99,7 @@ def _settings(**overrides: Any) -> Settings:
 
 
 async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
@@ -309,6 +310,7 @@ async def test_registering_puts_the_workspace_on_the_default_plan(db_session: As
     session_result = await _auth(db_session, settings).register(
         email="owner@acme-example.com",
         password="a-very-long-password-1",
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -333,6 +335,7 @@ async def test_registration_survives_a_catalogue_that_has_no_such_plan(
     session_result = await _auth(db_session, settings).register(
         email="owner@acme-example.com",
         password="a-very-long-password-1",
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -354,12 +357,14 @@ async def test_a_second_workspace_gets_its_own_subscription(db_session: AsyncSes
     first = await service.register(
         email="one@acme-example.com",
         password="a-very-long-password-1",
+        timezone=TEST_TIMEZONE,
         workspace_name="One",
         workspace_slug="one",
     )
     second = await service.register(
         email="two@acme-example.com",
         password="a-very-long-password-1",
+        timezone=TEST_TIMEZONE,
         workspace_name="Two",
         workspace_slug="two",
     )

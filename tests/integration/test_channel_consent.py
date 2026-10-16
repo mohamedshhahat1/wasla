@@ -66,6 +66,7 @@ from tests.integration.test_campaigns import (
     _template,
 )
 from tests.integration.test_omnichannel_operations import RecordingQueue
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -148,7 +149,7 @@ async def _instagram_writes(session: AsyncSession, person: Person, text: str) ->
 async def person(db_session: AsyncSession) -> AsyncIterator[Person]:
     """One contact writing on WhatsApp numbers A and B and on Instagram."""
     tag = uuid.uuid4().hex[:8]
-    tenant = Tenant(name=f"Consent {tag}", slug=f"consent-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Consent {tag}", slug=f"consent-{tag}")
     db_session.add(tenant)
     await db_session.flush()
     await allow_channels(db_session, tenant.id)
@@ -350,7 +351,9 @@ async def test_another_workspaces_consent_is_never_read(
 ) -> None:
     """A refusal is keyed by its workspace: a rival's row for the same contact id
     cannot exist, and the rival's own opt-outs never shrink this audience."""
-    rival = Tenant(name="Rival consent", slug=f"rival-consent-{uuid.uuid4().hex[:8]}")
+    rival = Tenant(
+        timezone=TEST_TIMEZONE, name="Rival consent", slug=f"rival-consent-{uuid.uuid4().hex[:8]}"
+    )
     db_session.add(rival)
     await db_session.flush()
     rival_contact = Contact(tenant_id=rival.id, wa_id=PHONE)

@@ -47,6 +47,7 @@ from app.services import messaging_service as messaging_module
 from app.services.analytics_service import AnalyticsService
 from app.services.campaign_service import CampaignService
 from app.services.messaging_service import MessagingService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -100,7 +101,7 @@ def _phone() -> str:
 
 async def _number(session: AsyncSession) -> tuple[Tenant, WhatsAppAccount]:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Low {tag}", slug=f"low-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Low {tag}", slug=f"low-{tag}")
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

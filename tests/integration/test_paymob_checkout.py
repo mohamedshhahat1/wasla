@@ -59,6 +59,7 @@ from tests.billing_fixtures import renewal_invoice
 from tests.fakes import as_table
 from tests.integration.plan_catalogue import own_plan
 from tests.paymob_orders import order_for, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -100,7 +101,7 @@ def _provider(transport: httpx.MockTransport | None = None) -> PaymobProvider:
 
 
 async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

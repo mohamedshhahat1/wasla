@@ -56,6 +56,7 @@ from app.main import create_app
 from tests.conftest import AllowingEntitlements
 from tests.payment_tokens import saved_card
 from tests.paymob_orders import order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -166,7 +167,9 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 
 async def _workspace_rows(session: AsyncSession, slug: str) -> tuple[Tenant, User]:
-    tenant = Tenant(name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}"
+    )
     user = User(
         email=f"{slug}-{uuid.uuid4().hex[:8]}@example.com",
         full_name="Owner Person",

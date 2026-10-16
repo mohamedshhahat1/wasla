@@ -33,12 +33,15 @@ from app.db.models.conversation import Contact, Conversation, ConversationStatus
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.media_repository import ConversationMediaGate
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
 
 async def _workspace(session: AsyncSession, slug: str) -> tuple[Tenant, Conversation]:
-    tenant = Tenant(name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}"
+    )
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

@@ -40,6 +40,7 @@ from app.db.models.billing import (
 from app.services.entitlement_service import Entitlement
 from app.services.subscription_service import SubscriptionService
 from tests.integration.plan_catalogue import own_plan
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -50,7 +51,7 @@ NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
 async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant
@@ -489,7 +490,13 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
     return ActiveWorkspace(
         user=User(id=USER_ID, email="owner@example.com", is_active=True),
         membership=Membership(id=uuid.uuid4(), user_id=USER_ID, tenant_id=TENANT_ID, role=role),
-        tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=TENANT_ID,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
 
 

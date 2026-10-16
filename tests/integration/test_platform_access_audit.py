@@ -36,6 +36,7 @@ from app.db.models.enums import PlatformRole
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.main import create_app
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -114,7 +115,7 @@ def _act_as(app: FastAPI, user: User) -> None:
 
 
 async def _workspace(session: AsyncSession, *, name: str = CANARY_WORKSPACE) -> Tenant:
-    tenant = Tenant(name=name, slug=f"canary-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=name, slug=f"canary-{uuid.uuid4().hex[:8]}")
     session.add(tenant)
     await session.flush()
     return tenant

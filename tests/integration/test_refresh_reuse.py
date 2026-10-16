@@ -38,6 +38,7 @@ from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.repositories import MembershipRepository
 from app.services.auth_service import AuthenticatedSession, AuthService
 from tests.fakes import as_credentials, as_redis_client
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -94,6 +95,7 @@ async def _register(auth: AuthService, session: AsyncSession) -> AuthenticatedSe
     result = await auth.register(
         email="ahmed@example.test",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -379,6 +381,7 @@ async def _seed_account_with(
         result = await service.register(
             email=email,
             password=PASSWORD,
+            timezone=TEST_TIMEZONE,
             workspace_name="Race",
             workspace_slug=f"race-{uuid.uuid4().hex[:8]}",
         )

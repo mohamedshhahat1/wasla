@@ -48,6 +48,7 @@ from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob
 from tests import media_harness as h
 from tests.fakes import as_media_reader, as_whatsapp
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -91,7 +92,7 @@ async def _two_attachments(
     committing: async_sessionmaker[AsyncSession],
 ) -> tuple[uuid.UUID, uuid.UUID, list[uuid.UUID]]:
     async with committing() as session:
-        tenant = Tenant(name="Race", slug=f"race-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Race", slug=f"race-{uuid.uuid4().hex[:8]}")
         session.add(tenant)
         await session.flush()
         account = WhatsAppAccount(

@@ -71,6 +71,7 @@ from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash
 from app.services.media_upload_service import MediaUploadReconciler
 from app.services.usage_service import UsageRecorder
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +129,9 @@ async def _subscribe(session: AsyncSession, tenant: Tenant, plan: Plan) -> Subsc
 async def _workspace(
     session: AsyncSession, *, limit_bytes: int | None, slug: str | None = None
 ) -> Tenant:
-    tenant = Tenant(name="Capacity", slug=slug or f"cap-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Capacity", slug=slug or f"cap-{uuid.uuid4().hex[:8]}"
+    )
     session.add(tenant)
     await session.flush()
     limits = {} if limit_bytes is None else {LimitKey.STORAGE_BYTES: limit_bytes}

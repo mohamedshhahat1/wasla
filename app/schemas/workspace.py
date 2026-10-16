@@ -11,10 +11,14 @@ and not another.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agents.disclosure import MAX_DISCLOSURE_LENGTH
+from app.core.timezones import MAX_TIMEZONE_LENGTH, format_offset, offset_of
+from app.db.models import Tenant
 from app.db.models.enums import TenantRole, TenantStatus
 from app.schemas.auth import (
     MAXIMUM_NAME_LENGTH,
@@ -57,6 +61,13 @@ class WorkspaceCreateRequest(_Payload):
         pattern=SLUG_PATTERN,
         description="The workspace's permanent address. Lower-cased on save.",
     )
+    # Where the workspace is, from `GET /api/v1/timezones` (TZ-01). Required:
+    # quiet hours and every local time a campaign shows are computed in it.
+    timezone: str = Field(
+        min_length=1,
+        max_length=MAX_TIMEZONE_LENGTH,
+        description="An IANA zone name from GET /api/v1/timezones, e.g. Africa/Cairo.",
+    )
 
 
 class DisclosureWording(_Payload):
@@ -91,6 +102,9 @@ class WorkspaceUpdateRequest(_Payload):
     # Wasla's. Only the words: an empty one is refused, because the obligation
     # to disclose is not the workspace's to switch off.
     automation_disclosure: DisclosureWording | None = None
+    # The workspace's IANA zone (TZ-01). An owner's or an administrator's to
+    # change; audited. Moves where quiet hours fall, never a scheduled time.
+    timezone: str | None = Field(default=None, min_length=1, max_length=MAX_TIMEZONE_LENGTH)
 
 
 class OwnershipTransferRequest(_Payload):
@@ -152,6 +166,23 @@ class WorkspaceRead(BaseModel):
     is_active: bool
     # The workspace's own disclosure wording, where it set one (OMNI-041).
     automation_disclosure: dict[str, str] | None = None
+    # Its IANA zone and that zone's offset from UTC now, daylight saving
+    # included (TZ-01): `+03:00`.
+    timezone: str
+    utc_offset: str
+
+    @classmethod
+    def from_tenant(cls, tenant: Tenant, *, at: datetime | None = None) -> Self:
+        return cls(
+            id=tenant.id,
+            name=tenant.name,
+            slug=tenant.slug,
+            status=tenant.status,
+            is_active=tenant.is_active,
+            automation_disclosure=tenant.automation_disclosure,
+            timezone=tenant.timezone,
+            utc_offset=format_offset(offset_of(tenant.timezone, at or datetime.now(UTC))),
+        )
 
 
 class WorkspaceCreatedResponse(BaseModel):

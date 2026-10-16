@@ -75,6 +75,7 @@ from tests.integration.entitlements_oracle import (
     oracle_capacity,
 )
 from tests.integration.plan_catalogue import own_plan
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -512,7 +513,11 @@ async def _population(
         status = STATUSES[index % len(STATUSES)]
         anchor = now - timedelta(days=rng.randint(0, 80), hours=rng.randint(0, 23))
         end = billing_calendar.add_interval(anchor, interval)
-        tenant = Tenant(name=f"Oracle {index}", slug=f"oracle-ent-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE,
+            name=f"Oracle {index}",
+            slug=f"oracle-ent-{uuid.uuid4().hex[:10]}",
+        )
         session.add(tenant)
         await session.flush()
         subscription: Subscription | None = None

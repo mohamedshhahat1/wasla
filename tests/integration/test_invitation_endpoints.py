@@ -26,13 +26,20 @@ from app.db.models import (
     User,
 )
 from app.services.invitation_service import AcceptedInvitation
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
 
 def _workspace(role: TenantRole) -> ActiveWorkspace:
     user = User(id=uuid.uuid4(), email="admin@example.com", is_active=True)
-    tenant = Tenant(id=uuid.uuid4(), name="Acme", slug="acme", status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE,
+        id=uuid.uuid4(),
+        name="Acme",
+        slug="acme",
+        status=TenantStatus.ACTIVE,
+    )
     membership = Membership(tenant_id=tenant.id, user_id=user.id, role=role)
     return ActiveWorkspace(user=user, membership=membership, tenant=tenant)
 
@@ -74,6 +81,7 @@ class StubInvitationService:
     async def accept(self, **kwargs: Any) -> AcceptedInvitation:
         self.calls.append(("accept", kwargs))
         tenant = Tenant(
+            timezone=TEST_TIMEZONE,
             id=self.invitation.tenant_id,
             name="Acme",
             slug="acme",

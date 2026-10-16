@@ -46,6 +46,7 @@ from tests.integration.test_commercial_api import (  # noqa: F401 - fixtures
     intentions,
 )
 from tests.integration.topup_harness import Paymob, base_now, workspace
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -63,7 +64,7 @@ async def test_one_ai_allowance_reads_used_held_remaining_and_its_channels(
 ) -> None:
     """Section 16's example: 742 used of 1,000, from every channel together."""
     now = base_now()
-    tenant = Tenant(name="Turns", slug=f"turns-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Turns", slug=f"turns-{uuid.uuid4().hex[:8]}")
     db_session.add(tenant)
     await db_session.flush()
     owner = await add_owner(db_session, tenant)
@@ -188,8 +189,8 @@ async def test_a_preview_counts_who_a_smaller_capacity_or_fewer_types_would_leav
     """Section 29: per proposed value, the workspaces whose active connections
     exceed it and the workspaces holding a connection of a type it removes."""
     plan = await plan_with_channels(db_session, limits={LimitKey.CHANNEL_CONNECTIONS.value: 10})
-    big = Tenant(name="Big", slug=f"big-{uuid.uuid4().hex[:8]}")
-    small = Tenant(name="Small", slug=f"small-{uuid.uuid4().hex[:8]}")
+    big = Tenant(timezone=TEST_TIMEZONE, name="Big", slug=f"big-{uuid.uuid4().hex[:8]}")
+    small = Tenant(timezone=TEST_TIMEZONE, name="Small", slug=f"small-{uuid.uuid4().hex[:8]}")
     db_session.add_all([big, small])
     await db_session.flush()
     for tenant, channels in (

@@ -65,6 +65,7 @@ from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.workers.follow_up_worker import FollowUpWorker
 from tests.consent import seed_opt_out
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +129,7 @@ async def _scenario(
 ) -> tuple[Tenant, Conversation, FollowUp]:
     """A due follow-up on an open conversation inside the service window."""
     slug = f"revalidate-{uuid.uuid4().hex[:8]}"
-    tenant = Tenant(name="Revalidate", slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Revalidate", slug=slug)
     session.add(tenant)
     await session.flush()
 

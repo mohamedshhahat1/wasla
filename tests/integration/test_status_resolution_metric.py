@@ -22,6 +22,7 @@ from app.services import channel_ingestion_service as ingestion_module
 from app.services.channel_ingestion_service import ChannelIngestionService
 from app.workers.queue import AgentQueue
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +42,7 @@ async def test_each_status_lookup_is_observed_by_channel(
 
     monkeypatch.setattr(ingestion_module, "record_status_resolutions", record)
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Metric {tag}", slug=f"metric-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Metric {tag}", slug=f"metric-{tag}")
     db_session.add(tenant)
     await db_session.flush()
     connection = ChannelConnection(

@@ -34,6 +34,7 @@ from app.db.models.whatsapp_template import (
     WhatsAppTemplate,
 )
 from app.services.template_service import SyncOutcome
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -102,6 +103,7 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             role=role,
         ),
         tenant=Tenant(
+            timezone=TEST_TIMEZONE,
             id=TENANT_ID,
             name="Acme",
             slug="acme",

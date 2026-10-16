@@ -87,6 +87,7 @@ from app.db.models.whatsapp_template import (
 )
 from app.main import create_app
 from tests.conftest import AllowingEntitlements, FakeDependency
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -134,7 +135,9 @@ async def _seed(session: AsyncSession, settings: Settings, *, slug: str) -> Work
     Deliberately not built through the services: seeding through the same code
     under test would make a shared isolation bug invisible in both directions.
     """
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     user = User(
         email=f"owner@{slug}.example",
         full_name=f"{slug.title()} Owner",

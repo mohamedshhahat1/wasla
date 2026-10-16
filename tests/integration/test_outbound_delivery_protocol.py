@@ -70,6 +70,7 @@ from app.integrations.whatsapp.client import (
 )
 from app.services.follow_up_service import FollowUpService
 from app.services.messaging_service import MessagingService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -162,7 +163,7 @@ async def workspace(one_connection: Database) -> AsyncIterator[tuple[uuid.UUID, 
     factory = one_connection.session_factory
     suffix = uuid.uuid4().hex[:8]
     async with factory() as session:
-        tenant = Tenant(name="Delivery", slug=f"delivery-{suffix}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Delivery", slug=f"delivery-{suffix}")
         session.add(tenant)
         await session.flush()
         account = WhatsAppAccount(

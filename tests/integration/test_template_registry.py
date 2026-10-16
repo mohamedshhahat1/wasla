@@ -33,6 +33,7 @@ from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services.follow_up_service import FollowUpService
 from app.services.template_service import WITHDRAWN_REASON, TemplateService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -81,7 +82,7 @@ def _payload(
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

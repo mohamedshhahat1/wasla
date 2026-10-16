@@ -52,6 +52,7 @@ from app.workers.queue import JobEnvelope
 from tests.fake_embeddings import FakeEmbeddings
 from tests.fakes import as_embeddings
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +129,7 @@ def _worker(database: Database, *, grace_seconds: float = 0.0) -> IngestionRecov
 
 
 async def _workspace(session: AsyncSession) -> tuple[Tenant, KnowledgeBase]:
-    tenant = Tenant(name="Ingest", slug=f"ingest-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Ingest", slug=f"ingest-{uuid.uuid4().hex[:8]}")
     session.add(tenant)
     await session.flush()
     base = KnowledgeBase(tenant_id=tenant.id, name="Handbook")

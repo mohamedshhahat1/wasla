@@ -38,6 +38,7 @@ from app.services.media_service import MediaService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from tests import media_harness as h
 from tests.fakes import as_agent_queue, as_media_queue, as_media_reader, as_whatsapp
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -210,7 +211,7 @@ async def test_a_released_numbers_file_is_recorded_terminal_and_never_queued(
     been given up. Text is recorded and not answered (MSG-01), and the file
     beside it is recorded the same way: terminal, with nothing queued."""
     sent_at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
-    tenant = Tenant(name="Former", slug="former")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Former", slug="former")
     db_session.add(tenant)
     await db_session.flush()
     db_session.add(

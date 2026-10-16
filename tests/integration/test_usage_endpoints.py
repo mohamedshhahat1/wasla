@@ -45,6 +45,7 @@ from app.repositories.metrics_repository import (
 from app.repositories.usage_repository import UsagePoint, UsageTotal
 from app.services.analytics_service import TenantAnalytics
 from app.services.usage_service import UsageSummary, UsageWindow
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -177,7 +178,13 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             tenant_id=TENANT_ID,
             role=role,
         ),
-        tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=TENANT_ID,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
 
 

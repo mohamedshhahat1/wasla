@@ -52,6 +52,7 @@ from app.main import create_app
 from tests.billing_fixtures import erase_ledger
 from tests.paymob_orders import order_for, order_from_request
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
@@ -320,6 +321,7 @@ async def test_paying_a_plan_settles_the_invoice_and_moves_the_entitlements(
                 json={
                     "email": email,
                     "password": PASSWORD,
+                    "timezone": TEST_TIMEZONE,
                     "workspace_name": "E2E Co",
                     "workspace_slug": slug,
                 },
@@ -428,6 +430,7 @@ async def test_a_declined_payment_leaves_the_workspace_exactly_as_it_was(
                 json={
                     "email": email,
                     "password": PASSWORD,
+                    "timezone": TEST_TIMEZONE,
                     "workspace_name": "E2E Co",
                     "workspace_slug": slug,
                 },
@@ -508,6 +511,7 @@ async def test_a_forged_callback_cannot_settle_anything_over_a_real_socket(
                 json={
                     "email": email,
                     "password": PASSWORD,
+                    "timezone": TEST_TIMEZONE,
                     "workspace_name": "E2E Co",
                     "workspace_slug": slug,
                 },
@@ -618,6 +622,7 @@ async def test_a_retried_callback_settles_the_invoice_once(
                 json={
                     "email": email,
                     "password": PASSWORD,
+                    "timezone": TEST_TIMEZONE,
                     "workspace_name": "E2E Co",
                     "workspace_slug": slug,
                 },

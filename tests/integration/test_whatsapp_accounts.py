@@ -36,6 +36,7 @@ from app.db.models import (
     WhatsAppAccountStatus,
 )
 from app.integrations.whatsapp.ownership import NumberOwnershipError
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -85,6 +86,7 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             status=MembershipStatus.ACTIVE,
         ),
         tenant=Tenant(
+            timezone=TEST_TIMEZONE,
             id=TENANT_ID,
             name="Acme",
             slug="acme",

@@ -75,6 +75,7 @@ from scripts.omnichannel_invariants import (
 )
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 from tests.channel_plans import allow_channels
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -131,7 +132,9 @@ def meta(monkeypatch: pytest.MonkeyPatch) -> Iterator[Meta]:
 
 async def _tenant(session: AsyncSession, label: str) -> Tenant:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Oracle {label} {tag}", slug=f"oracle-{label}-{tag}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=f"Oracle {label} {tag}", slug=f"oracle-{label}-{tag}"
+    )
     session.add(tenant)
     await session.flush()
     # A workspace holds a plan (ADR-131): one allowing every channel and the

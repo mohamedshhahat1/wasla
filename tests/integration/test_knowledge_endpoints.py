@@ -28,6 +28,7 @@ from app.core.exceptions import TenantIsolationError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.knowledge import Document, DocumentSource, DocumentStatus, KnowledgeBase
 from app.services.knowledge_service import DocumentView
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -152,6 +153,7 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             role=role,
         ),
         tenant=Tenant(
+            timezone=TEST_TIMEZONE,
             id=TENANT_ID,
             name="Acme",
             slug="acme",

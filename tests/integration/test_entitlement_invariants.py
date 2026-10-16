@@ -76,6 +76,7 @@ from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 from tests.channel_plans import plan_with_channels, subscribe
 from tests.consent import seed_opt_out
 from tests.integration.test_campaigns import _account, _campaign, _customer, _template
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -92,7 +93,7 @@ async def _added(session: AsyncSession, before: dict[str, int]) -> dict[str, int
 
 async def _tenant(session: AsyncSession) -> Tenant:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Ledger {tag}", slug=f"ledger-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Ledger {tag}", slug=f"ledger-{tag}")
     session.add(tenant)
     await session.flush()
     return tenant

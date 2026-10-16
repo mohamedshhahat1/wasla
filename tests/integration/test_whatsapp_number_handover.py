@@ -53,6 +53,7 @@ from app.db.models.whatsapp import (
     WhatsAppEvent,
 )
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -126,7 +127,9 @@ def _status(wamid: str, *, status: str, at: datetime) -> dict[str, object]:
 
 
 async def _tenant(session: AsyncSession, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}"
+    )
     session.add(tenant)
     await session.flush()
     return tenant

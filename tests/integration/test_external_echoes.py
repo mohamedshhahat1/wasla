@@ -64,6 +64,7 @@ from tests.integration.ai_harness import (
     text_response,
 )
 from tests.integration.test_automation_disclosure import Page, _customer_writes, _page
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -82,7 +83,7 @@ async def _setup(
     session: AsyncSession, adapter: SyntheticAdapter, *, wrote: timedelta = timedelta(minutes=1)
 ) -> tuple[ChannelConnection, Conversation]:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Echoes {tag}", slug=f"echoes-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Echoes {tag}", slug=f"echoes-{tag}")
     session.add(tenant)
     await session.flush()
     # Automation runs on Instagram only under a plan that includes it (ENT-16).

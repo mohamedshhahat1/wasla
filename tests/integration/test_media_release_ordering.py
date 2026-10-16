@@ -80,6 +80,7 @@ from app.workers.queue import AgentJob, AgentQueue, JobEnvelope
 from app.workers.retry import IDEMPOTENT_RETRY
 from tests.fakes import as_media_reader, as_whatsapp
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -221,7 +222,9 @@ async def workspace(
 ) -> AsyncIterator[tuple[uuid.UUID, uuid.UUID]]:
     """A committed conversation, exactly as the webhook leaves one."""
     async with committing() as session:
-        tenant = Tenant(name="Ordering", slug=f"ordering-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name="Ordering", slug=f"ordering-{uuid.uuid4().hex[:8]}"
+        )
         session.add(tenant)
         await session.flush()
 

@@ -41,6 +41,7 @@ from app.db.models import User
 from app.db.models.email import OutboundEmail
 from app.main import create_app
 from tests.conftest import FakeDependency
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -103,6 +104,7 @@ async def _register(client: AsyncClient, email: str, slug: str) -> Response:
         json={
             "email": email,
             "password": PASSWORD,
+            "timezone": TEST_TIMEZONE,
             "workspace_name": f"Enum {slug}",
             "workspace_slug": slug,
         },

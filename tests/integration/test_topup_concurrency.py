@@ -84,6 +84,7 @@ from app.services.topup_ledger import TopupLedger
 from app.services.topup_service import TopupService
 from tests.billing_fixtures import erase_ledger
 from tests.integration.topup_harness import Paymob, apply, callback
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -130,7 +131,7 @@ async def world(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[World]
     now = datetime.now(UTC).replace(microsecond=0)
     tag = uuid.uuid4().hex[:8]
     async with maker() as session:
-        tenant = Tenant(name="Race Co", slug=f"race-topup-{tag}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Race Co", slug=f"race-topup-{tag}")
         owner = User(email=f"race-owner-{tag}@example.com", hashed_password="x", is_active=True)
         staff = User(
             email=f"race-staff-{tag}@example.com",

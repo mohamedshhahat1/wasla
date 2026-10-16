@@ -63,6 +63,7 @@ from app.services.messaging_service import MessagingService
 from app.workers.campaign_worker import CampaignWorker
 from tests.billing_fixtures import erase_ledger
 from tests.channel_plans import EVERY_CHANNEL, allow_channels
+from tests.workspace_timezone import TEST_TIMEZONE
 
 PLATFORM_TOKEN = "harness-platform-token"
 
@@ -264,7 +265,9 @@ async def seed(
     """A workspace with one number, an approved template and N people who wrote first."""
     suffix = uuid.uuid4().hex[:10]
     async with database.session_factory() as session:
-        tenant = Tenant(name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}"
+        )
         session.add(tenant)
         await session.flush()
         await allow_channels(session, tenant.id, channels, limits=limits)

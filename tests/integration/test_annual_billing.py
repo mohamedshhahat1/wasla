@@ -110,6 +110,7 @@ from tests.integration.test_platform_billing_api import app, desk, http  # noqa:
 from tests.integration.topup_harness import GIB, product
 from tests.payment_tokens import saved_card
 from tests.paymob_orders import CARD_INTEGRATION_ID, MOTO_INTEGRATION_ID
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -199,7 +200,7 @@ async def _catalogue(session: AsyncSession, staff: User) -> dict[str, PlanPrice]
 async def _workspace(
     session: AsyncSession, *, now: datetime = T0, name: str = "Annual Co"
 ) -> tuple[Tenant, User]:
-    tenant = Tenant(name=name, slug=f"annual-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=name, slug=f"annual-{uuid.uuid4().hex[:10]}")
     session.add(tenant)
     await session.flush()
     owner = await add_owner(session, tenant)

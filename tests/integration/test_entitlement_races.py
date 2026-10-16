@@ -37,6 +37,7 @@ from app.db.models.tenant import Tenant
 from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
 from tests.billing_fixtures import erase_ledger
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -62,7 +63,7 @@ async def maker(prepared_database: str) -> AsyncIterator[async_sessionmaker[Asyn
 async def workspace(maker: async_sessionmaker[AsyncSession]) -> AsyncIterator[uuid.UUID]:
     code = f"race-{uuid.uuid4().hex[:8]}"
     async with maker() as session:
-        tenant = Tenant(name="Race", slug=f"race-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Race", slug=f"race-{uuid.uuid4().hex[:10]}")
         plan = Plan(
             code=code,
             name="Race",

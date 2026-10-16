@@ -47,6 +47,7 @@ from app.db.models.enums import TenantStatus
 from app.db.models.identity import FederatedIdentity, IdentityProvider
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -126,7 +127,9 @@ async def _workspace(
     owner: User,
     role: TenantRole = TenantRole.TENANT_OWNER,
 ) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     session.add(Membership(tenant_id=tenant.id, user_id=owner.id, role=role))
@@ -562,6 +565,7 @@ async def test_the_address_is_not_released_for_re_registration(
         json={
             "email": "reserved@example.com",
             "password": PASSWORD,
+            "timezone": TEST_TIMEZONE,
             "workspace_name": "Second Attempt",
             "workspace_slug": "second-attempt",
         },
@@ -594,6 +598,7 @@ async def test_deletion_is_a_tombstone_not_an_erasure(
         json={
             "email": "Tombstone@Example.com",
             "password": PASSWORD,
+            "timezone": TEST_TIMEZONE,
             "workspace_name": "Came Back",
             "workspace_slug": "came-back",
         },

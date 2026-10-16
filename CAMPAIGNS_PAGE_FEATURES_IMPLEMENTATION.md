@@ -12,8 +12,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 
 | Phase | Subject | State | Commit | Suites run |
 |---|---|---|---|---|
-| 0 | Baseline, Meta's documentation, before-probes | committed | (this commit) | p20, p21 at BASE_HEAD |
-| 1 | Workspace timezone, timezones API | not started | | |
+| 0 | Baseline, Meta's documentation, before-probes | committed | 1ca3e86 | p20, p21 at BASE_HEAD |
+| 1 | Workspace timezone, timezones API | committed | (this commit) | timezones unit + API, workspace lifecycle, route authorization, documentation truth, auth endpoints (89 passed); migration-built: schema parity, downgrade atomicity, every migration suite |
 | 2 | Quiet hours | not started | | |
 | 3 | Meta messaging limit: read, store, webhooks | not started | | |
 | 4 | Ledger and the 80 % budget | not started | | |
@@ -113,3 +113,28 @@ ETA, edit draft, delete, duplicate, replied, updates live, why recipients were n
 export CSV, activity, Meta daily messaging limit, personalisation buttons (`{contact.first_name}`,
 `{lead.interest}`), saved segments, respect quiet hours (a per-campaign checkbox in the design;
 TZ-03 makes quiet hours a workspace setting), estimated cost.
+
+## Phase 1 notes (TZ-01, TZ-02)
+
+- `tzdata>=2026.2,<2028` added; the lock pins `tzdata==2026.5` (IANA 2026e). Zones are read
+  from the package's files (`ZoneInfo.from_file`), never through the system path, so Windows
+  and the Linux CI compute with the same data.
+- Accepted names: the union of tzdata's `zone.tab` and `zone1970.tab` (418 zones). `zone.tab`
+  keeps a country's own name where the database linked it to a neighbour (`Asia/Kuwait`,
+  `Asia/Bahrain`, `Asia/Muscat`, all in the suggested list). `US/Eastern`, `Egypt`, `Etc/*`,
+  `UTC` and `Asia/Calcutta` are refused (`timezone_unknown`).
+- Migration **0108**: `tenants.timezone` added nullable, backfilled `Africa/Cairo` by keyset
+  batches, NOT NULL through a validated CHECK; no server default. Downgrade refuses while any
+  workspace has another zone.
+- Every route that creates a workspace requires it: `POST /workspaces` and
+  `POST /auth/register`. `PATCH /workspace` changes it (owner or admin), audited as
+  `workspace_updated` with `previous_timezone` / `timezone` only. `GET /workspace` returns
+  `timezone` and `utc_offset`.
+- `GET /api/v1/timezones`: public, `PublicRateLimit` (client address, workspace budget's
+  number), `Cache-Control: public, max-age=3600`, ETag over the tzdata release, every zone's
+  current offset and the filter; 304 on a match.
+- Test fixtures: one helper, `tests/workspace_timezone.py` (`TEST_TIMEZONE = "Africa/Cairo"`).
+  166 test files gained it on their `Tenant(...)` constructions, 16 on registration payloads
+  and calls, 5 on `POST /workspaces` payloads, 9 on raw `INSERT INTO tenants` against the head
+  schema; 189 test files changed in all, three of them new. `scripts/pitr_drill.sh` inserts a
+  zone too.

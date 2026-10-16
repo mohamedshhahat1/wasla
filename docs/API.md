@@ -4,8 +4,8 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **212 operations**, of which
-17 are unauthenticated and each is listed with what bounds it in
+The production shape - `DOCS_ENABLED=false` - serves **213 operations**, of which
+18 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
 dependency graph and compares it with the figure above, and

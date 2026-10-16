@@ -41,6 +41,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.follow_up_service import FollowUpService
 from tests.integration.test_follow_up_revalidation import CountingMessaging
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -54,6 +55,7 @@ async def _workspace(
 ) -> tuple[Tenant, Conversation]:
     slug = f"deferred-{uuid.uuid4().hex[:8]}"
     tenant = Tenant(
+        timezone=TEST_TIMEZONE,
         name="Deferred",
         slug=slug,
         status=status,

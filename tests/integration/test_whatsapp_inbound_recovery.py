@@ -54,6 +54,7 @@ from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.inbound_recovery import InboundRecoveryWorker
 from app.workers.queue import QUEUE_NAMESPACE, AgentQueue
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -135,7 +136,9 @@ def broken_queue() -> AgentQueue:
 
 
 async def _workspace(session: AsyncSession) -> tuple[Tenant, WhatsAppAccount]:
-    tenant = Tenant(name="Recovery", slug=f"recovery-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Recovery", slug=f"recovery-{uuid.uuid4().hex[:8]}"
+    )
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

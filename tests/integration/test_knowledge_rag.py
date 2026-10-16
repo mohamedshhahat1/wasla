@@ -23,6 +23,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.retrieval_service import RetrievalService
 from tests.fake_embeddings import BrokenEmbeddings, FakeEmbeddings
 from tests.fakes import as_embeddings
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -55,7 +56,7 @@ photographs. The gold package covers a full day and includes an album.
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

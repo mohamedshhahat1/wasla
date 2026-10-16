@@ -67,6 +67,7 @@ from app.workers.queue import AgentJob, AgentQueue
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_database
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -152,7 +153,7 @@ def meta(monkeypatch: pytest.MonkeyPatch) -> Iterator[Meta]:
 
 async def _tenant(session: AsyncSession) -> Tenant:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Operations {tag}", slug=f"operations-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Operations {tag}", slug=f"operations-{tag}")
     session.add(tenant)
     await session.flush()
     return tenant

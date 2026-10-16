@@ -19,6 +19,7 @@ from app.core import telemetry
 from app.db.models.billing_incident import BillingIncident, BillingIncidentKind
 from app.db.models.tenant import Tenant
 from app.services.billing_incident_service import raise_incident
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -32,7 +33,9 @@ async def test_an_incident_is_recorded_once_and_counted_once(
         counted.append(kind)
 
     monkeypatch.setattr(telemetry, "record_billing_incident", record)
-    tenant = Tenant(name="Incidents", slug=f"incidents-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Incidents", slug=f"incidents-{uuid.uuid4().hex[:10]}"
+    )
     db_session.add(tenant)
     await db_session.flush()
 

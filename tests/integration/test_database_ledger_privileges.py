@@ -73,8 +73,8 @@ async def roles(prepared_database: str, monkeypatch: pytest.MonkeyPatch) -> Asyn
     async with owner.begin() as connection:
         await connection.execute(
             text(
-                "INSERT INTO tenants (id, name, slug, status) VALUES (:id, 'Ledger roles',"
-                " :slug, 'active')"
+                "INSERT INTO tenants (id, name, slug, status, timezone)"
+                " VALUES (:id, 'Ledger roles', :slug, 'active', 'Africa/Cairo')"
             ),
             {"id": tenant_id, "slug": f"ledger-roles-{suffix}"},
         )

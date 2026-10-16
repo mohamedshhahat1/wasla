@@ -52,6 +52,7 @@ from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.queue import AgentJob, AgentQueue
 from tests.conftest import AllowingEntitlements, FakeDependency
 from tests.consent import consent_of, opted_out_at
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -68,7 +69,7 @@ class RecordingQueue:
 
 async def _number(session: AsyncSession) -> WhatsAppAccount:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Taps {tag}", slug=f"taps-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Taps {tag}", slug=f"taps-{tag}")
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

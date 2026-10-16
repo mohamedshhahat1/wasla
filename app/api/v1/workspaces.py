@@ -57,14 +57,7 @@ router = APIRouter(route_class=CommittingRoute, tags=["Workspace"])
 
 
 def _read(tenant: Tenant) -> WorkspaceRead:
-    return WorkspaceRead(
-        id=tenant.id,
-        name=tenant.name,
-        slug=tenant.slug,
-        status=tenant.status,
-        is_active=tenant.is_active,
-        automation_disclosure=tenant.automation_disclosure,
-    )
+    return WorkspaceRead.from_tenant(tenant)
 
 
 @router.post(
@@ -114,6 +107,7 @@ async def create_workspace(
         owner=current_user.user,
         name=payload.name,
         slug=payload.slug,
+        timezone=payload.timezone,
     )
     return WorkspaceCreatedResponse(
         workspace=_read(created.tenant),
@@ -168,6 +162,7 @@ async def update_workspace(
             if payload.automation_disclosure is not None
             else None
         ),
+        timezone=payload.timezone,
     )
     return _read(tenant)
 

@@ -44,6 +44,7 @@ from app.main import create_app
 from tests.channel_plans import allow_channels
 from tests.conftest import AllowingEntitlements
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -131,7 +132,11 @@ async def _desk(
     desk = Desk()
     tag = uuid.uuid4().hex[:8]
     tenant = Tenant(
-        id=desk.tenant_id, name=f"Media {tag}", slug=f"hm-{tag}", status=TenantStatus.ACTIVE
+        timezone=TEST_TIMEZONE,
+        id=desk.tenant_id,
+        name=f"Media {tag}",
+        slug=f"hm-{tag}",
+        status=TenantStatus.ACTIVE,
     )
     owner = User(
         email=f"owner@{tag}.example", hashed_password="x", email_verified_at=datetime.now(UTC)

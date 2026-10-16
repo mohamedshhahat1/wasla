@@ -85,6 +85,7 @@ from tests.integration.test_platform_billing_api import _act_as as _act_as_user
 from tests.integration.test_platform_billing_api import _user
 from tests.integration.topup_harness import base_now
 from tests.integration.topup_harness import workspace as topup_workspace
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -502,7 +503,7 @@ async def test_another_workspaces_grant_is_404(
 ) -> None:
     staff = await _staff(db_session)
     tenant, _, grant = await _granted(db_session, staff)
-    other = Tenant(name="Other", slug=f"other-{uuid.uuid4().hex[:10]}")
+    other = Tenant(timezone=TEST_TIMEZONE, name="Other", slug=f"other-{uuid.uuid4().hex[:10]}")
     db_session.add(other)
     await db_session.flush()
     _act_as_user(app, staff)

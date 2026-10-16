@@ -202,6 +202,7 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/platform/users/{user_id}/disable` | **PLATFORM_STAFF** | no | none | - |
 | `POST` | `/api/v1/platform/users/{user_id}/enable` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/templates` | **MEMBER** | yes | workspace | - |
+| `GET` | `/api/v1/timezones` | **ANON** | no | none | - |
 | `POST` | `/api/v1/templates/sync` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/templates/{template_id}` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/usage` | **ADMIN** | yes | workspace | - |
@@ -260,6 +261,7 @@ is what removes the enumeration surface rather than mitigating it (ADR-043).
 | `POST /webhooks/whatsapp` | Meta cannot hold a credential of ours | HMAC-SHA256 signature; **never** rate-limited (ADR-032); 1 MB body cap |
 | `POST /webhooks/paymob` | A payment processor cannot hold a credential of ours | HMAC-SHA512 over twenty documented fields, `compare_digest`; **never** rate-limited (ADR-032); a saved-card callback is verified under its own eight-field scheme (ADR-046) |
 | `POST /webhooks/email` | Resend cannot hold a credential of ours | Svix signature over the raw body; **never** rate-limited (ADR-032) |
+| `GET /timezones` | A workspace's zone is chosen at signup, before any account exists (TZ-02) | Client-address limit (`PublicRateLimit`); canonical IANA names and offsets only, nothing about a customer; cached an hour with an ETag |
 | `GET /health`, `/health/live`, `/health/ready` | A load balancer has no credential | Report status and a version, never a connection string or a dependency error |
 | `GET /metrics` | A metrics scraper has no credential, and a shared token every scraper holds would protect a document that carries no customer data (ADR-070) | Not routable from outside: the API publishes no port and `nginx.conf` answers 404 for this path on the public listener. Every label value is refused unless it is a bounded category — no identifier, address or phone number can become a series. `METRICS_ENABLED=false` removes it |
 

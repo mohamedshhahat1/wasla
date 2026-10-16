@@ -50,6 +50,7 @@ from app.api.v1 import (
     platform_commercial,
     platform_entitlements,
     templates,
+    timezones,
     usage,
     webhooks,
     whatsapp,
@@ -136,6 +137,10 @@ UNLIMITED_ROUTERS = (
     platform_entitlements.router,
     webhooks.router,
     email_webhooks.router,
+    # Public reference data read at signup, before any account exists (TZ-02).
+    # Not unguarded: its one route declares `PublicRateLimit`, counted by
+    # client address; the workspace limit would need a workspace.
+    timezones.router,
     # A payment provider cannot hold a credential of ours and retries anything
     # that is not a 2xx, so the same reasoning as the other two: an HMAC is its
     # authorization, and a 429 here would lose a payment notification.
