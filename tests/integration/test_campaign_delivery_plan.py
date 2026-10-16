@@ -26,7 +26,10 @@ from tests.integration.campaign_harness import (
     worker,
 )
 
-pytestmark = [pytest.mark.integration, pytest.mark.messaging_limit, pytest.mark.quiet_hours]
+# Quiet hours are real only in the tests that choose their own moments
+# (`tomorrow_cairo`): a test on the real clock, run at 22:30 Cairo, would find
+# every campaign waiting for the morning (CPF-02).
+pytestmark = [pytest.mark.integration, pytest.mark.messaging_limit]
 
 
 @pytest_asyncio.fixture
@@ -48,6 +51,7 @@ def tomorrow_cairo(hour: int, minute: int = 0) -> datetime:
     ) + timedelta(days=1)
 
 
+@pytest.mark.quiet_hours
 async def test_scheduling_answers_with_the_plan_and_a_late_start_waits_for_nine(
     database: Database,
 ) -> None:
@@ -90,6 +94,7 @@ async def test_the_plan_is_an_admin_s_and_recomputed_on_demand(database: Databas
         assert (await member.get(f"{API}/campaigns/{campaign_id}/delivery-plan")).status_code == 403
 
 
+@pytest.mark.quiet_hours
 async def test_a_deadline_needs_its_offset_and_must_follow_the_start(database: Database) -> None:
     meta = FakeMeta(messaging_limit="TIER_2K")
     workspace = await seed(database, recipients=3)
