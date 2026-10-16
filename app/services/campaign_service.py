@@ -125,6 +125,10 @@ from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services import messaging_limit_service as portfolio_limits
 from app.services import workspace_serving as serving
 from app.services.audit_service import AuditTrail
+from app.services.business_initiated_ledger import (
+    MessagingLimitUnknownError,
+    PortfolioLimitReachedError,
+)
 from app.services.campaign_header_media_service import (
     CampaignHeaderMediaService,
     HeaderMediaUnavailableError,
@@ -1046,6 +1050,31 @@ class CampaignService:
                 # staged, so the recipient is untouched; the campaign waits.
                 throttled_until = moment + PAUSED_RECHECK
                 break
+            except PortfolioLimitReachedError as reached:
+                # **The portfolio's campaign share of Meta's limit is used for
+                # this moving 24 hours** (LIM-04). Refused under the
+                # portfolio's lock before anything was staged: this person is
+                # untouched - no attempt, still pending - and so is everybody
+                # after them. The campaign waits until the first person
+                # counted leaves the window, and carries on by itself.
+                return await self._wait(
+                    campaign,
+                    CampaignWaitReason.DAILY_LIMIT,
+                    until=reached.resumes_at,
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped,
+                )
+            except MessagingLimitUnknownError:
+                # Nobody has read the limit (LIM-01): nothing is sent.
+                return await self._wait(
+                    campaign,
+                    CampaignWaitReason.LIMIT_UNKNOWN,
+                    until=clock() + LIMIT_UNKNOWN_RECHECK,
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped,
+                )
             except _CampaignWideRefusalError as refusal:
                 # The template is refused for everybody (CMP-05, CMP-19): the
                 # campaign fails once with the reason and Meta's code, and the
@@ -1185,7 +1214,12 @@ class CampaignService:
         """
         try:
             return await self._deliver(
-                campaign, recipient, messaging=messaging, now=now, header_file=header.file
+                campaign,
+                recipient,
+                messaging=messaging,
+                now=now,
+                header_file=header.file,
+                at=clock(),
             )
         except _HeaderFileRejectedError:
             pass
@@ -1212,7 +1246,12 @@ class CampaignService:
             return None
         try:
             return await self._deliver(
-                campaign, recipient, messaging=messaging, now=now, header_file=header.file
+                campaign,
+                recipient,
+                messaging=messaging,
+                now=now,
+                header_file=header.file,
+                at=clock(),
             )
         except _HeaderFileRejectedError:
             raise _BatchEndedError(await self._header_refused(campaign, token=token)) from None
@@ -1663,8 +1702,13 @@ class CampaignService:
         messaging: MessagingService,
         now: datetime,
         header_file: HeaderFileParameter | None = None,
+        at: datetime | None = None,
     ) -> RecipientStatus | _Deferred:
-        """Send one person's copy and record what happened to it."""
+        """Send one person's copy and record what happened to it.
+
+        `at` is the worker's clock at this send - what the business-initiated
+        ledger dates it with (LIM-03).
+        """
         contact = await self._contacts.get_by_id(recipient.contact_id)
         if contact is None:
             return self._skip(
@@ -1778,6 +1822,10 @@ class CampaignService:
                 # up* and made every broadcast read as their own reply
                 # (MSG-16).
                 origin=MessageOrigin.CAMPAIGN,
+                # Reserved in the business-initiated ledger against the
+                # portfolio's campaign share, at the worker's clock (LIM-04).
+                at=at or now,
+                campaign_id=campaign.id,
             )
         except ProviderConnectionRefusedError:
             # Let out rather than filed against this recipient. The credential
@@ -1787,9 +1835,16 @@ class CampaignService:
             # single thing to tell anybody (MSG-18). `dispatch_batch` fails the
             # campaign once instead.
             raise
-        except (ConnectionThrottledError, ChannelPausedError, ProviderUnreachableError):
+        except (
+            ConnectionThrottledError,
+            ChannelPausedError,
+            ProviderUnreachableError,
+            PortfolioLimitReachedError,
+            MessagingLimitUnknownError,
+        ):
             # Not this recipient's failure: `dispatch_batch` waits for the
-            # window, or for the outage to pass (CMP-07).
+            # window, for the outage to pass (CMP-07), or for the portfolio's
+            # moving 24 hours to free a place (LIM-04).
             raise
         except TemplateRefusedError as error:
             # The registry refuses the template - withdrawn by Meta through

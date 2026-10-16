@@ -36,6 +36,7 @@ from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import record_retention_pass, record_webhook_payload_retention
 from app.db.session import Database
 from app.repositories.whatsapp_repository import WebhookPayloadRetention
+from app.services.business_initiated_ledger import BusinessInitiatedLedger
 from app.services.media_retention_service import MediaRetentionService, RetentionOutcome
 
 logger = get_logger(__name__)
@@ -43,6 +44,9 @@ logger = get_logger(__name__)
 # Daily. A retention period is a date, and sweeping harder would be querying
 # constantly to learn nothing.
 POLL_SECONDS: Final = 86_400.0
+# How long a business-initiated ledger row is kept (LIM-03): twice the window
+# the reservation reads.
+LEDGER_RETENTION: Final = timedelta(hours=48)
 
 
 class RetentionWorker:
@@ -91,6 +95,12 @@ class RetentionWorker:
                 await self.redact_webhook_payloads()
             except Exception:
                 logger.exception("retention.webhook_redaction_failed")
+            try:
+                # The business-initiated ledger is only ever read 24 hours
+                # back (LIM-03); its rows go after 48.
+                await self.prune_business_initiated_ledger()
+            except Exception:
+                logger.exception("retention.ledger_prune_failed")
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=self._poll_seconds)
             except TimeoutError:
@@ -143,6 +153,25 @@ class RetentionWorker:
                 },
             )
         return outcome
+
+    async def prune_business_initiated_ledger(self, *, now: datetime | None = None) -> int:
+        """Delete business-initiated ledger rows older than 48 hours (LIM-03).
+
+        The reservation counts the last 24 hours and nothing older, so a row
+        past 48 is never read again: it is a record of a phone number with no
+        purpose left. One statement, in a short transaction of its own.
+        """
+        moment = now or datetime.now(UTC)
+        async with self._database.session() as session:
+            pruned = await BusinessInitiatedLedger(
+                session, share=self._settings.campaign_portfolio_limit_share
+            ).prune(before=moment - LEDGER_RETENTION)
+        if pruned:
+            logger.info(
+                "retention.ledger_pruned",
+                extra={"event": "retention.ledger_pruned", "pruned": pruned},
+            )
+        return pruned
 
     async def redact_webhook_payloads(self, *, now: datetime | None = None) -> int:
         """Clear processed webhook payloads past their window (DB-011).

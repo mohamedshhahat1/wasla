@@ -89,6 +89,8 @@ class StubMessaging:
         sent_by_id: uuid.UUID | None = None,
         link: Callable[[Message], None] | None = None,
         origin: MessageOrigin,
+        at: datetime | None = None,
+        campaign_id: uuid.UUID | None = None,
     ) -> Message:
         """The real protocol's shape, minus the commits (ADR-093).
 

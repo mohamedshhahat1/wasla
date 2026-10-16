@@ -30,6 +30,7 @@ from .billing import (
     SubscriptionStatus,
 )
 from .billing_incident import BillingIncident, BillingIncidentKind, BillingIncidentStatus
+from .business_initiated import BusinessInitiatedSend, LedgerSource
 from .campaign import (
     MAX_RECIPIENT_ATTEMPTS,
     TERMINAL_CAMPAIGN_STATUSES,
@@ -236,6 +237,7 @@ __all__ = [
     "BillingIncidentKind",
     "BillingIncidentStatus",
     "BillingInterval",
+    "BusinessInitiatedSend",
     "Campaign",
     "CampaignHeaderMedia",
     "CampaignRecipient",
@@ -288,6 +290,7 @@ __all__ = [
     "LeadNote",
     "LeadSource",
     "LeadStatus",
+    "LedgerSource",
     "LimitKey",
     "LimitSource",
     "MediaPurgeObject",

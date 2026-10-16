@@ -96,6 +96,7 @@ from app.core.storage import EXTENSIONS, MediaStorage, build_key, write_object
 from app.core.telemetry import record_opt_outs
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
+from app.db.models.business_initiated import LedgerSource
 from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import Channel, ChannelConnection, ConnectionHealth, IdentityKind
 from app.db.models.conversation import (
@@ -126,6 +127,7 @@ from app.repositories.conversation_repository import (
 from app.repositories.media_repository import MediaRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services.audit_service import AuditTrail
+from app.services.business_initiated_ledger import BusinessInitiatedLedger, Enforcement
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
@@ -169,6 +171,17 @@ class TemplateRefusedError(ValidationError):
 
     error_code = "template_refused"
 
+
+# Which ledger source each sender is (LIM-03), and whose budget it is held to
+# (LIM-04): campaigns to their share, everybody else recorded only.
+LEDGER_SOURCES: Final[dict[MessageOrigin, LedgerSource]] = {
+    MessageOrigin.CAMPAIGN: LedgerSource.CAMPAIGN,
+    MessageOrigin.HUMAN: LedgerSource.MANUAL_TEMPLATE,
+    MessageOrigin.FOLLOW_UP: LedgerSource.FOLLOW_UP,
+}
+LEDGER_ENFORCEMENT: Final[dict[MessageOrigin, Enforcement]] = {
+    MessageOrigin.CAMPAIGN: Enforcement.CAMPAIGN,
+}
 
 # Who may send a marketing template by hand (CMQ-02).
 MARKETING_SENDER_ROLES: Final = frozenset({TenantRole.TENANT_OWNER, TenantRole.TENANT_ADMIN})
@@ -331,6 +344,11 @@ class MessagingService:
             tenant_id=tenant_id,
             default_plan_code=settings.default_plan_code,
         )
+        # Every business-initiated WhatsApp template, counted per portfolio
+        # (LIM-03); campaigns held to their share of Meta's limit (LIM-04).
+        self._ledger = BusinessInitiatedLedger(
+            session, share=settings.campaign_portfolio_limit_share
+        )
 
     async def send_text(
         self,
@@ -386,6 +404,8 @@ class MessagingService:
         idempotency_key: str | None = None,
         origin: MessageOrigin,
         sender_role: TenantRole | None = None,
+        at: datetime | None = None,
+        campaign_id: uuid.UUID | None = None,
     ) -> Message:
         """Send an approved template, which is valid outside the service window.
 
@@ -415,6 +435,13 @@ class MessagingService:
         stricter rule - the template must exist locally and be approved - on
         top of this one, because setting a campaign up is a deliberate act that
         can afford to require a sync first.
+
+        **Counted against Meta's messaging limit** (LIM-03): a WhatsApp template
+        to a person outside their service window is reserved in the
+        business-initiated ledger under the portfolio's lock, in the send
+        intent's transaction - and a campaign's is refused past its share
+        (`PortfolioLimitReachedError`). `at` is the sender's clock (a campaign
+        worker's), `campaign_id` the campaign it belongs to.
         """
         template = await self._templates.find_anywhere(name=name, language=language)
         refusal = refusal_reason_for(template)
@@ -449,6 +476,8 @@ class MessagingService:
             link=link,
             idempotency_key=idempotency_key,
             origin=origin,
+            at=at,
+            campaign_id=campaign_id,
         )
 
     async def _admit_manual_marketing(
@@ -829,6 +858,8 @@ class MessagingService:
         link: LinkCall | None = None,
         idempotency_key: str | None = None,
         origin: MessageOrigin,
+        at: datetime | None = None,
+        campaign_id: uuid.UUID | None = None,
     ) -> Message:
         """One outbound message, under the delivery protocol in ADR-093.
 
@@ -894,6 +925,24 @@ class MessagingService:
         # The connection's allowance, shared by every sender on it (ADR-123).
         # Before anything is staged: a refusal leaves no row to reconcile.
         await self._take_allowance(connection, origin=origin)
+        # Meta's messaging limit (LIM-03, LIM-04): reserved under the
+        # portfolio's lock, decided before anything is staged - a campaign
+        # past its share is refused here and stages nothing - and written with
+        # the message below, so the lock ends at the intent's commit.
+        reservation = (
+            await self._ledger.reserve(
+                account_id=connection.id,
+                recipient=recipient.value,
+                last_inbound_at=conversation.last_inbound_at,
+                source=LEDGER_SOURCES.get(origin, LedgerSource.OTHER),
+                enforcement=LEDGER_ENFORCEMENT.get(origin, Enforcement.RECORD_ONLY),
+                tenant_id=self._tenant_id,
+                campaign_id=campaign_id,
+                at=at or datetime.now(UTC),
+            )
+            if kind is MessageKind.TEMPLATE and connection.channel is Channel.WHATSAPP
+            else None
+        )
 
         if idempotency_key is not None:
             message, claimed = await self._messages.claim_idempotency_key(
@@ -941,6 +990,8 @@ class MessagingService:
                 origin=origin,
             )
         await self._session.flush()
+        if reservation is not None:
+            self._ledger.record(reservation, message_id=message.id)
         if link is not None:
             link(message)
 
@@ -1186,6 +1237,8 @@ class MessagingService:
         the template from a refusal of one person (CMP-05, CMP-06).
         """
         await self._messages.mark_failed(message, reason=reason, code=code)
+        # Provably not delivered, so it reached nobody Meta counts (LIM-03).
+        await self._ledger.release(message.id)
         logger.warning(
             "channel.outbound_failed",
             extra={

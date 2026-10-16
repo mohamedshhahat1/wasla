@@ -600,6 +600,12 @@ class Settings(BaseSettings):
     # portfolio's limit "within 6 hours" of qualifying, and a webhook says so
     # sooner where it is subscribed.
     campaign_messaging_limit_refresh_seconds: int = Field(default=6 * 3600, ge=60, le=7 * 24 * 3600)
+    # The share of a business portfolio's messaging limit campaigns may use in
+    # a moving 24 hours (LIM-04, ADR-146): campaigns stop at floor(share x
+    # limit) unique people and wait for the window to move. The rest stays
+    # free for follow-ups, manual templates and other numbers' work. A
+    # platform setting, never a workspace's.
+    campaign_portfolio_limit_share: float = Field(default=0.80, gt=0, le=1)
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

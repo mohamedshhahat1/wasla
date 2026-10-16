@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -151,6 +151,54 @@ async def limit_for_account(session: AsyncSession, account_id: uuid.UUID) -> Por
     )
 
 
+async def portfolio_for_waba(session: AsyncSession, waba_id: str) -> WhatsAppBusinessPortfolio:
+    """The portfolio row of a WABA, created unknown if Meta has not been asked about it, locked."""
+    await session.execute(
+        insert(WhatsAppBusinessPortfolio)
+        .values(
+            id=uuid.uuid4(),
+            key_kind=PortfolioKeyKind.WABA.value,
+            meta_key=waba_id,
+        )
+        .on_conflict_do_nothing(constraint="uq_whatsapp_business_portfolios_key")
+    )
+    portfolio = await session.scalar(
+        select(WhatsAppBusinessPortfolio)
+        .where(
+            WhatsAppBusinessPortfolio.key_kind == PortfolioKeyKind.WABA.value,
+            WhatsAppBusinessPortfolio.meta_key == waba_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    assert portfolio is not None  # noqa: S101 - inserted or already there
+    return portfolio
+
+
+async def release_limit_waits(session: AsyncSession, portfolio_id: uuid.UUID) -> int:
+    """Make every campaign waiting on this portfolio's limit due now (LIM-01, LIM-04).
+
+    Across workspaces, because the limit is the portfolio's. The next sweep
+    asks the ledger again under the new figure: it sends, or waits anew.
+    """
+    from app.db.models.campaign import Campaign, CampaignStatus, CampaignWaitReason
+
+    accounts = select(WhatsAppAccount.id).where(WhatsAppAccount.portfolio_id == portfolio_id)
+    result = await session.execute(
+        update(Campaign)
+        .where(
+            Campaign.account_id.in_(accounts),
+            Campaign.status.in_([CampaignStatus.SCHEDULED, CampaignStatus.RUNNING]),
+            Campaign.waiting_reason.in_(
+                [CampaignWaitReason.DAILY_LIMIT.value, CampaignWaitReason.LIMIT_UNKNOWN.value]
+            ),
+        )
+        .values(next_send_at=func.now())
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+
 class MessagingLimitService:
     """Reading, storing and applying Meta's messaging limit. Platform-level: no tenant."""
 
@@ -218,26 +266,7 @@ class MessagingLimitService:
     # ------------------------------------------------------------------ storing
 
     async def _portfolio_for_waba(self, waba_id: str) -> WhatsAppBusinessPortfolio:
-        await self._session.execute(
-            insert(WhatsAppBusinessPortfolio)
-            .values(
-                id=uuid.uuid4(),
-                key_kind=PortfolioKeyKind.WABA.value,
-                meta_key=waba_id,
-            )
-            .on_conflict_do_nothing(constraint="uq_whatsapp_business_portfolios_key")
-        )
-        portfolio = await self._session.scalar(
-            select(WhatsAppBusinessPortfolio)
-            .where(
-                WhatsAppBusinessPortfolio.key_kind == PortfolioKeyKind.WABA.value,
-                WhatsAppBusinessPortfolio.meta_key == waba_id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        assert portfolio is not None  # noqa: S101 - inserted or already there
-        return portfolio
+        return await portfolio_for_waba(self._session, waba_id)
 
     async def attach(
         self,
@@ -273,7 +302,8 @@ class MessagingLimitService:
             return
         reading = interpret(value)
         stated = str(value)[:40]
-        if portfolio.checked_at is None or reading.limit != portfolio.messaging_limit:
+        changed = portfolio.checked_at is None or reading.limit != portfolio.messaging_limit
+        if changed:
             portfolio.changed_at = at
             logger.info(
                 "whatsapp.messaging_limit_changed",
@@ -290,6 +320,11 @@ class MessagingLimitService:
         portfolio.recognised = reading.recognised
         portfolio.source = source.value
         portfolio.checked_at = at
+        if changed:
+            # A new limit takes effect at the next batch (LIM-01): a campaign
+            # waiting for the old one's window, or for any limit at all, asks
+            # again now rather than at the moment the old figure gave it.
+            await release_limit_waits(self._session, portfolio.id)
         if not reading.recognised:
             logger.error(
                 "whatsapp.messaging_limit_unrecognised",
@@ -357,4 +392,6 @@ __all__ = [
     "PortfolioLimit",
     "interpret",
     "limit_for_account",
+    "portfolio_for_waba",
+    "release_limit_waits",
 ]

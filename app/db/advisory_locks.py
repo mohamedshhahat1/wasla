@@ -26,11 +26,21 @@ WORKSPACE_CREATION: Final = 0x5741_5301
 PLATFORM_OWNERS: Final = 0x5741_5302
 # Password-reset issuance, per account (`PasswordResetService`).
 PASSWORD_RESET_REQUEST: Final = 0x5741_5303
+# The business-initiated ledger's reservation, per business portfolio
+# (`BusinessInitiatedLedger`, LIM-03): count, decide and record as one step.
+BUSINESS_PORTFOLIO: Final = 0x5741_5304
 
 NAMESPACES: Final[dict[str, int]] = {
     "workspace_creation": WORKSPACE_CREATION,
     "platform_owners": PLATFORM_OWNERS,
     "password_reset_request": PASSWORD_RESET_REQUEST,
+    "business_portfolio": BUSINESS_PORTFOLIO,
 }
 
-__all__ = ["NAMESPACES", "PASSWORD_RESET_REQUEST", "PLATFORM_OWNERS", "WORKSPACE_CREATION"]
+__all__ = [
+    "BUSINESS_PORTFOLIO",
+    "NAMESPACES",
+    "PASSWORD_RESET_REQUEST",
+    "PLATFORM_OWNERS",
+    "WORKSPACE_CREATION",
+]

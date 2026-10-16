@@ -15,8 +15,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 0 | Baseline, Meta's documentation, before-probes | committed | 1ca3e86 | p20, p21 at BASE_HEAD |
 | 1 | Workspace timezone, timezones API | committed | 5450912 | timezones unit + API, workspace lifecycle, route authorization, documentation truth, auth endpoints (89 passed); migration-built: schema parity, downgrade atomicity, every migration suite |
 | 2 | Quiet hours | committed | 2015b7d | every campaign suite + unit (308 passed after the fixes below); quiet hours, settings API, timezones API; migration-built: schema parity, downgrade atomicity, quiet hours |
-| 3 | Meta messaging limit: read, store, webhooks | committed | (this commit) | every campaign, WhatsApp and webhook suite + metric/doc/deployment checks (658 passed after the fixes below); messaging limit reads + values; migration-built: parity, downgrade atomicity, limit reads |
-| 4 | Ledger and the 80 % budget | not started | | |
+| 3 | Meta messaging limit: read, store, webhooks | committed | e5bbb6e | every campaign, WhatsApp and webhook suite + metric/doc/deployment checks (658 passed after the fixes below); messaging limit reads + values; migration-built: parity, downgrade atomicity, limit reads |
+| 4 | Ledger and the 80 % budget | committed | (this commit) | every campaign, WhatsApp, follow-up, template, delivery-protocol, retention and unit suite (4,087 passed, 10 failed in one stub - fixed, 103 re-run passed); limit worker tests (14 passed: 200/200/200 with 1, 2, 4 workers; 40/40 races); migration-built: parity, downgrade atomicity, limit API |
 | 5 | Spreading, deadline, delivery plan, ETA | not started | | |
 | 6 | Per-contact cap, pacing, 131049 | not started | | |
 | 7 | Personalisation | not started | | |
@@ -208,3 +208,32 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
 - Intended test changes: `test_campaign_endpoints.py`'s service stub gained
   `refresh_messaging_limit` (the schedule route now calls it); `test_whatsapp_models.py` expects
   `ix_whatsapp_accounts_portfolio_id`.
+
+## Phase 4 notes (LIM-03, LIM-04, LIM-07)
+
+- Migration **0111**: `business_initiated_sends` (platform-level; `tenant_id` cascades; campaign and
+  message set null), five indexes `CONCURRENTLY`. Its portfolio key is named explicitly
+  (`fk_business_initiated_sends_portfolio_id`): the convention's name was 66 characters.
+- `BusinessInitiatedLedger.reserve` in `MessagingService._dispatch`, for every WhatsApp template:
+  the service window (23 h with an hour's margin) exempts; otherwise `pg_advisory_xact_lock`
+  (namespace `BUSINESS_PORTFOLIO`, registered in `app/db/advisory_locks.py`), count distinct people
+  of the last 24 h (no upper bound, so a racing sender's row a moment later still counts), decide,
+  and write the row with the staged message in TX1; `_undelivered` deletes it (provably not
+  delivered); an uncertain answer keeps it.
+- Campaigns are held to `floor(CAMPAIGN_PORTFOLIO_LIMIT_SHARE x limit)` (0.80); refused, the
+  campaign waits `daily_limit` until the first counted person leaves the window + 5 minutes, no
+  attempt spent, and carries on by itself. Follow-ups and manual templates are recorded, never
+  refused. A new limit (read or webhook) releases every `daily_limit` / `limit_unknown` wait on
+  the portfolio at once.
+- `GET /api/v1/whatsapp/accounts/{id}/messaging-limit` (member): tier, limit, share, budget, used in
+  24 h (all sources, whole portfolio), available now, next capacity (UTC and local), shared with
+  other numbers / workspaces - aggregates only.
+- Retention: the existing retention sweep deletes ledger rows older than 48 hours.
+- Transport-counted results (`test_campaign_messaging_limit.py`): 600 people on TIER_250 ->
+  `[200, 200, 200]` per 24 h window with 1, 2 and 4 workers, max 200 in any moving window, 0 twice,
+  every recipient `sent/0`; two campaigns on one number, two numbers of one portfolio, two
+  workspaces on one portfolio -> `[200, 200, 200]`; 30 by follow-up and manual -> campaigns 170;
+  100 open-window people sent beside 200 counted; unlimited -> 2,000 in one window; webhook
+  250 -> 2,000 mid-campaign -> the rest at once; a lowered read -> 200; UNTIERED -> 200; 5 refused
+  sends released, an uncertain one kept; the last place: exactly 1 winner in 40 of 40 races.
+- Intended test change: `test_campaigns.py`'s messaging stub gained `at` and `campaign_id`.
