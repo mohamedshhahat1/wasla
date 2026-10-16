@@ -185,6 +185,8 @@ class RecipientReason(StrEnum):
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"
     #: Meta refused the template's parameters for this send (CMP-05).
     TEMPLATE_PARAMETERS_REFUSED = "template_parameters_refused"
+    #: Still pending when the campaign's deadline passed (LIM-06).
+    SEND_WINDOW_CLOSED = "send_window_closed"
 
 
 class RecipientStatus(StrEnum):
@@ -312,6 +314,11 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         ),
         CheckConstraint(
             "consecutive_batch_failures >= 0", name="consecutive_batch_failures_non_negative"
+        ),
+        # A deadline comes after the start it ends (LIM-06). 0112.
+        CheckConstraint(
+            "send_until IS NULL OR scheduled_at IS NULL OR send_until > scheduled_at",
+            name="send_until_after_start",
         ),
         # The send rate the schema and the service already bound, held by the
         # column too (CMP-22). 0106.
@@ -456,6 +463,10 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         String(MAX_STOP_REASON_LENGTH), nullable=True
     )
     resumes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the campaign stops trying (LIM-06): whoever is still pending then is
+    # skipped `send_window_closed` and the campaign completes. An offer that
+    # ends on Friday stops on Friday, however long the limit spread it. 0112.
+    send_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     @property
     def is_running(self) -> bool:

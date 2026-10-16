@@ -423,6 +423,25 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         result = await self.session.execute(statement)
         return list(result.scalars().all())
 
+    async def skip_pending(self, campaign_id: uuid.UUID, *, reason: str, detail: str) -> int:
+        """Skip everybody still pending, in one statement (LIM-06). Returns how many.
+
+        Rows another worker holds between its check and its send intent are
+        waited for, not skipped from under it: the statement takes each row's
+        lock as it updates it.
+        """
+        result = await self.session.execute(
+            update(CampaignRecipient)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == RecipientStatus.PENDING,
+            )
+            .values(status=RecipientStatus.SKIPPED, reason_code=reason, last_error=detail)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
     async def earliest_deferral(self, campaign_id: uuid.UUID) -> datetime | None:
         """When the first pending recipient deferred by a pair limit may be asked (CMP-18)."""
         moment: datetime | None = await self.session.scalar(

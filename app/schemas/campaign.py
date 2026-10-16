@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,7 +43,9 @@ from app.db.models.conversation import Contact
 from app.db.models.lead import LeadStatus
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
 from app.schemas.text import StorableText
+from app.services.campaign_planner import Eta
 from app.services.campaign_service import MAX_AUDIENCE_SIZE
+from app.services.delivery_plan import DeliveryPlan, EtaBasis, PlanNotice
 from app.services.entitlement_terms import ordered
 
 # How many variables a template can plausibly want. Meta's own limit is higher;
@@ -148,6 +150,102 @@ class CampaignScheduleRequest(_Payload):
     """When to send. Omitting the time means now."""
 
     scheduled_at: datetime | None = None
+    # When to stop trying (LIM-06): whoever is still pending then is skipped
+    # `send_window_closed` and the campaign completes. With its UTC offset,
+    # after the start.
+    send_until: datetime | None = None
+
+
+class PlanDayRead(BaseModel):
+    """One local day of a delivery plan (LIM-05)."""
+
+    local_date: date
+    first_send_at: datetime
+    first_send_at_local: datetime
+    last_send_at: datetime
+    last_send_at_local: datetime
+    recipients: int
+
+
+class DeliveryPlanRead(BaseModel):
+    """When the campaign is expected to reach its people, day by day (LIM-05).
+
+    A prediction from the campaign's rate, the workspace's quiet hours, the
+    portfolio's campaign budget and what it has already used, and per-person
+    deferrals - never a guarantee. `notices` says what shaped it.
+    """
+
+    computed_at: datetime
+    timezone: str
+    first_send_at: datetime | None
+    first_send_at_local: datetime | None
+    estimated_completion_at: datetime | None
+    estimated_completion_at_local: datetime | None
+    recipients_planned: int
+    recipients_left_by_deadline: int
+    days: list[PlanDayRead]
+    notices: list[PlanNotice]
+    basis: list[EtaBasis]
+
+    @classmethod
+    def from_plan(cls, planned: DeliveryPlan) -> Self:
+        tz = planned.timezone
+
+        def at(moment: datetime | None) -> datetime | None:
+            return local(moment, tz) if moment is not None else None
+
+        return cls(
+            computed_at=planned.computed_at,
+            timezone=tz,
+            first_send_at=planned.first_send_at,
+            first_send_at_local=at(planned.first_send_at),
+            estimated_completion_at=planned.estimated_completion_at,
+            estimated_completion_at_local=at(planned.estimated_completion_at),
+            recipients_planned=planned.planned,
+            recipients_left_by_deadline=planned.left_by_deadline,
+            days=[
+                PlanDayRead(
+                    local_date=day.local_date,
+                    first_send_at=day.first_send_at,
+                    first_send_at_local=local(day.first_send_at, tz),
+                    last_send_at=day.last_send_at,
+                    last_send_at_local=local(day.last_send_at, tz),
+                    recipients=day.recipients,
+                )
+                for day in planned.days
+            ],
+            notices=list(planned.notices),
+            basis=list(planned.basis),
+        )
+
+
+class EtaRead(BaseModel):
+    """When a live campaign is expected to finish (PG-13) - an estimate, never a promise.
+
+    Null `estimated_completion_at` with a `reason` for a campaign that will not
+    send by itself (draft, paused, failed, cancelled, completed) or whose
+    number's limit is unknown.
+    """
+
+    estimated_completion_at: datetime | None
+    estimated_completion_at_local: datetime | None
+    basis: list[EtaBasis]
+    confidence: str | None
+    reason: str | None
+
+    @classmethod
+    def from_eta(cls, eta: Eta, *, timezone: str) -> Self:
+        return cls(
+            estimated_completion_at=eta.estimated_completion_at,
+            estimated_completion_at_local=(
+                local(eta.estimated_completion_at, timezone)
+                if eta.estimated_completion_at is not None
+                else None
+            ),
+            basis=list(eta.basis),
+            confidence=eta.confidence,
+            reason=eta.reason,
+        )
 
 
 class OptOutRequest(_Payload):
@@ -242,6 +340,15 @@ class CampaignRead(BaseModel):
     # its offset (TZ-03). Null unless it is waiting.
     resumes_at: datetime | None = None
     resumes_at_local: datetime | None = None
+    # Its deadline (LIM-06), in UTC and in the workspace's own time.
+    send_until: datetime | None = None
+    send_until_local: datetime | None = None
+    # When a live campaign is expected to finish (PG-13). Computed for one
+    # campaign's read, a list of live ones and the progress route.
+    eta: EtaRead | None = None
+    # The plan, on the schedule response only (LIM-05); `GET
+    # /campaigns/{id}/delivery-plan` recomputes it at any time.
+    delivery_plan: DeliveryPlanRead | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -252,12 +359,17 @@ class CampaignRead(BaseModel):
         *,
         header_media: CampaignHeaderMedia | None = None,
         timezone: str | None = None,
+        eta: Eta | None = None,
     ) -> Self:
         read = cls.model_validate(campaign)
         if header_media is not None:
             read.header_media = HeaderMediaRead.from_model(header_media)
         if timezone is not None and read.resumes_at is not None:
             read.resumes_at_local = local(read.resumes_at, timezone)
+        if timezone is not None and read.send_until is not None:
+            read.send_until_local = local(read.send_until, timezone)
+        if timezone is not None and eta is not None:
+            read.eta = EtaRead.from_eta(eta, timezone=timezone)
         return read
 
 
@@ -427,7 +539,10 @@ __all__ = [
     "ChannelConsentRead",
     "ContactIdentityRead",
     "ContactOptOutRead",
+    "DeliveryPlanRead",
+    "EtaRead",
     "OptOutRequest",
+    "PlanDayRead",
     "RecipientListResponse",
     "RecipientRead",
 ]

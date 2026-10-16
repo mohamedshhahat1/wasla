@@ -16,8 +16,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 1 | Workspace timezone, timezones API | committed | 5450912 | timezones unit + API, workspace lifecycle, route authorization, documentation truth, auth endpoints (89 passed); migration-built: schema parity, downgrade atomicity, every migration suite |
 | 2 | Quiet hours | committed | 2015b7d | every campaign suite + unit (308 passed after the fixes below); quiet hours, settings API, timezones API; migration-built: schema parity, downgrade atomicity, quiet hours |
 | 3 | Meta messaging limit: read, store, webhooks | committed | e5bbb6e | every campaign, WhatsApp and webhook suite + metric/doc/deployment checks (658 passed after the fixes below); messaging limit reads + values; migration-built: parity, downgrade atomicity, limit reads |
-| 4 | Ledger and the 80 % budget | committed | (this commit) | every campaign, WhatsApp, follow-up, template, delivery-protocol, retention and unit suite (4,087 passed, 10 failed in one stub - fixed, 103 re-run passed); limit worker tests (14 passed: 200/200/200 with 1, 2, 4 workers; 40/40 races); migration-built: parity, downgrade atomicity, limit API |
-| 5 | Spreading, deadline, delivery plan, ETA | not started | | |
+| 4 | Ledger and the 80 % budget | committed | b2482c7 | every campaign, WhatsApp, follow-up, template, delivery-protocol, retention and unit suite (4,087 passed, 10 failed in one stub - fixed, 103 re-run passed); limit worker tests (14 passed: 200/200/200 with 1, 2, 4 workers; 40/40 races); migration-built: parity, downgrade atomicity, limit API |
+| 5 | Spreading, deadline, delivery plan, ETA | committed | (this commit) | every campaign suite + limit suites + unit + docs (3,807 passed, 1 failed in the endpoints stub - fixed, re-run 15 passed); plan unit (11) and API/worker (5); migration-built: parity, downgrade atomicity, plan |
 | 6 | Per-contact cap, pacing, 131049 | not started | | |
 | 7 | Personalisation | not started | | |
 | 8 | Draft lifecycle, search, idempotent create, activity | not started | | |
@@ -237,3 +237,29 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   250 -> 2,000 mid-campaign -> the rest at once; a lowered read -> 200; UNTIERED -> 200; 5 refused
   sends released, an uncertain one kept; the last place: exactly 1 winner in 40 of 40 races.
 - Intended test change: `test_campaigns.py`'s messaging stub gained `at` and `campaign_id`.
+
+## Phase 5 notes (LIM-05, LIM-06, PG-13)
+
+- Migration **0112**: `campaigns.send_until` (CHECK after the start) and the reason code
+  `send_window_closed`.
+- `app/services/delivery_plan.py`: one pure function replays the worker's rules (batches of 50 at
+  the rate, quiet hours in the zone, the campaign budget with places returned 24 h + 5 min after
+  they were taken, per-person deferrals, the deadline) and returns days (local date, first/last
+  send, people), completion, notices (`starts_after_quiet_hours`, `spreads_over_days`,
+  `limit_shared_with_other_numbers`, `limit_unknown`, `contact_cap_defers`, `plan_exceeds_ttl`,
+  `deadline_leaves_recipients`) and the ETA basis (`rate`, `quiet_hours`, `daily_limit`,
+  `contact_cap`, `deadline`). `CampaignPlanner` gathers the facts; the schedule response, `GET
+  /campaigns/{id}/delivery-plan` (admin) and the ETA all use it.
+- The deadline: validated at schedule (`send_until_needs_offset`, `send_until_before_start`); at
+  the next batch or recipient after it, every pending person is skipped `send_window_closed` and
+  the campaign completes; a wait never sleeps past it.
+- `CampaignRead` gains `send_until`(`_local`) and `eta` {completion (UTC, local), basis,
+  confidence, reason}; `delivery_plan` on the schedule response. ETA from the observed rate of the
+  last ten minutes once running; null with the status as reason otherwise, `limit_unknown` without
+  a limit.
+- Tests: `tests/integration/campaign_api.py` drives the real API on the real database, the active
+  workspace resolved from a membership row it writes.
+- Phase 4 defect fixed here: black's reformat of migration 0111 moved its `# noqa: S608` off the
+  line it covers (ruff S608/RUF100 on b2482c7); the statement is now split so the comment sits on it.
+- Intended test changes: `test_campaign_endpoints.py`'s stub `schedule` takes `send_until`, and a
+  stub planner replaces the real one there (its workspace is not in the database).

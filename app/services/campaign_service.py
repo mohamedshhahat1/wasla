@@ -179,6 +179,10 @@ HEADER_MEDIA_NOT_STORED_CODE: Final = "header_media_not_stored"
 
 # The stable error code for a `scheduled_at` without a UTC offset (CMP-15).
 NAIVE_SCHEDULE_CODE: Final = "scheduled_at_needs_offset"
+# The stable error codes for a deadline without an offset, or not after the
+# start (LIM-06).
+SEND_UNTIL_NAIVE_CODE: Final = "send_until_needs_offset"
+SEND_UNTIL_BEFORE_START_CODE: Final = "send_until_before_start"
 
 # How far ahead a campaign may be scheduled. The lower bound is zero: sending
 # now is a legitimate thing to ask for, unlike a follow-up, which exists
@@ -595,6 +599,7 @@ class CampaignService:
         campaign_id: uuid.UUID,
         scheduled_at: datetime | None = None,
         actor: User | None = None,
+        send_until: datetime | None = None,
     ) -> Campaign:
         """Hand the campaign to the worker, now or at a moment in the future.
 
@@ -673,9 +678,23 @@ class CampaignService:
             raise ValidationError(
                 f"A campaign cannot be scheduled more than {MAX_SCHEDULE_AHEAD.days} days ahead."
             )
+        if send_until is not None:
+            # A deadline, like a start, is an instant: it needs its offset, and
+            # it comes after the start it ends (LIM-06).
+            if send_until.utcoffset() is None:
+                raise ValidationError(
+                    "A deadline needs a UTC offset, for example 2026-10-23T23:59:00+03:00.",
+                    error_code=SEND_UNTIL_NAIVE_CODE,
+                )
+            if send_until <= max(when, now):
+                raise ValidationError(
+                    "The deadline must come after the campaign starts.",
+                    error_code=SEND_UNTIL_BEFORE_START_CODE,
+                )
 
         campaign.status = CampaignStatus.SCHEDULED
         campaign.scheduled_at = max(when, now)
+        campaign.send_until = send_until
         campaign.next_send_at = None
         # A fresh schedule is owned by nobody until a sweep claims it.
         campaign.lease_token = None
@@ -691,7 +710,11 @@ class CampaignService:
             target_type="campaign",
             target_id=campaign.id,
             target_label=campaign.name,
-            meta={"recipients": pending, "scheduled_at": campaign.scheduled_at.isoformat()},
+            meta={
+                "recipients": pending,
+                "scheduled_at": campaign.scheduled_at.isoformat(),
+                "send_until": send_until.isoformat() if send_until is not None else None,
+            },
         )
         logger.info(
             "campaign.scheduled",
@@ -865,6 +888,11 @@ class CampaignService:
             # Paused with the reason; no send, no attempt spent.
             return await self._pause_unserved(campaign, unserved)
 
+        if campaign.send_until is not None and moment >= campaign.send_until:
+            # **The deadline has passed** (LIM-06): whoever is still pending is
+            # not going to be sent; the campaign completes.
+            return await self._close_at_deadline(campaign, moment)
+
         blocked = await self._blocking_reason(campaign)
         if blocked is not None:
             reason, detail = blocked
@@ -959,6 +987,16 @@ class CampaignService:
                 # person, exactly like a cancel (CMP-02).
                 return await self._pause_unserved(
                     campaign, unserved, sent=sent, failed=failed, skipped=skipped
+                )
+            if campaign.send_until is not None and clock() >= campaign.send_until:
+                # The deadline passed while this batch was sending (LIM-06).
+                closed = await self._close_at_deadline(campaign, clock())
+                return BatchOutcome(
+                    campaign.id,
+                    closed.status,
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped + closed.skipped,
                 )
             if quiet.contains(clock()):
                 # The window opened while this batch was sending: it stops at
@@ -1670,6 +1708,9 @@ class CampaignService:
         campaign.waiting_reason = reason.value
         campaign.resumes_at = until
         campaign.next_send_at = until
+        if campaign.send_until is not None and campaign.send_until < until:
+            # Woken at the deadline to close, not after it (LIM-06).
+            campaign.next_send_at = campaign.send_until
         campaign.lease_token = None
         campaign.consecutive_batch_failures = 0
         if entering:
@@ -2026,6 +2067,24 @@ class CampaignService:
             skipped=skipped,
         )
 
+    async def _close_at_deadline(self, campaign: Campaign, now: datetime) -> BatchOutcome:
+        """Skip everybody still pending and complete the campaign (LIM-06)."""
+        skipped = await self._recipients.skip_pending(
+            campaign.id,
+            reason=RecipientReason.SEND_WINDOW_CLOSED.value,
+            detail=_DEADLINE_PASSED,
+        )
+        logger.info(
+            "campaign.deadline_passed",
+            extra={
+                "event": "campaign.deadline_passed",
+                "campaign_id": str(campaign.id),
+                "skipped": skipped,
+            },
+        )
+        outcome = self._complete(campaign, now)
+        return BatchOutcome(campaign.id, outcome.status, skipped=skipped)
+
     def _complete(self, campaign: Campaign, now: datetime) -> BatchOutcome:
         campaign.status = CampaignStatus.COMPLETED
         campaign.completed_at = now
@@ -2207,6 +2266,8 @@ class _HeaderState:
     file: HeaderFileParameter | None = None
     reuploaded: bool = False
 
+
+_DEADLINE_PASSED: Final = "The campaign's deadline passed before this person was sent."
 
 _HEADER_REFUSED_TWICE: Final = (
     "WhatsApp refused the header file twice (code 131053), once after uploading it again."

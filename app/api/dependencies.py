@@ -45,6 +45,7 @@ from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_header_media_service import CampaignHeaderMediaService
+from app.services.campaign_planner import CampaignPlanner
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
 from app.services.credential_service import CredentialService
@@ -375,6 +376,22 @@ def get_campaign_service(
 
 
 CampaignServiceDep = Annotated[CampaignService, Depends(get_campaign_service)]
+
+
+def get_campaign_planner(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> CampaignPlanner:
+    """Plans and ETAs for the active workspace's campaigns (LIM-05, PG-13)."""
+    return CampaignPlanner(
+        session,
+        tenant_id=workspace.tenant.id,
+        share=settings.campaign_portfolio_limit_share,
+    )
+
+
+CampaignPlannerDep = Annotated[CampaignPlanner, Depends(get_campaign_planner)]
 
 
 def get_campaign_header_media_service(

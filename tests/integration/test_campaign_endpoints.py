@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 
 import pytest
@@ -24,6 +24,7 @@ from httpx import AsyncClient
 from app.api.dependencies import (
     ActiveWorkspace,
     get_active_workspace,
+    get_campaign_planner,
     get_campaign_service,
 )
 from app.core.pagination import Cursor, Page
@@ -41,6 +42,9 @@ from app.db.models.campaign import (
     RecipientStatus,
 )
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
+from app.services.campaign_planner import Eta
+from app.services.delivery_plan import PlanInputs, plan
+from app.services.quiet_hours import QuietHours
 from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
@@ -143,6 +147,7 @@ class StubCampaigns:
         campaign_id: uuid.UUID,
         scheduled_at: datetime | None = None,
         actor: User | None = None,
+        send_until: datetime | None = None,
     ) -> Campaign:
         self.scheduled.append({"campaign_id": campaign_id, "scheduled_at": scheduled_at})
         return _campaign(CampaignStatus.SCHEDULED)
@@ -189,10 +194,31 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
     )
 
 
+class StubPlanner:
+    """The plan and the ETA (LIM-05, PG-13) of a campaign that exists only in the stub."""
+
+    async def eta(self, campaign: Campaign, *, now: datetime) -> Eta:
+        return Eta(estimated_completion_at=None, basis=(), confidence=None, reason="draft")
+
+    async def plan(self, campaign: Campaign, *, now: datetime, observed: bool = False) -> Any:
+        return plan(
+            PlanInputs(
+                recipients=(),
+                rate=60,
+                quiet=QuietHours(
+                    enabled=False, start=time(22), end=time(9), timezone="Africa/Cairo"
+                ),
+                budget=None,
+            ),
+            now=now,
+        )
+
+
 @pytest.fixture
 def campaigns(app: FastAPI) -> StubCampaigns:
     stub = StubCampaigns()
     app.dependency_overrides[get_campaign_service] = lambda: stub
+    app.dependency_overrides[get_campaign_planner] = StubPlanner
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.TENANT_ADMIN)
     return stub
 

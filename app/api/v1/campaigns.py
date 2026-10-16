@@ -14,6 +14,7 @@ audit trail and the authorization legible.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
@@ -22,6 +23,7 @@ from app.api.dependencies import (
     ActiveWorkspace,
     ActiveWorkspaceDep,
     CampaignHeaderMediaServiceDep,
+    CampaignPlannerDep,
     CampaignServiceDep,
     TenantAdminDep,
 )
@@ -37,12 +39,14 @@ from app.schemas.campaign import (
     CampaignRead,
     CampaignScheduleRequest,
     CampaignStatisticsRead,
+    DeliveryPlanRead,
     HeaderMediaRead,
     HeaderMediaUploadRead,
     RecipientListResponse,
     RecipientRead,
 )
 from app.schemas.conversation import CursorPage
+from app.services.campaign_planner import CampaignPlanner
 from app.services.campaign_service import CampaignService
 
 router = APIRouter(route_class=CommittingRoute, prefix="/campaigns", tags=["campaigns"])
@@ -52,15 +56,22 @@ CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
 
 
 async def _read(
-    campaigns: CampaignService, campaign: Campaign, workspace: ActiveWorkspace
+    campaigns: CampaignService,
+    campaign: Campaign,
+    workspace: ActiveWorkspace,
+    planner: CampaignPlanner | None = None,
 ) -> CampaignRead:
     """One campaign as the API shows it, with its header file if it has one (HM-08).
 
-    Its times in the workspace's own zone too (TZ-03).
+    Its times in the workspace's own zone too (TZ-03), and its ETA (PG-13).
     """
     files = await campaigns.header_media_for([campaign])
+    eta = await planner.eta(campaign, now=datetime.now(UTC)) if planner is not None else None
     return CampaignRead.from_model(
-        campaign, header_media=files.get(campaign.id), timezone=workspace.tenant.timezone
+        campaign,
+        header_media=files.get(campaign.id),
+        timezone=workspace.tenant.timezone,
+        eta=eta,
     )
 
 
@@ -68,6 +79,7 @@ async def _read(
 async def list_campaigns(
     workspace: ActiveWorkspaceDep,
     campaigns: CampaignServiceDep,
+    planner: CampaignPlannerDep,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
     status_filter: Annotated[list[CampaignStatus] | None, Query(alias="status")] = None,
@@ -81,12 +93,20 @@ async def list_campaigns(
         cursor=cursor,
     )
     files = await campaigns.header_media_for(page.items)
+    now = datetime.now(UTC)
+    # The ETA of the live ones only (PG-13): the rest have none to compute.
+    etas = {
+        campaign.id: await planner.eta(campaign, now=now)
+        for campaign in page.items
+        if campaign.status in (CampaignStatus.SCHEDULED, CampaignStatus.RUNNING)
+    }
     return CursorPage[CampaignRead](
         items=[
             CampaignRead.from_model(
                 campaign,
                 header_media=files.get(campaign.id),
                 timezone=workspace.tenant.timezone,
+                eta=etas.get(campaign.id),
             )
             for campaign in page.items
         ],
@@ -207,8 +227,31 @@ async def get_campaign(
     campaign_id: uuid.UUID,
     workspace: ActiveWorkspaceDep,
     campaigns: CampaignServiceDep,
+    planner: CampaignPlannerDep,
 ) -> CampaignRead:
-    return await _read(campaigns, await campaigns.get(campaign_id), workspace)
+    return await _read(campaigns, await campaigns.get(campaign_id), workspace, planner)
+
+
+@router.get(
+    "/{campaign_id}/delivery-plan",
+    response_model=DeliveryPlanRead,
+    summary="When the campaign is expected to reach its people",
+)
+async def delivery_plan(
+    campaign_id: uuid.UUID,
+    workspace: TenantAdminDep,
+    campaigns: CampaignServiceDep,
+    planner: CampaignPlannerDep,
+) -> DeliveryPlanRead:
+    """The plan, recomputed now (LIM-05): days, first and last send, completion, notices.
+
+    From the campaign's rate, the workspace's quiet hours, the portfolio's
+    campaign budget and what is already used of it, and per-person deferrals.
+    An estimate: other senders on the portfolio, a changed limit and the rate
+    actually achieved all move it. A draft's plan starts now.
+    """
+    campaign = await campaigns.get(campaign_id)
+    return DeliveryPlanRead.from_plan(await planner.plan(campaign, now=datetime.now(UTC)))
 
 
 @router.post("/{campaign_id}/audience", response_model=CampaignRead, summary="Set the audience")
@@ -237,6 +280,7 @@ async def schedule_campaign(
     payload: CampaignScheduleRequest,
     workspace: TenantAdminDep,
     campaigns: CampaignServiceDep,
+    planner: CampaignPlannerDep,
 ) -> CampaignRead:
     """Hand the campaign to the worker. Omitting the time means now.
 
@@ -252,8 +296,16 @@ async def schedule_campaign(
         campaign_id=campaign_id,
         scheduled_at=payload.scheduled_at,
         actor=workspace.user,
+        send_until=payload.send_until,
     )
-    return await _read(campaigns, campaign, workspace)
+    read = await _read(campaigns, campaign, workspace, planner)
+    # The plan comes with the answer (LIM-05): nothing is refused because of
+    # it - spreading over days is the decided behaviour - but the page shows
+    # when the first and the last person will be reached, and why.
+    read.delivery_plan = DeliveryPlanRead.from_plan(
+        await planner.plan(campaign, now=datetime.now(UTC))
+    )
+    return read
 
 
 @router.post("/{campaign_id}/pause", response_model=CampaignRead, summary="Stop, reversibly")

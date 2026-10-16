@@ -119,9 +119,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    rows = (
-        op.get_bind().exec_driver_sql(f"SELECT count(*) FROM {TABLE}").scalar_one()
-    )  # noqa: S608 - module constant
+    count = f"SELECT count(*) FROM {TABLE}"  # noqa: S608 - module constant
+    rows = op.get_bind().exec_driver_sql(count).scalar_one()
     if rows:
         raise RuntimeError(
             f"The business-initiated ledger cannot be downgraded ({RUNBOOK}). "
