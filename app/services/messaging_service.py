@@ -179,9 +179,12 @@ LEDGER_SOURCES: Final[dict[MessageOrigin, LedgerSource]] = {
     MessageOrigin.CAMPAIGN: LedgerSource.CAMPAIGN,
     MessageOrigin.HUMAN: LedgerSource.MANUAL_TEMPLATE,
     MessageOrigin.FOLLOW_UP: LedgerSource.FOLLOW_UP,
+    MessageOrigin.CAMPAIGN_TEST: LedgerSource.CAMPAIGN_TEST,
 }
 LEDGER_ENFORCEMENT: Final[dict[MessageOrigin, Enforcement]] = {
     MessageOrigin.CAMPAIGN: Enforcement.CAMPAIGN,
+    # A test is refused only when the portfolio has nothing left at all (PG-09).
+    MessageOrigin.CAMPAIGN_TEST: Enforcement.WHOLE_LIMIT,
 }
 
 # Who is held to one marketing message per contact per 24 hours (FREQ-01):

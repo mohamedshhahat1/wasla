@@ -21,8 +21,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 6 | Per-contact cap, pacing, 131049 | committed | 429f892 | broad send-path regression (4,221 passed, 4 failed: 3 intended test updates below, 1 PDF-deadline timing flake that passed on re-run; 100 re-run passed); contact cap + pacing (8); migration-built: parity, downgrade atomicity, cap |
 | 7 | Personalisation | committed | 8b97c3d | send-path regression: unit + every campaign, WhatsApp, template and follow-up suite + documentation truth (4,052 passed, 1 failed: the documented operation count, 217 -> 218, fixed; 1 tmpfs skip); every route-walking suite (231 passed); personalisation (7 integration, 8 unit); migration-built: parity, downgrade atomicity, personalisation (16) |
 | 8 | Draft lifecycle, search, idempotent create, activity | committed | a2e9c91 | unit + every campaign, WhatsApp, template, follow-up, audit, retention, metric and route-walking suite (4,313 passed, 1 failed: CPF-01, a pre-existing test-isolation defect, fixed in 3980c37); drafts (13); migration-built: parity, downgrade atomicity, drafts (22) |
-| 9 | Segments, contact picker | committed | (this commit) | unit + campaign, WhatsApp, template, follow-up, contact, lead, audit, retention, metric, route-walking suites (4,396 passed, 4 failed: 2 stubs without `segment_id` - intended; 2 = CPF-02, fixed in its own commit); segments + picker (7); migration-built: parity, downgrade atomicity, segments |
-| 10 | Test send | not started | | |
+| 9 | Segments, contact picker | committed | 0889109 | unit + campaign, WhatsApp, template, follow-up, contact, lead, audit, retention, metric, route-walking suites (4,396 passed, 4 failed: 2 stubs without `segment_id` - intended; 2 = CPF-02, fixed in its own commit); segments + picker (7); migration-built: parity, downgrade atomicity, segments |
+| 10 | Test send | committed | (this commit) | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
 | 11 | Results, summary, progress, CSV export | not started | | |
 | 12 | Rate cards, cost estimate | not started | | |
 | 13 | Invariants, observability, documentation, contract | not started | | |
@@ -453,3 +453,41 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   consent's null, and the planner hashed every contact of the number (153 ms) - it now uses the
   audience's own `refused()` anti-join (1 ms), with the displayed consent aliased so the subquery is
   not correlated away.
+
+## Phase 10 notes (PG-09)
+
+- Migration **0117**: `message_origin` gains `campaign_test`; `campaign_test_sends` (tenant, campaign,
+  contact - tenant-composite keys cascading -, message and sender set null, created_at;
+  `UNIQUE(tenant_id, id)`). The table is what the daily allowance counts and what links the test
+  message to its campaign; messages carry no campaign column. Downgrade refuses while a test or a
+  `campaign_test` message exists (an enum value cannot be dropped and stays).
+- `POST /campaigns/{id}/test-send` (admin, `{contact_id}`) -> 201 with the message. Any status but
+  cancelled (409 `campaign_not_testable`). The contact must be of this workspace (404 otherwise) and
+  already have a conversation with the campaign's number (422 `contact_has_no_conversation` -
+  ADR-025: the admin writes to the business first), not opted out on its channel (422
+  `contact_opted_out`).
+- One send path: the composition is validated as for a send, the one component builder
+  (`send_components`) gets the campaign's parameters with this contact's own values resolved now
+  (`_renderer`, `_facts`), and `MessagingService.send_template` sends it with origin
+  `campaign_test` through the same client.
+- Header file: the campaign's Meta id is reused only while fresh and uploaded through the
+  campaign's number; otherwise the stored file is read and uploaded for the test - before any lock
+  (ADR-093) - and the id is never written onto the campaign.
+- Not a recipient: no list row, no statistics, not in `CAPPED_ORIGINS` (the contact's
+  `last_marketing_sent_at` is untouched), not checked against quiet hours (only the worker asks).
+  In Meta's limit: `LEDGER_SOURCES[campaign_test] = campaign_test`, enforcement `whole_limit` -
+  refused only when the portfolio has nothing left at all (409 `portfolio_limit_reached` with
+  `details.available_at`); a never-read limit -> 422 `messaging_limit_unknown`.
+- `CAMPAIGN_TEST_SENDS_PER_DAY` (10) per workspace in a moving 24 hours, counted and recorded under
+  a `CAMPAIGN_TEST_SENDS` advisory lock; the 11th -> 429 `test_send_limit` with `details.reset_at`
+  (the oldest test of the window + 24 h).
+- Audited `campaign_test_sent` (contact id in the entry; the activity log shows no contact);
+  `wasla_campaign_events_total{event="test_sent"}`.
+- Tests (`test_campaign_test_send.py`, 5): the transport request carries the contact's own name and
+  the image header (one upload, the campaign's media id still null); statistics and the list
+  unchanged; the cap untouched; the ledger row `campaign_test`; quiet the whole day and the contact
+  capped a minute ago -> still sent; 10 then 429; opted out, no conversation, another workspace,
+  cancelled, member; 240 of 250 used -> sent, 251 used -> a new person refused 409.
+- `tests/integration/campaign_api.py::client_for` takes `overrides` (the messaging service on the
+  fake Meta, a test media store).
+- `docs/API.md` states 229 operations; `docs/AUTHORIZATION.md` lists `test-send` (ADMIN).

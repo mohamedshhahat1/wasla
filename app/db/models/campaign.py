@@ -682,6 +682,55 @@ class CampaignCreateKey(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
     )
 
 
+class CampaignTestSend(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
+    """One test of a campaign, sent to an admin's own contact (PG-09). 0117.
+
+    Not a recipient: the campaign's list, statistics and per-contact cap never
+    see it (CR-14). It is what a workspace's daily allowance of tests is
+    counted from, and the link between the test message and its campaign.
+    """
+
+    __tablename__ = "campaign_test_sends"
+    __table_args__ = (
+        Index("ix_campaign_test_sends_tenant_id_created_at", "tenant_id", "created_at"),
+        Index("ix_campaign_test_sends_campaign_id", "campaign_id"),
+        Index(
+            "ix_campaign_test_sends_message_id",
+            "message_id",
+            postgresql_where=text("message_id IS NOT NULL"),
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_campaign_test_sends_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "campaign_id"],
+            ["campaigns.tenant_id", "campaigns.id"],
+            name="fk_campaign_test_sends_tenant_campaign",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "contact_id"],
+            ["contacts.tenant_id", "contacts.id"],
+            name="fk_campaign_test_sends_tenant_contact",
+            ondelete="CASCADE",
+        ),
+    )
+
+    campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    contact_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    sent_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 __all__ = [
     "CAMPAIGN_STATUS_TYPE",
     "DEFAULT_MESSAGES_PER_MINUTE",
@@ -698,6 +747,7 @@ __all__ = [
     "CampaignRecipient",
     "CampaignStatus",
     "CampaignStopReason",
+    "CampaignTestSend",
     "CampaignWaitReason",
     "OptOutSource",
     "RecipientReason",

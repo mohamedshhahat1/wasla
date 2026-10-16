@@ -128,6 +128,10 @@ class MessageOrigin(StrEnum):
     # (OMNI-037, ADR-129). Nobody in Wasla sent it, and it is still the
     # business talking: the AI stops and a person has the conversation.
     EXTERNAL = "external"
+    # An admin's test of a campaign, sent to their own contact (PG-09): the
+    # campaign's composition, not one of its recipients, never in its
+    # statistics and not held to the per-contact cap. 0117.
+    CAMPAIGN_TEST = "campaign_test"
 
 
 class ReplyActionSource(StrEnum):

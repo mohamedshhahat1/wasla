@@ -160,6 +160,7 @@ authoritative answer is always the dependency tree.
 | `GET` | `/api/v1/campaigns/{campaign_id}/recipients` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/schedule` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/test-send` | **ADMIN** | yes | workspace | - |
 | `DELETE` | `/api/v1/contacts/{contact_id}/opt-out` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/contacts` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/contacts/{contact_id}/opt-out` | **MEMBER** | yes | workspace | - |

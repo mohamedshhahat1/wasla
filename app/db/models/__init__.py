@@ -38,6 +38,7 @@ from .campaign import (
     CampaignCreateKey,
     CampaignRecipient,
     CampaignStatus,
+    CampaignTestSend,
     OptOutSource,
     RecipientStatus,
 )
@@ -246,6 +247,7 @@ __all__ = [
     "CampaignRecipient",
     "CampaignSegment",
     "CampaignStatus",
+    "CampaignTestSend",
     "CapacityReductionCause",
     "CapacityReductionStatus",
     "Channel",

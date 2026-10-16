@@ -70,9 +70,14 @@ async def client_for(
     *,
     role: TenantRole = TenantRole.TENANT_ADMIN,
     user_id: uuid.UUID | None = None,
+    overrides: dict[Any, Any] | None = None,
     **settings: Any,
 ) -> AsyncIterator[AsyncClient]:
-    """An HTTP client acting as one person in one workspace."""
+    """An HTTP client acting as one person in one workspace.
+
+    `overrides` replaces further dependencies - the messaging service with one
+    on the fake Meta, the media store with a test one - for the routes that send.
+    """
     person = user_id or await member_of(database, workspace, role=role)
     application = page_app(database, **settings)
 
@@ -88,6 +93,7 @@ async def client_for(
         return ActiveWorkspace(user=user, membership=membership, tenant=tenant)
 
     application.dependency_overrides[get_active_workspace] = active
+    application.dependency_overrides.update(overrides or {})
     try:
         async with AsyncClient(
             transport=ASGITransport(app=application), base_url="http://wasla.test"

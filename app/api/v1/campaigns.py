@@ -27,10 +27,13 @@ from app.api.dependencies import (
     CampaignHeaderMediaServiceDep,
     CampaignPlannerDep,
     CampaignServiceDep,
+    MediaStorageDep,
+    MessagingServiceDep,
     TenantAdminDep,
 )
 from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
+from app.core.dependencies import SettingsDep
 from app.core.exceptions import ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.campaign import (
@@ -58,8 +61,9 @@ from app.schemas.campaign import (
     MessagePreviewResponse,
     RecipientListResponse,
     RecipientRead,
+    TestSendRequest,
 )
-from app.schemas.conversation import CursorPage
+from app.schemas.conversation import CursorPage, MessageRead
 from app.services.campaign_planner import CampaignPlanner
 from app.services.campaign_service import (
     CAMPAIGN_VERSION_REQUIRED_CODE,
@@ -287,6 +291,42 @@ async def duplicate_campaign(
     return await _read(
         campaigns, await campaigns.duplicate(campaign_id, actor=workspace.user), workspace
     )
+
+
+@router.post(
+    "/{campaign_id}/test-send",
+    response_model=MessageRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Send a test to myself",
+)
+async def send_test(
+    campaign_id: uuid.UUID,
+    payload: TestSendRequest,
+    workspace: TenantAdminDep,
+    campaigns: CampaignServiceDep,
+    messaging: MessagingServiceDep,
+    storage: MediaStorageDep,
+    settings: SettingsDep,
+) -> MessageRead:
+    """This campaign's message, as a recipient would get it, to one contact (PG-09).
+
+    The contact must already have a conversation with the campaign's number -
+    the admin writes to the business from their own phone first (422
+    `contact_has_no_conversation`); opted out -> 422 `contact_opted_out`. Not
+    a recipient, not in the statistics, not under the per-contact cap or quiet
+    hours. At most `CAMPAIGN_TEST_SENDS_PER_DAY` per workspace in 24 hours
+    (429 `test_send_limit`, `details.reset_at`). Any status but cancelled.
+    """
+    message = await campaigns.send_test(
+        campaign_id,
+        contact_id=payload.contact_id,
+        actor=workspace.user,
+        sender_role=workspace.role,
+        messaging=messaging,
+        storage=storage,
+        per_day=settings.campaign_test_sends_per_day,
+    )
+    return MessageRead.from_model(message)
 
 
 @router.get(

@@ -32,6 +32,9 @@ BUSINESS_PORTFOLIO: Final = 0x5741_5304
 # A workspace's saved campaign segments, counted against their cap as one step
 # with the insert (`CampaignSegmentService`, PG-06).
 CAMPAIGN_SEGMENTS: Final = 0x5741_5305
+# A workspace's campaign test sends, counted against the daily allowance as
+# one step with the record (`CampaignService.send_test`, PG-09).
+CAMPAIGN_TEST_SENDS: Final = 0x5741_5306
 
 NAMESPACES: Final[dict[str, int]] = {
     "workspace_creation": WORKSPACE_CREATION,
@@ -39,11 +42,13 @@ NAMESPACES: Final[dict[str, int]] = {
     "password_reset_request": PASSWORD_RESET_REQUEST,
     "business_portfolio": BUSINESS_PORTFOLIO,
     "campaign_segments": CAMPAIGN_SEGMENTS,
+    "campaign_test_sends": CAMPAIGN_TEST_SENDS,
 }
 
 __all__ = [
     "BUSINESS_PORTFOLIO",
     "CAMPAIGN_SEGMENTS",
+    "CAMPAIGN_TEST_SENDS",
     "NAMESPACES",
     "PASSWORD_RESET_REQUEST",
     "PLATFORM_OWNERS",

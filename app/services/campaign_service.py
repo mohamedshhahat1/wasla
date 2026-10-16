@@ -35,7 +35,7 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -65,6 +65,7 @@ from app.core.telemetry import (
     record_campaign_stop,
     record_campaign_wait,
 )
+from app.db import advisory_locks
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
 from app.db.models.campaign import (
@@ -77,6 +78,7 @@ from app.db.models.campaign import (
     CampaignRecipient,
     CampaignStatus,
     CampaignStopReason,
+    CampaignTestSend,
     CampaignWaitReason,
     OptOutSource,
     OptOutVia,
@@ -93,6 +95,7 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.enums import TenantRole
 from app.db.models.lead import Lead, LeadStatus
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
@@ -202,6 +205,15 @@ PARAMETER_FALLBACK_REQUIRED_CODE: Final = "parameter_fallback_required"
 PARAMETER_FALLBACK_TOO_LONG_CODE: Final = "parameter_fallback_too_long"
 PARAMETER_KEY_UNKNOWN_CODE: Final = "parameter_key_unknown"
 PARAMETER_SOURCE_NOT_ALLOWED_CODE: Final = "parameter_source_not_allowed"
+
+# The test send's stable error codes (PG-09).
+CAMPAIGN_NOT_TESTABLE_CODE: Final = "campaign_not_testable"
+TEST_CONTACT_NO_CONVERSATION_CODE: Final = "contact_has_no_conversation"
+TEST_CONTACT_OPTED_OUT_CODE: Final = "contact_opted_out"
+TEST_SEND_LIMIT_CODE: Final = "test_send_limit"
+PORTFOLIO_LIMIT_REACHED_CODE: Final = "portfolio_limit_reached"
+# The moving window a workspace's test allowance is counted over (PG-09).
+TEST_SEND_WINDOW: Final = timedelta(hours=24)
 
 # The draft lifecycle's stable error codes (PG-03, PG-04, PG-08).
 CAMPAIGN_NOT_EDITABLE_CODE: Final = "campaign_not_editable"
@@ -1178,6 +1190,203 @@ class CampaignService:
         )
         await record_campaign_event("duplicated")
         return copy
+
+    # ------------------------------------------------------------- test send
+
+    async def send_test(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        contact_id: uuid.UUID,
+        actor: User,
+        sender_role: TenantRole,
+        messaging: MessagingService,
+        storage: MediaStorage,
+        per_day: int,
+        now: datetime | None = None,
+    ) -> Message:
+        """Send this campaign's message to one contact - the admin's own (PG-09).
+
+        The same composition a recipient gets: the one component builder, this
+        contact's own values (resolved now), the header file. Sent as a
+        `campaign_test` message through the same client and send path, but it
+        is not a recipient: never in the list or the statistics, not under the
+        per-contact cap or quiet hours. Counted in Meta's messaging limit
+        like any business-initiated send outside the service window, and
+        refused only when the portfolio has nothing left at all.
+
+        ADR-025 holds: the contact must already have a conversation with this
+        number - the admin writes to the business first. At most `per_day`
+        tests per workspace in a moving 24 hours (429 `test_send_limit`).
+        """
+        moment = now or datetime.now(UTC)
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        if campaign.status is CampaignStatus.CANCELLED:
+            raise ConflictError(
+                "A cancelled campaign cannot be tested.", error_code=CAMPAIGN_NOT_TESTABLE_CODE
+            )
+        contact = await self._contacts.require_by_id(contact_id)
+        conversation = await self._conversations.get_for_contact(
+            contact_id=contact.id, account_id=campaign.account_id
+        )
+        if conversation is None:
+            raise ValidationError(
+                "Write to this WhatsApp number from that phone first: a test reaches only a "
+                "contact who already has a conversation with it.",
+                error_code=TEST_CONTACT_NO_CONVERSATION_CODE,
+            )
+        if not await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).accepts_marketing(contact.id, conversation.channel):
+            raise ValidationError(
+                "This contact has opted out of marketing messages.",
+                error_code=TEST_CONTACT_OPTED_OUT_CODE,
+            )
+        template = await self._templates.require_by_id(campaign.template_id)
+        spec = parameter_spec(template.components)
+        refused = (
+            parameter_refusal(
+                spec,
+                CampaignParameters.from_campaign(
+                    campaign.variables,
+                    campaign.template_parameters,
+                    header_file_kind=await self._header_file_kind(campaign),
+                ),
+            )
+            if spec is not None
+            else None
+        )
+        if spec is None or refused is not None:
+            raise refused or ValidationError("This template's components are not known yet.")
+
+        # The header file first, outside any lock (ADR-093): the campaign's
+        # own id while it is fresh, otherwise uploaded for this test - and
+        # never written onto the campaign, whose upload is the worker's.
+        header_file = await self._test_header_file(campaign, messaging=messaging, storage=storage)
+
+        # The allowance and the record as one step.
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    advisory_locks.CAMPAIGN_TEST_SENDS, self._tenant_id.int & 0x7FFFFFFF
+                )
+            )
+        )
+        since = moment - TEST_SEND_WINDOW
+        recent = list(
+            (
+                await self._session.execute(
+                    select(CampaignTestSend.created_at)
+                    .where(
+                        CampaignTestSend.tenant_id == self._tenant_id,
+                        CampaignTestSend.created_at > since,
+                    )
+                    .order_by(CampaignTestSend.created_at, CampaignTestSend.id)
+                )
+            ).scalars()
+        )
+        if len(recent) >= per_day:
+            reset_at = recent[0] + TEST_SEND_WINDOW
+            raise RateLimitedError(
+                f"A workspace may send {per_day} campaign tests in 24 hours.",
+                error_code=TEST_SEND_LIMIT_CODE,
+                details={"reset_at": reset_at.isoformat()},
+            )
+        record = CampaignTestSend(
+            tenant_id=self._tenant_id,
+            campaign_id=campaign.id,
+            contact_id=contact.id,
+            sent_by_id=actor.id,
+        )
+        self._session.add(record)
+        await self._session.flush()
+
+        renderer = await self._renderer(campaign)
+        rendered = (
+            renderer((await self._facts([contact]))[contact.id]) if renderer is not None else None
+        )
+        components = send_components(
+            spec,
+            _personal(
+                CampaignParameters.from_campaign(
+                    campaign.variables, campaign.template_parameters, header_file=header_file
+                ),
+                rendered,
+            ),
+        )
+        try:
+            message = await messaging.send_template(
+                conversation_id=conversation.id,
+                name=template.name,
+                language=template.language,
+                components=components,
+                sent_by_id=actor.id,
+                origin=MessageOrigin.CAMPAIGN_TEST,
+                sender_role=sender_role,
+                campaign_id=campaign.id,
+            )
+        except PortfolioLimitReachedError as error:
+            raise ConflictError(
+                "This business has reached its WhatsApp messaging limit for now.",
+                error_code=PORTFOLIO_LIMIT_REACHED_CODE,
+                details={"available_at": error.resumes_at.isoformat()},
+            ) from error
+        except MessagingLimitUnknownError as error:
+            raise ValidationError(
+                "This number's WhatsApp messaging limit has not been read yet.",
+                error_code=portfolio_limits.LIMIT_UNKNOWN_CODE,
+            ) from error
+        record.message_id = message.id
+        self._audit.record(
+            AuditAction.CAMPAIGN_TEST_SENT,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"contact_id": str(contact.id)},
+        )
+        logger.info(
+            "campaign.test_sent",
+            extra={"campaign_id": str(campaign.id), "message_id": str(message.id)},
+        )
+        await record_campaign_event("test_sent")
+        return message
+
+    async def _test_header_file(
+        self, campaign: Campaign, *, messaging: MessagingService, storage: MediaStorage
+    ) -> HeaderFileParameter | None:
+        if campaign.header_media_id is None:
+            return None
+        asset = await self._header_files.get_by_id(campaign.header_media_id)
+        if asset is None:
+            raise ValidationError(
+                "This campaign's header file is gone.", error_code=HEADER_MEDIA_NOT_STORED_CODE
+            )
+        now = datetime.now(UTC)
+        if (
+            campaign.header_provider_media_id is not None
+            and campaign.header_provider_account_id == campaign.account_id
+            and campaign.header_provider_uploaded_at is not None
+            and now - campaign.header_provider_uploaded_at < self._header_refresh
+        ):
+            return _header_parameter(asset, campaign.header_provider_media_id)
+        loader = CampaignHeaderMediaService(
+            session=self._session, tenant_id=self._tenant_id, storage=storage
+        )
+        try:
+            header_bytes = await loader.load_for_upload(asset)
+        except HeaderMediaUnavailableError as error:
+            raise ValidationError(
+                "This campaign's header file is not stored. Upload it again.",
+                error_code=HEADER_MEDIA_NOT_STORED_CODE,
+            ) from error
+        provider_media_id = await messaging.upload_header_file(
+            connection_id=campaign.account_id,
+            content=header_bytes.content,
+            mime_type=header_bytes.mime_type,
+            filename=_upload_name(asset),
+        )
+        return _header_parameter(asset, provider_media_id)
 
     # -------------------------------------------------------------- lifecycle
 

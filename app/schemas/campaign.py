@@ -240,6 +240,12 @@ class CampaignActivityRead(BaseModel):
         )
 
 
+class TestSendRequest(_Payload):
+    """Who a campaign's test goes to: the admin's own contact (PG-09)."""
+
+    contact_id: uuid.UUID
+
+
 class MessagePreviewRequest(_Payload):
     """Up to five people of the campaign's audience (PER-04)."""
 
@@ -719,4 +725,5 @@ __all__ = [
     "PlanDayRead",
     "RecipientListResponse",
     "RecipientRead",
+    "TestSendRequest",
 ]

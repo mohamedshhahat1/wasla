@@ -609,6 +609,9 @@ class Settings(BaseSettings):
     # The longest one person's value - a name, an interest - may be before the
     # fallback is sent instead (PER-03). A fallback is held to it too.
     campaign_parameter_max_chars: int = Field(default=60, ge=1, le=1024)
+    # How many test sends of its campaigns a workspace may make in a moving
+    # 24 hours (PG-09).
+    campaign_test_sends_per_day: int = Field(default=10, ge=1, le=1000)
     # One marketing message per customer per this many seconds, per workspace
     # (FREQ-01): across every campaign and every manual marketing template.
     campaign_contact_marketing_interval_seconds: int = Field(
