@@ -224,6 +224,13 @@ async def test_concurrent_claims_produce_one_winner_and_one_conflict(
         assert outcomes.count("conflict") == 1
     finally:
         async with sessions() as cleanup:
+            # The winner's `whatsapp_account_connected` entry first: the audit
+            # trail outlives a workspace (`SET NULL`), and left behind it reads
+            # as a platform entry to every later suite that counts those.
+            await cleanup.execute(
+                text("DELETE FROM audit_logs WHERE tenant_id = ANY(:ids)"),
+                {"ids": tenant_ids},
+            )
             await cleanup.execute(
                 text("DELETE FROM whatsapp_accounts WHERE phone_number_id = :number"),
                 {"number": number},
