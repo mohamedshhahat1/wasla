@@ -36,6 +36,7 @@ from app.core.storage import LocalMediaStorage, MediaStorage
 from app.db.models import Tenant, TenantStatus
 from app.db.models.campaign import Campaign, CampaignStatus, CampaignStopReason
 from app.db.models.campaign_media import CampaignHeaderMedia
+from app.db.models.conversation import Contact
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import TemplateStatus, WhatsAppTemplate
 from app.db.session import Database
@@ -272,7 +273,13 @@ async def test_two_campaigns_sharing_a_file_upload_it_once_each(
     await each.run_once()
     second = await compose(database, workspace, header_media_id=asset, schedule=False)
     async with database.session_factory() as session:
-        # The second campaign's audience is the same five people.
+        # The second campaign's audience is the same five people - a day later,
+        # since a person hears from a workspace's campaigns once a day (FREQ-01).
+        await session.execute(
+            update(Contact)
+            .where(Contact.id.in_(workspace.contact_ids))
+            .values(last_marketing_sent_at=Contact.last_marketing_sent_at - timedelta(days=2))
+        )
         await CampaignService(session=session, tenant_id=workspace.tenant_id).schedule(
             campaign_id=second
         )

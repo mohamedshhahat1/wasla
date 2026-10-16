@@ -1167,6 +1167,7 @@ CAMPAIGN_STOP_REASONS: Final = frozenset(
         "repeated_batch_failure",
         "header_media_unavailable",
         "header_media_refused",
+        "meta_quality_review",
     }
 )
 CAMPAIGN_EVENTS: Final = frozenset(

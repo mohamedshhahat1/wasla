@@ -122,6 +122,9 @@ class CampaignStopReason(StrEnum):
     HEADER_MEDIA_UNAVAILABLE = "header_media_unavailable"
     #: Meta refused the header's file, on upload or on a send twice (HM-06).
     HEADER_MEDIA_REFUSED = "header_media_refused"
+    #: Meta dropped a message its portfolio pacing held (135000): the portfolio
+    #: is under quality review and cannot send templates (LIM-08).
+    META_QUALITY_REVIEW = "meta_quality_review"
 
 
 MAX_STOP_REASON_LENGTH: Final = 40
@@ -187,6 +190,9 @@ class RecipientReason(StrEnum):
     TEMPLATE_PARAMETERS_REFUSED = "template_parameters_refused"
     #: Still pending when the campaign's deadline passed (LIM-06).
     SEND_WINDOW_CLOSED = "send_window_closed"
+    #: Sent a marketing message less than 24 hours earlier, and the deadline
+    #: came first (FREQ-01).
+    CONTACT_FREQUENCY_CAP = "contact_frequency_cap"
 
 
 class RecipientStatus(StrEnum):

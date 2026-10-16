@@ -337,6 +337,9 @@ class CampaignWorker:
             header_media_refresh=timedelta(
                 seconds=self._settings.campaign_header_media_refresh_seconds
             ),
+            contact_cap_interval=timedelta(
+                seconds=self._settings.campaign_contact_marketing_interval_seconds
+            ),
         )
         return await service.dispatch_batch(campaign, now=now, lease=lease)
 

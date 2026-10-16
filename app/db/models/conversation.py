@@ -248,6 +248,13 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     wa_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When this workspace last sent the person a marketing template - from any
+    # campaign, or by hand (FREQ-01). Claimed by one conditional UPDATE in the
+    # send intent's transaction; at most one marketing message per 24 hours.
+    # Null for somebody never sent one. 0113.
+    last_marketing_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Marketing consent is not here: it is per channel, in
     # `contact_channel_consents` (ENT-19). A STOP on WhatsApp is not a STOP on
@@ -665,6 +672,19 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # would silently inherit - and inheriting the wrong attribution is the
     # defect this column exists to remove (MSG-16).
     origin: Mapped[MessageOrigin] = mapped_column(MESSAGE_ORIGIN_TYPE, nullable=False)
+    # The per-contact marketing claim this send made (FREQ-01) and the value it
+    # replaced, so a send Meta provably refused gives it back. 0113.
+    marketing_cap_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    marketing_cap_previous_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Meta accepted it with `message_status: held_for_quality_assessment`:
+    # held by its portfolio pacing (LIM-08). 0113.
+    provider_held_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # What the customer tapped, when this message is a tap (OMNI-030, ADR-124).
     # The title is also the body, so the transcript reads as words; the payload
     # is what routing and the opt-out match read, because display text is

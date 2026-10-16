@@ -37,7 +37,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import httpx
@@ -126,6 +126,7 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.media_repository import MediaRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
+from app.services import contact_cap
 from app.services.audit_service import AuditTrail
 from app.services.business_initiated_ledger import BusinessInitiatedLedger, Enforcement
 from app.services.credential_service import CredentialService
@@ -182,6 +183,22 @@ LEDGER_SOURCES: Final[dict[MessageOrigin, LedgerSource]] = {
 LEDGER_ENFORCEMENT: Final[dict[MessageOrigin, Enforcement]] = {
     MessageOrigin.CAMPAIGN: Enforcement.CAMPAIGN,
 }
+
+# Who is held to one marketing message per contact per 24 hours (FREQ-01):
+# a campaign and a person. Not a test send, a follow-up or an agent.
+CAPPED_ORIGINS: Final = frozenset({MessageOrigin.CAMPAIGN, MessageOrigin.HUMAN})
+# Meta's answer for a message its portfolio pacing holds (LIM-08; "Business
+# portfolio pacing", developers.facebook.com, read 2026-10-16).
+HELD_FOR_QUALITY_ASSESSMENT: Final = "held_for_quality_assessment"
+
+
+def _held(raw: Any) -> bool:
+    """Whether Meta's send answer says `message_status: held_for_quality_assessment`."""
+    messages = raw.get("messages") if isinstance(raw, dict) else None
+    if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+        return messages[0].get("message_status") == HELD_FOR_QUALITY_ASSESSMENT
+    return False
+
 
 # Who may send a marketing template by hand (CMQ-02).
 MARKETING_SENDER_ROLES: Final = frozenset({TenantRole.TENANT_OWNER, TenantRole.TENANT_ADMIN})
@@ -459,6 +476,13 @@ class MessagingService:
         ):
             await self._admit_manual_marketing(conversation_id, sender_role=sender_role)
 
+        # Marketing to a person, whoever sends it - a campaign or a colleague
+        # - is held to one per contact per 24 hours (FREQ-01).
+        capped = (
+            origin in CAPPED_ORIGINS
+            and template is not None
+            and template.category is TemplateCategory.MARKETING
+        )
         return await self._dispatch(
             conversation_id=conversation_id,
             kind=MessageKind.TEMPLATE,
@@ -478,6 +502,7 @@ class MessagingService:
             origin=origin,
             at=at,
             campaign_id=campaign_id,
+            marketing_capped=capped,
         )
 
     async def _admit_manual_marketing(
@@ -860,6 +885,7 @@ class MessagingService:
         origin: MessageOrigin,
         at: datetime | None = None,
         campaign_id: uuid.UUID | None = None,
+        marketing_capped: bool = False,
     ) -> Message:
         """One outbound message, under the delivery protocol in ADR-093.
 
@@ -944,6 +970,25 @@ class MessagingService:
             else None
         )
 
+        async def claim_marketing() -> contact_cap.Claim | None:
+            # One marketing message per contact per 24 hours (FREQ-01): one
+            # conditional statement in this same transaction, after the
+            # ledger's decision and before the intent commits.
+            if not marketing_capped:
+                return None
+            return await contact_cap.claim(
+                self._session,
+                tenant_id=self._tenant_id,
+                contact_id=conversation.contact_id,
+                at=at or datetime.now(UTC),
+                interval=timedelta(
+                    seconds=self._settings.campaign_contact_marketing_interval_seconds
+                ),
+            )
+
+        # Without a key - a campaign's send - the claim comes before anything
+        # is staged, so a loser stages nothing in a transaction that goes on.
+        cap_claim = await claim_marketing() if idempotency_key is None else None
         if idempotency_key is not None:
             message, claimed = await self._messages.claim_idempotency_key(
                 conversation_id=conversation_id,
@@ -979,6 +1024,10 @@ class MessagingService:
                     },
                 )
                 return message
+            # A new keyed send - a person's: claimed after the replay check,
+            # so a retried request gets its original message back; a refusal
+            # here rolls the whole request back with what was staged.
+            cap_claim = await claim_marketing()
         else:
             message = await self._messages.stage_outbound(
                 conversation_id=conversation_id,
@@ -989,6 +1038,9 @@ class MessagingService:
                 template_language=template_language,
                 origin=origin,
             )
+        if cap_claim is not None:
+            message.marketing_cap_claimed_at = cap_claim.claimed_at
+            message.marketing_cap_previous_at = cap_claim.previous
         await self._session.flush()
         if reservation is not None:
             self._ledger.record(reservation, message_id=message.id)
@@ -1178,6 +1230,10 @@ class MessagingService:
             # (OMNI-042); an echo or a `sent` status may fill it in later.
             provider_sent_at=outcome.sent_at,
         )
+        if _held(outcome.raw):
+            # Accepted - sent, as far as the campaign is concerned - and held
+            # by Meta's portfolio pacing while it gathers feedback (LIM-08).
+            message.provider_held_at = now
         # Forward only (OMNI-036): a send never moves the inbox order back.
         await self._conversations.touch_outbound(conversation, at=now)
         # A credential that works again clears a recorded refusal. Conditional:
@@ -1237,8 +1293,15 @@ class MessagingService:
         the template from a refusal of one person (CMP-05, CMP-06).
         """
         await self._messages.mark_failed(message, reason=reason, code=code)
-        # Provably not delivered, so it reached nobody Meta counts (LIM-03).
+        # Provably not delivered, so it reached nobody Meta counts (LIM-03),
+        # and its marketing claim is given back (FREQ-01).
         await self._ledger.release(message.id)
+        if message.marketing_cap_claimed_at is not None:
+            conversation = await self._conversations.get_by_id(message.conversation_id)
+            if conversation is not None:
+                await contact_cap.release(
+                    self._session, message, contact_id=conversation.contact_id
+                )
         logger.warning(
             "channel.outbound_failed",
             extra={

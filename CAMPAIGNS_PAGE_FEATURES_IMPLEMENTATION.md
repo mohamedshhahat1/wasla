@@ -17,8 +17,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 2 | Quiet hours | committed | 2015b7d | every campaign suite + unit (308 passed after the fixes below); quiet hours, settings API, timezones API; migration-built: schema parity, downgrade atomicity, quiet hours |
 | 3 | Meta messaging limit: read, store, webhooks | committed | e5bbb6e | every campaign, WhatsApp and webhook suite + metric/doc/deployment checks (658 passed after the fixes below); messaging limit reads + values; migration-built: parity, downgrade atomicity, limit reads |
 | 4 | Ledger and the 80 % budget | committed | b2482c7 | every campaign, WhatsApp, follow-up, template, delivery-protocol, retention and unit suite (4,087 passed, 10 failed in one stub - fixed, 103 re-run passed); limit worker tests (14 passed: 200/200/200 with 1, 2, 4 workers; 40/40 races); migration-built: parity, downgrade atomicity, limit API |
-| 5 | Spreading, deadline, delivery plan, ETA | committed | (this commit) | every campaign suite + limit suites + unit + docs (3,807 passed, 1 failed in the endpoints stub - fixed, re-run 15 passed); plan unit (11) and API/worker (5); migration-built: parity, downgrade atomicity, plan |
-| 6 | Per-contact cap, pacing, 131049 | not started | | |
+| 5 | Spreading, deadline, delivery plan, ETA | committed | fdddae1 | every campaign suite + limit suites + unit + docs (3,807 passed, 1 failed in the endpoints stub - fixed, re-run 15 passed); plan unit (11) and API/worker (5); migration-built: parity, downgrade atomicity, plan |
+| 6 | Per-contact cap, pacing, 131049 | committed | (this commit) | broad send-path regression (4,221 passed, 4 failed: 3 intended test updates below, 1 PDF-deadline timing flake that passed on re-run; 100 re-run passed); contact cap + pacing (8); migration-built: parity, downgrade atomicity, cap |
 | 7 | Personalisation | not started | | |
 | 8 | Draft lifecycle, search, idempotent create, activity | not started | | |
 | 9 | Segments, contact picker | not started | | |
@@ -263,3 +263,29 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   line it covers (ruff S608/RUF100 on b2482c7); the statement is now split so the comment sits on it.
 - Intended test changes: `test_campaign_endpoints.py`'s stub `schedule` takes `send_until`, and a
   stub planner replaces the real one there (its workspace is not in the database).
+
+## Phase 6 notes (FREQ-01, LIM-08)
+
+- Migration **0113**: `contacts.last_marketing_sent_at`; `messages.marketing_cap_claimed_at`,
+  `marketing_cap_previous_at`, `provider_held_at`; stop reason `meta_quality_review`; reason code
+  `contact_frequency_cap`.
+- The claim (`app/services/contact_cap.py`): one conditional `UPDATE contacts ... WHERE
+  last_marketing_sent_at IS NULL OR <= at - interval RETURNING (previous)` in the send intent's
+  transaction, after the ledger's decision; held to marketing templates from a campaign or a
+  person (`CAPPED_ORIGINS`); not a test send, a follow-up, an agent, a utility or authentication
+  template. Without an idempotency key (a campaign) it comes before anything is staged; with one
+  (a person) after the replay check, so a retried request returns its original message.
+  Released when the send is provably undelivered (if nobody claimed since); kept when uncertain.
+- Campaign: a capped person is deferred to their moment + 5 minutes, no attempt spent; skipped
+  `contact_frequency_cap` if the deadline comes first; when only capped people remain the
+  campaign waits `contact_cap`. A person's manual marketing template inside the cap: 409
+  `contact_frequency_cap` with `details.available_at`.
+- LIM-08: Meta's `message_status: held_for_quality_assessment` in the send answer marks the
+  message `provider_held_at` (the recipient is sent; `statistics.held` counts it); a `failed` status
+  with 135000 on a campaign message pauses that campaign `meta_quality_review` (audited by the
+  system) without failing the others; 131049 (at send or by status) pushes the person's marketing
+  claim to now, so nothing of this workspace asks for 24 hours.
+- Intended test changes: `test_campaign_endpoints.py` expects `held: 0` in statistics;
+  `test_campaign_header_media.py`'s two campaigns sharing a file reach the same five people a day
+  apart (FREQ-01); `test_payment_methods_are_configuration.py` allowlists Meta's 135000 and 131049
+  in `provider_feedback.py`.

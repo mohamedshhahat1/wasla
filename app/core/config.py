@@ -606,6 +606,11 @@ class Settings(BaseSettings):
     # free for follow-ups, manual templates and other numbers' work. A
     # platform setting, never a workspace's.
     campaign_portfolio_limit_share: float = Field(default=0.80, gt=0, le=1)
+    # One marketing message per customer per this many seconds, per workspace
+    # (FREQ-01): across every campaign and every manual marketing template.
+    campaign_contact_marketing_interval_seconds: int = Field(
+        default=86_400, ge=3600, le=30 * 86_400
+    )
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

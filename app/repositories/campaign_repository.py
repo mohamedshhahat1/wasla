@@ -87,6 +87,8 @@ class CampaignStatistics:
     read: int = 0
     #: Sent - Meta accepted them - and reported `failed` afterwards (CMP-10).
     failed_after_send: int = 0
+    #: Accepted and held by Meta's portfolio pacing (LIM-08).
+    held: int = 0
 
     @property
     def total(self) -> int:
@@ -442,6 +444,21 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         )
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
+    async def capped_pending(self, campaign_id: uuid.UUID, *, since: datetime) -> bool:
+        """Whether a pending person was sent a marketing message after `since` (FREQ-01)."""
+        found = await self.session.scalar(
+            select(CampaignRecipient.id)
+            .join(Contact, Contact.id == CampaignRecipient.contact_id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == RecipientStatus.PENDING,
+                Contact.last_marketing_sent_at > since,
+            )
+            .limit(1)
+        )
+        return found is not None
+
     async def earliest_deferral(self, campaign_id: uuid.UUID) -> datetime | None:
         """When the first pending recipient deferred by a pair limit may be asked (CMP-18)."""
         moment: datetime | None = await self.session.scalar(
@@ -527,7 +544,19 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
             )
         )
 
+        held = await self.session.scalar(
+            select(func.count())
+            .select_from(CampaignRecipient)
+            .join(Message, Message.id == CampaignRecipient.message_id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                Message.provider_held_at.is_not(None),
+            )
+        )
+
         return CampaignStatistics(
+            held=int(held or 0),
             pending=tally.get(RecipientStatus.PENDING, 0),
             sent=tally.get(RecipientStatus.SENT, 0),
             failed=tally.get(RecipientStatus.FAILED, 0),

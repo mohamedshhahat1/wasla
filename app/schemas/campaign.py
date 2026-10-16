@@ -417,6 +417,9 @@ class CampaignStatisticsRead(BaseModel):
     total: int
     # Sent - Meta accepted them - then reported `failed` (CMP-10).
     failed_after_send: int = 0
+    # Accepted, and held by Meta's portfolio pacing while it gathers feedback
+    # (LIM-08). Counted among `sent`.
+    held: int = 0
 
     @classmethod
     def from_statistics(cls, statistics: CampaignStatistics) -> Self:
@@ -429,6 +432,7 @@ class CampaignStatisticsRead(BaseModel):
             read=statistics.read,
             total=statistics.total,
             failed_after_send=statistics.failed_after_send,
+            held=statistics.held,
         )
 
 

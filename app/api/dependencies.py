@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends
@@ -388,6 +389,7 @@ def get_campaign_planner(
         session,
         tenant_id=workspace.tenant.id,
         share=settings.campaign_portfolio_limit_share,
+        cap_interval=timedelta(seconds=settings.campaign_contact_marketing_interval_seconds),
     )
 
 

@@ -122,6 +122,7 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services import contact_cap
 from app.services import messaging_limit_service as portfolio_limits
 from app.services import workspace_serving as serving
 from app.services.audit_service import AuditTrail
@@ -133,6 +134,7 @@ from app.services.campaign_header_media_service import (
     CampaignHeaderMediaService,
     HeaderMediaUnavailableError,
 )
+from app.services.contact_cap import ContactFrequencyCapError
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
     EntitlementService,
@@ -255,6 +257,7 @@ class CampaignService:
         storage: MediaStorage | None = None,
         header_media_refresh: timedelta | None = None,
         limits: portfolio_limits.MessagingLimitService | None = None,
+        contact_cap_interval: timedelta | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -296,6 +299,8 @@ class CampaignService:
         # Reads Meta's messaging limit before a schedule when the stored value
         # is stale (LIM-01). A request supplies it; the worker never reads.
         self._limits = limits
+        # One marketing message per contact per this long (FREQ-01).
+        self._cap_interval = contact_cap_interval or DEFAULT_CONTACT_CAP_INTERVAL
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
@@ -933,6 +938,14 @@ class CampaignService:
             if deferred_until is not None:
                 # Only people deferred by Meta's pair limit remain (CMP-18):
                 # not finished, just waiting for the earliest of them.
+                if await self._recipients.capped_pending(
+                    campaign.id, since=moment - self._cap_interval
+                ):
+                    # Everybody left was sent a marketing message in the last
+                    # 24 hours (FREQ-01): the campaign waits for the first.
+                    return await self._wait(
+                        campaign, CampaignWaitReason.CONTACT_CAP, until=max(deferred_until, moment)
+                    )
                 campaign.next_send_at = max(deferred_until, moment)
                 campaign.lease_token = None
                 _clear_wait(campaign)
@@ -1887,6 +1900,18 @@ class CampaignService:
             # window, for the outage to pass (CMP-07), or for the portfolio's
             # moving 24 hours to free a place (LIM-04).
             raise
+        except ContactFrequencyCapError as capped:
+            # **One marketing message per person per 24 hours** (FREQ-01):
+            # another campaign, or a colleague, reached this person less than
+            # a day ago. Refused by the claim before anything was staged, so
+            # no attempt is spent: the person waits for their moment, and the
+            # campaign goes on with the others - unless the deadline comes
+            # first, when they are skipped.
+            until = capped.available_at + CONTACT_CAP_MARGIN
+            if campaign.send_until is not None and until >= campaign.send_until:
+                return self._skip(recipient, _CONTACT_CAPPED, RecipientReason.CONTACT_FREQUENCY_CAP)
+            recipient.not_before = until
+            return _DEFERRED
         except TemplateRefusedError as error:
             # The registry refuses the template - withdrawn by Meta through
             # another send since this batch began. Nothing was staged and this
@@ -1960,6 +1985,13 @@ class CampaignService:
                 recipient.message_id = None
                 recipient.status = RecipientStatus.FAILED
                 recipient.reason_code = TERMINAL_PER_PERSON_CODES[code]
+                if code == MARKETING_LIMIT_PER_USER_CODE:
+                    # Meta: "wait at least 24 hours before resending" - so
+                    # this workspace sends the person no marketing for a day,
+                    # whatever campaign asks next (LIM-08, FREQ-01).
+                    await contact_cap.push(
+                        self._session, tenant_id=self._tenant_id, contact_id=contact.id, at=now
+                    )
                 recipient.last_error = (message.failure_reason or "Rejected by WhatsApp.")[
                     :MAX_ERROR_LENGTH
                 ]
@@ -2212,6 +2244,12 @@ HEADER_MEDIA_REJECTED_CODE: Final = 131053
 # five days before (HM-05; `campaign_header_media_refresh_seconds`).
 DEFAULT_HEADER_MEDIA_REFRESH: Final = timedelta(days=25)
 DEFAULT_PROVIDER_UNREACHABLE_PAUSE: Final = timedelta(hours=6)
+# One marketing message per contact per 24 hours (FREQ-01), and the margin a
+# capped person waits beyond their moment, so they are never asked a second early.
+DEFAULT_CONTACT_CAP_INTERVAL: Final = timedelta(hours=24)
+CONTACT_CAP_MARGIN: Final = timedelta(minutes=5)
+# Meta's per-user marketing limit (131049).
+MARKETING_LIMIT_PER_USER_CODE: Final = 131049
 # How often a campaign whose number's messaging limit was never read looks
 # again (LIM-01). The deploy step reads every connection's limit; this is what
 # a campaign does until it has.
@@ -2268,6 +2306,10 @@ class _HeaderState:
 
 
 _DEADLINE_PASSED: Final = "The campaign's deadline passed before this person was sent."
+_CONTACT_CAPPED: Final = (
+    "This customer was sent a marketing message in the last 24 hours, "
+    "and the campaign's deadline came first."
+)
 
 _HEADER_REFUSED_TWICE: Final = (
     "WhatsApp refused the header file twice (code 131053), once after uploading it again."

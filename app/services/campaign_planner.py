@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.business_initiated import BusinessInitiatedSend
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
 from app.db.models.channel import ContactIdentity
-from app.db.models.conversation import Conversation
+from app.db.models.conversation import Contact, Conversation
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services import messaging_limit_service as portfolio_limits
@@ -76,10 +76,18 @@ async def quiet_hours_of(session: AsyncSession, tenant_id: uuid.UUID) -> QuietHo
 class CampaignPlanner:
     """Plans and ETAs for one workspace's campaigns."""
 
-    def __init__(self, session: AsyncSession, *, tenant_id: uuid.UUID, share: float) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        share: float,
+        cap_interval: timedelta = timedelta(hours=24),
+    ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._share = share
+        self._cap_interval = cap_interval
 
     async def _portfolio(
         self, account_id: uuid.UUID, *, at: datetime
@@ -117,14 +125,15 @@ class CampaignPlanner:
 
     async def _pending(
         self, campaign: Campaign
-    ) -> list[tuple[datetime | None, datetime | None, str | None]]:
-        """Each pending person: their deferral, last inbound on this number, and identity."""
+    ) -> list[tuple[datetime | None, datetime | None, str | None, datetime | None]]:
+        """Each pending person: deferral, last inbound on this number, identity, marketing cap."""
         rows = (
             await self._session.execute(
                 select(
                     CampaignRecipient.not_before,
                     Conversation.last_inbound_at,
                     ContactIdentity.value,
+                    Contact.last_marketing_sent_at,
                 )
                 .outerjoin(
                     Conversation,
@@ -137,6 +146,7 @@ class CampaignPlanner:
                 .outerjoin(
                     ContactIdentity, ContactIdentity.id == CampaignRecipient.participant_identity_id
                 )
+                .outerjoin(Contact, Contact.id == CampaignRecipient.contact_id)
                 .where(
                     CampaignRecipient.tenant_id == self._tenant_id,
                     CampaignRecipient.campaign_id == campaign.id,
@@ -144,7 +154,7 @@ class CampaignPlanner:
                 )
             )
         ).all()
-        return [(row[0], row[1], row[2]) for row in rows]
+        return [(row[0], row[1], row[2], row[3]) for row in rows]
 
     async def _observed_rate(self, campaign: Campaign, *, at: datetime) -> float | None:
         sent = await self._session.scalar(
@@ -171,12 +181,18 @@ class CampaignPlanner:
         quiet = await quiet_hours_of(self._session, self._tenant_id)
         limit, counted, shared = await self._portfolio(campaign.account_id, at=now)
         recipients = []
-        for not_before, last_inbound_at, identity in await self._pending(campaign):
+        for not_before, last_inbound_at, identity, last_marketing in await self._pending(campaign):
             recipients.append(
                 PlannedRecipient(
                     window_open=window_open(last_inbound_at, at=now),
                     counted=identity is not None and identity in counted,
                     not_before=not_before,
+                    # Their next marketing message, once a day (FREQ-01).
+                    cap_until=(
+                        last_marketing + self._cap_interval
+                        if last_marketing is not None and last_marketing + self._cap_interval > now
+                        else None
+                    ),
                 )
             )
         rate = float(campaign.messages_per_minute)
