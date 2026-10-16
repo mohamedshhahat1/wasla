@@ -242,6 +242,14 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         # columns. `conversations` points here through one (ADR-100).
         UniqueConstraint("tenant_id", "id", name="uq_contacts_tenant_id_id"),
         Index("ix_contacts_tenant_id", "tenant_id"),
+        # The contact picker without a number, most recently seen first
+        # (PG-07). 0116.
+        Index(
+            "ix_contacts_tenant_id_last_seen_at",
+            "tenant_id",
+            text("last_seen_at DESC NULLS LAST"),
+            "id",
+        ),
     )
 
     # Deprecated: read a contact's identities instead (docs/API.md).
@@ -301,6 +309,15 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         # alone finds the workspace and then discards most of what it read
         # by filter, which costs more the longer a workspace has existed.
         Index("ix_conversations_tenant_id_created_at", "tenant_id", "created_at"),
+        # The campaign contact picker on one number, most recent inbound
+        # first (PG-07). 0116.
+        Index(
+            "ix_conversations_tenant_id_account_id_last_inbound_at",
+            "tenant_id",
+            "account_id",
+            text("last_inbound_at DESC NULLS LAST"),
+            "contact_id",
+        ),
         # The inbox narrowed to one connection, in the inbox's own order
         # (OMNI-014). Without it the filter walks the workspace's whole range
         # and discards by predicate - slowest for the largest, oldest

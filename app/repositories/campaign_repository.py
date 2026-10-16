@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, and_, delete, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, and_, delete, false, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,14 +63,20 @@ class AudienceFilter:
     last_inbound_within_days: int | None = None
     lead_statuses: tuple[LeadStatus, ...] = ()
     contact_ids: tuple[uuid.UUID, ...] = ()
+    #: A segment and filters naming lead statuses with none in common (PG-06):
+    #: what was asked for reaches nobody.
+    nobody: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """The record kept on the campaign, so a person can read what was targeted."""
-        return {
+        record: dict[str, Any] = {
             "last_inbound_within_days": self.last_inbound_within_days,
             "lead_statuses": [status.value for status in self.lead_statuses],
             "contact_ids": [str(contact_id) for contact_id in self.contact_ids],
         }
+        if self.nobody:
+            record["nobody"] = True
+        return record
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,6 +724,8 @@ class AudienceRepository(TenantScopedRepository[Contact]):
             )
         )
 
+        if filters.nobody:
+            query = query.where(false())
         if filters.contact_ids:
             query = query.where(Contact.id.in_(filters.contact_ids))
 

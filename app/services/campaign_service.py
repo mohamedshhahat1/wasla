@@ -140,6 +140,7 @@ from app.services.campaign_header_media_service import (
     CampaignHeaderMediaService,
     HeaderMediaUnavailableError,
 )
+from app.services.campaign_segment_service import CampaignSegmentService, narrowed
 from app.services.contact_cap import ContactFrequencyCapError
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
@@ -352,6 +353,7 @@ class CampaignService:
         self._parameter_max_chars = parameter_max_chars or DEFAULT_PARAMETER_MAX_CHARS
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
+        self._segments = CampaignSegmentService(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
@@ -701,9 +703,17 @@ class CampaignService:
         *,
         account_id: uuid.UUID,
         filters: AudienceFilter,
+        segment_id: uuid.UUID | None = None,
     ) -> int:
-        """How many people this filter would reach, without writing anything."""
+        """How many people this filter - over a saved segment's rules - would reach.
+
+        Nothing is written.
+        """
         await self._accounts.require_by_id(account_id)
+        if segment_id is not None:
+            filters = narrowed(
+                await self._segments.for_audience(segment_id, account_id=account_id), filters
+            )
         return await self._audience.count_eligible(account_id=account_id, filters=filters)
 
     async def set_audience(
@@ -712,6 +722,7 @@ class CampaignService:
         campaign_id: uuid.UUID,
         filters: AudienceFilter,
         actor: User | None = None,
+        segment_id: uuid.UUID | None = None,
     ) -> Campaign:
         """Materialise the recipient list.
 
@@ -734,6 +745,15 @@ class CampaignService:
         campaign = await self._campaigns.lock_by_id(campaign_id)
         if campaign.status is not CampaignStatus.DRAFT:
             raise ValidationError("An audience can only be set while the campaign is a draft.")
+        if segment_id is not None:
+            # The segment's rules, narrowed by the filters given with it, are
+            # copied onto the campaign below (PG-06): a later edit of the
+            # segment changes nothing here.
+            filters = narrowed(
+                await self._segments.for_audience(segment_id, account_id=campaign.account_id),
+                filters,
+            )
+        campaign.audience_segment_id = segment_id
         # The campaign allowance's lock, taken after the row's as `schedule`
         # takes them, so nothing that reads promised recipients interleaves.
         await hold_limit_lock(
@@ -788,7 +808,11 @@ class CampaignService:
             target_type="campaign",
             target_id=campaign.id,
             target_label=campaign.name,
-            meta={"recipients": campaign.audience_size, "filters": summary},
+            meta={
+                "recipients": campaign.audience_size,
+                "filters": summary,
+                "segment_id": str(segment_id) if segment_id is not None else None,
+            },
         )
         logger.info(
             "campaign.audience_set",
@@ -1138,6 +1162,7 @@ class CampaignService:
         copy.template_parameters = composition.stored()
         copy.header_media_id = source.header_media_id
         copy.audience = dict(source.audience) if source.audience is not None else None
+        copy.audience_segment_id = source.audience_segment_id
         await self._session.flush()
         self._audit.record(
             AuditAction.CAMPAIGN_DUPLICATED,

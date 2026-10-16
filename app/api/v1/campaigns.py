@@ -389,6 +389,7 @@ async def preview_audience(
     size = await campaigns.preview_audience(
         account_id=payload.account_id,
         filters=payload.to_filter(),
+        segment_id=payload.segment_id,
     )
     return AudiencePreviewResponse(account_id=payload.account_id, size=size)
 
@@ -476,6 +477,7 @@ async def set_audience(
         campaign_id=campaign_id,
         filters=payload.to_filter(),
         actor=workspace.user,
+        segment_id=payload.segment_id,
     )
     return await _read(campaigns, campaign, workspace)
 

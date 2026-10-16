@@ -292,6 +292,12 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         # The target of a tenant-composite foreign key (ADR-100): a create key
         # names a campaign of its own workspace (PG-08). 0115.
         Index("uq_campaigns_tenant_id_id", "tenant_id", "id", unique=True),
+        # Which campaigns a segment was used by (PG-06). Partial: most none.
+        Index(
+            "ix_campaigns_audience_segment_id",
+            "audience_segment_id",
+            postgresql_where=text("audience_segment_id IS NOT NULL"),
+        ),
         Index("ix_campaigns_template_id", "template_id"),
         # Which campaigns name an asset: retention keeps a live campaign's
         # file (HM-07), and the asset's foreign key is checked through it.
@@ -354,6 +360,14 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         ),
         # The connection Meta's media id was uploaded through, of this
         # workspace (HM-04, CR-09).
+        # The segment its audience rules were copied from, of its own workspace
+        # (PG-06, CR-13). No action on delete: deleting a segment clears the
+        # reference first, and the campaign keeps the rules it copied. 0116.
+        ForeignKeyConstraint(
+            ["tenant_id", "audience_segment_id"],
+            ["campaign_segments.tenant_id", "campaign_segments.id"],
+            name="fk_campaigns_tenant_audience_segment",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "header_provider_account_id"],
             ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
@@ -480,6 +494,10 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # from, and an edit made from an older one is refused 409. Bumped by the
     # draft edit and by writing the audience, never by the worker. 0115.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # The saved segment the audience's rules were copied from (PG-06); the
+    # rules themselves are in `audience`. Null when written from filters alone,
+    # or when the segment was deleted since. 0116.
+    audience_segment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     @property
     def is_running(self) -> bool:

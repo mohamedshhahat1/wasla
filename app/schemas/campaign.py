@@ -268,6 +268,10 @@ class AudienceRequest(_Payload):
     # Contacts of this workspace, chosen by hand. Still filtered by everything
     # else: naming somebody who opted out does not reach them.
     contact_ids: list[uuid.UUID] = Field(default_factory=list, max_length=1000)
+    # A saved segment of this workspace (PG-06): its rules are the starting
+    # point, and the filters above can only narrow them. Copied onto the
+    # campaign when the list is written.
+    segment_id: uuid.UUID | None = None
 
     def to_filter(self) -> AudienceFilter:
         return AudienceFilter(

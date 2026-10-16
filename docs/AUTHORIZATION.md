@@ -139,6 +139,11 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/billing/subscription/cancel` | **OWNER** | yes | workspace | - |
 | `POST` | `/api/v1/billing/subscription/plan` | **OWNER** | yes | workspace | - |
 | `POST` | `/api/v1/billing/subscription/resume` | **OWNER** | yes | workspace | - |
+| `GET` | `/api/v1/campaign-segments` | **MEMBER** | yes | workspace | - |
+| `POST` | `/api/v1/campaign-segments` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaign-segments/{segment_id}` | **MEMBER** | yes | workspace | - |
+| `PATCH` | `/api/v1/campaign-segments/{segment_id}` | **ADMIN** | yes | workspace | - |
+| `DELETE` | `/api/v1/campaign-segments/{segment_id}` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/audience/preview` | **ADMIN** | yes | workspace | - |
@@ -156,6 +161,7 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/campaigns/{campaign_id}/schedule` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace | - |
 | `DELETE` | `/api/v1/contacts/{contact_id}/opt-out` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/contacts` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/contacts/{contact_id}/opt-out` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/channel-connections` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/conversations` | **MEMBER** | yes | workspace | - |

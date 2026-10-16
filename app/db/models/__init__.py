@@ -42,6 +42,7 @@ from .campaign import (
     RecipientStatus,
 )
 from .campaign_media import CampaignHeaderMedia, HeaderMediaKind
+from .campaign_segment import CampaignSegment
 from .channel import (
     Channel,
     ChannelConnection,
@@ -243,6 +244,7 @@ __all__ = [
     "CampaignCreateKey",
     "CampaignHeaderMedia",
     "CampaignRecipient",
+    "CampaignSegment",
     "CampaignStatus",
     "CapacityReductionCause",
     "CapacityReductionStatus",

@@ -47,6 +47,7 @@ from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_header_media_service import CampaignHeaderMediaService
 from app.services.campaign_planner import CampaignPlanner
+from app.services.campaign_segment_service import CampaignSegmentService
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
 from app.services.credential_service import CredentialService
@@ -378,6 +379,16 @@ def get_campaign_service(
 
 
 CampaignServiceDep = Annotated[CampaignService, Depends(get_campaign_service)]
+
+
+def get_campaign_segment_service(
+    session: SessionDep, workspace: ActiveWorkspaceDep
+) -> CampaignSegmentService:
+    """A workspace's saved segments (PG-06)."""
+    return CampaignSegmentService(session, tenant_id=workspace.tenant.id)
+
+
+CampaignSegmentServiceDep = Annotated[CampaignSegmentService, Depends(get_campaign_segment_service)]
 
 
 def get_campaign_planner(

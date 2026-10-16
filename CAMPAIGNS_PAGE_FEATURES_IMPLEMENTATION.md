@@ -20,8 +20,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 5 | Spreading, deadline, delivery plan, ETA | committed | fdddae1 | every campaign suite + limit suites + unit + docs (3,807 passed, 1 failed in the endpoints stub - fixed, re-run 15 passed); plan unit (11) and API/worker (5); migration-built: parity, downgrade atomicity, plan |
 | 6 | Per-contact cap, pacing, 131049 | committed | 429f892 | broad send-path regression (4,221 passed, 4 failed: 3 intended test updates below, 1 PDF-deadline timing flake that passed on re-run; 100 re-run passed); contact cap + pacing (8); migration-built: parity, downgrade atomicity, cap |
 | 7 | Personalisation | committed | 8b97c3d | send-path regression: unit + every campaign, WhatsApp, template and follow-up suite + documentation truth (4,052 passed, 1 failed: the documented operation count, 217 -> 218, fixed; 1 tmpfs skip); every route-walking suite (231 passed); personalisation (7 integration, 8 unit); migration-built: parity, downgrade atomicity, personalisation (16) |
-| 8 | Draft lifecycle, search, idempotent create, activity | committed | (this commit) | unit + every campaign, WhatsApp, template, follow-up, audit, retention, metric and route-walking suite (4,313 passed, 1 failed: CPF-01, a pre-existing test-isolation defect, fixed in 3980c37); drafts (13); migration-built: parity, downgrade atomicity, drafts (22) |
-| 9 | Segments, contact picker | not started | | |
+| 8 | Draft lifecycle, search, idempotent create, activity | committed | a2e9c91 | unit + every campaign, WhatsApp, template, follow-up, audit, retention, metric and route-walking suite (4,313 passed, 1 failed: CPF-01, a pre-existing test-isolation defect, fixed in 3980c37); drafts (13); migration-built: parity, downgrade atomicity, drafts (22) |
+| 9 | Segments, contact picker | committed | (this commit) | unit + campaign, WhatsApp, template, follow-up, contact, lead, audit, retention, metric, route-walking suites (4,396 passed, 4 failed: 2 stubs without `segment_id` - intended; 2 = CPF-02, fixed in its own commit); segments + picker (7); migration-built: parity, downgrade atomicity, segments |
 | 10 | Test send | not started | | |
 | 11 | Results, summary, progress, CSV export | not started | | |
 | 12 | Rate cards, cost estimate | not started | | |
@@ -398,3 +398,58 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   test_the_platform_reader_sees_every_workspace_and_the_platform` counted 4 instead of 3 whenever the
   ownership suite ran first. The full lane runs them alphabetically (audit first) and never met it;
   this stage's targeted regression did. Fixed in 3980c37 (the cleanup deletes the entries first).
+- **CPF-02** (test defect of this stage's Phase 5): `test_campaign_delivery_plan.py` marked the whole
+  module `quiet_hours`, so its two tests on the real clock (the deadline worker test and the ETA
+  test) ran the real window and failed between 22:00 and 09:00 Cairo - found when the Phase 9
+  regression ran at 22:25. The marker now sits on the two tests that schedule at chosen Cairo times.
+
+## Phase 9 notes (PG-06, PG-07)
+
+- Migration **0116**: `campaign_segments` (tenant, name - unique per workspace, and the service also
+  refuses a name differing only in case - description, `rules` JSONB with
+  `ck_campaign_segments_rules_have_no_contacts`, optional number of the same workspace via
+  `fk_campaign_segments_tenant_account`, `created_by_id`, `version`, `UNIQUE(tenant_id, id)`);
+  `campaigns.audience_segment_id` with `fk_campaigns_tenant_audience_segment` (`NOT VALID` ->
+  `VALIDATE`, no action on delete); indexes `CONCURRENTLY`: `ix_campaigns_audience_segment_id`
+  (partial), `ix_conversations_tenant_id_account_id_last_inbound_at`,
+  `ix_contacts_tenant_id_last_seen_at`. Downgrade refuses while a segment exists or a campaign
+  names one.
+- Segments: `GET /campaign-segments`, `GET /campaign-segments/{id}` (member); `POST`, `PATCH`
+  (If-Match or `version`; 409 `segment_version_conflict`, 422 `segment_version_required`), `DELETE`
+  (admin). In the campaign rate bucket with the campaigns page. Rules are `last_inbound_within_days`
+  and `lead_statuses`; anything else (`contact_ids`) is 422. At most 100 per workspace, counted and
+  inserted under a `CAMPAIGN_SEGMENTS` advisory lock (registered in `app/db/advisory_locks.py`): 3
+  concurrent creates for the 100th place -> one 201, two 409 `segment_limit_reached`. A name taken
+  -> 409 `segment_name_taken`. Segments are not audited (no campaign is changed by one).
+- Using one: `POST /campaigns/audience/preview` and `POST /campaigns/{id}/audience` take
+  `segment_id`. The segment's rules are narrowed by the filters sent with it (the shorter recency
+  window; lead statuses intersected - an empty intersection reaches nobody, recorded as
+  `audience.nobody = true`; hand-picked contacts narrow further) and copied onto the campaign's
+  `audience` with `audience_segment_id`. Editing or deleting the segment changes no campaign;
+  deleting it clears `audience_segment_id` first and the copied rules stay. A segment meant for
+  another number -> 422 `segment_account_mismatch`; another workspace's -> 404. Duplicate copies the
+  reference. The audience audit entry and the activity log carry `segment_id`.
+- Contact picker: `GET /contacts` (member, workspace rate bucket - the existing contacts router), at
+  most 50 per page, keyset `(last_inbound_at DESC NULLS LAST, id DESC)`. With `account_id`: contacts
+  with a conversation on that number, `last_inbound_at` of that conversation, `opted_out_at` on its
+  channel, `eligible_for_campaign` and `ineligible_reason` (`opted_out`; everybody listed has a
+  conversation on the number); `eligible_for_campaign=true` keeps only the base population. Without
+  `account_id`: every contact by `last_seen_at`, eligibility null; `eligible_for_campaign=true`
+  without a number -> 422 `account_required`. `q`: digits (an optional `+`, spaces ignored) search
+  the WhatsApp number, anything else the name or the active lead's name; wildcards literal. Another
+  workspace's number -> 404.
+- Measured at 100,000 contacts in one workspace (`audit/p23_picker_plan.py`, 10 % opted out, a
+  third with a lead), p95: first page on a number 6.3 ms; eligible only 6.7 ms; name search 8.7 ms;
+  digits 83 ms (a substring of the number cannot use a b-tree; no extension added); without a
+  number 4.2 ms, name search 15.7 ms. Not SCALE-TRIGGERED.
+- Intended test changes: `test_campaign_endpoints.py`'s stub `preview_audience` and `set_audience`
+  take `segment_id`.
+- `docs/API.md` states 228 operations; `docs/AUTHORIZATION.md` lists the five segment routes and
+  `GET /contacts`.
+- Two defects found by the measurement and fixed before commit: (1) after five executions
+  PostgreSQL switched the prepared statement to a generic plan and a name search went from 15 ms to
+  5.3 s - the picker now sets `plan_cache_mode = force_custom_plan` for its transaction, the
+  knowledge search's documented remedy (docs/RAG.md); (2) "eligible only" filtered the outer-joined
+  consent's null, and the planner hashed every contact of the number (153 ms) - it now uses the
+  audience's own `refused()` anti-join (1 ms), with the displayed consent aliased so the subquery is
+  not correlated away.

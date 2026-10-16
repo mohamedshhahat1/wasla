@@ -44,7 +44,7 @@ SAFE_KEYS: Final[dict[AuditAction, frozenset[str]]] = {
     AuditAction.CAMPAIGN_CREATED: frozenset({"messages_per_minute"}),
     AuditAction.CAMPAIGN_UPDATED: frozenset({"fields", "audience_cleared"}),
     AuditAction.CAMPAIGN_DUPLICATED: frozenset({"source_id"}),
-    AuditAction.CAMPAIGN_AUDIENCE_SET: frozenset({"recipients"}),
+    AuditAction.CAMPAIGN_AUDIENCE_SET: frozenset({"recipients", "segment_id"}),
     AuditAction.CAMPAIGN_SCHEDULED: frozenset({"recipients", "scheduled_at", "send_until"}),
     AuditAction.CAMPAIGN_PAUSED: frozenset({"reason"}),
     AuditAction.CAMPAIGN_CANCELLED: frozenset({"reason"}),

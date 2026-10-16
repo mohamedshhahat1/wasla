@@ -29,16 +29,21 @@ PASSWORD_RESET_REQUEST: Final = 0x5741_5303
 # The business-initiated ledger's reservation, per business portfolio
 # (`BusinessInitiatedLedger`, LIM-03): count, decide and record as one step.
 BUSINESS_PORTFOLIO: Final = 0x5741_5304
+# A workspace's saved campaign segments, counted against their cap as one step
+# with the insert (`CampaignSegmentService`, PG-06).
+CAMPAIGN_SEGMENTS: Final = 0x5741_5305
 
 NAMESPACES: Final[dict[str, int]] = {
     "workspace_creation": WORKSPACE_CREATION,
     "platform_owners": PLATFORM_OWNERS,
     "password_reset_request": PASSWORD_RESET_REQUEST,
     "business_portfolio": BUSINESS_PORTFOLIO,
+    "campaign_segments": CAMPAIGN_SEGMENTS,
 }
 
 __all__ = [
     "BUSINESS_PORTFOLIO",
+    "CAMPAIGN_SEGMENTS",
     "NAMESPACES",
     "PASSWORD_RESET_REQUEST",
     "PLATFORM_OWNERS",

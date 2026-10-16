@@ -125,7 +125,13 @@ class StubCampaigns:
         self.created.append(kwargs)
         return _campaign()
 
-    async def preview_audience(self, *, account_id: uuid.UUID, filters: AudienceFilter) -> int:
+    async def preview_audience(
+        self,
+        *,
+        account_id: uuid.UUID,
+        filters: AudienceFilter,
+        segment_id: uuid.UUID | None = None,
+    ) -> int:
         self.previews.append({"account_id": account_id, "filters": filters})
         return 7
 
@@ -135,6 +141,7 @@ class StubCampaigns:
         campaign_id: uuid.UUID,
         filters: AudienceFilter,
         actor: User | None = None,
+        segment_id: uuid.UUID | None = None,
     ) -> Campaign:
         self.audiences.append({"campaign_id": campaign_id, "filters": filters})
         return _campaign()

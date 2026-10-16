@@ -31,6 +31,7 @@ from app.api.v1 import (
     audit,
     auth,
     billing,
+    campaign_segments,
     campaigns,
     channel_connections,
     contacts,
@@ -103,6 +104,8 @@ MIXED_ROUTERS = (invitations.router, workspaces.router)
 # Expensive and rare: a broadcast, a template sync against Meta.
 CAMPAIGN_ROUTERS = (
     campaigns.router,
+    # Saved audience rules, read and written from the campaigns page (PG-06).
+    campaign_segments.router,
     templates.router,
 )
 
