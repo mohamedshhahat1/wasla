@@ -29,6 +29,7 @@ from app.api.dependencies import (
 )
 from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
+from app.core.exceptions import ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.campaign import Campaign, CampaignStatus, RecipientReason, RecipientStatus
 from app.schemas.campaign import (
@@ -42,12 +43,19 @@ from app.schemas.campaign import (
     DeliveryPlanRead,
     HeaderMediaRead,
     HeaderMediaUploadRead,
+    MessagePreviewRead,
+    MessagePreviewRequest,
+    MessagePreviewResponse,
     RecipientListResponse,
     RecipientRead,
 )
 from app.schemas.conversation import CursorPage
 from app.services.campaign_planner import CampaignPlanner
-from app.services.campaign_service import CampaignService
+from app.services.campaign_service import (
+    PARAMETER_SOURCE_NOT_ALLOWED_CODE,
+    CampaignService,
+)
+from app.services.personalisation import ParameterSource
 
 router = APIRouter(route_class=CommittingRoute, prefix="/campaigns", tags=["campaigns"])
 
@@ -125,7 +133,19 @@ async def create_campaign(
     workspace: TenantAdminDep,
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
-    """Create a draft. Nothing is sent and no audience exists yet."""
+    """Create a draft. Nothing is sent and no audience exists yet.
+
+    Body and text-header values are constants (`variables`, `header_variables`)
+    or, per placeholder, a field of each person with a fallback
+    (`body_parameters`, `header_parameters`; PER-01). Button values are always
+    constants.
+    """
+    if any(entry.source is not ParameterSource.CONSTANT for entry in payload.button_parameters):
+        raise ValidationError(
+            "A button's value is the same for everybody: a personal value in a link leaves "
+            "Wasla in a URL.",
+            error_code=PARAMETER_SOURCE_NOT_ALLOWED_CODE,
+        )
     campaign = await campaigns.create(
         account_id=payload.account_id,
         template_id=payload.template_id,
@@ -138,6 +158,16 @@ async def create_campaign(
         button_parameters={entry.index: entry.value for entry in payload.button_parameters},
         header_media_id=payload.header_media_id,
         actor=workspace.user,
+        body_mappings=(
+            [entry.to_mapping() for entry in payload.body_parameters]
+            if payload.body_parameters is not None
+            else None
+        ),
+        header_mappings=(
+            [entry.to_mapping() for entry in payload.header_parameters]
+            if payload.header_parameters is not None
+            else None
+        ),
     )
     return await _read(campaigns, campaign, workspace)
 
@@ -252,6 +282,41 @@ async def delivery_plan(
     """
     campaign = await campaigns.get(campaign_id)
     return DeliveryPlanRead.from_plan(await planner.plan(campaign, now=datetime.now(UTC)))
+
+
+@router.post(
+    "/{campaign_id}/preview-messages",
+    response_model=MessagePreviewResponse,
+    summary="What chosen people would receive",
+)
+async def preview_messages(
+    campaign_id: uuid.UUID,
+    payload: MessagePreviewRequest,
+    workspace: TenantAdminDep,
+    campaigns: CampaignServiceDep,
+) -> MessagePreviewResponse:
+    """Up to five people's own messages, rendered (PER-04), and which values fell back.
+
+    From the values written with the audience, or - before it is written - resolved
+    now for people of the eligible population. Anybody else is not found; nothing
+    about anybody but the people asked for is returned.
+    """
+    previews = await campaigns.preview_messages(campaign_id, payload.contact_ids)
+    return MessagePreviewResponse(
+        previews=[
+            MessagePreviewRead(
+                contact_id=preview.contact_id,
+                header=preview.header,
+                body=preview.body,
+                buttons=list(preview.buttons),
+                fallbacks={
+                    "body": list(preview.body_fallbacks),
+                    "header": list(preview.header_fallbacks),
+                },
+            )
+            for preview in previews
+        ]
+    )
 
 
 @router.post("/{campaign_id}/audience", response_model=CampaignRead, summary="Set the audience")

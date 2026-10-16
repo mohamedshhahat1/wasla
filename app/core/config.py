@@ -606,6 +606,9 @@ class Settings(BaseSettings):
     # free for follow-ups, manual templates and other numbers' work. A
     # platform setting, never a workspace's.
     campaign_portfolio_limit_share: float = Field(default=0.80, gt=0, le=1)
+    # The longest one person's value - a name, an interest - may be before the
+    # fallback is sent instead (PER-03). A fallback is held to it too.
+    campaign_parameter_max_chars: int = Field(default=60, ge=1, le=1024)
     # One marketing message per customer per this many seconds, per workspace
     # (FREQ-01): across every campaign and every manual marketing template.
     campaign_contact_marketing_interval_seconds: int = Field(

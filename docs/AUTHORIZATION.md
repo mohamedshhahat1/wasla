@@ -147,6 +147,7 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/campaigns/{campaign_id}/cancel` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/delivery-plan` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/pause` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/preview-messages` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/recipients` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/schedule` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace | - |

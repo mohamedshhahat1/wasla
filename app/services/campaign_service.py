@@ -27,12 +27,13 @@ successor permission to send a burst.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +50,7 @@ from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import (
     DependencyUnavailableError,
     ExternalServiceError,
+    NotFoundError,
     PlanLimitExceededError,
     RateLimitedError,
     ValidationError,
@@ -90,10 +92,11 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.lead import Lead, LeadStatus
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
-from app.db.models.whatsapp_template import TemplateStatus
+from app.db.models.whatsapp_template import PLACEHOLDER, TemplateStatus
 from app.db.session import released
 from app.integrations.whatsapp.client import (
     MARKETING_OPTED_OUT_CODE,
@@ -146,6 +149,15 @@ from app.services.messaging_service import (
     safe_upload_filename,
 )
 from app.services.opt_out import record_opt_out, record_resume
+from app.services.personalisation import (
+    Mapping,
+    ParameterSource,
+    PersonFacts,
+    Rendered,
+    fill,
+    normalise,
+    resolve,
+)
 from app.services.quiet_hours import QuietHours
 from app.services.template_parameters import (
     FILE_HEADER_FORMATS,
@@ -178,6 +190,14 @@ TEMPLATE_CATEGORY_CODE: Final = "template_category"
 # The stable error code for a header file that is not stored: never written, or
 # removed by retention (HM-02, HM-07).
 HEADER_MEDIA_NOT_STORED_CODE: Final = "header_media_not_stored"
+
+# The stable error codes of a composition's per-person values (PER-01, PER-03).
+PARAMETERS_CONFLICT_CODE: Final = "parameters_conflict"
+PARAMETER_VALUE_REQUIRED_CODE: Final = "parameter_value_required"
+PARAMETER_FALLBACK_REQUIRED_CODE: Final = "parameter_fallback_required"
+PARAMETER_FALLBACK_TOO_LONG_CODE: Final = "parameter_fallback_too_long"
+PARAMETER_KEY_UNKNOWN_CODE: Final = "parameter_key_unknown"
+PARAMETER_SOURCE_NOT_ALLOWED_CODE: Final = "parameter_source_not_allowed"
 
 # The stable error code for a `scheduled_at` without a UTC offset (CMP-15).
 NAIVE_SCHEDULE_CODE: Final = "scheduled_at_needs_offset"
@@ -258,6 +278,7 @@ class CampaignService:
         header_media_refresh: timedelta | None = None,
         limits: portfolio_limits.MessagingLimitService | None = None,
         contact_cap_interval: timedelta | None = None,
+        parameter_max_chars: int | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -301,6 +322,8 @@ class CampaignService:
         self._limits = limits
         # One marketing message per contact per this long (FREQ-01).
         self._cap_interval = contact_cap_interval or DEFAULT_CONTACT_CAP_INTERVAL
+        # The longest one person's value may be before the fallback is sent (PER-03).
+        self._parameter_max_chars = parameter_max_chars or DEFAULT_PARAMETER_MAX_CHARS
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
@@ -399,6 +422,8 @@ class CampaignService:
         button_parameters: dict[int, str] | None = None,
         header_media_id: uuid.UUID | None = None,
         actor: User | None = None,
+        body_mappings: list[Mapping] | None = None,
+        header_mappings: list[Mapping] | None = None,
     ) -> Campaign:
         """Compose a draft. Nothing is sent and no audience exists yet.
 
@@ -412,6 +437,73 @@ class CampaignService:
         HM-03): `header_media_id` names one of this workspace's header files,
         stored, of the kind the template's header names. Another workspace's
         id is not found. Fixed here: nothing changes it afterwards.
+
+        **Each person's own values** (PER-01): `body_mappings` and
+        `header_mappings` name, per placeholder, a constant or a field of the
+        contact or their active lead, with a fallback - in place of
+        `variables` and `header_variables`. Resolved per person when the
+        audience is written.
+        """
+        composition = await self._composition(
+            account_id=account_id,
+            template_id=template_id,
+            variables=variables,
+            header_variables=header_variables,
+            button_parameters=button_parameters,
+            header_media_id=header_media_id,
+            body_mappings=body_mappings,
+            header_mappings=header_mappings,
+        )
+
+        campaign = self._campaigns.create(
+            account_id=account_id,
+            template_id=template_id,
+            name=_validated_name(name),
+            description=description,
+            variables=list(composition.parameters.body) or None,
+            messages_per_minute=_validated_rate(messages_per_minute),
+            created_by_id=created_by_id,
+        )
+        campaign.template_parameters = composition.stored()
+        campaign.header_media_id = header_media_id
+        # Flushed so the caller can read the generated id and the timestamps.
+        # Without it a route serialising this row answers 500: the primary key
+        # default and the server defaults are applied at flush, and the request
+        # commits after the response has already been built.
+        await self._session.flush()
+        # Audited (CMP-14): composing a broadcast is where its template and
+        # number are chosen. The template's parameters stay out of the trail.
+        self._audit.record(
+            AuditAction.CAMPAIGN_CREATED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={
+                "account_id": str(account_id),
+                "template_id": str(template_id),
+                "messages_per_minute": campaign.messages_per_minute,
+            },
+        )
+        logger.info("campaign.created", extra={"campaign_id": str(campaign.id)})
+        return campaign
+
+    async def _composition(
+        self,
+        *,
+        account_id: uuid.UUID,
+        template_id: uuid.UUID,
+        variables: list[str] | None,
+        header_variables: list[str] | None,
+        button_parameters: dict[int, str] | None,
+        header_media_id: uuid.UUID | None,
+        body_mappings: list[Mapping] | None,
+        header_mappings: list[Mapping] | None,
+    ) -> _Composition:
+        """Everything a campaign is composed of, validated - the one validator (PG-03).
+
+        Create and the draft edit both go through here, so a draft can never
+        be edited into something create would have refused.
         """
         account = await self._accounts.require_by_id(account_id)
         if not account.is_active:
@@ -449,48 +541,81 @@ class CampaignService:
                     "This header file is not stored. Upload it again.",
                     error_code=HEADER_MEDIA_NOT_STORED_CODE,
                 )
+        body_sources = await self._validated_mappings(body_mappings, variables, "body")
+        header_sources = await self._validated_mappings(header_mappings, header_variables, "header")
         supplied = CampaignParameters(
-            body=tuple(variables or ()),
-            header=tuple(header_variables or ()),
+            body=(
+                tuple(mapping.default() for mapping in body_sources)
+                if body_sources is not None
+                else tuple(variables or ())
+            ),
+            header=(
+                tuple(mapping.default() for mapping in header_sources)
+                if header_sources is not None
+                else tuple(header_variables or ())
+            ),
             buttons=dict(button_parameters or {}),
             header_file_kind=header_file.kind if header_file is not None else None,
         )
         refused = parameter_refusal(parameter_spec(template.components), supplied)
         if refused is not None:
             raise refused
+        return _Composition(
+            parameters=supplied,
+            body_sources=body_sources,
+            header_sources=header_sources,
+        )
 
-        campaign = self._campaigns.create(
-            account_id=account_id,
-            template_id=template_id,
-            name=_validated_name(name),
-            description=description,
-            variables=list(supplied.body) or None,
-            messages_per_minute=_validated_rate(messages_per_minute),
-            created_by_id=created_by_id,
+    async def _validated_mappings(
+        self, mappings: list[Mapping] | None, constants: list[str] | None, part: str
+    ) -> tuple[Mapping, ...] | None:
+        """A part's mappings, checked (PER-01, PER-03); None when it has constants only."""
+        if mappings is None:
+            return None
+        if constants:
+            raise ValidationError(
+                f"Give the {part}'s values either as constants or as mappings, not both.",
+                error_code=PARAMETERS_CONFLICT_CODE,
+            )
+        checked: list[Mapping] = []
+        for mapping in mappings:
+            if mapping.source is ParameterSource.CONSTANT:
+                if mapping.value is None:
+                    raise ValidationError(
+                        "A constant needs its value.", error_code=PARAMETER_VALUE_REQUIRED_CODE
+                    )
+                checked.append(Mapping(source=mapping.source, value=mapping.value))
+                continue
+            fallback = normalise(mapping.fallback)
+            if not fallback:
+                raise ValidationError(
+                    "A value taken from the contact or the lead needs a fallback for people "
+                    "without it.",
+                    error_code=PARAMETER_FALLBACK_REQUIRED_CODE,
+                )
+            if len(fallback) > self._parameter_max_chars:
+                raise ValidationError(
+                    f"A fallback is at most {self._parameter_max_chars} characters.",
+                    error_code=PARAMETER_FALLBACK_TOO_LONG_CODE,
+                )
+            key = None
+            if mapping.source is ParameterSource.LEAD_CUSTOM_FIELD:
+                key = (mapping.key or "").strip()
+                if not key or not await self._custom_field_exists(key):
+                    raise ValidationError(
+                        "No lead in this workspace has that custom field.",
+                        error_code=PARAMETER_KEY_UNKNOWN_CODE,
+                    )
+            checked.append(Mapping(source=mapping.source, key=key, fallback=fallback))
+        return tuple(checked)
+
+    async def _custom_field_exists(self, key: str) -> bool:
+        found = await self._session.scalar(
+            select(Lead.id)
+            .where(Lead.tenant_id == self._tenant_id, Lead.custom_fields.has_key(key))
+            .limit(1)
         )
-        campaign.template_parameters = supplied.as_dict()
-        campaign.header_media_id = header_media_id
-        # Flushed so the caller can read the generated id and the timestamps.
-        # Without it a route serialising this row answers 500: the primary key
-        # default and the server defaults are applied at flush, and the request
-        # commits after the response has already been built.
-        await self._session.flush()
-        # Audited (CMP-14): composing a broadcast is where its template and
-        # number are chosen. The template's parameters stay out of the trail.
-        self._audit.record(
-            AuditAction.CAMPAIGN_CREATED,
-            actor=actor,
-            target_type="campaign",
-            target_id=campaign.id,
-            target_label=campaign.name,
-            meta={
-                "account_id": str(account_id),
-                "template_id": str(template_id),
-                "messages_per_minute": campaign.messages_per_minute,
-            },
-        )
-        logger.info("campaign.created", extra={"campaign_id": str(campaign.id)})
-        return campaign
+        return found is not None
 
     async def preview_audience(
         self,
@@ -548,16 +673,26 @@ class CampaignService:
             )
 
         already = await self._recipients.existing_contact_ids(campaign.id)
+        # Each person's own values, resolved now and written down with them
+        # (PER-02): what this campaign will send them, whatever changes later.
+        renderer = await self._renderer(campaign)
+        facts = (
+            await self._facts([contact for contact, _ in members if contact.id not in already])
+            if renderer is not None
+            else {}
+        )
         added = 0
         for contact, participant_identity_id in members:
             if contact.id in already:
                 continue
             # The exact identity this copy is addressed to (OMNI-004).
-            self._recipients.create(
+            recipient = self._recipients.create(
                 campaign_id=campaign.id,
                 contact_id=contact.id,
                 participant_identity_id=participant_identity_id,
             )
+            if renderer is not None:
+                recipient.rendered_parameters = renderer(facts[contact.id]).as_dict()
             added += 1
 
         campaign.audience = filters.as_dict()
@@ -579,6 +714,130 @@ class CampaignService:
             extra={"campaign_id": str(campaign.id), "audience_size": campaign.audience_size},
         )
         return campaign
+
+    async def _renderer(self, campaign: Campaign) -> Callable[[PersonFacts], Rendered] | None:
+        """How to resolve one person's values for this campaign; None if nothing is personal."""
+        stored = campaign.template_parameters or {}
+        body = tuple(Mapping.from_dict(entry) for entry in stored.get("body_sources") or ())
+        header = tuple(Mapping.from_dict(entry) for entry in stored.get("header_sources") or ())
+        if not any(mapping.personal for mapping in body + header):
+            return None
+        if not body:
+            body = tuple(
+                Mapping(ParameterSource.CONSTANT, value=v) for v in campaign.variables or ()
+            )
+        if not header:
+            header = tuple(
+                Mapping(ParameterSource.CONSTANT, value=str(v)) for v in stored.get("header") or ()
+            )
+        template = await self._templates.require_by_id(campaign.template_id)
+        spec = parameter_spec(template.components)
+        body_names = spec.body if spec is not None else ()
+        max_chars = self._parameter_max_chars
+
+        def render(facts: PersonFacts) -> Rendered:
+            return resolve(
+                body=body,
+                header=header,
+                facts=facts,
+                max_chars=max_chars,
+                body_text=template.body_text,
+                body_names=body_names,
+            )
+
+        return render
+
+    async def _facts(self, contacts: Sequence[Contact]) -> dict[uuid.UUID, PersonFacts]:
+        """What each contact and their active lead say, in one read (PER-01)."""
+        ids = [contact.id for contact in contacts]
+        leads = {
+            lead.contact_id: lead
+            for lead in (
+                await self._session.execute(
+                    select(Lead).where(
+                        Lead.tenant_id == self._tenant_id,
+                        Lead.contact_id.in_(ids),
+                        Lead.status.not_in([LeadStatus.WON, LeadStatus.LOST]),
+                    )
+                )
+            ).scalars()
+        }
+        facts: dict[uuid.UUID, PersonFacts] = {}
+        for contact in contacts:
+            lead = leads.get(contact.id)
+            facts[contact.id] = PersonFacts(
+                contact_id=contact.id,
+                display_name=contact.display_name,
+                lead_name=lead.name if lead is not None else None,
+                lead_interest=lead.interest if lead is not None else None,
+                lead_status=lead.status.value if lead is not None else None,
+                lead_budget_amount=lead.budget_amount if lead is not None else None,
+                lead_budget_currency=lead.budget_currency if lead is not None else None,
+                lead_custom_fields=lead.custom_fields if lead is not None else None,
+            )
+        return facts
+
+    async def preview_messages(
+        self, campaign_id: uuid.UUID, contact_ids: Sequence[uuid.UUID]
+    ) -> list[MessagePreview]:
+        """What each of these people would receive (PER-04): theirs, and nobody else's.
+
+        A contact of the campaign's written audience is shown the values
+        written for them; before the audience is written, any contact of the
+        eligible population is resolved now. Anybody else - another
+        workspace's contact, somebody outside the audience - is not found.
+        """
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        template = await self._templates.require_by_id(campaign.template_id)
+        spec = parameter_spec(template.components)
+        written = await self._recipients.rendered_for(campaign.id, contact_ids)
+        has_audience = campaign.audience_size > 0
+        renderer = await self._renderer(campaign)
+        eligible = (
+            {
+                contact.id: contact
+                for contact, _ in await self._audience.list_eligible_members(
+                    account_id=campaign.account_id,
+                    filters=AudienceFilter(contact_ids=tuple(contact_ids)),
+                    limit=len(contact_ids) + 1,
+                )
+            }
+            if not has_audience
+            else {}
+        )
+        facts = await self._facts(list(eligible.values())) if renderer is not None else {}
+        defaults = CampaignParameters.from_campaign(
+            campaign.variables, campaign.template_parameters
+        )
+        previews: list[MessagePreview] = []
+        for contact_id in contact_ids:
+            if has_audience and contact_id not in written:
+                raise NotFoundError("That contact is not in this campaign's audience.")
+            if not has_audience and contact_id not in eligible:
+                raise NotFoundError("That contact is not in this campaign's audience.")
+            stored = written.get(contact_id)
+            rendered = (
+                Rendered.from_dict(stored)
+                if stored
+                else (renderer(facts[contact_id]) if renderer is not None else None)
+            )
+            parameters = _personal(defaults, rendered)
+            header_text = _header_text(template.components)
+            previews.append(
+                MessagePreview(
+                    contact_id=contact_id,
+                    header=(
+                        fill(header_text, spec.header, parameters.header)
+                        if spec is not None and header_text
+                        else None
+                    ),
+                    body=fill(template.body_text, spec.body if spec else (), parameters.body),
+                    buttons=_button_texts(template.components, parameters.buttons),
+                    body_fallbacks=rendered.body_fallbacks if rendered else (),
+                    header_fallbacks=rendered.header_fallbacks if rendered else (),
+                )
+            )
+        return previews
 
     # -------------------------------------------------------------- lifecycle
 
@@ -1844,6 +2103,19 @@ class CampaignService:
             """
             recipient.message_id = message.id
 
+        rendered = (
+            Rendered.from_dict(recipient.rendered_parameters)
+            if recipient.rendered_parameters
+            else None
+        )
+        if rendered is not None and rendered.contact_id != recipient.contact_id:
+            # Values resolved for somebody else are never sent (CR-15): this
+            # person is left out rather than sent a stranger's name.
+            return self._skip(
+                recipient,
+                "This copy's values were not written for this contact.",
+                RecipientReason.IDENTITY_CHANGED,
+            )
         template = await self._templates.require_by_id(campaign.template_id)
         spec = parameter_spec(template.components)
         if spec is None:  # pragma: no cover - `_blocking_reason` refused it first
@@ -1861,12 +2133,15 @@ class CampaignService:
                 # before, and Meta refused every recipient for the rest.
                 components=send_components(
                     spec,
-                    CampaignParameters.from_campaign(
-                        campaign.variables,
-                        campaign.template_parameters,
-                        # The one id the campaign's upload returned, the same
-                        # for everybody (HM-04).
-                        header_file=header_file,
+                    _personal(
+                        CampaignParameters.from_campaign(
+                            campaign.variables,
+                            campaign.template_parameters,
+                            # The one id the campaign's upload returned, the
+                            # same for everybody (HM-04).
+                            header_file=header_file,
+                        ),
+                        rendered,
                     ),
                 ),
                 sent_by_id=campaign.created_by_id,
@@ -2247,6 +2522,8 @@ DEFAULT_PROVIDER_UNREACHABLE_PAUSE: Final = timedelta(hours=6)
 # One marketing message per contact per 24 hours (FREQ-01), and the margin a
 # capped person waits beyond their moment, so they are never asked a second early.
 DEFAULT_CONTACT_CAP_INTERVAL: Final = timedelta(hours=24)
+# `CAMPAIGN_PARAMETER_MAX_CHARS` (PER-03).
+DEFAULT_PARAMETER_MAX_CHARS: Final = 60
 CONTACT_CAP_MARGIN: Final = timedelta(minutes=5)
 # Meta's per-user marketing limit (131049).
 MARKETING_LIMIT_PER_USER_CODE: Final = 131049
@@ -2254,6 +2531,89 @@ MARKETING_LIMIT_PER_USER_CODE: Final = 131049
 # again (LIM-01). The deploy step reads every connection's limit; this is what
 # a campaign does until it has.
 LIMIT_UNKNOWN_RECHECK: Final = timedelta(minutes=5)
+
+
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """A validated composition: the send's parameters and the mappings behind them."""
+
+    parameters: CampaignParameters
+    body_sources: tuple[Mapping, ...] | None = None
+    header_sources: tuple[Mapping, ...] | None = None
+
+    def stored(self) -> dict[str, Any] | None:
+        stored = self.parameters.as_dict() or {}
+        if self.body_sources is not None:
+            stored["body_sources"] = [mapping.as_dict() for mapping in self.body_sources]
+        if self.header_sources is not None:
+            stored["header_sources"] = [mapping.as_dict() for mapping in self.header_sources]
+        if self.body_sources is not None or self.header_sources is not None:
+            stored.setdefault("header", list(self.parameters.header))
+            stored.setdefault("buttons", [])
+        return stored or None
+
+
+@dataclass(frozen=True, slots=True)
+class MessagePreview:
+    """What one person would receive (PER-04)."""
+
+    contact_id: uuid.UUID
+    header: str | None
+    body: str
+    buttons: tuple[str, ...]
+    body_fallbacks: tuple[int, ...]
+    header_fallbacks: tuple[int, ...]
+
+
+def _personal(defaults: CampaignParameters, rendered: Rendered | None) -> CampaignParameters:
+    """The campaign's parameters with one person's own values, when there are any (PER-02)."""
+    if rendered is None:
+        return defaults
+    return CampaignParameters(
+        body=rendered.body or defaults.body,
+        header=rendered.header or defaults.header,
+        buttons=defaults.buttons,
+        header_file_kind=defaults.header_file_kind,
+        header_file=defaults.header_file,
+    )
+
+
+def _header_text(components: Any) -> str | None:
+    for component in components if isinstance(components, list) else ():
+        if (
+            isinstance(component, dict)
+            and str(component.get("type", "")).upper() == "HEADER"
+            and str(component.get("format", "TEXT")).upper() == "TEXT"
+        ):
+            text = component.get("text")
+            return text if isinstance(text, str) else None
+    return None
+
+
+def _literal(value: str) -> Callable[[re.Match[str]], str]:
+    def replace(_match: re.Match[str]) -> str:
+        return value
+
+    return replace
+
+
+def _button_texts(components: Any, values: dict[int, str]) -> tuple[str, ...]:
+    """Each button's label, a URL button's link with its suffix filled in."""
+    found: list[str] = []
+    for component in components if isinstance(components, list) else ():
+        if not isinstance(component, dict) or str(component.get("type", "")).upper() != "BUTTONS":
+            continue
+        for index, button in enumerate(component.get("buttons") or []):
+            if not isinstance(button, dict):
+                continue
+            label = str(button.get("text", ""))
+            url = button.get("url")
+            if isinstance(url, str) and index in values:
+                # A function, not a replacement string: a backslash in the
+                # value is text, not a group reference.
+                url = PLACEHOLDER.sub(_literal(values[index]), url, count=1)
+            found.append(f"{label} ({url})" if isinstance(url, str) else label)
+    return tuple(found)
 
 
 def _clear_wait(campaign: Campaign) -> None:

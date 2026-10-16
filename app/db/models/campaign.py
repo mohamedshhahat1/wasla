@@ -602,6 +602,11 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     # the rest of the campaign goes on. The claim skips it until then.
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # This person's own values, resolved once when the audience was written
+    # (PER-02): `{"contact_id", "body", "header", "fallbacks", "body_too_long"}`.
+    # The send uses exactly these. Null for a campaign with nothing personal.
+    # A copy of a name per row: retention is CMQ-08. 0114.
+    rendered_parameters: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     @property
     def is_pending(self) -> bool:

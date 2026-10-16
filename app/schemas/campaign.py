@@ -47,12 +47,19 @@ from app.services.campaign_planner import Eta
 from app.services.campaign_service import MAX_AUDIENCE_SIZE
 from app.services.delivery_plan import DeliveryPlan, EtaBasis, PlanNotice
 from app.services.entitlement_terms import ordered
+from app.services.personalisation import (
+    MAX_CUSTOM_FIELD_KEY_LENGTH,
+    Mapping,
+    ParameterSource,
+)
 
 # How many variables a template can plausibly want. Meta's own limit is higher;
 # this is a bound on a request body, not a statement about templates.
 MAX_TEMPLATE_VARIABLES = 20
 MAX_VARIABLE_LENGTH = 1024
 MAX_TEMPLATE_BUTTONS = 10
+# How many people one preview may show (PER-04).
+MAX_PREVIEW_CONTACTS = 5
 # A campaign description is a note to whoever runs the campaign next, and the
 # column is `Text` - so nothing but this decides how long it may be. Two
 # thousand characters is several paragraphs, which is more than anybody writes
@@ -75,6 +82,29 @@ class ButtonParameterRequest(_Payload):
     # Meta allows up to ten buttons on a template.
     index: int = Field(ge=0, le=MAX_TEMPLATE_BUTTONS - 1)
     value: str = Field(min_length=1, max_length=MAX_VARIABLE_LENGTH)
+    # Always a constant (PER-01): a personal value in a URL leaves Wasla in a
+    # link. Anything else is refused, 422 `parameter_source_not_allowed`.
+    source: ParameterSource = ParameterSource.CONSTANT
+
+
+class ParameterSourceRequest(_Payload):
+    """Where one body or text-header placeholder's value comes from (PER-01).
+
+    `constant` with its `value`; or a field of the contact or their active lead
+    - `contact.display_name`, `lead.name`, `lead.interest`, `lead.status`,
+    `lead.budget`, `lead.custom_fields` with its `key` - and a `fallback` for
+    people without it. The phone number is not a source.
+    """
+
+    source: ParameterSource
+    value: StorableText | None = Field(default=None, max_length=MAX_VARIABLE_LENGTH)
+    key: StorableText | None = Field(
+        default=None, min_length=1, max_length=MAX_CUSTOM_FIELD_KEY_LENGTH
+    )
+    fallback: StorableText | None = Field(default=None, max_length=MAX_VARIABLE_LENGTH)
+
+    def to_mapping(self) -> Mapping:
+        return Mapping(source=self.source, value=self.value, key=self.key, fallback=self.fallback)
 
 
 class CampaignCreateRequest(_Payload):
@@ -115,6 +145,34 @@ class CampaignCreateRequest(_Payload):
     # an id from `POST /campaigns/header-media` (HM-02). Required by such a
     # template, refused by any other; fixed once the campaign is composed.
     header_media_id: uuid.UUID | None = None
+    # Each person's own values (PER-01), in place of `variables` and
+    # `header_variables`: one entry per placeholder, in placeholder order.
+    body_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    header_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+
+
+class MessagePreviewRequest(_Payload):
+    """Up to five people of the campaign's audience (PER-04)."""
+
+    contact_ids: list[uuid.UUID] = Field(min_length=1, max_length=MAX_PREVIEW_CONTACTS)
+
+
+class MessagePreviewRead(BaseModel):
+    """What one person would receive, and which of their values fell back."""
+
+    contact_id: uuid.UUID
+    header: str | None
+    body: str
+    buttons: list[str]
+    fallbacks: dict[str, list[int]]
+
+
+class MessagePreviewResponse(BaseModel):
+    previews: list[MessagePreviewRead]
 
 
 class AudienceRequest(_Payload):
@@ -545,7 +603,11 @@ __all__ = [
     "ContactOptOutRead",
     "DeliveryPlanRead",
     "EtaRead",
+    "MessagePreviewRead",
+    "MessagePreviewRequest",
+    "MessagePreviewResponse",
     "OptOutRequest",
+    "ParameterSourceRequest",
     "PlanDayRead",
     "RecipientListResponse",
     "RecipientRead",

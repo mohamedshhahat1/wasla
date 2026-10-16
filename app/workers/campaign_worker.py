@@ -340,6 +340,7 @@ class CampaignWorker:
             contact_cap_interval=timedelta(
                 seconds=self._settings.campaign_contact_marketing_interval_seconds
             ),
+            parameter_max_chars=self._settings.campaign_parameter_max_chars,
         )
         return await service.dispatch_batch(campaign, now=now, lease=lease)
 

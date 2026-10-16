@@ -18,8 +18,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 3 | Meta messaging limit: read, store, webhooks | committed | e5bbb6e | every campaign, WhatsApp and webhook suite + metric/doc/deployment checks (658 passed after the fixes below); messaging limit reads + values; migration-built: parity, downgrade atomicity, limit reads |
 | 4 | Ledger and the 80 % budget | committed | b2482c7 | every campaign, WhatsApp, follow-up, template, delivery-protocol, retention and unit suite (4,087 passed, 10 failed in one stub - fixed, 103 re-run passed); limit worker tests (14 passed: 200/200/200 with 1, 2, 4 workers; 40/40 races); migration-built: parity, downgrade atomicity, limit API |
 | 5 | Spreading, deadline, delivery plan, ETA | committed | fdddae1 | every campaign suite + limit suites + unit + docs (3,807 passed, 1 failed in the endpoints stub - fixed, re-run 15 passed); plan unit (11) and API/worker (5); migration-built: parity, downgrade atomicity, plan |
-| 6 | Per-contact cap, pacing, 131049 | committed | (this commit) | broad send-path regression (4,221 passed, 4 failed: 3 intended test updates below, 1 PDF-deadline timing flake that passed on re-run; 100 re-run passed); contact cap + pacing (8); migration-built: parity, downgrade atomicity, cap |
-| 7 | Personalisation | not started | | |
+| 6 | Per-contact cap, pacing, 131049 | committed | 429f892 | broad send-path regression (4,221 passed, 4 failed: 3 intended test updates below, 1 PDF-deadline timing flake that passed on re-run; 100 re-run passed); contact cap + pacing (8); migration-built: parity, downgrade atomicity, cap |
+| 7 | Personalisation | committed | (this commit) | send-path regression: unit + every campaign, WhatsApp, template and follow-up suite + documentation truth (4,052 passed, 1 failed: the documented operation count, 217 -> 218, fixed; 1 tmpfs skip); every route-walking suite (231 passed); personalisation (7 integration, 8 unit); migration-built: parity, downgrade atomicity, personalisation (16) |
 | 8 | Draft lifecycle, search, idempotent create, activity | not started | | |
 | 9 | Segments, contact picker | not started | | |
 | 10 | Test send | not started | | |
@@ -289,3 +289,38 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   `test_campaign_header_media.py`'s two campaigns sharing a file reach the same five people a day
   apart (FREQ-01); `test_payment_methods_are_configuration.py` allowlists Meta's 135000 and 131049
   in `provider_feedback.py`.
+
+## Phase 7 notes (PER-01 .. PER-05)
+
+- Migration **0114**: `campaign_recipients.rendered_parameters` (JSONB, nullable, catalogue-only).
+  Downgrade refuses while any recipient carries values.
+- `app/services/personalisation.py`: the closed source vocabulary (`constant`,
+  `contact.display_name`, `lead.name`, `lead.interest`, `lead.status` as its label, `lead.budget` as
+  amount + currency, `lead.custom_fields` with a key); the phone number is not a source. Normalisation
+  (PER-05: newline, CR, tab -> space; runs of spaces -> one; control characters removed; trimmed) -
+  Meta documents no rule of its own for parameter values. A value missing, empty after normalisation
+  or longer than `CAMPAIGN_PARAMETER_MAX_CHARS` (60) is the fallback; a person whose values carry the
+  rendered body past Meta's 1,024 characters gets every fallback and the row records `body_too_long`.
+- Composition: `POST /campaigns` takes `body_parameters` / `header_parameters` (one entry per
+  placeholder) in place of `variables` / `header_variables` (both -> 422 `parameters_conflict`).
+  Every non-constant source needs a fallback (`parameter_fallback_required`, at most 60 characters:
+  `parameter_fallback_too_long`); a custom field must exist on a lead of the workspace
+  (`parameter_key_unknown`); a button's source other than `constant` -> `parameter_source_not_allowed`.
+  One validator (`CampaignService._composition`) - the draft edit of Phase 8 reuses it. The send's
+  count check runs on the fallbacks, so a mapping of the wrong length is refused as a constant list is.
+- Frozen at materialisation (PER-02): `set_audience` resolves each person's values from the contact
+  and the active lead (the `uq_leads_active_contact` predicate: not won, not lost) in one read and
+  writes them with the contact id they were resolved for. The send uses exactly those; a row whose
+  values name another contact is skipped `identity_changed` rather than sent a stranger's values
+  (CR-15's runtime guard; the invariant itself is Phase 13).
+- `POST /campaigns/{id}/preview-messages` (admin): up to five contacts; the written values once the
+  audience exists, otherwise resolved now for people of the eligible population; anybody else 404.
+  Header text, body, buttons (a URL with its constant suffix) and the fallback positions.
+- Privacy (CMQ-08, still open): each recipient row now carries a copy of the values sent to that
+  person (a name, an interest). Retention of recipient rows covers it.
+- Fixed while building: a URL suffix was substituted with `re.sub` and a string replacement (a
+  backslash in the value would have been read as a group reference); now a function.
+- `docs/API.md` states 218 operations; `docs/AUTHORIZATION.md` lists `preview-messages` (ADMIN).
+- Intended test changes: none in Phase 7.
+- To do in Phase 13: the migrations' `RUNBOOK` pointer names "Campaign page features (0108-0113)";
+  the RUNBOOK section will carry the final range and the pointers are updated with it.

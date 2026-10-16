@@ -14,6 +14,7 @@ name that says so, exactly as `DueFollowUpClaim` is.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -443,6 +444,24 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
             .execution_options(synchronize_session=False)
         )
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def rendered_for(
+        self, campaign_id: uuid.UUID, contact_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, dict[str, Any] | None]:
+        """The values written for these contacts in this campaign, by contact (PER-04)."""
+        rows = (
+            await self.session.execute(
+                select(CampaignRecipient.contact_id, CampaignRecipient.rendered_parameters).where(
+                    CampaignRecipient.tenant_id == self.tenant_id,
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.contact_id.in_(list(contact_ids)),
+                )
+            )
+        ).all()
+        found: dict[uuid.UUID, dict[str, Any] | None] = {}
+        for contact_id, rendered in rows:
+            found[contact_id] = rendered
+        return found
 
     async def capped_pending(self, campaign_id: uuid.UUID, *, since: datetime) -> bool:
         """Whether a pending person was sent a marketing message after `since` (FREQ-01)."""
