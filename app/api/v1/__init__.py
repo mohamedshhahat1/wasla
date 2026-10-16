@@ -50,6 +50,7 @@ from app.api.v1 import (
     platform_billing,
     platform_commercial,
     platform_entitlements,
+    platform_rate_cards,
     templates,
     timezones,
     usage,
@@ -138,6 +139,8 @@ UNLIMITED_ROUTERS = (
     # The reduction queue, a workspace's channels and the channel vocabulary:
     # the same prefix and authority (ADR-132).
     platform_entitlements.router,
+    # Meta's rate cards, for campaign cost estimates (COST-01).
+    platform_rate_cards.router,
     webhooks.router,
     email_webhooks.router,
     # Public reference data read at signup, before any account exists (TZ-02).

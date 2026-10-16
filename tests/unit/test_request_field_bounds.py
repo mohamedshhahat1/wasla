@@ -53,6 +53,13 @@ EXEMPT: Final[dict[tuple[str, str], str]] = {
         "while the body is read, and by the workspace's storage entitlement "
         "before the object is written."
     ),
+    ("Body_upload_rate_card_api_v1_platform_whatsapp_rate_cards_post", "file"): (
+        "Meta's rate card as CSV, multipart (COST-01). Read to MAX_RATE_CARD_BYTES (1 MB) "
+        "plus one byte and refused past it by the parser; the optional market map likewise."
+    ),
+    ("Body_upload_rate_card_api_v1_platform_whatsapp_rate_cards_post", "market_map"): (
+        "The rate card's calling-code map, multipart (COST-01). Bounded as the card is."
+    ),
     ("Body_upload_header_media_api_v1_campaigns_header_media_post", "file"): (
         "A campaign header file, multipart (HM-02). Bounded by MAX_UPLOAD_BYTES while "
         "the body is read, by Meta's limit for its kind, and by the workspace's storage "

@@ -328,9 +328,19 @@ async def test_every_platform_read_route_records_one_entry(
         f"{PATH}/billing/tenants/{{tenant_id}}/summary",
         f"{PATH}/billing/topup-purchases/{{purchase_id}}",
         f"{PATH}/billing/topups/{{topup_id}}",
+        # Meta's rate cards (COST-01): one card's read is audited by the same
+        # `billing_read` as the list, proved in test_campaign_cost.py.
+        f"{PATH}/whatsapp-rate-cards/{{card_id}}",
     ]
     assert read_routes == sorted(
-        [f"{PATH}/audit-logs", f"{PATH}/overview", f"{PATH}/tenants", *billing_lists, *billing_rows]
+        [
+            f"{PATH}/audit-logs",
+            f"{PATH}/overview",
+            f"{PATH}/tenants",
+            f"{PATH}/whatsapp-rate-cards",
+            *billing_lists,
+            *billing_rows,
+        ]
     )
     read_routes = [path for path in read_routes if path not in billing_rows]
 

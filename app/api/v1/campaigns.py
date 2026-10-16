@@ -35,7 +35,7 @@ from app.api.dependencies import (
 )
 from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
-from app.core.dependencies import SettingsDep
+from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.core.timezones import local, local_midnight
@@ -72,6 +72,7 @@ from app.schemas.campaign import (
     TestSendRequest,
 )
 from app.schemas.conversation import CursorPage, MessageRead
+from app.schemas.rate_card import CostEstimateRead
 from app.services.campaign_export import csv_header, csv_rows
 from app.services.campaign_planner import CampaignPlanner
 from app.services.campaign_service import (
@@ -79,6 +80,7 @@ from app.services.campaign_service import (
     PARAMETER_SOURCE_NOT_ALLOWED_CODE,
     CampaignService,
 )
+from app.services.cost_estimate import CampaignCostEstimator
 from app.services.personalisation import ParameterSource
 
 router = APIRouter(route_class=CommittingRoute, prefix="/campaigns", tags=["campaigns"])
@@ -314,6 +316,28 @@ async def duplicate_campaign(
     return await _read(
         campaigns, await campaigns.duplicate(campaign_id, actor=workspace.user), workspace
     )
+
+
+@router.get(
+    "/{campaign_id}/cost-estimate",
+    response_model=CostEstimateRead,
+    summary="What this campaign may cost at Meta's prices",
+)
+async def cost_estimate(
+    campaign_id: uuid.UUID,
+    workspace: TenantAdminDep,
+    session: SessionDep,
+) -> CostEstimateRead:
+    """An upper-bound estimate at the active rate card's marketing rates (COST-02).
+
+    Everyone counted as delivered; Meta bills the business directly - Wasla
+    charges nothing for messages. No active card: `total` null with `reason:
+    no_rate_card`.
+    """
+    estimate = await CampaignCostEstimator(session, tenant_id=workspace.tenant.id).estimate(
+        campaign_id
+    )
+    return CostEstimateRead.from_estimate(estimate)
 
 
 @router.post(

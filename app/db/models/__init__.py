@@ -143,6 +143,7 @@ from .messaging_limit import LimitSource, PortfolioKeyKind, WhatsAppBusinessPort
 from .password_reset import PasswordResetToken
 from .payment_event import PaymentEvent
 from .payment_method import PaymentMethod, PaymentMethodStatus
+from .rate_card import WhatsAppRateCard, WhatsAppRateCardMarket, WhatsAppRateCardRate
 from .sentiment import (
     PRIORITY_RANK,
     SENTIMENT_PRIORITY,
@@ -355,6 +356,9 @@ __all__ = [
     "WhatsAppEvent",
     "WhatsAppEventKind",
     "WhatsAppEventState",
+    "WhatsAppRateCard",
+    "WhatsAppRateCardMarket",
+    "WhatsAppRateCardRate",
     "WhatsAppTemplate",
     "clamp_score",
     "count_placeholders",

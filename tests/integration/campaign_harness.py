@@ -364,6 +364,7 @@ async def seed(
     timezone: str = TEST_TIMEZONE,
     last_inbound_at: datetime | None = None,
     waba_id: str | None = None,
+    numbers: list[str] | None = None,
 ) -> Workspace:
     """A workspace with one number, an approved template and N people who wrote first.
 
@@ -402,7 +403,8 @@ async def seed(
         contact_ids: list[uuid.UUID] = []
         base = int(suffix[:6], 16) % 10**6
         for index in range(recipients):
-            contact = Contact(tenant_id=tenant.id, wa_id=f"20{base:06d}{index:05d}")
+            wa_id = numbers[index] if numbers is not None else f"20{base:06d}{index:05d}"
+            contact = Contact(tenant_id=tenant.id, wa_id=wa_id)
             session.add(contact)
             await session.flush()
             session.add(

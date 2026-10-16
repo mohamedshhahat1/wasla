@@ -23,8 +23,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 8 | Draft lifecycle, search, idempotent create, activity | committed | a2e9c91 | unit + every campaign, WhatsApp, template, follow-up, audit, retention, metric and route-walking suite (4,313 passed, 1 failed: CPF-01, a pre-existing test-isolation defect, fixed in 3980c37); drafts (13); migration-built: parity, downgrade atomicity, drafts (22) |
 | 9 | Segments, contact picker | committed | 0889109 | unit + campaign, WhatsApp, template, follow-up, contact, lead, audit, retention, metric, route-walking suites (4,396 passed, 4 failed: 2 stubs without `segment_id` - intended; 2 = CPF-02, fixed in its own commit); segments + picker (7); migration-built: parity, downgrade atomicity, segments |
 | 10 | Test send | committed | 7bfd4c5 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
-| 11 | Results, summary, progress, CSV export | committed | (this commit) | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
-| 12 | Rate cards, cost estimate | not started | | |
+| 11 | Results, summary, progress, CSV export | committed | 020a945 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
+| 12 | Rate cards, cost estimate | committed | (this commit) | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
 | 13 | Invariants, observability, documentation, contract | not started | | |
 | 14 | Mutation matrix | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
@@ -546,3 +546,57 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   export (ADMIN).
 - Intended test change: `test_campaign_endpoints.py::test_statistics_report_delivery_as_well_as_outcome`
   expects `replied`, `opted_out_after` and `reasons` in the statistics body.
+
+## Phase 12 notes (COST-01, COST-02)
+
+- Migration **0119**: platform-level `whatsapp_rate_cards` (currency, effective_from, source file
+  name, sha256, uploaded_by, uploaded_at, activated_at), `whatsapp_rate_card_rates` (market,
+  category in a closed vocabulary, `numeric(12, 6)` rate, unique per card/market/category),
+  `whatsapp_rate_card_markets` (the card's calling-code -> market map); `audit_action` gains
+  `rate_card_uploaded`, `rate_card_activated`. No `tenant_id`: a rate card is Meta's price list for
+  every workspace.
+- The default calling-code map is a **code constant** (`app/services/pricing_markets.py`,
+  transcribed from Meta's pricing page, read 2026-10-16) copied onto each card at upload, not seed
+  data in the migration: correcting the constant later never reprices a card already uploaded.
+  +1 is North America except the Dominican Republic, Jamaica and Puerto Rico, which Meta lists by
+  four-digit prefixes (Rest of Latin America). **+7 is not documented** - Russia and Kazakhstan
+  share it - and is mapped to Russia, the higher marketing rate (0.0802 against 0.0604): the
+  estimate is an upper bound. An unlisted code is priced at "Other". The longest prefix wins.
+- Meta's "Rates (CSV)" link serves an Excel workbook (sha256
+  `3e996b56a86d9e7f70a9cfded896c8f39a19cb0e88683ed06b28f191856c9260`); the parser takes the
+  workbook saved as CSV UTF-8 - preamble rows skipped until the `Market` header, the two-line
+  "Authentication-International" heading read, `n/a` as no price, the "Meta Business Agent" token
+  column ignored. Strict: a non-decimal, negative or NaN rate, a wrong currency, a market twice or a
+  missing header -> 422 `rate_card_invalid` with `details.line`. The card must price "Other", and
+  an uploaded map may name only priced markets. At most 1 MB.
+- Fixture `tests/fixtures/whatsapp_rate_card_usd_2026-10-01.csv`: that workbook saved as CSV (47
+  markets; Excel's `8.0E-4` written as `0.0008`).
+- Platform routes (PLATFORM_STAFF, every workspace role 403, unlimited like the platform plane):
+  `POST /platform/whatsapp-rate-cards?currency=USD&effective_from=2026-10-01` (multipart: the file
+  and an optional `market_map`; the scalars are bounded query parameters so no free-form text rides
+  in the multipart body) -> 201 inactive card with every rate and `changes_from_active`;
+  `POST /platform/whatsapp-rate-cards/{id}/activate`; `GET` list and one. Writes audited as platform
+  staff; reads recorded like every platform read (`platform_billing_read`, resources
+  `billing.rate_cards` / `billing.rate_card`). The active card is the one activated most recently.
+- The platform and upload policy suites caught five omissions of the first draft, each fixed: the
+  upload's body allowance (`app/core/limits.py`), its multipart parts listed with their bounds in
+  `test_request_field_bounds.py`'s EXEMPT (with the reason), form text fields (moved to query
+  parameters), unaudited platform reads (now recorded - the draft had argued for an exception),
+  and the platform route policy (`test_platform_hierarchy.py`, the four routes as `staff`) and read
+  inventory (`test_platform_access_audit.py`) - intended test changes.
+- `GET /campaigns/{id}/cost-estimate` (admin, campaign bucket): `label: "estimate"`, currency,
+  total, per market (recipients, rate, subtotal), category marketing, recipients counted, excluded
+  (`opted_out`, `skipped`, `failed`, `no_phone_number`, `unpriced`), the card, computed_at,
+  assumptions (charged only when delivered; Meta bills the business directly; Wasla does not charge
+  for messages; free entry point windows not modelled). A written audience: its pending and sent
+  people; before: the eligible population under the stored rules. Decimal arithmetic throughout,
+  serialised as strings. No active card -> `total: null`, `reason: no_rate_card`.
+- Tests: `tests/unit/test_rate_card_parsing.py` (21: Meta's card read exactly, 7 malformed cards
+  with their lines, 10 calling codes to markets, every mapped market priced, the companion map, exact
+  multiplication); `tests/integration/test_campaign_cost.py` (3: upload, preview, activate, diff,
+  malformed, no Other, non-staff 403; an estimate of 2 Egypt + 1 Saudi + 1 Other = 0.2468 exactly
+  with one opted out excluded, no card -> null, member 403; before the audience).
+- `tests/integration/campaign_harness.py::seed` takes `numbers` (the WhatsApp numbers of its
+  contacts), for tests that price by calling code.
+- `docs/API.md` states 237 operations; `docs/AUTHORIZATION.md` lists the four platform routes
+  (PLATFORM_STAFF) and the estimate (ADMIN).

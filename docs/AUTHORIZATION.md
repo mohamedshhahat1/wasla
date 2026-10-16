@@ -155,6 +155,7 @@ authoritative answer is always the dependency tree.
 | `GET` | `/api/v1/campaigns/{campaign_id}/activity` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/audience` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/cancel` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/cost-estimate` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/delivery-plan` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/duplicate` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/pause` | **ADMIN** | yes | workspace | - |
@@ -215,6 +216,10 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/platform/invoices/{invoice_id}/void` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/platform/overview` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/platform/tenants` | **PLATFORM_STAFF** | no | none | - |
+| `GET` | `/api/v1/platform/whatsapp-rate-cards` | **PLATFORM_STAFF** | no | none | - |
+| `POST` | `/api/v1/platform/whatsapp-rate-cards` | **PLATFORM_STAFF** | no | none | - |
+| `GET` | `/api/v1/platform/whatsapp-rate-cards/{card_id}` | **PLATFORM_STAFF** | no | none | - |
+| `POST` | `/api/v1/platform/whatsapp-rate-cards/{card_id}/activate` | **PLATFORM_STAFF** | no | none | - |
 | `POST` | `/api/v1/platform/users/{user_id}/disable` | **PLATFORM_STAFF** | no | none | - |
 | `POST` | `/api/v1/platform/users/{user_id}/enable` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/templates` | **MEMBER** | yes | workspace | - |

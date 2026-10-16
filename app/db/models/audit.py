@@ -465,6 +465,10 @@ class AuditAction(StrEnum):
     # rows. 0115.
     CAMPAIGN_TEST_SENT = "campaign_test_sent"
     CAMPAIGN_RECIPIENTS_EXPORTED = "campaign_recipients_exported"
+    # Platform staff entered Meta's rate card, and made one the active card
+    # (COST-01). Platform actions: no workspace. 0119.
+    RATE_CARD_UPLOADED = "rate_card_uploaded"
+    RATE_CARD_ACTIVATED = "rate_card_activated"
 
     # What the agents are allowed to say (RAG-17, docs/RAG.md).
     #
@@ -685,6 +689,9 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "campaign_failed",
     "campaign_test_sent",
     "campaign_recipients_exported",
+    # 0119
+    "rate_card_uploaded",
+    "rate_card_activated",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER
