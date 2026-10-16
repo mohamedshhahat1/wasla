@@ -25,7 +25,7 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 10 | Test send | committed | 7bfd4c5 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
 | 11 | Results, summary, progress, CSV export | committed | 020a945 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
 | 12 | Rate cards, cost estimate | committed | afc271d | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
-| 13 | Invariants, observability, documentation, contract | not started | | |
+| 13 | Invariants, observability, documentation, contract | in progress | (invariants: this commit) | campaign invariants (16) |
 | 14 | Mutation matrix | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
@@ -406,6 +406,7 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   "Authentication-International" heading by replacing `
 ` - a file saved by Excel on Windows (and
   the fixture as git checks it out there) has `
+
 ` inside the quoted cell, and the column would
   have been ignored. Found when git warned it would check the fixture out with CRLF; the heading is
   now normalised with a regular expression, and a test parses the card with both line endings
@@ -608,3 +609,15 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   contacts), for tests that price by calling code.
 - `docs/API.md` states 237 operations; `docs/AUTHORIZATION.md` lists the four platform routes
   (PLATFORM_STAFF) and the estimate (ADMIN).
+
+## Phase 13 notes
+
+### Invariants CR-11..CR-15 (`scripts/omnichannel_invariants.py`, `campaign_violations`)
+
+| ID | Counts | Injection test |
+|---|---|---|
+| CR-11 | pairs of marketing templates (origin campaign or human, accepted, template category marketing on the conversation's number) to one contact of one workspace less than 24 h apart; test sends excluded | a person's marketing template 1 h after a campaign's -> +1 (a test send 1 h after another is not counted) |
+| CR-12 | campaign ledger rows whose portfolio's distinct people in the 24 h ending at them, every source, exceed the `budget_at_send` recorded with them | a third person before a campaign row of budget 2 -> +1 |
+| CR-13 | campaigns naming another workspace's segment (beside the composite key) | written with the key's trigger set aside -> +1 |
+| CR-14 | recipients linked to a `campaign_test` message, plus campaign meters naming one | a recipient linked to a test message -> +1 |
+| CR-15 | sent recipients whose `rendered_parameters.contact_id` is not their contact | values naming another contact -> +1 |

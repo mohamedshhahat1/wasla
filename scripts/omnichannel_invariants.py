@@ -493,7 +493,7 @@ _REDUCTION_DISABLE = "('capacity_reduction', 'capacity_reduction_automatic')"
 _DISABLED = "('channel_connection_disabled', 'whatsapp_account_disabled')"
 _RELEASED = "('channel_connection_released', 'whatsapp_account_released')"
 
-# Campaigns (CR-01..CR-10, ADR-134..ADR-144): what the campaigns audit counted
+# Campaigns (CR-01..CR-15, ADR-134..ADR-150): what the campaigns audit counted
 # by hand after its probes, kept here so a restore or a deployment can be
 # checked the same way. Every one is zero on a healthy database.
 CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
@@ -587,6 +587,61 @@ CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
         "cr10_campaign_naming_another_workspaces_header_file",
         "SELECT count(*) FROM campaigns c JOIN campaign_header_media a"
         " ON a.id = c.header_media_id WHERE a.tenant_id <> c.tenant_id",
+    ),
+    # CR-11: two marketing templates accepted for one contact of one workspace
+    # within 24 hours - from campaigns or by hand, never a test (FREQ-01,
+    # CMQ-03). Counted per pair.
+    Check(
+        "cr11_two_marketing_messages_to_one_contact_within_a_day",
+        "WITH marketing AS (SELECT m.id, m.tenant_id, v.contact_id, m.sent_at"
+        " FROM messages m JOIN conversations v ON v.tenant_id = m.tenant_id"
+        " AND v.id = m.conversation_id"
+        " WHERE m.direction = 'outbound' AND m.origin IN ('campaign', 'human')"
+        " AND m.sent_at IS NOT NULL AND m.delivery_state <> 'undelivered'"
+        " AND EXISTS (SELECT 1 FROM whatsapp_templates t WHERE t.tenant_id = m.tenant_id"
+        " AND t.account_id = v.account_id AND t.name = m.template_name"
+        " AND t.language = m.template_language AND t.category = 'marketing'))"
+        " SELECT count(*) FROM marketing a JOIN marketing b ON b.tenant_id = a.tenant_id"
+        " AND b.contact_id = a.contact_id AND b.id <> a.id AND b.sent_at >= a.sent_at"
+        " AND (b.sent_at > a.sent_at OR b.id > a.id)"
+        " AND b.sent_at < a.sent_at + interval '24 hours'",
+    ),
+    # CR-12: a campaign's ledger row past its budget - the distinct people of
+    # its portfolio in the 24 hours ending at it, every source counted, above
+    # floor(share x limit) recorded with it (LIM-03, LIM-04). Unlimited rows
+    # record no budget and are not checked.
+    Check(
+        "cr12_campaign_send_past_the_portfolio_budget",
+        "SELECT count(*) FROM business_initiated_sends b WHERE b.source = 'campaign'"
+        " AND b.budget_at_send IS NOT NULL AND (SELECT count(DISTINCT x.recipient)"
+        " FROM business_initiated_sends x WHERE x.portfolio_id = b.portfolio_id"
+        " AND x.sent_at > b.sent_at - interval '24 hours' AND x.sent_at <= b.sent_at)"
+        " > b.budget_at_send",
+    ),
+    # CR-13: a campaign naming another workspace's segment - defence in depth
+    # beside `fk_campaigns_tenant_audience_segment` (PG-06).
+    Check(
+        "cr13_campaign_naming_another_workspaces_segment",
+        "SELECT count(*) FROM campaigns c JOIN campaign_segments s"
+        " ON s.id = c.audience_segment_id WHERE s.tenant_id <> c.tenant_id",
+    ),
+    # CR-14: a test send counted as the campaign's - a recipient linked to a
+    # `campaign_test` message, or a campaign meter naming one (PG-09).
+    Check(
+        "cr14_test_message_counted_as_a_campaign_send",
+        "SELECT (SELECT count(*) FROM campaign_recipients r JOIN messages m"
+        " ON m.tenant_id = r.tenant_id AND m.id = r.message_id WHERE m.origin = 'campaign_test')"
+        " + (SELECT count(*) FROM usage_events u JOIN messages m ON m.tenant_id = u.tenant_id"
+        " AND m.id = CAST(u.metadata ->> 'message_id' AS uuid)"
+        " WHERE u.event_type = 'campaign_message' AND m.origin = 'campaign_test')",
+    ),
+    # CR-15: a sent recipient whose own values were resolved for somebody else
+    # (PER-02): another contact's name in this person's message.
+    Check(
+        "cr15_recipient_sent_values_resolved_for_another_contact",
+        "SELECT count(*) FROM campaign_recipients r WHERE r.status = 'sent'"
+        " AND r.rendered_parameters IS NOT NULL"
+        " AND r.rendered_parameters ->> 'contact_id' IS DISTINCT FROM CAST(r.contact_id AS text)",
     ),
 )
 
@@ -817,7 +872,7 @@ async def violations(
 async def campaign_violations(
     connection: AsyncConnection, *, read_only: bool = True
 ) -> dict[str, int]:
-    """The campaign invariants alone (CR-01..CR-10). All zero on a healthy database."""
+    """The campaign invariants alone (CR-01..CR-15). All zero on a healthy database."""
     return await _counts(connection, CAMPAIGN_INVARIANTS, read_only=read_only)
 
 

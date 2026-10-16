@@ -303,3 +303,109 @@ async def test_cr10_campaign_naming_another_workspaces_file(db_session: AsyncSes
     assert await _added(db_session, before) == {
         "cr10_campaign_naming_another_workspaces_header_file": 1
     }
+
+
+# ------------------------------------------- CR-11..CR-15 (ADR-145..ADR-150)
+
+
+async def test_cr11_two_marketing_messages_to_one_contact_within_a_day(
+    db_session: AsyncSession,
+) -> None:
+    _, _, conversation = await _world(db_session, "cr11")
+    first = await _message(db_session, conversation, MessageDeliveryState.SENT)
+    first.sent_at = datetime.now(UTC) - timedelta(hours=30)
+    # A test of the campaign an hour later is not a marketing send to count.
+    test = await _message(db_session, conversation, MessageDeliveryState.SENT)
+    test.origin = MessageOrigin.CAMPAIGN_TEST
+    test.sent_at = datetime.now(UTC) - timedelta(hours=29)
+    second = await _message(db_session, conversation, MessageDeliveryState.SENT)
+    second.sent_at = datetime.now(UTC) - timedelta(hours=2)
+    before = await _counts(db_session)
+
+    # A person's marketing template 23 hours after the first send's pair: the
+    # second and this one are 1 hour apart.
+    manual = await _message(db_session, conversation, MessageDeliveryState.SENT)
+    manual.origin = MessageOrigin.HUMAN
+    manual.sent_at = datetime.now(UTC) - timedelta(hours=1)
+
+    assert await _added(db_session, before) == {
+        "cr11_two_marketing_messages_to_one_contact_within_a_day": 1
+    }
+
+
+async def test_cr12_campaign_send_past_the_portfolio_budget(db_session: AsyncSession) -> None:
+    from app.db.models.business_initiated import BusinessInitiatedSend
+    from app.db.models.messaging_limit import WhatsAppBusinessPortfolio
+
+    campaign, _, _ = await _world(db_session, "cr12")
+    portfolio = WhatsAppBusinessPortfolio(key_kind="waba", meta_key=f"cr12-{uuid.uuid4().hex}")
+    db_session.add(portfolio)
+    await db_session.flush()
+    now = datetime.now(UTC)
+
+    def row(person: str, at: datetime, source: str = "follow_up") -> BusinessInitiatedSend:
+        return BusinessInitiatedSend(
+            portfolio_id=portfolio.id,
+            recipient=person,
+            sent_at=at,
+            source=source,
+            tenant_id=campaign.tenant_id,
+            campaign_id=campaign.id if source == "campaign" else None,
+            limit_at_send=250 if source == "campaign" else None,
+            budget_at_send=2 if source == "campaign" else None,
+        )
+
+    db_session.add_all([row("a", now - timedelta(hours=1)), row("b", now, "campaign")])
+    before = await _counts(db_session)
+
+    # A third person counted before the campaign's row: three in its 24 hours, budget two.
+    db_session.add(row("c", now - timedelta(minutes=30)))
+
+    assert await _added(db_session, before) == {"cr12_campaign_send_past_the_portfolio_budget": 1}
+
+
+async def test_cr13_campaign_naming_another_workspaces_segment(db_session: AsyncSession) -> None:
+    from app.db.models.campaign_segment import CampaignSegment
+
+    campaign, _, _ = await _world(db_session, "cr13")
+    stranger = await _tenant(db_session, slug="cr13-other")
+    theirs = CampaignSegment(tenant_id=stranger.id, name="Theirs", rules={}, version=1)
+    db_session.add(theirs)
+    await db_session.flush()
+    before = await _counts(db_session)
+
+    await db_session.execute(text("SET LOCAL session_replication_role = replica"))
+    campaign.audience_segment_id = theirs.id
+    await db_session.flush()
+    await db_session.execute(text("SET LOCAL session_replication_role = origin"))
+
+    assert await _added(db_session, before) == {
+        "cr13_campaign_naming_another_workspaces_segment": 1
+    }
+
+
+async def test_cr14_test_message_counted_as_a_campaign_send(db_session: AsyncSession) -> None:
+    campaign, recipient, conversation = await _world(db_session, "cr14")
+    test = await _message(db_session, conversation, MessageDeliveryState.SENT)
+    test.origin = MessageOrigin.CAMPAIGN_TEST
+    await db_session.flush()
+    before = await _counts(db_session)
+
+    recipient.message_id = test.id
+
+    assert await _added(db_session, before) == {"cr14_test_message_counted_as_a_campaign_send": 1}
+
+
+async def test_cr15_sent_values_resolved_for_another_contact(db_session: AsyncSession) -> None:
+    _, recipient, _ = await _world(db_session, "cr15")
+    recipient.status = RecipientStatus.SENT
+    recipient.sent_at = datetime.now(UTC)
+    recipient.rendered_parameters = {"contact_id": str(recipient.contact_id), "body": ["Ahmed"]}
+    await db_session.flush()
+    before = await _counts(db_session)
+
+    recipient.rendered_parameters = {"contact_id": str(uuid.uuid4()), "body": ["Mona"]}
+
+    assert await _added(db_session, before) == {
+        "cr15_recipient_sent_values_resolved_for_another_contact": 1
+    }
