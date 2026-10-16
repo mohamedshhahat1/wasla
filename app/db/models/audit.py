@@ -446,6 +446,12 @@ class AuditAction(StrEnum):
     CAMPAIGN_PAUSED = "campaign_paused"
     # A file uploaded for a campaign's template header (HM-02). 0107.
     CAMPAIGN_HEADER_MEDIA_UPLOADED = "campaign_header_media_uploaded"
+    # A workspace's campaign settings - its quiet hours - changed (TZ-03), and
+    # a live campaign that began waiting by itself: quiet hours, the daily
+    # limit, the per-contact cap (LIM-04, FREQ-01). Once per transition, never
+    # per batch. 0109.
+    CAMPAIGN_SETTINGS_UPDATED = "campaign_settings_updated"
+    CAMPAIGN_WAITING = "campaign_waiting"
 
     # What the agents are allowed to say (RAG-17, docs/RAG.md).
     #
@@ -655,6 +661,9 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "campaign_paused",
     # 0107
     "campaign_header_media_uploaded",
+    # 0109
+    "campaign_settings_updated",
+    "campaign_waiting",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

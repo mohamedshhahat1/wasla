@@ -24,6 +24,7 @@ from app.repositories import (
     UserRepository,
 )
 from tests.fakes import as_session
+from tests.workspace_timezone import TEST_TIMEZONE
 
 TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 TENANT_B = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -190,7 +191,9 @@ async def test_active_tenant_listing_excludes_suspended_and_deleted() -> None:
 async def test_new_tenant_slug_is_normalised() -> None:
     session = RecordingSession()
 
-    tenant = await TenantRepository(as_session(session)).create(name="  Acme Inc  ", slug=" Acme ")
+    tenant = await TenantRepository(as_session(session)).create(
+        timezone=TEST_TIMEZONE, name="  Acme Inc  ", slug=" Acme "
+    )
 
     assert tenant.slug == "acme"
     assert tenant.name == "Acme Inc"
@@ -200,4 +203,6 @@ async def test_duplicate_slug_is_rejected_as_a_conflict() -> None:
     session = RecordingSession(rows=[object()])
 
     with pytest.raises(ConflictError):
-        await TenantRepository(as_session(session)).create(name="Acme", slug="acme")
+        await TenantRepository(as_session(session)).create(
+            timezone=TEST_TIMEZONE, name="Acme", slug="acme"
+        )

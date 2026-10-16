@@ -1,3 +1,4 @@
+# ruff: noqa: F811 - the workspace lifecycle fixtures are imported by name.
 """A workspace's time zone, and the public list it is chosen from (TZ-01, TZ-02).
 
 Driven over HTTP against real rows, with the lifecycle suite's application:

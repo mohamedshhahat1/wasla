@@ -229,6 +229,28 @@ def _no_live_dns(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(socket, "getaddrinfo", guarded)
 
 
+@pytest.fixture(autouse=True)
+def _quiet_hours_only_where_tested(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quiet hours bind only the tests that are about them (TZ-03).
+
+    Every workspace has quiet hours on from the start - 22:00 to 09:00 in its
+    own zone - and most suites drive campaigns at the real time of day. Left
+    alone, the same suite would pass by day and wait at night: a campaign
+    suite run at 23:00 Cairo time would find every campaign waiting for the
+    morning. So outside a test marked `quiet_hours` the window is never open,
+    exactly as for a workspace that switched quiet hours off. Every test of
+    the window itself carries the mark and runs the real check, at times it
+    chooses.
+    """
+    if request.node.get_closest_marker("quiet_hours") is not None:
+        return
+    from app.services.quiet_hours import QuietHours
+
+    monkeypatch.setattr(QuietHours, "contains", lambda self, at: False)
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(

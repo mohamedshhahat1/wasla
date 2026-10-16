@@ -94,7 +94,7 @@ def invitations(db_session: AsyncSession) -> InvitationService:
 
 
 async def _tenant(db_session: AsyncSession, *, name: str, slug: str) -> Tenant:
-    tenant = await TenantRepository(db_session).create(name=name, slug=slug)
+    tenant = await TenantRepository(db_session).create(timezone=TEST_TIMEZONE, name=name, slug=slug)
     await db_session.flush()
     return tenant
 

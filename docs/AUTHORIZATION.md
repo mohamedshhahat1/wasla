@@ -215,6 +215,8 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/enable` | **ADMIN** | yes | workspace | channel_connections, allowed_channel_types (409) |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/release` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/verify` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/workspace/campaign-settings` | **MEMBER** | yes | workspace | - |
+| `PUT` | `/api/v1/workspace/campaign-settings` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/workspace/members` | **MEMBER** | yes | workspace | - |
 | `DELETE` | `/api/v1/workspace/members/{user_id}` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/workspace/members/{user_id}/reinstate` | **ADMIN** | yes | workspace | team_members |

@@ -13,8 +13,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | Phase | Subject | State | Commit | Suites run |
 |---|---|---|---|---|
 | 0 | Baseline, Meta's documentation, before-probes | committed | 1ca3e86 | p20, p21 at BASE_HEAD |
-| 1 | Workspace timezone, timezones API | committed | (this commit) | timezones unit + API, workspace lifecycle, route authorization, documentation truth, auth endpoints (89 passed); migration-built: schema parity, downgrade atomicity, every migration suite |
-| 2 | Quiet hours | not started | | |
+| 1 | Workspace timezone, timezones API | committed | 5450912 | timezones unit + API, workspace lifecycle, route authorization, documentation truth, auth endpoints (89 passed); migration-built: schema parity, downgrade atomicity, every migration suite |
+| 2 | Quiet hours | committed | (this commit) | every campaign suite + unit (308 passed after the fixes below); quiet hours, settings API, timezones API; migration-built: schema parity, downgrade atomicity, quiet hours |
 | 3 | Meta messaging limit: read, store, webhooks | not started | | |
 | 4 | Ledger and the 80 % budget | not started | | |
 | 5 | Spreading, deadline, delivery plan, ETA | not started | | |
@@ -138,3 +138,37 @@ TZ-03 makes quiet hours a workspace setting), estimated cost.
   and calls, 5 on `POST /workspaces` payloads, 9 on raw `INSERT INTO tenants` against the head
   schema; 189 test files changed in all, three of them new. `scripts/pitr_drill.sh` inserts a
   zone too.
+
+## Phase 2 notes (TZ-03, TZ-04)
+
+- Migration **0109**: `tenants.campaign_quiet_hours_enabled` (true), `_start` (22:00), `_end`
+  (09:00) with constant defaults (catalogue-only), CHECKs for a non-empty window and whole
+  minutes; `campaigns.waiting_reason` (CHECK: quiet_hours, daily_limit, contact_cap,
+  limit_unknown) and `campaigns.resumes_at`; audit labels `campaign_settings_updated`,
+  `campaign_waiting`. Migration numbering: one revision per phase that needs one, so the
+  brief's four-revision sketch (0108-0111) became 0108 onwards, one per phase.
+- `app/services/quiet_hours.py`: the window as pure arithmetic in the workspace's zone; the end
+  is built as a local date-time and converted with that date's rules (PEP 495 `fold=0`).
+- The worker asks before claiming a batch and again before every recipient; inside the window
+  the campaign **waits** (`CampaignService._wait`): status unchanged (a scheduled campaign is
+  not started), no attempt spent, lease given up, `next_send_at = resumes_at = window end`,
+  one `campaign_waiting` audit entry and one `wasla_campaign_waits_total{reason}` per
+  transition. The next batch that sends clears the wait; every transition out of the live
+  statuses clears it.
+- `GET/PUT /api/v1/workspace/campaign-settings` (member / admin), audited old and new;
+  `quiet_hours_empty_window` for start = end; HH:MM only. A change, and a change of zone,
+  makes every campaign waiting for quiet hours due now, so its next batch asks the new window.
+- `CampaignRead` gains `waiting_reason`, `resumes_at` and `resumes_at_local` (the workspace's
+  zone, with its offset).
+- Tests: `tests/conftest.py` makes the window never open outside tests marked `quiet_hours`
+  (registered marker): the suites run at any hour, and a suite run at 23:00 Cairo would
+  otherwise find every campaign waiting. Every quiet-hours test carries the mark and runs the
+  real check at moments it chooses (`SimClock` in the harness; the fake Meta stamps each
+  request with the worker's clock).
+
+Phase 1 defects found while building Phase 2 and fixed in this commit: the new
+`test_timezones_api.py` imported the lifecycle fixtures in a way ruff flags (F811; now the
+repository's file-level `# ruff: noqa: F811` convention); three `TenantRepository.create`
+calls in `tests/unit/test_repositories.py` and `tests/integration/test_authorization.py`
+lacked the zone (mypy); the three new `timezone` request fields were plain `str` instead of
+`StorableText` (the NUL guard) - `tests/unit/test_request_text_storability.py` found it.

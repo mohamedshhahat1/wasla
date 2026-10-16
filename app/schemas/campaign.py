@@ -20,6 +20,7 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.timezones import local
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
     MAX_CAMPAIGN_NAME_LENGTH,
@@ -29,6 +30,7 @@ from app.db.models.campaign import (
     CampaignRecipient,
     CampaignStatus,
     CampaignStopReason,
+    CampaignWaitReason,
     OptOutSource,
     OptOutVia,
     RecipientReason,
@@ -231,16 +233,31 @@ class CampaignRead(BaseModel):
     # The header file it is sent with (HM-08), or null for a template whose
     # header is text or absent. Meta's id for it is never shown.
     header_media: HeaderMediaRead | None = None
+    # Why a live campaign is sending nothing right now and will by itself
+    # (TZ-03, LIM-04, FREQ-01): `quiet_hours`, `daily_limit`, `contact_cap`,
+    # `limit_unknown`. Not a pause - the status stays scheduled or running.
+    # Null while it sends, and in every other status.
+    waiting_reason: CampaignWaitReason | None = None
+    # When it will send again, in UTC and in the workspace's own time with
+    # its offset (TZ-03). Null unless it is waiting.
+    resumes_at: datetime | None = None
+    resumes_at_local: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
     @classmethod
     def from_model(
-        cls, campaign: Campaign, *, header_media: CampaignHeaderMedia | None = None
+        cls,
+        campaign: Campaign,
+        *,
+        header_media: CampaignHeaderMedia | None = None,
+        timezone: str | None = None,
     ) -> Self:
         read = cls.model_validate(campaign)
         if header_media is not None:
             read.header_media = HeaderMediaRead.from_model(header_media)
+        if timezone is not None and read.resumes_at is not None:
+            read.resumes_at_local = local(read.resumes_at, timezone)
         return read
 
 

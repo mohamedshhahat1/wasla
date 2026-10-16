@@ -63,7 +63,7 @@ class WorkspaceCreateRequest(_Payload):
     )
     # Where the workspace is, from `GET /api/v1/timezones` (TZ-01). Required:
     # quiet hours and every local time a campaign shows are computed in it.
-    timezone: str = Field(
+    timezone: StorableText = Field(
         min_length=1,
         max_length=MAX_TIMEZONE_LENGTH,
         description="An IANA zone name from GET /api/v1/timezones, e.g. Africa/Cairo.",
@@ -104,7 +104,9 @@ class WorkspaceUpdateRequest(_Payload):
     automation_disclosure: DisclosureWording | None = None
     # The workspace's IANA zone (TZ-01). An owner's or an administrator's to
     # change; audited. Moves where quiet hours fall, never a scheduled time.
-    timezone: str | None = Field(default=None, min_length=1, max_length=MAX_TIMEZONE_LENGTH)
+    timezone: StorableText | None = Field(
+        default=None, min_length=1, max_length=MAX_TIMEZONE_LENGTH
+    )
 
 
 class OwnershipTransferRequest(_Payload):
@@ -183,6 +185,33 @@ class WorkspaceRead(BaseModel):
             timezone=tenant.timezone,
             utc_offset=format_offset(offset_of(tenant.timezone, at or datetime.now(UTC))),
         )
+
+
+#: A wall-clock time to the minute, `HH:MM` on a 24-hour clock; seconds refused.
+CLOCK_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
+
+
+class CampaignSettingsRead(BaseModel):
+    """A workspace's quiet hours, in its own zone (TZ-03)."""
+
+    quiet_hours_enabled: bool
+    quiet_hours_start: str
+    quiet_hours_end: str
+    # The zone the window is read in, and its offset from UTC now.
+    timezone: str
+    utc_offset: str
+
+
+class CampaignSettingsUpdateRequest(_Payload):
+    """The whole of the quiet hours: every field, every time (a `PUT`)."""
+
+    quiet_hours_enabled: bool
+    quiet_hours_start: str = Field(
+        max_length=5, pattern=CLOCK_PATTERN, description="Local time, HH:MM."
+    )
+    quiet_hours_end: str = Field(
+        max_length=5, pattern=CLOCK_PATTERN, description="Local time, HH:MM."
+    )
 
 
 class WorkspaceCreatedResponse(BaseModel):

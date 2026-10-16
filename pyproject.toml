@@ -170,4 +170,7 @@ markers = [
     # Opt-in, and skipped without OPENAI_API_KEY so CI stays green without
     # credentials. These call the real provider and cost real money.
     "real_provider: calls a real external provider; needs credentials",
+    # Without it a workspace's quiet hours never bind (tests/conftest.py):
+    # suites run at any hour, and only these test the window (TZ-03).
+    "quiet_hours: exercises the real quiet-hours window rather than daytime",
 ]

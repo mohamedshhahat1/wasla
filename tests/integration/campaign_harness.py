@@ -28,6 +28,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -131,6 +132,10 @@ class FakeMeta:
     #: Seconds to wait before answering particular upload numbers (1-based).
     upload_stall: dict[int, float] = field(default_factory=dict)
     on_upload: Callable[[int], Awaitable[None]] | None = None
+    #: The simulated time a request reached Meta at (`SimClock.at`); real time
+    #: when unset. What "never inside quiet hours" and "never over the limit in
+    #: a moving 24 hours" are counted by.
+    clock: Callable[[], datetime] | None = None
 
     async def upload(self, request: httpx.Request, *, worker: str) -> httpx.Response:
         n = len(self.uploads) + 1
@@ -180,6 +185,7 @@ class FakeMeta:
                 "worker": worker,
                 "payload": payload,
                 "n": n,
+                "at": self.clock() if self.clock is not None else datetime.now(UTC),
             }
         )
         if self.on_request is not None:
@@ -206,6 +212,43 @@ class FakeMeta:
 
     def by_worker(self) -> Counter[str]:
         return Counter(str(entry["worker"]) for entry in self.requests)
+
+
+@dataclass
+class SimClock:
+    """The worker's clock in a test: a moment the test chooses, advancing as a sweep runs.
+
+    `CampaignWorker.run_once(now=...)` dates a batch from `now` and advances it
+    by the time the batch takes, so a sweep started at 21:59:59 local and
+    slowed by Meta's latency crosses 22:00 part-way, exactly as a real one
+    would. `at` is that clock, for the fake Meta to stamp each request with.
+    """
+
+    now: datetime
+    _started: float = 0.0
+
+    def at(self) -> datetime:
+        return self.now + timedelta(seconds=perf_counter() - self._started)
+
+    async def sweep(self, replica: CampaignWorker) -> int:
+        self._started = perf_counter()
+        return await replica.run_once(now=self.now)
+
+
+async def make_due(database: Database, campaign_id: uuid.UUID, *, at: datetime) -> None:
+    """Put a scheduled campaign's moment at `at`, as if it had been scheduled for then.
+
+    `schedule()` refuses a time in the past and moves a past one to now; a
+    test standing at a daylight-saving transition in April needs the campaign
+    to be due at that simulated moment instead.
+    """
+    async with database.session_factory() as session:
+        await session.execute(
+            update(Campaign)
+            .where(Campaign.id == campaign_id)
+            .values(scheduled_at=at, next_send_at=None)
+        )
+        await session.commit()
 
 
 def worker(
@@ -261,12 +304,19 @@ async def seed(
     variable_count: int = 0,
     body_text: str = "Hello.",
     channels: Iterable[Channel] = EVERY_CHANNEL,
+    timezone: str = TEST_TIMEZONE,
+    last_inbound_at: datetime | None = None,
 ) -> Workspace:
-    """A workspace with one number, an approved template and N people who wrote first."""
+    """A workspace with one number, an approved template and N people who wrote first.
+
+    In `timezone` (TZ-01), with the default quiet hours. Every person last
+    wrote two days ago - their service window closed - unless
+    `last_inbound_at` says otherwise.
+    """
     suffix = uuid.uuid4().hex[:10]
     async with database.session_factory() as session:
         tenant = Tenant(
-            timezone=TEST_TIMEZONE, name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}"
+            timezone=timezone, name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}"
         )
         session.add(tenant)
         await session.flush()
@@ -304,7 +354,11 @@ async def seed(
                     account_id=account.id,
                     status=ConversationStatus.OPEN,
                     mode=ConversationMode.AI,
-                    last_inbound_at=datetime.now(UTC) - timedelta(days=2),
+                    last_inbound_at=(
+                        last_inbound_at
+                        if last_inbound_at is not None
+                        else datetime.now(UTC) - timedelta(days=2)
+                    ),
                 )
             )
             contact_ids.append(contact.id)
@@ -508,12 +562,14 @@ __all__ = [
     "USER_DOMAIN",
     "FakeMeta",
     "Ledger",
+    "SimClock",
     "Workspace",
     "accepted",
     "compose",
     "erase",
     "harness_settings",
     "ledger",
+    "make_due",
     "meta_error",
     "quiesce",
     "seed",

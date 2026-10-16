@@ -6,14 +6,29 @@ of business data in the platform.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
+from typing import Final
 
-from sqlalchemy import DateTime, Index, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    String,
+    Time,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import TENANT_STATUS_TYPE, TenantStatus
+
+#: Quiet hours every workspace starts with (TZ-03): on, 22:00 to 09:00 in the
+#: workspace's own time zone - a window that crosses midnight.
+DEFAULT_QUIET_HOURS_START: Final = time(22, 0)
+DEFAULT_QUIET_HOURS_END: Final = time(9, 0)
 
 
 class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -26,6 +41,16 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "tenants"
     __table_args__ = (
         UniqueConstraint("slug", name="uq_tenants_slug"),
+        # Quiet hours are a window, never an empty one, to the minute (TZ-03).
+        CheckConstraint(
+            "campaign_quiet_hours_start <> campaign_quiet_hours_end",
+            name="campaign_quiet_hours_window",
+        ),
+        CheckConstraint(
+            "date_part('second', campaign_quiet_hours_start) = 0"
+            " AND date_part('second', campaign_quiet_hours_end) = 0",
+            name="campaign_quiet_hours_minutes",
+        ),
         # The purge sweep's only query: tombstoned, due, and not yet done. A
         # partial index rather than a plain one, because the rows it must find
         # are a vanishing fraction of the table and stay that way - a workspace
@@ -79,6 +104,20 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # Validated against `app.core.timezones`; no default, so nothing creates a
     # workspace without deciding. 0108 gave every earlier one `Africa/Cairo`.
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    # When no campaign may write to this workspace's customers, in the
+    # workspace's own time (TZ-03, ADR-145): the customer's protection, so it
+    # binds every campaign send and nothing else - not an AI or human reply,
+    # not a follow-up, not a test send. On by default, 22:00 to 09:00; a
+    # window whose start is later than its end crosses midnight. 0109.
+    campaign_quiet_hours_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    campaign_quiet_hours_start: Mapped[time] = mapped_column(
+        Time, nullable=False, default=DEFAULT_QUIET_HOURS_START, server_default=text("'22:00'")
+    )
+    campaign_quiet_hours_end: Mapped[time] = mapped_column(
+        Time, nullable=False, default=DEFAULT_QUIET_HOURS_END, server_default=text("'09:00'")
+    )
     # The workspace's own wording of the automation disclosure, by language
     # (`{"en": ..., "ar": ...}`), where it has replaced Wasla's (OMNI-041).
     # Only the wording: the obligation itself cannot be switched off.

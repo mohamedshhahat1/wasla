@@ -19,6 +19,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 
 from app.api.dependencies import (
+    ActiveWorkspace,
     ActiveWorkspaceDep,
     CampaignHeaderMediaServiceDep,
     CampaignServiceDep,
@@ -50,10 +51,17 @@ LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
 
 
-async def _read(campaigns: CampaignService, campaign: Campaign) -> CampaignRead:
-    """One campaign as the API shows it, with its header file if it has one (HM-08)."""
+async def _read(
+    campaigns: CampaignService, campaign: Campaign, workspace: ActiveWorkspace
+) -> CampaignRead:
+    """One campaign as the API shows it, with its header file if it has one (HM-08).
+
+    Its times in the workspace's own zone too (TZ-03).
+    """
     files = await campaigns.header_media_for([campaign])
-    return CampaignRead.from_model(campaign, header_media=files.get(campaign.id))
+    return CampaignRead.from_model(
+        campaign, header_media=files.get(campaign.id), timezone=workspace.tenant.timezone
+    )
 
 
 @router.get("", response_model=CursorPage[CampaignRead], summary="List campaigns")
@@ -75,7 +83,11 @@ async def list_campaigns(
     files = await campaigns.header_media_for(page.items)
     return CursorPage[CampaignRead](
         items=[
-            CampaignRead.from_model(campaign, header_media=files.get(campaign.id))
+            CampaignRead.from_model(
+                campaign,
+                header_media=files.get(campaign.id),
+                timezone=workspace.tenant.timezone,
+            )
             for campaign in page.items
         ],
         next_cursor=page.next_cursor,
@@ -107,7 +119,7 @@ async def create_campaign(
         header_media_id=payload.header_media_id,
         actor=workspace.user,
     )
-    return await _read(campaigns, campaign)
+    return await _read(campaigns, campaign, workspace)
 
 
 @router.post(
@@ -196,7 +208,7 @@ async def get_campaign(
     workspace: ActiveWorkspaceDep,
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
-    return await _read(campaigns, await campaigns.get(campaign_id))
+    return await _read(campaigns, await campaigns.get(campaign_id), workspace)
 
 
 @router.post("/{campaign_id}/audience", response_model=CampaignRead, summary="Set the audience")
@@ -216,7 +228,7 @@ async def set_audience(
         filters=payload.to_filter(),
         actor=workspace.user,
     )
-    return await _read(campaigns, campaign)
+    return await _read(campaigns, campaign, workspace)
 
 
 @router.post("/{campaign_id}/schedule", response_model=CampaignRead, summary="Send, now or later")
@@ -236,7 +248,7 @@ async def schedule_campaign(
         scheduled_at=payload.scheduled_at,
         actor=workspace.user,
     )
-    return await _read(campaigns, campaign)
+    return await _read(campaigns, campaign, workspace)
 
 
 @router.post("/{campaign_id}/pause", response_model=CampaignRead, summary="Stop, reversibly")
@@ -246,7 +258,9 @@ async def pause_campaign(
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
     """Stop sending and keep the rest of the list. Schedule again to resume."""
-    return await _read(campaigns, await campaigns.pause(campaign_id, actor=workspace.user))
+    return await _read(
+        campaigns, await campaigns.pause(campaign_id, actor=workspace.user), workspace
+    )
 
 
 @router.post("/{campaign_id}/cancel", response_model=CampaignRead, summary="Stop, finally")
@@ -256,7 +270,9 @@ async def cancel_campaign(
     campaigns: CampaignServiceDep,
 ) -> CampaignRead:
     """Finish the campaign where it stands. What has been sent stays sent."""
-    return await _read(campaigns, await campaigns.cancel(campaign_id, actor=workspace.user))
+    return await _read(
+        campaigns, await campaigns.cancel(campaign_id, actor=workspace.user), workspace
+    )
 
 
 @router.get("/{campaign_id}/statistics", summary="Delivery and failure counts")

@@ -58,7 +58,7 @@ class RegistrationRequest(_Payload):
     )
     # The new workspace's IANA zone, from `GET /api/v1/timezones` (TZ-01).
     # Required; a name outside the list is 422 `timezone_unknown`.
-    timezone: str = Field(min_length=1, max_length=MAX_TIMEZONE_LENGTH)
+    timezone: StorableText = Field(min_length=1, max_length=MAX_TIMEZONE_LENGTH)
 
 
 class LoginRequest(_Payload):

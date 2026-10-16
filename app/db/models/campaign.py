@@ -126,6 +126,30 @@ class CampaignStopReason(StrEnum):
 
 MAX_STOP_REASON_LENGTH: Final = 40
 
+
+class CampaignWaitReason(StrEnum):
+    """Why a live campaign is sending nothing right now, and will by itself (TZ-03, LIM-04).
+
+    A wait is not a pause: the campaign stays `scheduled` or `running`, no
+    recipient spends an attempt or changes state, no lease is held, and the
+    worker comes back at `resumes_at` without anybody doing anything. Cleared
+    by the next batch that sends, and by every transition out of the live
+    statuses.
+    """
+
+    #: It is night in the workspace's own time (TZ-03).
+    QUIET_HOURS = "quiet_hours"
+    #: The business portfolio's share of Meta's messaging limit is used for
+    #: this moving 24 hours (LIM-04).
+    DAILY_LIMIT = "daily_limit"
+    #: Everybody left was sent a marketing message in the last 24 hours
+    #: (FREQ-01).
+    CONTACT_CAP = "contact_cap"
+    #: Meta's messaging limit for the sending number has never been read
+    #: (LIM-01): fail closed until it is.
+    LIMIT_UNKNOWN = "limit_unknown"
+
+
 # Meta's media ids are short numeric strings; the bound is the one inbound
 # handles use (`MAX_MEDIA_HANDLE_LENGTH`).
 MAX_PROVIDER_MEDIA_ID_LENGTH: Final = 255
@@ -281,6 +305,12 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             name="status_reason_known",
         ),
         CheckConstraint(
+            "waiting_reason IS NULL OR waiting_reason IN ("
+            + ", ".join(f"'{reason.value}'" for reason in CampaignWaitReason)
+            + ")",
+            name="waiting_reason_known",
+        ),
+        CheckConstraint(
             "consecutive_batch_failures >= 0", name="consecutive_batch_failures_non_negative"
         ),
         # The send rate the schema and the service already bound, held by the
@@ -419,6 +449,13 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     header_provider_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    # Why a live campaign is sending nothing right now, from `CampaignWaitReason`
+    # (TZ-03, LIM-04), and when it will by itself. Text with a CHECK, like
+    # `status_reason`. Null while sending, and in every other status. 0109.
+    waiting_reason: Mapped[str | None] = mapped_column(
+        String(MAX_STOP_REASON_LENGTH), nullable=True
+    )
+    resumes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     @property
     def is_running(self) -> bool:
@@ -572,6 +609,7 @@ __all__ = [
     "CampaignRecipient",
     "CampaignStatus",
     "CampaignStopReason",
+    "CampaignWaitReason",
     "OptOutSource",
     "RecipientReason",
     "RecipientStatus",

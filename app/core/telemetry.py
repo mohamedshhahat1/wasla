@@ -483,6 +483,14 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Campaign ownership events: lease takeovers, leases lost, recipients owned elsewhere.",
         ("event",),
     ),
+    # A live campaign that began waiting by itself (TZ-03, LIM-04, FREQ-01):
+    # quiet hours, the portfolio's daily share used, the per-contact cap, or a
+    # messaging limit never read. Once per transition into a wait, never per
+    # sweep. Closed vocabulary (`CampaignWaitReason`).
+    "wasla_campaign_waits_total": (
+        "Campaigns that began waiting by themselves, by reason.",
+        ("reason",),
+    ),
     # Template registry status changes, by what reported them (CMP-10,
     # CMQ-05): a refused send, a provider `failed` status, or Meta's
     # template status webhook.
@@ -1161,6 +1169,9 @@ CAMPAIGN_EVENTS: Final = frozenset(
         "header_media_reupload_on_send",
     }
 )
+CAMPAIGN_WAIT_REASONS: Final = frozenset(
+    {"quiet_hours", "daily_limit", "contact_cap", "limit_unknown"}
+)
 TEMPLATE_STATUS_SOURCES: Final = frozenset({"send_writeback", "status_webhook", "template_webhook"})
 
 
@@ -1185,6 +1196,14 @@ async def record_campaign_event(event: str) -> None:
     await _increment(
         "wasla_campaign_events_total",
         {"event": event if event in CAMPAIGN_EVENTS else "other"},
+    )
+
+
+async def record_campaign_wait(reason: str) -> None:
+    """One live campaign that began waiting by itself (TZ-03, LIM-04). Best-effort."""
+    await _increment(
+        "wasla_campaign_waits_total",
+        {"reason": reason if reason in CAMPAIGN_WAIT_REASONS else "other"},
     )
 
 

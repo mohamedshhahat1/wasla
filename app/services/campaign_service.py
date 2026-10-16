@@ -56,7 +56,12 @@ from app.core.exceptions import (
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.core.storage import MediaStorage, StorageError
-from app.core.telemetry import record_campaign_event, record_campaign_send, record_campaign_stop
+from app.core.telemetry import (
+    record_campaign_event,
+    record_campaign_send,
+    record_campaign_stop,
+    record_campaign_wait,
+)
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
 from app.db.models.campaign import (
@@ -69,6 +74,7 @@ from app.db.models.campaign import (
     CampaignRecipient,
     CampaignStatus,
     CampaignStopReason,
+    CampaignWaitReason,
     OptOutSource,
     OptOutVia,
     RecipientReason,
@@ -84,6 +90,7 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
 from app.db.models.whatsapp_template import TemplateStatus
@@ -132,6 +139,7 @@ from app.services.messaging_service import (
     safe_upload_filename,
 )
 from app.services.opt_out import record_opt_out, record_resume
+from app.services.quiet_hours import QuietHours
 from app.services.template_parameters import (
     FILE_HEADER_FORMATS,
     TEMPLATE_PARAMETER_CODES,
@@ -639,6 +647,7 @@ class CampaignService:
         campaign.lease_token = None
         campaign.last_error = None
         campaign.status_reason = None
+        _clear_wait(campaign)
         # Writing to thousands of people who did not just say something is the
         # single most consequential thing a workspace can do here, so who
         # authorised it and how many it would reach are both recorded.
@@ -676,6 +685,7 @@ class CampaignService:
 
         campaign.status = CampaignStatus.PAUSED
         campaign.status_reason = CampaignStopReason.ADMIN_PAUSED.value
+        _clear_wait(campaign)
         # Audited like scheduling and cancelling (CMP-14): stopping a
         # broadcast part-way is a decision somebody is answerable for.
         self._audit.record(
@@ -751,6 +761,7 @@ class CampaignService:
 
         campaign.status = CampaignStatus.CANCELLED
         campaign.cancelled_at = datetime.now(UTC)
+        _clear_wait(campaign)
         self._audit.record(
             AuditAction.CAMPAIGN_CANCELLED,
             actor=actor,
@@ -829,6 +840,16 @@ class CampaignService:
         if messaging is None:
             raise RuntimeError("CampaignService needs a messaging service to send.")
 
+        # **Quiet hours** (TZ-03): night in the workspace's own time. The
+        # campaign sends nothing and comes back when the window ends - still
+        # scheduled or running, nobody's attempt spent, no lease kept. A
+        # scheduled campaign is not started by a batch that cannot send.
+        quiet = await self._quiet_hours()
+        if quiet.contains(moment):
+            return await self._wait(
+                campaign, CampaignWaitReason.QUIET_HOURS, until=quiet.ends_after(moment)
+            )
+
         if campaign.status is CampaignStatus.SCHEDULED:
             campaign.status = CampaignStatus.RUNNING
             campaign.started_at = campaign.started_at or moment
@@ -842,6 +863,7 @@ class CampaignService:
                 # not finished, just waiting for the earliest of them.
                 campaign.next_send_at = max(deferred_until, moment)
                 campaign.lease_token = None
+                _clear_wait(campaign)
                 return BatchOutcome(campaign.id, campaign.status)
             return self._complete(campaign, moment)
 
@@ -893,6 +915,17 @@ class CampaignService:
                 # person, exactly like a cancel (CMP-02).
                 return await self._pause_unserved(
                     campaign, unserved, sent=sent, failed=failed, skipped=skipped
+                )
+            if quiet.contains(clock()):
+                # The window opened while this batch was sending: it stops at
+                # the next person, like a pause (TZ-03, CMP-08), and waits.
+                return await self._wait(
+                    campaign,
+                    CampaignWaitReason.QUIET_HOURS,
+                    until=quiet.ends_after(clock()),
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped,
                 )
             if await self._recipients.take(recipient) is None:
                 # Another worker owns this person right now, or finished them
@@ -1053,6 +1086,8 @@ class CampaignService:
             campaign.next_send_at = throttled_until
         # The batch is over, and with it this worker's claim.
         campaign.lease_token = None
+        # It sent, or tried: whatever it was waiting for is over.
+        _clear_wait(campaign)
         # A batch that ran resets the run of failed ones (CMP-20).
         campaign.consecutive_batch_failures = 0
         if reached_provider:
@@ -1511,6 +1546,74 @@ class CampaignService:
         campaign.status_reason = reason.value
         campaign.next_send_at = None
         campaign.lease_token = None
+        _clear_wait(campaign)
+
+    async def _quiet_hours(self) -> QuietHours:
+        """This workspace's quiet hours as committed now (TZ-03).
+
+        Read by columns rather than as a `Tenant` object, which the session
+        may hold from earlier in its life: a window an admin moved is honoured
+        from the next batch on.
+        """
+        row = (
+            await self._session.execute(
+                select(
+                    Tenant.campaign_quiet_hours_enabled,
+                    Tenant.campaign_quiet_hours_start,
+                    Tenant.campaign_quiet_hours_end,
+                    Tenant.timezone,
+                ).where(Tenant.id == self._tenant_id)
+            )
+        ).one()
+        return QuietHours(enabled=row[0], start=row[1], end=row[2], timezone=row[3])
+
+    async def _wait(
+        self,
+        campaign: Campaign,
+        reason: CampaignWaitReason,
+        *,
+        until: datetime,
+        sent: int = 0,
+        failed: int = 0,
+        skipped: int = 0,
+    ) -> BatchOutcome:
+        """End the batch without sending, and come back at `until` (TZ-03, LIM-04, FREQ-01).
+
+        **A wait is not a pause.** The status stays `scheduled` or `running`,
+        no recipient's state or attempts change, the lease is given up - a
+        waiting campaign is nobody's - and `next_send_at` is the moment it is
+        due again, which is how the rate limit has always been stored (ADR-026):
+        a timestamp, never a sleep. Recorded once per transition into a wait -
+        an audit entry by the system and `wasla_campaign_waits_total` - never
+        once per batch.
+        """
+        entering = campaign.waiting_reason != reason.value
+        campaign.waiting_reason = reason.value
+        campaign.resumes_at = until
+        campaign.next_send_at = until
+        campaign.lease_token = None
+        campaign.consecutive_batch_failures = 0
+        if entering:
+            self._audit.record(
+                AuditAction.CAMPAIGN_WAITING,
+                actor=None,
+                actor_kind=AuditActorKind.SYSTEM,
+                target_type="campaign",
+                target_id=campaign.id,
+                target_label=campaign.name,
+                meta={"reason": reason.value, "resumes_at": until.isoformat()},
+            )
+            await record_campaign_wait(reason.value)
+            logger.info(
+                "campaign.waiting",
+                extra={
+                    "event": "campaign.waiting",
+                    "campaign_id": str(campaign.id),
+                    "reason": reason.value,
+                    "resumes_at": until.isoformat(),
+                },
+            )
+        return BatchOutcome(campaign.id, campaign.status, sent=sent, failed=failed, skipped=skipped)
 
     async def _deliver(
         self,
@@ -1833,6 +1936,7 @@ class CampaignService:
         campaign.completed_at = now
         campaign.next_send_at = None
         campaign.lease_token = None
+        _clear_wait(campaign)
         logger.info("campaign.completed", extra={"campaign_id": str(campaign.id)})
         return BatchOutcome(campaign.id, CampaignStatus.COMPLETED)
 
@@ -1844,6 +1948,7 @@ class CampaignService:
         campaign.status_reason = reason.value
         campaign.next_send_at = None
         campaign.lease_token = None
+        _clear_wait(campaign)
         logger.warning(
             "campaign.blocked",
             extra={"campaign_id": str(campaign.id), "detail": detail, "reason": reason.value},
@@ -1953,6 +2058,12 @@ HEADER_MEDIA_REJECTED_CODE: Final = 131053
 # five days before (HM-05; `campaign_header_media_refresh_seconds`).
 DEFAULT_HEADER_MEDIA_REFRESH: Final = timedelta(days=25)
 DEFAULT_PROVIDER_UNREACHABLE_PAUSE: Final = timedelta(hours=6)
+
+
+def _clear_wait(campaign: Campaign) -> None:
+    """A campaign that sends, or leaves the live statuses, is not waiting for anything."""
+    campaign.waiting_reason = None
+    campaign.resumes_at = None
 
 
 def _send_outcome(recipient: CampaignRecipient, outcome: RecipientStatus) -> str:
