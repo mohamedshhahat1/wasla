@@ -502,6 +502,50 @@ async def test_people_inside_their_service_window_do_not_use_the_budget(
         await database.dispose()
 
 
+async def test_a_window_open_on_another_number_does_not_exempt_a_person(
+    prepared_database: str,
+) -> None:
+    """The service window is the conversation's on the sending number, not any of the person's.
+
+    210 people wrote to another number of the workspace an hour ago and to the
+    campaign's number two days ago: on the campaign's number their window is
+    closed, so they count - 200 on the first day, not 210.
+    """
+    meta = FakeMeta(messaging_limit="TIER_250")
+    clock = SimClock(now=datetime.now(UTC))
+    meta.clock = clock.at
+    replica, database = worker(prepared_database, meta, name="elsewhere")
+    waba = new_waba()
+    try:
+        await quiesce(database)
+        workspace = await seed(database, recipients=210, waba_id=waba)
+        other = await add_number(database, workspace, recipients=0, waba_id=new_waba())
+        async with database.session_factory() as session:
+            for contact_id in workspace.contact_ids:
+                session.add(
+                    Conversation(
+                        tenant_id=workspace.tenant_id,
+                        contact_id=contact_id,
+                        account_id=other.account_id,
+                        status=ConversationStatus.OPEN,
+                        mode=ConversationMode.AI,
+                        last_inbound_at=datetime.now(UTC) - timedelta(hours=1),
+                    )
+                )
+            await session.commit()
+        await read_limit(database, meta, workspace.account_id)
+        campaign_id = await launch(database, workspace)
+        await start(clock)
+
+        await drive(clock, [replica], database, [campaign_id], horizon=DAY)
+
+        assert len(sends(meta)) == 200
+        assert (await campaign(database, campaign_id)).waiting_reason == "daily_limit"
+    finally:
+        await erase(database)
+        await database.dispose()
+
+
 async def test_an_unlimited_portfolio_is_paced_by_throughput_only(prepared_database: str) -> None:
     meta = FakeMeta(messaging_limit="TIER_UNLIMITED")
     clock = SimClock(now=datetime.now(UTC))
