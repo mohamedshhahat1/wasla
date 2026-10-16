@@ -25,7 +25,7 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 10 | Test send | committed | 7bfd4c5 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
 | 11 | Results, summary, progress, CSV export | committed | 020a945 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
 | 12 | Rate cards, cost estimate | committed | afc271d | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
-| 13 | Invariants, observability, documentation, contract | in progress | (invariants: this commit) | campaign invariants (16) |
+| 13 | Invariants, observability, documentation, contract | in progress | invariants ce83f89; observability (this commit) | campaign invariants (16); campaign metrics, metric catalogue, metrics endpoint, delivery plan (31); promtool check config, test rules, amtool check-config |
 | 14 | Mutation matrix | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
@@ -621,3 +621,21 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
 | CR-13 | campaigns naming another workspace's segment (beside the composite key) | written with the key's trigger set aside -> +1 |
 | CR-14 | recipients linked to a `campaign_test` message, plus campaign meters naming one | a recipient linked to a test message -> +1 |
 | CR-15 | sent recipients whose `rendered_parameters.contact_id` is not their contact | values naming another contact -> +1 |
+
+### Observability
+
+- Scrape-time gauge `wasla_portfolio_limit_utilisation{bucket}` (`<50`, `50-80`, `80-100`,
+  `>=100`): portfolios with a known finite limit counted by the share of Meta's **whole** limit their
+  last 24 hours used, every source (`business_initiated_ledger.utilisation_census`). The whole
+  limit, not the campaigns' 80 %: campaigns stop at 80 % by themselves, and what the alert is for
+  is follow-ups and manual templates reaching Meta's ceiling.
+- `wasla_campaign_events_total{event="plan_spread"}` when a schedule's plan carries
+  `spreads_over_days`; `duplicated`, `test_sent`, `exported` were added with their phases.
+- Alerts `PortfolioLimitReached` (`max(...{bucket=">=100"}) > 0` for 5m), `CampaignMetaQualityReview`
+  (`increase(wasla_campaign_stops_total{reason="meta_quality_review"}[1h]) > 0`),
+  `MessagingLimitUnknown` (`increase(wasla_campaign_messaging_limit_unknown_total[1h]) > 0`), each
+  with promtool cases that fire, clear, and stay silent on ordinary traffic (other buckets, an
+  admin's pause). `promtool check config` (78 rules), `promtool test rules`, `amtool check-config`
+  green.
+- `test_campaign_metrics.py::test_portfolios_are_counted_by_how_full_their_day_is`: 250 people on a
+  TIER_250 portfolio move it from `<50` to `>=100`; no line carries a portfolio id.

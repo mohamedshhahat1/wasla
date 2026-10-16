@@ -38,6 +38,7 @@ from app.api.uploads import read_capped
 from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
+from app.core.telemetry import record_campaign_event
 from app.core.timezones import local, local_midnight
 from app.db.models.campaign import (
     MAX_CREATE_KEY_LENGTH,
@@ -710,9 +711,12 @@ async def schedule_campaign(
     # The plan comes with the answer (LIM-05): nothing is refused because of
     # it - spreading over days is the decided behaviour - but the page shows
     # when the first and the last person will be reached, and why.
-    read.delivery_plan = DeliveryPlanRead.from_plan(
-        await planner.plan(campaign, now=datetime.now(UTC))
-    )
+    planned = await planner.plan(campaign, now=datetime.now(UTC))
+    read.delivery_plan = DeliveryPlanRead.from_plan(planned)
+    if any(notice.value == "spreads_over_days" for notice in planned.notices):
+        # A schedule Meta's limit spreads over days (LIM-04): how often the
+        # limit, rather than the rate, decides when a campaign finishes.
+        await record_campaign_event("plan_spread")
     return read
 
 

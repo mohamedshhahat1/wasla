@@ -1599,6 +1599,60 @@ groups:
             sending").
           runbook: docs/RUNBOOK.md
 
+      - alert: PortfolioLimitReached
+        # A business portfolio's last 24 hours reached Meta's whole messaging
+        # limit, every source counted (LIM-04, LIM-07). Campaigns stop at 80 %
+        # by themselves; what fills the rest is follow-ups and manual templates,
+        # which are recorded and not refused - an open product decision.
+        expr: max(wasla_portfolio_limit_utilisation{bucket=">=100"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "A business portfolio reached Meta's messaging limit"
+          description: >-
+            A business portfolio has messaged as many people outside their
+            service window in the last 24 hours as Meta's messaging limit
+            allows. Campaigns are already waiting (daily_limit); follow-ups
+            and manual templates past this point are Meta's to refuse. Read
+            GET /api/v1/whatsapp/accounts/{id}/messaging-limit for the
+            workspaces on it (docs/RUNBOOK.md, "Campaigns are not sending").
+          runbook: docs/RUNBOOK.md
+
+      - alert: CampaignMetaQualityReview
+        # A held message was dropped by Meta's portfolio pacing (135000) and
+        # its campaign paused meta_quality_review (LIM-08): during the review
+        # the portfolio can send no templates.
+        expr: sum(increase(wasla_campaign_stops_total{reason="meta_quality_review"}[1h])) > 0
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "A campaign was paused because Meta is reviewing its template"
+          description: >-
+            Meta dropped a held campaign message (135000) and the campaign was
+            paused with status_reason meta_quality_review. While Meta reviews
+            the template's quality the portfolio cannot send templates. Wait
+            for the review in WhatsApp Manager, then have the workspace resume.
+          runbook: docs/RUNBOOK.md
+
+      - alert: MessagingLimitUnknown
+        # Meta answered a messaging limit Wasla does not recognise (LIM-01); it
+        # is treated as 250, the lowest level, and never guessed upward.
+        expr: sum(increase(wasla_campaign_messaging_limit_unknown_total[1h])) > 0
+        labels:
+          severity: warning
+          component: campaigns
+        annotations:
+          summary: "Meta reported a messaging limit Wasla does not recognise"
+          description: >-
+            A connection's whatsapp_business_manager_messaging_limit was a
+            value outside the known tiers and is being treated as 250. Read
+            Meta's messaging-limits page for a new tier and extend the table in
+            messaging_limit_service.interpret.
+          runbook: docs/RUNBOOK.md
+
       - alert: CampaignsPausedRepeatedBatchFailure
         # Every recent batch of a campaign raised (CMP-20); it was paused
         # repeated_batch_failure instead of being retried for ever.

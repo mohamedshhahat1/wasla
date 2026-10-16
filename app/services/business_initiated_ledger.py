@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import advisory_locks
 from app.db.models.business_initiated import BusinessInitiatedSend, LedgerSource
+from app.db.models.messaging_limit import WhatsAppBusinessPortfolio
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services import messaging_limit_service as portfolio_limits
 
@@ -115,6 +116,48 @@ def campaign_budget(limit: int | None, share: float) -> int | None:
 def window_open(last_inbound_at: datetime | None, *, at: datetime) -> bool:
     """Whether a conversation's customer service window is open at `at`, with the margin."""
     return last_inbound_at is not None and last_inbound_at > at - SERVICE_WINDOW_WITH_MARGIN
+
+
+#: How full a portfolio's moving 24 hours is, as a closed set of buckets: the
+#: gauge counts portfolios per bucket and never names one (ADR-072).
+UTILISATION_BUCKETS: Final = ("<50", "50-80", "80-100", ">=100")
+
+
+def utilisation_bucket(used: int, limit: int) -> str:
+    """Which bucket `used` of `limit` falls in: the share of Meta's whole limit, all sources."""
+    share = used * 100 / limit
+    if share >= 100:
+        return ">=100"
+    if share >= 80:
+        return "80-100"
+    if share >= 50:
+        return "50-80"
+    return "<50"
+
+
+async def utilisation_census(session: AsyncSession, *, at: datetime) -> dict[str, int]:
+    """How many portfolios with a known, finite limit sit in each bucket now (LIM-07).
+
+    Distinct people of the last 24 hours, every source - the count Meta's
+    limit is about - against the whole limit, not the campaigns' share: what
+    `PortfolioLimitReached` warns of is follow-ups and manual templates
+    running into Meta's own ceiling.
+    """
+    rows = await session.execute(
+        select(
+            WhatsAppBusinessPortfolio.messaging_limit,
+            select(func.count(func.distinct(BusinessInitiatedSend.recipient)))
+            .where(
+                BusinessInitiatedSend.portfolio_id == WhatsAppBusinessPortfolio.id,
+                BusinessInitiatedSend.sent_at > at - WINDOW,
+            )
+            .scalar_subquery(),
+        ).where(WhatsAppBusinessPortfolio.messaging_limit.is_not(None))
+    )
+    census = dict.fromkeys(UTILISATION_BUCKETS, 0)
+    for limit, used in rows.all():
+        census[utilisation_bucket(int(used or 0), int(limit))] += 1
+    return census
 
 
 class BusinessInitiatedLedger:
