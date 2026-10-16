@@ -25,7 +25,7 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 10 | Test send | committed | 7bfd4c5 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
 | 11 | Results, summary, progress, CSV export | committed | 020a945 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
 | 12 | Rate cards, cost estimate | committed | afc271d | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
-| 13 | Invariants, observability, documentation, contract | in progress | invariants ce83f89; observability c5468d9; documentation (this commit) | campaign invariants (16); campaign metrics, metric catalogue, metrics endpoint, delivery plan (31); promtool check config, test rules, amtool check-config |
+| 13 | Invariants, observability, documentation, contract | committed | invariants ce83f89; observability c5468d9; documentation 0119585; contract (this commit) | campaign invariants (16); campaign metrics, metric catalogue, metrics endpoint, delivery plan (31); promtool check config, test rules, amtool check-config |
 | 14 | Mutation matrix | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
@@ -664,3 +664,19 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   that section. `.env.example`: `CAMPAIGN_PARAMETER_MAX_CHARS`, `CAMPAIGN_TEST_SENDS_PER_DAY`,
   `CAMPAIGN_EXPORTS_PER_HOUR`, `CAMPAIGN_REPLY_ATTRIBUTION_SECONDS` (the other four were added with
   their phases).
+
+### The frontend contract
+
+`docs/CAMPAIGNS_PAGE_CONTRACT.md` (new, tracked): ground rules (roles, buckets, error shape, times
+in two zones, decimals, keyset paging, versions), the polling budget (bucket C is 30 a minute for
+campaigns and templates together; progress every 10 s = 6 a minute; 429 handling), the 21 elements
+of section 31 one by one (route, request, response, who, bucket, states, what not to claim), the
+design's existing elements, the waiting and stop reasons in English and Egyptian Arabic, the
+recipient reasons, every error code a campaign screen can meet, and what the page must never claim.
+Read from the design (`E:\wasla\docs\ui\campaigns-page-mockup.html`, the owner's untracked file,
+not modified): its 15 "new" elements are send test, ETA, edit draft, delete, duplicate, replied,
+updates live, why not reached, export CSV, activity, Meta daily limit, personalisation buttons,
+saved segments, respect quiet hours, estimated cost. Three design assumptions the API does not
+serve as drawn, recorded in the contract: `{contact.first_name}` (the contact has a display name),
+a per-campaign quiet-hours checkbox (a workspace setting), and replies / ETA / cost computed in the
+page from constants (the API returns them).
