@@ -41,6 +41,15 @@ def test_meta_s_card_is_read_exactly_with_its_preamble_and_two_line_heading() ->
     assert all(isinstance(rate, Decimal) for rate in rates.values())
 
 
+def test_a_card_saved_with_windows_line_endings_reads_the_same() -> None:
+    """Excel on Windows writes CRLF, inside the quoted two-line heading too."""
+    lf = FIXTURE.read_bytes().replace(b"\r\n", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    assert parse_rate_card(crlf, currency="USD") == parse_rate_card(lf, currency="USD")
+    rows = {(row.market, row.category) for row in parse_rate_card(crlf, currency="USD")}
+    assert ("Egypt", PricingCategory.AUTHENTICATION_INTERNATIONAL) in rows
+
+
 @pytest.mark.parametrize(
     ("content", "line", "fragment"),
     [

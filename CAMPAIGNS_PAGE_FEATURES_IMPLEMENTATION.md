@@ -24,7 +24,7 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 9 | Segments, contact picker | committed | 0889109 | unit + campaign, WhatsApp, template, follow-up, contact, lead, audit, retention, metric, route-walking suites (4,396 passed, 4 failed: 2 stubs without `segment_id` - intended; 2 = CPF-02, fixed in its own commit); segments + picker (7); migration-built: parity, downgrade atomicity, segments |
 | 10 | Test send | committed | 7bfd4c5 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
 | 11 | Results, summary, progress, CSV export | committed | 020a945 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
-| 12 | Rate cards, cost estimate | committed | (this commit) | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
+| 12 | Rate cards, cost estimate | committed | afc271d | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
 | 13 | Invariants, observability, documentation, contract | not started | | |
 | 14 | Mutation matrix | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
@@ -402,6 +402,14 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   module `quiet_hours`, so its two tests on the real clock (the deadline worker test and the ETA
   test) ran the real window and failed between 22:00 and 09:00 Cairo - found when the Phase 9
   regression ran at 22:25. The marker now sits on the two tests that schedule at chosen Cairo times.
+- **CPF-03** (this stage's Phase 12): the rate-card parser joined Meta's two-line
+  "Authentication-International" heading by replacing `
+` - a file saved by Excel on Windows (and
+  the fixture as git checks it out there) has `
+` inside the quoted cell, and the column would
+  have been ignored. Found when git warned it would check the fixture out with CRLF; the heading is
+  now normalised with a regular expression, and a test parses the card with both line endings
+  (failing without the fix, passing with it).
 
 ## Phase 9 notes (PG-06, PG-07)
 

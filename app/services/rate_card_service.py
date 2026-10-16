@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -91,7 +92,12 @@ def _refuse(line: int, message: str) -> ValidationError:
 
 
 def _heading(cell: str) -> str:
-    return "-".join(cell.strip().lower().replace("\n", " ").replace("- ", "-").split())
+    """A column heading as one token, whatever line ending the file was saved with.
+
+    Meta's "Authentication-<line break>International" is `authentication-international`
+    with a `\n` or a `\r\n` inside the quoted cell.
+    """
+    return "-".join(re.sub(r"\s*-\s*", "-", cell.strip().lower()).split())
 
 
 def parse_rate_card(content: bytes, *, currency: str) -> list[ParsedRate]:
