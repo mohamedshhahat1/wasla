@@ -575,6 +575,15 @@ class RecipientListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class ReasonCountRead(BaseModel):
+    """How many recipients ended in one status for one reason (PG-10)."""
+
+    status: str
+    reason_code: str
+    provider_code: int | None
+    count: int
+
+
 class CampaignStatisticsRead(BaseModel):
     """Outcomes, plus what Meta has since said about delivery."""
 
@@ -590,6 +599,14 @@ class CampaignStatisticsRead(BaseModel):
     # Accepted, and held by Meta's portfolio pacing while it gathers feedback
     # (LIM-08). Counted among `sent`.
     held: int = 0
+    # Answered on the campaign's number within the attribution window after
+    # their copy - their latest campaign there (PG-10).
+    replied: int = 0
+    # Opted out by their own decision within the window after their copy.
+    opted_out_after: int = 0
+    # Every recipient once, by status, closed reason code ("unrecorded" for
+    # none) and Meta's error code (PG-10). Sums to `total`.
+    reasons: list[ReasonCountRead] = Field(default_factory=list)
 
     @classmethod
     def from_statistics(cls, statistics: CampaignStatistics) -> Self:
@@ -603,7 +620,42 @@ class CampaignStatisticsRead(BaseModel):
             total=statistics.total,
             failed_after_send=statistics.failed_after_send,
             held=statistics.held,
+            replied=statistics.replied,
+            opted_out_after=statistics.opted_out_after,
+            reasons=[
+                ReasonCountRead(status=status, reason_code=reason, provider_code=code, count=count)
+                for status, reason, code, count in statistics.reasons
+            ],
         )
+
+
+class CampaignSummaryRead(BaseModel):
+    """The campaigns page's KPI cards (PG-11): every campaign created in the window."""
+
+    campaigns_by_status: dict[str, int]
+    recipients: dict[str, int]
+    # Delivered / sent, read / delivered, replied / sent; null with nothing to divide by.
+    rates: dict[str, float | None]
+    window: dict[str, Any]
+
+
+class CampaignProgressItem(BaseModel):
+    """One campaign's live state (PG-12)."""
+
+    id: uuid.UUID
+    status: CampaignStatus
+    waiting_reason: CampaignWaitReason | None
+    resumes_at: datetime | None
+    resumes_at_local: datetime | None
+    counts: dict[str, int]
+    eta: EtaRead | None
+    updated_at: datetime
+
+
+class CampaignProgressRead(BaseModel):
+    items: list[CampaignProgressItem]
+    # Ask again after this many seconds: 10 while any is live, 60 otherwise.
+    poll_after_seconds: int
 
 
 class ContactIdentityRead(BaseModel):
@@ -708,9 +760,12 @@ __all__ = [
     "ButtonParameterRequest",
     "CampaignActivityRead",
     "CampaignCreateRequest",
+    "CampaignProgressItem",
+    "CampaignProgressRead",
     "CampaignRead",
     "CampaignScheduleRequest",
     "CampaignStatisticsRead",
+    "CampaignSummaryRead",
     "CampaignUpdateRequest",
     "ChannelConsentRead",
     "ContactIdentityRead",
@@ -723,6 +778,7 @@ __all__ = [
     "OptOutRequest",
     "ParameterSourceRequest",
     "PlanDayRead",
+    "ReasonCountRead",
     "RecipientListResponse",
     "RecipientRead",
     "TestSendRequest",

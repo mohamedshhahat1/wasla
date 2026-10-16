@@ -612,6 +612,11 @@ class Settings(BaseSettings):
     # How many test sends of its campaigns a workspace may make in a moving
     # 24 hours (PG-09).
     campaign_test_sends_per_day: int = Field(default=10, ge=1, le=1000)
+    # How long after a campaign copy was accepted a customer's message counts
+    # as their reply to it, and their opt-out as following it (PG-10).
+    campaign_reply_attribution_seconds: int = Field(default=259_200, ge=3600, le=30 * 86_400)
+    # How many recipient-list exports a workspace may make in an hour (PG-14).
+    campaign_exports_per_hour: int = Field(default=5, ge=1, le=100)
     # One marketing message per customer per this many seconds, per workspace
     # (FREQ-01): across every campaign and every manual marketing template.
     campaign_contact_marketing_interval_seconds: int = Field(

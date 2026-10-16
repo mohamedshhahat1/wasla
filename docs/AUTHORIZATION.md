@@ -147,6 +147,8 @@ authoritative answer is always the dependency tree.
 | `GET` | `/api/v1/campaigns` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/audience/preview` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/progress` | **MEMBER** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/summary` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}` | **MEMBER** | yes | workspace | - |
 | `PATCH` | `/api/v1/campaigns/{campaign_id}` | **ADMIN** | yes | workspace | - |
 | `DELETE` | `/api/v1/campaigns/{campaign_id}` | **ADMIN** | yes | workspace | - |
@@ -158,6 +160,7 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/campaigns/{campaign_id}/pause` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/preview-messages` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/recipients` | **MEMBER** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/recipients/export.csv` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/schedule` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/test-send` | **ADMIN** | yes | workspace | - |

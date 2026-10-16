@@ -22,8 +22,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 7 | Personalisation | committed | 8b97c3d | send-path regression: unit + every campaign, WhatsApp, template and follow-up suite + documentation truth (4,052 passed, 1 failed: the documented operation count, 217 -> 218, fixed; 1 tmpfs skip); every route-walking suite (231 passed); personalisation (7 integration, 8 unit); migration-built: parity, downgrade atomicity, personalisation (16) |
 | 8 | Draft lifecycle, search, idempotent create, activity | committed | a2e9c91 | unit + every campaign, WhatsApp, template, follow-up, audit, retention, metric and route-walking suite (4,313 passed, 1 failed: CPF-01, a pre-existing test-isolation defect, fixed in 3980c37); drafts (13); migration-built: parity, downgrade atomicity, drafts (22) |
 | 9 | Segments, contact picker | committed | 0889109 | unit + campaign, WhatsApp, template, follow-up, contact, lead, audit, retention, metric, route-walking suites (4,396 passed, 4 failed: 2 stubs without `segment_id` - intended; 2 = CPF-02, fixed in its own commit); segments + picker (7); migration-built: parity, downgrade atomicity, segments |
-| 10 | Test send | committed | (this commit) | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
-| 11 | Results, summary, progress, CSV export | not started | | |
+| 10 | Test send | committed | 7bfd4c5 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
+| 11 | Results, summary, progress, CSV export | committed | (this commit) | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
 | 12 | Rate cards, cost estimate | not started | | |
 | 13 | Invariants, observability, documentation, contract | not started | | |
 | 14 | Mutation matrix | not started | | |
@@ -491,3 +491,58 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
 - `tests/integration/campaign_api.py::client_for` takes `overrides` (the messaging service on the
   fake Meta, a test media store).
 - `docs/API.md` states 229 operations; `docs/AUTHORIZATION.md` lists `test-send` (ADMIN).
+
+## Phase 11 notes (PG-10, PG-11, PG-12, PG-14)
+
+- Migration **0118**: `campaign_recipients.replied_at`, `opted_out_after_at` (nullable,
+  catalogue-only); `ix_campaign_recipients_tenant_id_contact_id_sent_at` (partial, sent rows)
+  `CONCURRENTLY`. Downgrade refuses while any recipient records either.
+- Replies (`app/services/campaign_results.py`): in `ConversationProjectionService`, right after a
+  new inbound message is stored and the conversation touched, one bounded UPDATE marks the contact's
+  **latest** accepted copy on that number within `CAMPAIGN_REPLY_ATTRIBUTION_SECONDS` (259,200 =
+  72 h) - only if not marked already. A replay never reaches it (the projection runs for new
+  messages only). Why the latest: a reply answers the last thing a customer received; crediting
+  every campaign of three days would count one answer several times.
+- Opt-outs after: in `record_opt_out` (the one writer), when the source is the customer, the same
+  UPDATE marks the latest copy on any number of the workspace (an opt-out covers every number of the
+  channel, ENT-19). A colleague's opt-out is not a campaign result. A STOP is both a reply and an
+  opt-out after.
+- The window setting is read through `get_settings()` at the hook (the same pattern as
+  `capacity_reduction.py`), so the ingestion chain's constructors are unchanged.
+- Statistics gain `replied`, `opted_out_after` and `reasons: [{status, reason_code, provider_code,
+  count}]` (`reason_code` "unrecorded" when none; `provider_code` Meta's `failure_code`), every
+  recipient once, summing to `total`. The query became `statistics_of(<campaign predicate>)`.
+- `GET /campaigns/summary` (member, campaign bucket): campaigns **created** in `[from, to)` (aware
+  datetimes; naive -> 422 `summary_window_needs_offset`; by default from local midnight 30 days ago
+  in the workspace's zone to now), optionally on one number: `campaigns_by_status`, recipients
+  (sent, delivered, read, failed, skipped, held, replied, opted_out_after, pending), rates (delivery
+  = delivered/sent, read = read/delivered, reply = replied/sent; null when dividing by zero), and
+  the window in UTC and local. Computed by `statistics_of` over the chosen campaigns - the same
+  queries as a campaign's own statistics, never a page of the list.
+- `GET /campaigns/progress?ids=` (member, 1-20 ids; 21 -> 422; an id not of this workspace -> 404):
+  per campaign status, waiting reason, resumes_at (UTC and local), counts (sent, delivered, read,
+  failed, skipped, pending, replied), ETA and updated_at, in two grouped queries plus the ETA per
+  campaign; `poll_after_seconds` 10 while any is scheduled or running, 60 otherwise. `ETag` over
+  everything but the ETA (which drifts with the clock); `If-None-Match` equal -> 304. Both
+  routes are declared before `/{campaign_id}` so their paths are not read as ids.
+- `GET /campaigns/{id}/recipients/export.csv` (admin): filters `status` and `reason`; UTF-8 with a
+  BOM; columns contact_name, phone (wa_id), status, reason_code, provider_code, sent_at,
+  delivered_at, read_at, replied_at, opted_out_after in the workspace's zone with the offset; a cell
+  starting with `=`, `+`, `-`, `@`, tab or carriage return is prefixed with `'`
+  (`app/services/campaign_export.py`). `CAMPAIGN_EXPORTS_PER_HOUR` (5) per workspace in a moving
+  hour, counted from the audit trail itself under a `CAMPAIGN_EXPORTS` advisory lock (429
+  `export_limit`, `details.reset_at`); audited `campaign_recipients_exported` with the row count and
+  filters, never the rows; `wasla_campaign_events_total{event="exported"}`. **Streaming, honestly:**
+  the rows are read in pages of 1,000 inside the request, while its transaction is open, and the
+  body is sent in chunks of 500 rows; a list is at most 10,000 people (MAX_AUDIENCE_SIZE). A
+  generator reading the database after the route returned would outlive the request's session.
+- Tests (`test_campaign_results.py`, 7): reply 10 min after -> one, a second -> still one (time
+  unmoved), 80 h -> none; two campaigns 30 h and 2 h before -> the newer only; STOP -> replied and
+  opted out after; reasons sum to total; summary = the sum of three campaigns' statistics while the
+  list pages one at a time, rates, naive window 422; progress 20 ids, 304, change -> 200, 21 -> 422,
+  unknown -> 404; export BOM, Arabic intact, `=1+1` and `@SUM(A1)` neutralised, local offsets,
+  filter, 6th in an hour 429, member 403, five audit entries with counts and no names.
+- `docs/API.md` states 232 operations; `docs/AUTHORIZATION.md` lists summary, progress (MEMBER) and
+  export (ADMIN).
+- Intended test change: `test_campaign_endpoints.py::test_statistics_report_delivery_as_well_as_outcome`
+  expects `replied`, `opted_out_after` and `reasons` in the statistics body.

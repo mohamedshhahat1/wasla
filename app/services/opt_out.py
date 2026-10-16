@@ -33,6 +33,7 @@ from app.core.logging import get_logger
 from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import Channel
 from app.repositories.consent_repository import ContactConsentRepository
+from app.services.campaign_results import attribute_opt_out
 
 logger = get_logger(__name__)
 
@@ -161,6 +162,10 @@ async def record_opt_out(
     consent.marketing_opt_out_at = at
     consent.opt_out_source = source
     consent.opt_out_via = via
+    if source is OptOutSource.CUSTOMER:
+        # The customer's own refusal soon after a campaign reached them
+        # (PG-10); a colleague's note is not the campaign's result.
+        await attribute_opt_out(session, tenant_id=tenant_id, contact_id=contact_id, at=at)
     logger.info(
         "campaign.opt_out_recorded",
         extra={

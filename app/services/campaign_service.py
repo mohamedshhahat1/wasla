@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
@@ -66,7 +66,7 @@ from app.core.telemetry import (
     record_campaign_wait,
 )
 from app.db import advisory_locks
-from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
@@ -117,6 +117,7 @@ from app.repositories.campaign_repository import (
     CampaignRecipientRepository,
     CampaignRepository,
     CampaignStatistics,
+    ExportRow,
 )
 from app.repositories.channel_repository import (
     ChannelConnectionRepository,
@@ -205,6 +206,11 @@ PARAMETER_FALLBACK_REQUIRED_CODE: Final = "parameter_fallback_required"
 PARAMETER_FALLBACK_TOO_LONG_CODE: Final = "parameter_fallback_too_long"
 PARAMETER_KEY_UNKNOWN_CODE: Final = "parameter_key_unknown"
 PARAMETER_SOURCE_NOT_ALLOWED_CODE: Final = "parameter_source_not_allowed"
+
+# The export's stable error code, window and page (PG-14).
+EXPORT_LIMIT_CODE: Final = "export_limit"
+EXPORT_WINDOW: Final = timedelta(hours=1)
+EXPORT_PAGE: Final = 1000
 
 # The test send's stable error codes (PG-09).
 CAMPAIGN_NOT_TESTABLE_CODE: Final = "campaign_not_testable"
@@ -437,6 +443,161 @@ class CampaignService:
         return Page(
             items=[entry for entry in shown if entry is not None], next_cursor=page.next_cursor
         )
+
+    async def summary(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        account_id: uuid.UUID | None = None,
+    ) -> tuple[dict[str, int], CampaignStatistics]:
+        """Every campaign of the workspace created in `[since, until)` (PG-11).
+
+        Campaigns by status, and their recipients' statistics by the very
+        queries a single campaign's use - aggregate SQL, never a page of a list.
+        """
+        if until <= since:
+            raise ValidationError("The window's end must come after its start.")
+        chosen = select(Campaign.id).where(
+            Campaign.tenant_id == self._tenant_id,
+            Campaign.created_at >= since,
+            Campaign.created_at < until,
+        )
+        if account_id is not None:
+            chosen = chosen.where(Campaign.account_id == account_id)
+        by_status = {
+            status.value: int(count)
+            for status, count in (
+                await self._session.execute(
+                    select(Campaign.status, func.count())
+                    .where(Campaign.id.in_(chosen))
+                    .group_by(Campaign.status)
+                )
+            ).all()
+        }
+        statistics = await self._recipients.statistics_of(CampaignRecipient.campaign_id.in_(chosen))
+        return by_status, statistics
+
+    async def progress(
+        self, campaign_ids: Sequence[uuid.UUID]
+    ) -> tuple[list[Campaign], dict[uuid.UUID, dict[str, int]]]:
+        """Up to twenty campaigns' live state in two queries (PG-12).
+
+        An id of another workspace, or none, is not found.
+        """
+        unique = list(dict.fromkeys(campaign_ids))
+        found = {
+            campaign.id: campaign
+            for campaign in (
+                await self._session.execute(
+                    select(Campaign).where(
+                        Campaign.tenant_id == self._tenant_id, Campaign.id.in_(unique)
+                    )
+                )
+            ).scalars()
+        }
+        if len(found) != len(unique):
+            raise NotFoundError("One of those campaigns does not exist.")
+        return [found[campaign_id] for campaign_id in unique], await self._recipients.progress(
+            unique
+        )
+
+    async def export_recipients(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        status: RecipientStatus | None,
+        reason: RecipientReason | None,
+        actor: User,
+        per_hour: int,
+        now: datetime | None = None,
+    ) -> tuple[Campaign, Callable[[], AsyncIterator[ExportRow]]]:
+        """Allow and audit one CSV export, and return its rows a page at a time (PG-14).
+
+        At most `per_hour` exports per workspace in a moving hour, counted from
+        the audit trail itself under the export's advisory lock (429
+        `export_limit`). Audited with the filters and the row count - never
+        the rows. The rows are read in pages of 1,000 by recipient id.
+        """
+        moment = now or datetime.now(UTC)
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    advisory_locks.CAMPAIGN_EXPORTS, self._tenant_id.int & 0x7FFFFFFF
+                )
+            )
+        )
+        recent = list(
+            (
+                await self._session.execute(
+                    select(AuditLog.occurred_at)
+                    .where(
+                        AuditLog.tenant_id == self._tenant_id,
+                        AuditLog.action == AuditAction.CAMPAIGN_RECIPIENTS_EXPORTED,
+                        AuditLog.occurred_at > moment - EXPORT_WINDOW,
+                    )
+                    .order_by(AuditLog.occurred_at, AuditLog.id)
+                )
+            ).scalars()
+        )
+        if len(recent) >= per_hour:
+            raise RateLimitedError(
+                f"A workspace may export {per_hour} recipient lists an hour.",
+                error_code=EXPORT_LIMIT_CODE,
+                details={"reset_at": (recent[0] + EXPORT_WINDOW).isoformat()},
+            )
+        total = int(
+            await self._session.scalar(
+                select(func.count())
+                .select_from(CampaignRecipient)
+                .where(
+                    CampaignRecipient.tenant_id == self._tenant_id,
+                    CampaignRecipient.campaign_id == campaign.id,
+                    *((CampaignRecipient.status == status,) if status is not None else ()),
+                    *(
+                        (CampaignRecipient.reason_code == reason.value,)
+                        if reason is not None
+                        else ()
+                    ),
+                )
+            )
+            or 0
+        )
+        self._audit.record(
+            AuditAction.CAMPAIGN_RECIPIENTS_EXPORTED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={
+                "rows": total,
+                "filters": {
+                    "status": status.value if status is not None else None,
+                    "reason_code": reason.value if reason is not None else None,
+                },
+            },
+        )
+        await record_campaign_event("exported")
+        recipients = self._recipients
+
+        async def pages() -> AsyncIterator[ExportRow]:
+            after: uuid.UUID | None = None
+            while True:
+                page = await recipients.export_rows(
+                    campaign.id,
+                    status=status,
+                    reason=reason.value if reason is not None else None,
+                    after=after,
+                    limit=EXPORT_PAGE,
+                )
+                for row in page:
+                    yield row
+                if len(page) < EXPORT_PAGE:
+                    return
+                after = page[-1].id
+
+        return campaign, pages
 
     async def statistics(self, campaign_id: uuid.UUID) -> CampaignStatistics:
         campaign = await self._campaigns.require_by_id(campaign_id)

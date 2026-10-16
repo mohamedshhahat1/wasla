@@ -132,6 +132,12 @@ def local(at: datetime, name: str) -> datetime:
     return at.astimezone(zone(name))
 
 
+def local_midnight(at: datetime, name: str) -> datetime:
+    """The start of `at`'s local day in zone `name`, as an aware instant (DST-correct)."""
+    day = local(at, name).date()
+    return datetime(day.year, day.month, day.day, tzinfo=zone(name))
+
+
 def _label(name: str) -> str:
     parts = name.split("/")
     city = parts[-1].replace("_", " ")

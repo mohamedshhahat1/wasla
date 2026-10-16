@@ -275,6 +275,9 @@ async def test_statistics_report_delivery_as_well_as_outcome(
         "total": 4,
         "failed_after_send": 0,
         "held": 0,
+        "replied": 0,
+        "opted_out_after": 0,
+        "reasons": [],
     }
 
 

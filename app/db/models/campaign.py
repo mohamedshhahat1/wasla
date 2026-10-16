@@ -552,6 +552,15 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
             "id",
             postgresql_where=text("status = 'pending'"),
         ),
+        # A contact's latest accepted copies, newest first: what a reply or an
+        # opt-out is attributed to (PG-10). Partial: unsent rows never are. 0118.
+        Index(
+            "ix_campaign_recipients_tenant_id_contact_id_sent_at",
+            "tenant_id",
+            "contact_id",
+            text("sent_at DESC"),
+            postgresql_where=text("sent_at IS NOT NULL"),
+        ),
         Index(
             "ix_campaign_recipients_participant_identity_id",
             "participant_identity_id",
@@ -632,6 +641,14 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     # The send uses exactly these. Null for a campaign with nothing personal.
     # A copy of a name per row: retention is CMQ-08. 0114.
     rendered_parameters: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # The customer answered on the campaign's number within the attribution
+    # window after this copy was accepted - this copy being their latest
+    # (PG-10). Recorded once, at ingestion. 0118.
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The customer opted out within the window after this copy, their latest.
+    opted_out_after_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     @property
     def is_pending(self) -> bool:

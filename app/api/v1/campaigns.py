@@ -16,10 +16,12 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, File, Header, Query, Response, UploadFile, status
+from fastapi import APIRouter, File, Header, Query, Request, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -36,6 +38,7 @@ from app.api.uploads import read_capped
 from app.core.dependencies import SettingsDep
 from app.core.exceptions import ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
+from app.core.timezones import local, local_midnight
 from app.db.models.campaign import (
     MAX_CREATE_KEY_LENGTH,
     Campaign,
@@ -43,17 +46,22 @@ from app.db.models.campaign import (
     RecipientReason,
     RecipientStatus,
 )
+from app.repositories.campaign_repository import ExportRow
 from app.schemas.campaign import (
     AudiencePreviewRequest,
     AudiencePreviewResponse,
     AudienceRequest,
     CampaignActivityRead,
     CampaignCreateRequest,
+    CampaignProgressItem,
+    CampaignProgressRead,
     CampaignRead,
     CampaignScheduleRequest,
     CampaignStatisticsRead,
+    CampaignSummaryRead,
     CampaignUpdateRequest,
     DeliveryPlanRead,
+    EtaRead,
     HeaderMediaRead,
     HeaderMediaUploadRead,
     MessagePreviewRead,
@@ -64,6 +72,7 @@ from app.schemas.campaign import (
     TestSendRequest,
 )
 from app.schemas.conversation import CursorPage, MessageRead
+from app.services.campaign_export import csv_header, csv_rows
 from app.services.campaign_planner import CampaignPlanner
 from app.services.campaign_service import (
     CAMPAIGN_VERSION_REQUIRED_CODE,
@@ -96,6 +105,20 @@ CreateKeyHeader = Annotated[
 def _request_hash(payload: CampaignCreateRequest) -> str:
     canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# The progress route's bound and polling advice (PG-12).
+MAX_PROGRESS_IDS = 20
+POLL_LIVE_SECONDS = 10
+POLL_IDLE_SECONDS = 60
+# The summary's default window, in days (PG-11).
+SUMMARY_DEFAULT_DAYS = 30
+SUMMARY_WINDOW_NEEDS_OFFSET_CODE = "summary_window_needs_offset"
+CSV_CHUNK_ROWS = 500
+
+
+def _rate(part: int, whole: int) -> float | None:
+    return round(part / whole, 4) if whole else None
 
 
 def _version(if_match: str) -> int:
@@ -434,6 +457,119 @@ async def preview_audience(
     return AudiencePreviewResponse(account_id=payload.account_id, size=size)
 
 
+@router.get("/summary", response_model=CampaignSummaryRead, summary="KPI cards")
+async def campaigns_summary(
+    workspace: ActiveWorkspaceDep,
+    campaigns: CampaignServiceDep,
+    since: Annotated[datetime | None, Query(alias="from")] = None,
+    until: Annotated[datetime | None, Query(alias="to")] = None,
+    account_id: uuid.UUID | None = None,
+) -> CampaignSummaryRead:
+    """Every campaign created in the window, by aggregate SQL (PG-11).
+
+    `from` / `to` need their UTC offsets; by default the last 30 days, from
+    midnight in the workspace's own time zone, to now.
+    """
+    timezone = workspace.tenant.timezone
+    now = datetime.now(UTC)
+    for name, value in (("from", since), ("to", until)):
+        if value is not None and value.utcoffset() is None:
+            raise ValidationError(
+                f"`{name}` needs a UTC offset, for example 2026-10-01T00:00:00+03:00.",
+                error_code=SUMMARY_WINDOW_NEEDS_OFFSET_CODE,
+            )
+    start = since or local_midnight(now - timedelta(days=SUMMARY_DEFAULT_DAYS), timezone)
+    end = until or now
+    by_status, statistics = await campaigns.summary(since=start, until=end, account_id=account_id)
+    return CampaignSummaryRead(
+        campaigns_by_status=by_status,
+        recipients={
+            "sent": statistics.sent,
+            "delivered": statistics.delivered,
+            "read": statistics.read,
+            "failed": statistics.failed,
+            "skipped": statistics.skipped,
+            "held": statistics.held,
+            "replied": statistics.replied,
+            "opted_out_after": statistics.opted_out_after,
+            "pending": statistics.pending,
+        },
+        rates={
+            "delivery": _rate(statistics.delivered, statistics.sent),
+            "read": _rate(statistics.read, statistics.delivered),
+            "reply": _rate(statistics.replied, statistics.sent),
+        },
+        window={
+            "from": start,
+            "to": end,
+            "from_local": local(start, timezone),
+            "to_local": local(end, timezone),
+            "timezone": timezone,
+        },
+    )
+
+
+@router.get(
+    "/progress",
+    response_model=CampaignProgressRead,
+    summary="Live state of up to 20 campaigns",
+    responses={304: {"description": "Nothing changed since the ETag sent"}},
+)
+async def campaigns_progress(
+    request: Request,
+    workspace: ActiveWorkspaceDep,
+    campaigns: CampaignServiceDep,
+    planner: CampaignPlannerDep,
+    ids: Annotated[list[uuid.UUID], Query(min_length=1, max_length=MAX_PROGRESS_IDS)],
+) -> Response:
+    """One request for every campaign the page shows (PG-12).
+
+    Poll every `poll_after_seconds` (10 while any is live, 60 otherwise) with
+    the last `ETag` as `If-None-Match`: 304 when nothing changed. Counted in
+    the campaign rate bucket like any request.
+    """
+    found, counts = await campaigns.progress(ids)
+    timezone = workspace.tenant.timezone
+    now = datetime.now(UTC)
+    items = []
+    for campaign in found:
+        eta = await planner.eta(campaign, now=now)
+        items.append(
+            CampaignProgressItem(
+                id=campaign.id,
+                status=campaign.status,
+                waiting_reason=campaign.waiting_reason,
+                resumes_at=campaign.resumes_at,
+                resumes_at_local=(
+                    local(campaign.resumes_at, timezone) if campaign.resumes_at else None
+                ),
+                counts=counts[campaign.id],
+                eta=EtaRead.from_eta(eta, timezone=timezone),
+                updated_at=campaign.updated_at,
+            )
+        )
+    live_any = any(
+        item.status in (CampaignStatus.SCHEDULED, CampaignStatus.RUNNING) for item in items
+    )
+    body = CampaignProgressRead(
+        items=items, poll_after_seconds=POLL_LIVE_SECONDS if live_any else POLL_IDLE_SECONDS
+    )
+    # The ETag ignores the ETA's own clock-driven drift: it changes when a
+    # count, a status or a wait changes.
+    stable = [
+        {key: value for key, value in item.model_dump(mode="json").items() if key != "eta"}
+        for item in items
+    ]
+    tag = '"' + hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()[:32] + '"'
+    if request.headers.get("If-None-Match") == tag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": tag})
+    return Response(
+        content=body.model_dump_json(),
+        media_type="application/json",
+        headers={"ETag": tag, "Cache-Control": "no-cache"},
+    )
+
+
 @router.get("/{campaign_id}", response_model=CampaignRead, summary="One campaign")
 async def get_campaign(
     campaign_id: uuid.UUID,
@@ -588,6 +724,62 @@ async def campaign_statistics(
 ) -> CampaignStatisticsRead:
     """`delivered` and `read` come from Meta's own status webhooks, not from us."""
     return CampaignStatisticsRead.from_statistics(await campaigns.statistics(campaign_id))
+
+
+@router.get(
+    "/{campaign_id}/recipients/export.csv",
+    summary="Download the recipient list as CSV",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"text/csv": {}}}},
+)
+async def export_recipients(
+    campaign_id: uuid.UUID,
+    workspace: TenantAdminDep,
+    campaigns: CampaignServiceDep,
+    settings: SettingsDep,
+    status_filter: Annotated[RecipientStatus | None, Query(alias="status")] = None,
+    reason: RecipientReason | None = None,
+) -> StreamingResponse:
+    """Every recipient as CSV, UTF-8 with a BOM so Excel opens Arabic names (PG-14).
+
+    Columns: contact_name, phone, status, reason_code, provider_code, sent_at,
+    delivered_at, read_at, replied_at, opted_out_after - times in the
+    workspace's own zone with their offset. A cell that a spreadsheet would read
+    as a formula is prefixed with `'`. Admin only; at most
+    `CAMPAIGN_EXPORTS_PER_HOUR` per workspace (429 `export_limit`). Audited
+    with the filters and the row count, never the rows.
+
+    The rows are read in pages of 1,000 inside the request - while its
+    transaction is open - and the body is streamed in chunks; a list is at most
+    10,000 people.
+    """
+    campaign, pages = await campaigns.export_recipients(
+        campaign_id,
+        status=status_filter,
+        reason=reason,
+        actor=workspace.user,
+        per_hour=settings.campaign_exports_per_hour,
+    )
+    chunks = [csv_header()]
+    batch: list[ExportRow] = []
+    async for row in pages():
+        batch.append(row)
+        if len(batch) == CSV_CHUNK_ROWS:
+            chunks.append(csv_rows(batch, timezone=workspace.tenant.timezone))
+            batch = []
+    if batch:
+        chunks.append(csv_rows(batch, timezone=workspace.tenant.timezone))
+
+    async def body() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    filename = f"campaign-{campaign.id}-recipients.csv"
+    return StreamingResponse(
+        body(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{campaign_id}/recipients", summary="Who a campaign reached")
