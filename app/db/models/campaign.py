@@ -289,6 +289,9 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_campaigns_tenant_id_status", "tenant_id", "status"),
         Index("ix_campaigns_tenant_id_created_at", "tenant_id", "created_at"),
         Index("ix_campaigns_account_id", "account_id"),
+        # The target of a tenant-composite foreign key (ADR-100): a create key
+        # names a campaign of its own workspace (PG-08). 0115.
+        Index("uq_campaigns_tenant_id_id", "tenant_id", "id", unique=True),
         Index("ix_campaigns_template_id", "template_id"),
         # Which campaigns name an asset: retention keeps a live campaign's
         # file (HM-07), and the asset's foreign key is checked through it.
@@ -473,6 +476,10 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # skipped `send_window_closed` and the campaign completes. An offer that
     # ends on Friday stops on Friday, however long the limit spread it. 0112.
     send_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A draft's edit counter (PG-03): an edit names the version it was made
+    # from, and an edit made from an older one is refused 409. Bumped by the
+    # draft edit and by writing the audience, never by the worker. 0115.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     @property
     def is_running(self) -> bool:
@@ -617,10 +624,51 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
         return self.attempts >= MAX_RECIPIENT_ATTEMPTS
 
 
+#: The longest `Idempotency-Key` a campaign create accepts (PG-08).
+MAX_CREATE_KEY_LENGTH: Final = 128
+
+
+class CampaignCreateKey(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
+    """A retried "create the draft" names the draft it already made (PG-08).
+
+    The composer's first step sends an `Idempotency-Key`; the same key in the
+    same workspace within a day returns that draft instead of making a second.
+    `request_hash` is the request it was first used with: the key reused for a
+    different request is refused rather than answered with a draft the person
+    did not ask for. Rows older than a day are deleted by the retention sweep.
+    0115.
+    """
+
+    __tablename__ = "campaign_create_keys"
+    __table_args__ = (
+        Index("ix_campaign_create_keys_tenant_id", "tenant_id"),
+        Index("ix_campaign_create_keys_created_at", "created_at"),
+        Index("ix_campaign_create_keys_campaign_id", "campaign_id"),
+        UniqueConstraint("tenant_id", "key", name="uq_campaign_create_keys_tenant_id_key"),
+        UniqueConstraint("tenant_id", "id", name="uq_campaign_create_keys_tenant_id_id"),
+        # The draft is one of the key's own workspace (ADR-100); deleting the
+        # draft deletes its key.
+        ForeignKeyConstraint(
+            ["tenant_id", "campaign_id"],
+            ["campaigns.tenant_id", "campaigns.id"],
+            name="fk_campaign_create_keys_tenant_campaign",
+            ondelete="CASCADE",
+        ),
+    )
+
+    key: Mapped[str] = mapped_column(String(MAX_CREATE_KEY_LENGTH), nullable=False)
+    campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 __all__ = [
     "CAMPAIGN_STATUS_TYPE",
     "DEFAULT_MESSAGES_PER_MINUTE",
     "MAX_CAMPAIGN_NAME_LENGTH",
+    "MAX_CREATE_KEY_LENGTH",
     "MAX_MESSAGES_PER_MINUTE",
     "MAX_RECIPIENT_ATTEMPTS",
     "MIN_MESSAGES_PER_MINUTE",
@@ -628,6 +676,7 @@ __all__ = [
     "RECIPIENT_STATUS_TYPE",
     "TERMINAL_CAMPAIGN_STATUSES",
     "Campaign",
+    "CampaignCreateKey",
     "CampaignRecipient",
     "CampaignStatus",
     "CampaignStopReason",

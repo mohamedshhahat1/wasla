@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, Select, and_, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, and_, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -27,13 +28,14 @@ from app.core.pagination import Cursor
 from app.core.telemetry import record_campaign_event
 from app.db.models.campaign import (
     Campaign,
+    CampaignCreateKey,
     CampaignRecipient,
     CampaignStatus,
     RecipientStatus,
 )
 from app.db.models.conversation import Contact, Conversation, Message, MessageStatus
 from app.db.models.lead import Lead, LeadStatus
-from app.repositories.base import BaseRepository, TenantScopedRepository
+from app.repositories.base import BaseRepository, TenantScopedRepository, escape_like
 from app.repositories.consent_repository import refused
 
 logger = get_logger(__name__)
@@ -260,13 +262,20 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
         account_id: uuid.UUID | None = None,
         limit: int = 50,
         after: Cursor | None = None,
+        name_contains: str | None = None,
     ) -> list[Campaign]:
-        """Newest first, paged by keyset."""
+        """Newest first, paged by keyset.
+
+        `name_contains` matches anywhere in the name, ignoring case, as typed:
+        `%` and `_` are the characters they are, not wildcards (PG-01).
+        """
         query = self._select()
         if statuses:
             query = query.where(Campaign.status.in_(statuses))
         if account_id is not None:
             query = query.where(Campaign.account_id == account_id)
+        if name_contains:
+            query = query.where(Campaign.name.ilike(f"%{escape_like(name_contains)}%", escape="\\"))
         if after is not None:
             query = query.where(_after_created(after))
         return await self._all(
@@ -299,6 +308,65 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
                 created_by_id=created_by_id,
             )
         )
+
+    async def created_with_key(
+        self, key: str, *, since: datetime
+    ) -> tuple[CampaignCreateKey, Campaign | None] | None:
+        """The draft a create key made in the last day, and the key's row (PG-08)."""
+        row = await self.session.scalar(
+            select(CampaignCreateKey).where(
+                CampaignCreateKey.tenant_id == self.tenant_id,
+                CampaignCreateKey.key == key,
+                CampaignCreateKey.created_at >= since,
+            )
+        )
+        if row is None:
+            return None
+        return row, await self.get_by_id(row.campaign_id)
+
+    async def claim_create_key(
+        self, *, key: str, campaign_id: uuid.UUID, request_hash: str, stale_before: datetime
+    ) -> bool:
+        """Record that `key` made `campaign_id`; False when another request holds it.
+
+        A key older than a day is forgotten first. The insert waits for a
+        concurrent request holding the same key to commit or roll back, so two
+        retries racing each other make exactly one draft.
+        """
+        await self.session.execute(
+            delete(CampaignCreateKey).where(
+                CampaignCreateKey.tenant_id == self.tenant_id,
+                CampaignCreateKey.key == key,
+                CampaignCreateKey.created_at < stale_before,
+            )
+        )
+        result = await self.session.execute(
+            pg_insert(CampaignCreateKey)
+            .values(
+                id=uuid.uuid4(),
+                tenant_id=self.tenant_id,
+                key=key,
+                campaign_id=campaign_id,
+                request_hash=request_hash,
+            )
+            .on_conflict_do_nothing(index_elements=["tenant_id", "key"])
+            .returning(CampaignCreateKey.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+
+async def prune_create_keys(session: AsyncSession, *, before: datetime) -> int:
+    """Delete every workspace's create keys older than `before` (PG-08, retention).
+
+    Unscoped on purpose: the retention sweep runs for the whole platform, and a
+    key past its day names nothing anybody can ask for again.
+    """
+    result = await session.execute(
+        delete(CampaignCreateKey)
+        .where(CampaignCreateKey.created_at < before)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
 class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
@@ -442,6 +510,33 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
             )
             .values(status=RecipientStatus.SKIPPED, reason_code=reason, last_error=detail)
             .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def ever_sent(self, campaign_id: uuid.UUID) -> bool:
+        """Whether anybody on this list was ever handed to Meta (PG-04)."""
+        found = await self.session.scalar(
+            select(CampaignRecipient.id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                or_(
+                    CampaignRecipient.sent_at.is_not(None),
+                    CampaignRecipient.message_id.is_not(None),
+                    CampaignRecipient.attempts > 0,
+                ),
+            )
+            .limit(1)
+        )
+        return found is not None
+
+    async def delete_all(self, campaign_id: uuid.UUID) -> int:
+        """Drop a draft's written list: its rules stay on the campaign (PG-03, PG-04)."""
+        result = await self.session.execute(
+            delete(CampaignRecipient).where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+            )
         )
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
 

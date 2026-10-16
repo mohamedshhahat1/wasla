@@ -48,6 +48,7 @@ from app.channels.registry import PAUSED_RECHECK, ChannelPausedError
 from app.channels.throughput import ConnectionThrottledError
 from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import (
+    ConflictError,
     DependencyUnavailableError,
     ExternalServiceError,
     NotFoundError,
@@ -104,6 +105,7 @@ from app.integrations.whatsapp.client import (
     TEMPLATE_WITHDRAWN_CODES,
     MediaUploadRefusedError,
 )
+from app.repositories.audit_repository import AuditLogRepository
 from app.repositories.campaign_media_repository import CampaignHeaderMediaRepository
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
@@ -133,6 +135,7 @@ from app.services.business_initiated_ledger import (
     MessagingLimitUnknownError,
     PortfolioLimitReachedError,
 )
+from app.services.campaign_activity import ActivityEntry, activity_entry
 from app.services.campaign_header_media_service import (
     CampaignHeaderMediaService,
     HeaderMediaUnavailableError,
@@ -198,6 +201,29 @@ PARAMETER_FALLBACK_REQUIRED_CODE: Final = "parameter_fallback_required"
 PARAMETER_FALLBACK_TOO_LONG_CODE: Final = "parameter_fallback_too_long"
 PARAMETER_KEY_UNKNOWN_CODE: Final = "parameter_key_unknown"
 PARAMETER_SOURCE_NOT_ALLOWED_CODE: Final = "parameter_source_not_allowed"
+
+# The draft lifecycle's stable error codes (PG-03, PG-04, PG-08).
+CAMPAIGN_NOT_EDITABLE_CODE: Final = "campaign_not_editable"
+CAMPAIGN_NOT_DELETABLE_CODE: Final = "campaign_not_deletable"
+CAMPAIGN_VERSION_CONFLICT_CODE: Final = "campaign_version_conflict"
+CAMPAIGN_VERSION_REQUIRED_CODE: Final = "campaign_version_required"
+IDEMPOTENCY_KEY_REUSED_CODE: Final = "idempotency_key_reused"
+# How long a create key names its draft (PG-08).
+CREATE_KEY_LIFETIME: Final = timedelta(hours=24)
+# What a draft edit may change (PG-03), and which of those are its composition.
+COMPOSITION_FIELDS: Final = frozenset(
+    {
+        "account_id",
+        "template_id",
+        "variables",
+        "header_variables",
+        "button_parameters",
+        "body_mappings",
+        "header_mappings",
+        "header_media_id",
+    }
+)
+DRAFT_FIELDS: Final = COMPOSITION_FIELDS | {"name", "description", "messages_per_minute"}
 
 # The stable error code for a `scheduled_at` without a UTC offset (CMP-15).
 NAIVE_SCHEDULE_CODE: Final = "scheduled_at_needs_offset"
@@ -363,6 +389,7 @@ class CampaignService:
         account_id: uuid.UUID | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        name_contains: str | None = None,
     ) -> Page[Campaign]:
         after = Cursor.decode(cursor) if cursor else None
         rows = await self._campaigns.list_campaigns(
@@ -370,11 +397,31 @@ class CampaignService:
             account_id=account_id,
             limit=limit,
             after=after,
+            name_contains=name_contains,
         )
         return paginate(
             rows,
             limit=limit,
             key=lambda row: Cursor(sort_value=row.created_at, id=row.id),
+        )
+
+    async def activity(
+        self, campaign_id: uuid.UUID, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[ActivityEntry]:
+        """A campaign's activity, newest first (PG-05); another workspace's is not found."""
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        after = Cursor.decode(cursor) if cursor else None
+        rows = await AuditLogRepository(self._session, tenant_id=self._tenant_id).campaign_activity(
+            campaign.id,
+            limit=limit,
+            before=(after.sort_value, after.id) if after and after.sort_value else None,
+        )
+        # Paged on the trail's rows, then shown: an entry the page does not
+        # show never ends a page early.
+        page = paginate(rows, limit=limit, key=lambda row: Cursor(row[0].occurred_at, row[0].id))
+        shown = [activity_entry(entry, name, campaign.id) for entry, name in page.items]
+        return Page(
+            items=[entry for entry in shown if entry is not None], next_cursor=page.next_cursor
         )
 
     async def statistics(self, campaign_id: uuid.UUID) -> CampaignStatistics:
@@ -424,6 +471,8 @@ class CampaignService:
         actor: User | None = None,
         body_mappings: list[Mapping] | None = None,
         header_mappings: list[Mapping] | None = None,
+        idempotency_key: str | None = None,
+        request_hash: str | None = None,
     ) -> Campaign:
         """Compose a draft. Nothing is sent and no audience exists yet.
 
@@ -443,7 +492,16 @@ class CampaignService:
         contact or their active lead, with a fallback - in place of
         `variables` and `header_variables`. Resolved per person when the
         audience is written.
+
+        **A retried create makes one draft** (PG-08): with `idempotency_key`,
+        the same key in this workspace within a day returns the draft it made;
+        the key reused for a different request (`request_hash`) is refused 409
+        `idempotency_key_reused`.
         """
+        if idempotency_key is not None:
+            earlier = await self._created_with(idempotency_key, request_hash)
+            if earlier is not None:
+                return earlier
         composition = await self._composition(
             account_id=account_id,
             template_id=template_id,
@@ -466,6 +524,27 @@ class CampaignService:
         )
         campaign.template_parameters = composition.stored()
         campaign.header_media_id = header_media_id
+        if idempotency_key is not None:
+            # The draft and its key in one savepoint: a concurrent retry that
+            # holds the key first makes this draft vanish and that one answer.
+            savepoint = await self._session.begin_nested()
+            await self._session.flush()
+            claimed = await self._campaigns.claim_create_key(
+                key=idempotency_key,
+                campaign_id=campaign.id,
+                request_hash=request_hash or "",
+                stale_before=datetime.now(UTC) - CREATE_KEY_LIFETIME,
+            )
+            if not claimed:
+                await savepoint.rollback()
+                earlier = await self._created_with(idempotency_key, request_hash)
+                if earlier is None:  # pragma: no cover - the holder rolled back
+                    raise ConflictError(
+                        "Another request with this key is still being handled. Try again.",
+                        error_code=IDEMPOTENCY_KEY_REUSED_CODE,
+                    )
+                return earlier
+            await savepoint.commit()
         # Flushed so the caller can read the generated id and the timestamps.
         # Without it a route serialising this row answers 500: the primary key
         # default and the server defaults are applied at flush, and the request
@@ -697,6 +776,8 @@ class CampaignService:
 
         campaign.audience = filters.as_dict()
         campaign.audience_size = len(already) + added
+        # Writing the list is an edit of the draft (PG-03).
+        campaign.version += 1
         # Audited (CMP-14) with how many and which filters - the number of
         # hand-picked contacts, never who they are.
         summary = filters.as_dict()
@@ -839,6 +920,240 @@ class CampaignService:
             )
         return previews
 
+    # ---------------------------------------------------------------- drafts
+
+    async def _created_with(self, key: str, request_hash: str | None) -> Campaign | None:
+        """The draft this create key already made in the last day, if any (PG-08)."""
+        found = await self._campaigns.created_with_key(
+            key, since=datetime.now(UTC) - CREATE_KEY_LIFETIME
+        )
+        if found is None:
+            return None
+        row, campaign = found
+        if row.request_hash != (request_hash or ""):
+            raise ConflictError(
+                "That idempotency key was already used for a different campaign.",
+                error_code=IDEMPOTENCY_KEY_REUSED_CODE,
+            )
+        return campaign
+
+    def _inputs(self, campaign: Campaign) -> dict[str, Any]:
+        """A draft's composition as `_composition` takes it: constants or mappings."""
+        stored = campaign.template_parameters or {}
+        body_sources = stored.get("body_sources")
+        header_sources = stored.get("header_sources")
+        return {
+            "account_id": campaign.account_id,
+            "template_id": campaign.template_id,
+            "variables": None if body_sources is not None else campaign.variables,
+            "header_variables": (
+                None
+                if header_sources is not None
+                else [str(value) for value in stored.get("header") or []] or None
+            ),
+            "button_parameters": {
+                int(entry["index"]): str(entry["value"])
+                for entry in stored.get("buttons") or []
+                if isinstance(entry, dict) and "index" in entry and "value" in entry
+            },
+            "header_media_id": campaign.header_media_id,
+            "body_mappings": (
+                [Mapping.from_dict(entry) for entry in body_sources]
+                if body_sources is not None
+                else None
+            ),
+            "header_mappings": (
+                [Mapping.from_dict(entry) for entry in header_sources]
+                if header_sources is not None
+                else None
+            ),
+        }
+
+    async def update_draft(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        version: int | None,
+        changes: dict[str, Any],
+        actor: User | None = None,
+    ) -> tuple[Campaign, bool]:
+        """Edit a draft (PG-03); returns it and whether its written list was cleared.
+
+        Drafts only, under the row lock, from the version the editor read:
+        another edit in between is refused 409 `campaign_version_conflict` with
+        the current version. Validated by the one validator `create` uses. A
+        change to the number, the template, the values or the header file
+        clears the written list - its people's values were resolved for the
+        old composition - and keeps its rules; the page writes it again.
+        Audited with the names of the changed fields, never their values.
+        """
+        unknown = set(changes) - DRAFT_FIELDS
+        if unknown:  # pragma: no cover - the request schema admits nothing else
+            raise ValidationError(f"Not editable: {', '.join(sorted(unknown))}.")
+        campaign = await self._campaigns.lock_by_id(campaign_id)
+        if campaign.status is not CampaignStatus.DRAFT:
+            raise ConflictError(
+                "Only a draft can be edited.", error_code=CAMPAIGN_NOT_EDITABLE_CODE
+            )
+        if version is None:
+            raise ValidationError(
+                "Say which version you edited: If-Match or `version`.",
+                error_code=CAMPAIGN_VERSION_REQUIRED_CODE,
+            )
+        if version != campaign.version:
+            raise ConflictError(
+                "Somebody changed this draft since you opened it. Reload it and edit again.",
+                error_code=CAMPAIGN_VERSION_CONFLICT_CODE,
+                details={"version": campaign.version},
+            )
+
+        changed: set[str] = set()
+        cleared = False
+        if set(changes) & COMPOSITION_FIELDS:
+            inputs = self._inputs(campaign)
+            # Constants and mappings replace each other: giving one drops the other.
+            for constants, mappings in (
+                ("variables", "body_mappings"),
+                ("header_variables", "header_mappings"),
+            ):
+                if constants in changes and mappings not in changes:
+                    inputs[mappings] = None
+                if mappings in changes and constants not in changes:
+                    inputs[constants] = None
+            for field in COMPOSITION_FIELDS & set(changes):
+                inputs[field] = changes[field]
+            inputs["button_parameters"] = dict(inputs["button_parameters"] or {})
+            composition = await self._composition(**inputs)
+            stored = composition.stored()
+            body = list(composition.parameters.body) or None
+            before = {
+                "account_id": campaign.account_id,
+                "template_id": campaign.template_id,
+                "variables": campaign.variables,
+                "template_parameters": campaign.template_parameters,
+                "header_media_id": campaign.header_media_id,
+            }
+            after = {
+                "account_id": inputs["account_id"],
+                "template_id": inputs["template_id"],
+                "variables": body,
+                "template_parameters": stored,
+                "header_media_id": inputs["header_media_id"],
+            }
+            changed |= {field for field in before if before[field] != after[field]}
+            if changed:
+                campaign.account_id = inputs["account_id"]
+                campaign.template_id = inputs["template_id"]
+                campaign.template_parameters = stored
+                campaign.variables = body
+                campaign.header_media_id = inputs["header_media_id"]
+                if await self._recipients.delete_all(campaign.id) or campaign.audience_size:
+                    cleared = True
+                campaign.audience_size = 0
+        if "name" in changes:
+            name = _validated_name(changes["name"])
+            if name != campaign.name:
+                campaign.name = name
+                changed.add("name")
+        if "description" in changes and changes["description"] != campaign.description:
+            campaign.description = changes["description"]
+            changed.add("description")
+        if "messages_per_minute" in changes:
+            rate = _validated_rate(changes["messages_per_minute"])
+            if rate != campaign.messages_per_minute:
+                campaign.messages_per_minute = rate
+                changed.add("messages_per_minute")
+        if not changed:
+            return campaign, False
+
+        campaign.version += 1
+        await self._session.flush()
+        # `updated_at` is the database's: read back, so the response can show it.
+        await self._session.refresh(campaign, ["updated_at"])
+        self._audit.record(
+            AuditAction.CAMPAIGN_UPDATED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"fields": sorted(changed), "audience_cleared": cleared},
+        )
+        logger.info(
+            "campaign.updated",
+            extra={"campaign_id": str(campaign.id), "fields": sorted(changed)},
+        )
+        return campaign, cleared
+
+    async def delete_draft(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> None:
+        """Delete a draft and its never-sent list (PG-04).
+
+        A scheduled campaign is cancelled first; anything else is refused 409
+        `campaign_not_deletable`. A campaign anybody was ever sent to is never
+        deletable, whatever its status says. Its header file stays: another
+        campaign may use it, and retention decides when it goes. The audit
+        entry keeps the id and the name.
+        """
+        campaign = await self._campaigns.lock_by_id(campaign_id)
+        if campaign.status is not CampaignStatus.DRAFT or await self._recipients.ever_sent(
+            campaign.id
+        ):
+            raise ConflictError(
+                "Only a draft nobody was sent can be deleted. Cancel a scheduled campaign first.",
+                error_code=CAMPAIGN_NOT_DELETABLE_CODE,
+            )
+        removed = await self._recipients.delete_all(campaign.id)
+        self._audit.record(
+            AuditAction.CAMPAIGN_DELETED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"name": campaign.name, "recipients": removed},
+        )
+        await self._session.delete(campaign)
+        await self._session.flush()
+        logger.info("campaign.deleted", extra={"campaign_id": str(campaign_id)})
+
+    async def duplicate(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
+        """A new draft composed like this campaign (PG-02).
+
+        Copies the name (" (copy)"), description, number, template, values and
+        their mappings, header file, rate and the audience's rules - never the
+        written list, the schedule, results, stop reasons, Meta's media id,
+        the lease or counters. Validated like a create: a template withdrawn or
+        a number disabled since is refused with create's codes.
+        """
+        source = await self._campaigns.require_by_id(campaign_id)
+        inputs = self._inputs(source)
+        composition = await self._composition(**inputs)
+        copy = self._campaigns.create(
+            account_id=source.account_id,
+            template_id=source.template_id,
+            name=_copy_name(source.name),
+            description=source.description,
+            variables=list(composition.parameters.body) or None,
+            messages_per_minute=source.messages_per_minute,
+            created_by_id=actor.id if actor is not None else None,
+        )
+        copy.template_parameters = composition.stored()
+        copy.header_media_id = source.header_media_id
+        copy.audience = dict(source.audience) if source.audience is not None else None
+        await self._session.flush()
+        self._audit.record(
+            AuditAction.CAMPAIGN_DUPLICATED,
+            actor=actor,
+            target_type="campaign",
+            target_id=copy.id,
+            target_label=copy.name,
+            meta={"source_id": str(source.id)},
+        )
+        logger.info(
+            "campaign.duplicated",
+            extra={"campaign_id": str(copy.id), "source_id": str(source.id)},
+        )
+        await record_campaign_event("duplicated")
+        return copy
+
     # -------------------------------------------------------------- lifecycle
 
     async def refresh_messaging_limit(self, campaign_id: uuid.UUID) -> None:
@@ -876,6 +1191,8 @@ class CampaignService:
         campaign = await self._campaigns.lock_by_id(campaign_id)
         if campaign.status not in SCHEDULABLE_FROM:
             raise ValidationError(f"A {campaign.status.value} campaign cannot be scheduled.")
+        # A paused or failed campaign scheduled again is resumed (PG-05).
+        resumed = campaign.status is not CampaignStatus.DRAFT
 
         pending = await self._recipients.pending_count(campaign.id)
         if pending == 0:
@@ -978,6 +1295,7 @@ class CampaignService:
                 "recipients": pending,
                 "scheduled_at": campaign.scheduled_at.isoformat(),
                 "send_until": send_until.isoformat() if send_until is not None else None,
+                "resumed": resumed,
             },
         )
         logger.info(
@@ -2398,6 +2716,13 @@ class CampaignService:
         campaign.next_send_at = None
         campaign.lease_token = None
         _clear_wait(campaign)
+        # The system's own end of a campaign, once (PG-05).
+        self._audit.record(
+            AuditAction.CAMPAIGN_COMPLETED,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+        )
         logger.info("campaign.completed", extra={"campaign_id": str(campaign.id)})
         return BatchOutcome(campaign.id, CampaignStatus.COMPLETED)
 
@@ -2410,6 +2735,13 @@ class CampaignService:
         campaign.next_send_at = None
         campaign.lease_token = None
         _clear_wait(campaign)
+        self._audit.record(
+            AuditAction.CAMPAIGN_FAILED,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"reason": reason.value},
+        )
         logger.warning(
             "campaign.blocked",
             extra={"campaign_id": str(campaign.id), "detail": detail, "reason": reason.value},
@@ -2695,6 +3027,12 @@ def _validated_name(name: str) -> str:
     if not trimmed:
         raise ValidationError("A campaign needs a name.")
     return trimmed[:MAX_CAMPAIGN_NAME_LENGTH]
+
+
+def _copy_name(name: str) -> str:
+    """A duplicate's name: the original's with " (copy)", within the column (PG-02)."""
+    suffix = " (copy)"
+    return name[: MAX_CAMPAIGN_NAME_LENGTH - len(suffix)].rstrip() + suffix
 
 
 def _validated_rate(messages_per_minute: int) -> int:

@@ -1181,6 +1181,13 @@ CAMPAIGN_EVENTS: Final = frozenset(
         "header_media_uploaded",
         "header_media_refreshed",
         "header_media_reupload_on_send",
+        # The campaigns page (PG-02, PG-09, PG-14, LIM-05): a draft copied, a
+        # test sent to the admin, a recipient list exported, and a schedule
+        # whose plan spreads over more than one day.
+        "duplicated",
+        "test_sent",
+        "exported",
+        "plan_spread",
     }
 )
 CAMPAIGN_WAIT_REASONS: Final = frozenset(

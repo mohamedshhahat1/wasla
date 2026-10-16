@@ -143,9 +143,13 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/campaigns` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/audience/preview` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}` | **MEMBER** | yes | workspace | - |
+| `PATCH` | `/api/v1/campaigns/{campaign_id}` | **ADMIN** | yes | workspace | - |
+| `DELETE` | `/api/v1/campaigns/{campaign_id}` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/activity` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/audience` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/cancel` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/delivery-plan` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/duplicate` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/pause` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/preview-messages` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/recipients` | **MEMBER** | yes | workspace | - |

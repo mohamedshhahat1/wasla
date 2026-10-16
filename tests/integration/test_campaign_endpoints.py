@@ -111,6 +111,7 @@ class StubCampaigns:
         account_id: uuid.UUID | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        name_contains: str | None = None,
     ) -> Page[Campaign]:
         return Page(items=[_campaign()], next_cursor=NEXT_CURSOR)
 
@@ -383,7 +384,9 @@ async def test_there_is_no_way_to_set_a_status_directly(
 ) -> None:
     response = await client.patch(f"{PATH}/{CAMPAIGN_ID}", json={"status": "running"})
 
-    assert response.status_code == 405
+    # `PATCH` edits a draft's composition (PG-03); `status` is not one of its
+    # fields, and an unknown field is refused, not ignored.
+    assert response.status_code == 422
 
 
 # ------------------------------------------------------------------ the roles

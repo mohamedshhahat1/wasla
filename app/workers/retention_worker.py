@@ -35,8 +35,10 @@ from app.core.logging import get_logger
 from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import record_retention_pass, record_webhook_payload_retention
 from app.db.session import Database
+from app.repositories.campaign_repository import prune_create_keys
 from app.repositories.whatsapp_repository import WebhookPayloadRetention
 from app.services.business_initiated_ledger import BusinessInitiatedLedger
+from app.services.campaign_service import CREATE_KEY_LIFETIME
 from app.services.media_retention_service import MediaRetentionService, RetentionOutcome
 
 logger = get_logger(__name__)
@@ -101,6 +103,11 @@ class RetentionWorker:
                 await self.prune_business_initiated_ledger()
             except Exception:
                 logger.exception("retention.ledger_prune_failed")
+            try:
+                # A campaign create key names its draft for a day (PG-08).
+                await self.prune_campaign_create_keys()
+            except Exception:
+                logger.exception("retention.create_key_prune_failed")
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=self._poll_seconds)
             except TimeoutError:
@@ -170,6 +177,22 @@ class RetentionWorker:
             logger.info(
                 "retention.ledger_pruned",
                 extra={"event": "retention.ledger_pruned", "pruned": pruned},
+            )
+        return pruned
+
+    async def prune_campaign_create_keys(self, *, now: datetime | None = None) -> int:
+        """Delete campaign create keys older than a day (PG-08).
+
+        A key is honoured for 24 hours and forgotten by the next create that
+        reuses it; this removes the ones nobody reuses.
+        """
+        moment = now or datetime.now(UTC)
+        async with self._database.session() as session:
+            pruned = await prune_create_keys(session, before=moment - CREATE_KEY_LIFETIME)
+        if pruned:
+            logger.info(
+                "retention.create_keys_pruned",
+                extra={"event": "retention.create_keys_pruned", "pruned": pruned},
             )
         return pruned
 

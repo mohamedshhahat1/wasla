@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.timezones import local
 from app.db.models.campaign import (
@@ -43,6 +43,7 @@ from app.db.models.conversation import Contact
 from app.db.models.lead import LeadStatus
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
 from app.schemas.text import StorableText
+from app.services.campaign_activity import ActivityEntry, ActivityKind
 from app.services.campaign_planner import Eta
 from app.services.campaign_service import MAX_AUDIENCE_SIZE
 from app.services.delivery_plan import DeliveryPlan, EtaBasis, PlanNotice
@@ -153,6 +154,90 @@ class CampaignCreateRequest(_Payload):
     header_parameters: list[ParameterSourceRequest] | None = Field(
         default=None, max_length=MAX_TEMPLATE_VARIABLES
     )
+
+
+class CampaignUpdateRequest(_Payload):
+    """A draft's edit (PG-03): only the fields sent change.
+
+    The values are given as in a create - constants, or per-placeholder
+    `body_parameters` / `header_parameters` - and replace the draft's; a field
+    left out keeps its value. `version` is the draft's version the edit was
+    made from, unless it comes as the `If-Match` header.
+    """
+
+    name: StorableText | None = Field(
+        default=None, min_length=1, max_length=MAX_CAMPAIGN_NAME_LENGTH
+    )
+    description: StorableText | None = Field(
+        default=None, max_length=MAX_CAMPAIGN_DESCRIPTION_LENGTH
+    )
+    account_id: uuid.UUID | None = None
+    template_id: uuid.UUID | None = None
+    variables: list[StorableText] | None = Field(default=None, max_length=MAX_TEMPLATE_VARIABLES)
+    header_variables: list[StorableText] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    button_parameters: list[ButtonParameterRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_BUTTONS
+    )
+    body_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    header_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    header_media_id: uuid.UUID | None = None
+    messages_per_minute: int | None = Field(
+        default=None, ge=MIN_MESSAGES_PER_MINUTE, le=MAX_MESSAGES_PER_MINUTE
+    )
+    version: int | None = Field(default=None, ge=1)
+
+    def changes(self) -> dict[str, Any]:
+        """The fields sent, in the service's terms (PG-03)."""
+        sent = self.model_fields_set - {"version"}
+        changes: dict[str, Any] = {}
+        for field in sent:
+            value = getattr(self, field)
+            if field == "button_parameters":
+                changes[field] = {entry.index: entry.value for entry in value or []}
+            elif field in ("body_parameters", "header_parameters"):
+                target = "body_mappings" if field == "body_parameters" else "header_mappings"
+                changes[target] = (
+                    [entry.to_mapping() for entry in value] if value is not None else None
+                )
+            else:
+                changes[field] = value
+        return changes
+
+    def personal_buttons(self) -> bool:
+        return any(
+            entry.source is not ParameterSource.CONSTANT for entry in self.button_parameters or []
+        )
+
+
+class CampaignActivityRead(BaseModel):
+    """One line of a campaign's activity (PG-05)."""
+
+    id: uuid.UUID
+    action: ActivityKind
+    occurred_at: datetime
+    # The same moment in the workspace's own time, with its offset.
+    occurred_at_local: datetime
+    # `user` with their id and name, or `system`.
+    actor: dict[str, Any]
+    # Field names, counts, reasons and times only.
+    metadata: dict[str, Any]
+
+    @classmethod
+    def from_entry(cls, entry: ActivityEntry, *, timezone: str) -> Self:
+        return cls(
+            id=entry.id,
+            action=entry.kind,
+            occurred_at=entry.occurred_at,
+            occurred_at_local=local(entry.occurred_at, timezone),
+            actor={"type": entry.actor_type, "id": entry.actor_id, "name": entry.actor_name},
+            metadata=entry.metadata,
+        )
 
 
 class MessagePreviewRequest(_Payload):
@@ -407,8 +492,24 @@ class CampaignRead(BaseModel):
     # The plan, on the schedule response only (LIM-05); `GET
     # /campaigns/{id}/delivery-plan` recomputes it at any time.
     delivery_plan: DeliveryPlanRead | None = None
+    # A draft's edit counter (PG-03): send it back as If-Match (or `version`)
+    # with an edit. Also the response's ETag.
+    version: int = 1
+    # Whether the draft's list is written and it can be scheduled (PG-08):
+    # false for a draft whose audience step has not run, or was cleared.
+    audience_ready: bool = False
+    # On a draft edit's response only (PG-03): true when the edit cleared the
+    # written list, which the page writes again from `audience`.
+    audience_cleared: bool | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _unflushed(cls, value: object) -> object:
+        # The column's default is applied at insert: a row read before its
+        # first flush is version 1.
+        return 1 if value is None else value
 
     @classmethod
     def from_model(
@@ -420,6 +521,7 @@ class CampaignRead(BaseModel):
         eta: Eta | None = None,
     ) -> Self:
         read = cls.model_validate(campaign)
+        read.audience_ready = campaign.audience_size > 0
         if header_media is not None:
             read.header_media = HeaderMediaRead.from_model(header_media)
         if timezone is not None and read.resumes_at is not None:
@@ -594,10 +696,12 @@ __all__ = [
     "AudiencePreviewResponse",
     "AudienceRequest",
     "ButtonParameterRequest",
+    "CampaignActivityRead",
     "CampaignCreateRequest",
     "CampaignRead",
     "CampaignScheduleRequest",
     "CampaignStatisticsRead",
+    "CampaignUpdateRequest",
     "ChannelConsentRead",
     "ContactIdentityRead",
     "ContactOptOutRead",

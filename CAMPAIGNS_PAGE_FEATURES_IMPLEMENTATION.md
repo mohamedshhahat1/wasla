@@ -19,8 +19,8 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 4 | Ledger and the 80 % budget | committed | b2482c7 | every campaign, WhatsApp, follow-up, template, delivery-protocol, retention and unit suite (4,087 passed, 10 failed in one stub - fixed, 103 re-run passed); limit worker tests (14 passed: 200/200/200 with 1, 2, 4 workers; 40/40 races); migration-built: parity, downgrade atomicity, limit API |
 | 5 | Spreading, deadline, delivery plan, ETA | committed | fdddae1 | every campaign suite + limit suites + unit + docs (3,807 passed, 1 failed in the endpoints stub - fixed, re-run 15 passed); plan unit (11) and API/worker (5); migration-built: parity, downgrade atomicity, plan |
 | 6 | Per-contact cap, pacing, 131049 | committed | 429f892 | broad send-path regression (4,221 passed, 4 failed: 3 intended test updates below, 1 PDF-deadline timing flake that passed on re-run; 100 re-run passed); contact cap + pacing (8); migration-built: parity, downgrade atomicity, cap |
-| 7 | Personalisation | committed | (this commit) | send-path regression: unit + every campaign, WhatsApp, template and follow-up suite + documentation truth (4,052 passed, 1 failed: the documented operation count, 217 -> 218, fixed; 1 tmpfs skip); every route-walking suite (231 passed); personalisation (7 integration, 8 unit); migration-built: parity, downgrade atomicity, personalisation (16) |
-| 8 | Draft lifecycle, search, idempotent create, activity | not started | | |
+| 7 | Personalisation | committed | 8b97c3d | send-path regression: unit + every campaign, WhatsApp, template and follow-up suite + documentation truth (4,052 passed, 1 failed: the documented operation count, 217 -> 218, fixed; 1 tmpfs skip); every route-walking suite (231 passed); personalisation (7 integration, 8 unit); migration-built: parity, downgrade atomicity, personalisation (16) |
+| 8 | Draft lifecycle, search, idempotent create, activity | committed | (this commit) | unit + every campaign, WhatsApp, template, follow-up, audit, retention, metric and route-walking suite (4,313 passed, 1 failed: CPF-01, a pre-existing test-isolation defect, fixed in 3980c37); drafts (13); migration-built: parity, downgrade atomicity, drafts (22) |
 | 9 | Segments, contact picker | not started | | |
 | 10 | Test send | not started | | |
 | 11 | Results, summary, progress, CSV export | not started | | |
@@ -324,3 +324,77 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
 - Intended test changes: none in Phase 7.
 - To do in Phase 13: the migrations' `RUNBOOK` pointer names "Campaign page features (0108-0113)";
   the RUNBOOK section will carry the final range and the pointers are updated with it.
+
+## Phase 8 notes (PG-01 .. PG-05, PG-08)
+
+- Migration **0115**: seven `audit_action` values (`campaign_updated`, `_duplicated`, `_deleted`,
+  `_completed`, `_failed`, `_test_sent`, `_recipients_exported` - the last two used by Phases 10 and
+  11); `uq_campaigns_tenant_id_id` built `CONCURRENTLY` (the target of ADR-100's tenant-composite
+  key); `campaigns.version` (integer, constant default 1, catalogue-only); `campaign_create_keys`
+  (tenant, key, the draft, the request's sha256, created_at; `UNIQUE(tenant_id, key)`,
+  `UNIQUE(tenant_id, id)`, `(tenant_id, campaign_id)` -> campaigns cascading).
+- The audience rules were already stored: `campaigns.audience` has kept the filter a list was written
+  from since 0004 (`last_inbound_within_days`, `lead_statuses`, `contact_ids` up to the 1,000 cap).
+  No `audience_rules` column was added; duplicate copies `audience`.
+- PG-01: `GET /campaigns?q=` (at most 100 characters), case-insensitive "contains" on the name with
+  `%`, `_` and `\` escaped (`escape_like`, `app/repositories/base.py`), combined with status, number
+  and cursor. Measured at 5,000 campaigns in one workspace (`audit/p22_search_plan.py`): an index
+  scan of `ix_campaigns_tenant_id_created_at` with the name as a filter; p95 2.7 ms for a common
+  term, 5.6 ms for a term matching nothing (every row filtered). Not SCALE-TRIGGERED; no extension.
+- PG-02: `POST /campaigns/{id}/duplicate` (admin, any status): a new draft "<name> (copy)" with the
+  description, number, template, values and mappings, header file, rate and audience rules; never
+  the written list, schedule, results, stop reasons, Meta's media id, lease or counters. Validated by
+  the one validator: a withdrawn template is refused with create's code. Audited
+  `campaign_duplicated` (target the copy, `source_id`); counted `wasla_campaign_events_total{event=
+  "duplicated"}`.
+- PG-03: `PATCH /campaigns/{id}` (admin, drafts only - 409 `campaign_not_editable`): name,
+  description, number, template, values (constants or mappings), header file, rate. The version is
+  `If-Match` (`3`, `"3"`, `W/"3"`) or `version`; missing -> 422 `campaign_version_required`;
+  different -> 409 `campaign_version_conflict` with `details.version`. A change to the number,
+  template, values or header file deletes the written list (`audience_cleared: true`), keeps the
+  rules. Unknown fields (`status`) -> 422. Audited `campaign_updated` with field names only;
+  response `ETag: "<version>"`. Writing the audience also bumps the version.
+- PG-04: `DELETE /campaigns/{id}` (admin) -> 204; anything but a draft, or any recipient ever
+  attempted, sent or linked to a message -> 409 `campaign_not_deletable`. The header file stays.
+  Audited `campaign_deleted` (id, name, how many list rows went).
+- PG-05: `GET /campaigns/{id}/activity` (member), keyset-paged on the audit trail by
+  `(occurred_at, id)` - everything targeting the campaign plus `campaign_duplicated` entries naming
+  it as the source. Closed vocabulary (`app/services/campaign_activity.py`): created, updated,
+  duplicated_from / duplicated_to, audience_set, scheduled, resumed (a schedule from paused or
+  failed, now recorded as `resumed` in the entry), paused, cancelled, deleted, waiting, completed,
+  failed, test_sent, recipients_exported. Each action shows a whitelisted set of metadata (field
+  names, counts, reasons, times; audience filters with hand-picked people as a count). The worker now
+  audits `campaign_completed` and `campaign_failed` with the system as actor, once per transition.
+- PG-08: `POST /campaigns` takes `Idempotency-Key` (1-128 characters): the same key in the workspace
+  within 24 hours returns the draft it made; reused for a different request (sha256 of the canonical
+  body) -> 409 `idempotency_key_reused`. The draft and its key are written in one savepoint; a
+  concurrent retry's insert waits on the first's and then returns its draft (4 concurrent retries ->
+  1 draft). A key older than a day is forgotten by the next create that uses it, and deleted by the
+  existing retention sweep (`RetentionWorker.prune_campaign_create_keys`). `CampaignRead` gains
+  `version` and `audience_ready`; a draft whose audience step failed is listed with
+  `audience_ready: false`.
+- Intended test changes: `test_campaign_endpoints.py::test_there_is_no_way_to_set_a_status_directly`
+  now expects 422 (PATCH edits drafts; `status` is not a field) instead of 405, and its stub
+  `list_campaigns` takes `name_contains`; `test_campaign_header_media_api.py::
+  test_the_header_file_cannot_be_changed_after_composition` became
+  `test_the_header_file_changes_only_through_a_draft_s_versioned_edit` (405 -> 422 without a version,
+  200 with one).
+- `docs/API.md` states 222 operations; `docs/AUTHORIZATION.md` lists PATCH, DELETE (ADMIN),
+  duplicate (ADMIN) and activity (MEMBER).
+- How Phase 7 was committed: Phase 8 edits had begun in five files Phase 7 also changed before the
+  Phase 7 regression finished. The Phase 7 versions of those files were rebuilt (Phase 8's scripted
+  edits reversed, the rest from HEAD plus Phase 7's own hunks), assembled with the Phase-7-only files
+  in a scratch worktree, checked there (ruff, black, mypy, 30 personalisation and endpoint tests,
+  231 route-walking tests) and committed; the branch was fast-forwarded to it and the feature
+  worktree's index refreshed (`git reset`, files untouched). The regression of 4,052 tests ran on the
+  Phase 7 code itself (imported before any Phase 8 edit).
+
+## Findings of this stage (CPF)
+
+- **CPF-01** (test isolation, pre-existing): `test_whatsapp_ownership.py::
+  test_concurrent_claims_produce_one_winner_and_one_conflict` deleted its two workspaces but not the
+  winner's `whatsapp_account_connected` audit entry. `audit_logs.tenant_id` is `SET NULL`, so the
+  entry stayed as a platform entry, and `test_audit_trail.py::
+  test_the_platform_reader_sees_every_workspace_and_the_platform` counted 4 instead of 3 whenever the
+  ownership suite ran first. The full lane runs them alphabetically (audit first) and never met it;
+  this stage's targeted regression did. Fixed in 3980c37 (the cleanup deletes the entries first).

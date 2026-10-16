@@ -13,11 +13,13 @@ audit trail and the authorization legible.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, File, Header, Query, Response, UploadFile, status
 
 from app.api.dependencies import (
     ActiveWorkspace,
@@ -31,15 +33,23 @@ from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
 from app.core.exceptions import ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
-from app.db.models.campaign import Campaign, CampaignStatus, RecipientReason, RecipientStatus
+from app.db.models.campaign import (
+    MAX_CREATE_KEY_LENGTH,
+    Campaign,
+    CampaignStatus,
+    RecipientReason,
+    RecipientStatus,
+)
 from app.schemas.campaign import (
     AudiencePreviewRequest,
     AudiencePreviewResponse,
     AudienceRequest,
+    CampaignActivityRead,
     CampaignCreateRequest,
     CampaignRead,
     CampaignScheduleRequest,
     CampaignStatisticsRead,
+    CampaignUpdateRequest,
     DeliveryPlanRead,
     HeaderMediaRead,
     HeaderMediaUploadRead,
@@ -52,6 +62,7 @@ from app.schemas.campaign import (
 from app.schemas.conversation import CursorPage
 from app.services.campaign_planner import CampaignPlanner
 from app.services.campaign_service import (
+    CAMPAIGN_VERSION_REQUIRED_CODE,
     PARAMETER_SOURCE_NOT_ALLOWED_CODE,
     CampaignService,
 )
@@ -61,6 +72,37 @@ router = APIRouter(route_class=CommittingRoute, prefix="/campaigns", tags=["camp
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
+# The longest name search (PG-01).
+MAX_SEARCH_LENGTH = 100
+# A create's retry key (PG-08), the convention of a manual send's.
+CreateKeyHeader = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=MAX_CREATE_KEY_LENGTH,
+        description=(
+            "An opaque key of your own. Repeating the create with the same key "
+            "within a day returns the draft it made instead of a second one."
+        ),
+    ),
+]
+
+
+def _request_hash(payload: CampaignCreateRequest) -> str:
+    canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _version(if_match: str) -> int:
+    """A draft's version from `If-Match` - `3`, `"3"` or `W/"3"`."""
+    raw = if_match.strip().removeprefix("W/").strip('"')
+    if not raw.isdigit():
+        raise ValidationError(
+            'If-Match carries the draft\'s version, for example "3".',
+            error_code=CAMPAIGN_VERSION_REQUIRED_CODE,
+        )
+    return int(raw)
 
 
 async def _read(
@@ -92,13 +134,15 @@ async def list_campaigns(
     cursor: CursorQuery = None,
     status_filter: Annotated[list[CampaignStatus] | None, Query(alias="status")] = None,
     account_id: uuid.UUID | None = None,
+    q: Annotated[str | None, Query(max_length=MAX_SEARCH_LENGTH)] = None,
 ) -> CursorPage[CampaignRead]:
-    """Newest first."""
+    """Newest first. `q` finds campaigns whose name contains it, ignoring case (PG-01)."""
     page = await campaigns.list_campaigns(
         statuses=tuple(status_filter or ()),
         account_id=account_id,
         limit=limit,
         cursor=cursor,
+        name_contains=(q or "").strip() or None,
     )
     files = await campaigns.header_media_for(page.items)
     now = datetime.now(UTC)
@@ -132,8 +176,13 @@ async def create_campaign(
     payload: CampaignCreateRequest,
     workspace: TenantAdminDep,
     campaigns: CampaignServiceDep,
+    idempotency_key: CreateKeyHeader = None,
 ) -> CampaignRead:
     """Create a draft. Nothing is sent and no audience exists yet.
+
+    Send `Idempotency-Key` to make a retried request return the draft it
+    already made (PG-08); the key reused for a different request is 409
+    `idempotency_key_reused`.
 
     Body and text-header values are constants (`variables`, `header_variables`)
     or, per placeholder, a field of each person with a fallback
@@ -168,8 +217,100 @@ async def create_campaign(
             if payload.header_parameters is not None
             else None
         ),
+        idempotency_key=idempotency_key,
+        request_hash=_request_hash(payload) if idempotency_key is not None else None,
     )
     return await _read(campaigns, campaign, workspace)
+
+
+@router.patch("/{campaign_id}", response_model=CampaignRead, summary="Edit a draft")
+async def update_campaign(
+    campaign_id: uuid.UUID,
+    payload: CampaignUpdateRequest,
+    response: Response,
+    workspace: TenantAdminDep,
+    campaigns: CampaignServiceDep,
+    if_match: Annotated[str | None, Header(alias="If-Match", max_length=32)] = None,
+) -> CampaignRead:
+    """Change a draft's fields (PG-03). Drafts only: 409 `campaign_not_editable`.
+
+    Name the version edited, as `If-Match` or `version`: an edit made from an
+    older one is 409 `campaign_version_conflict` with the current version.
+    A change to the number, template, values or header file clears the
+    written list (`audience_cleared`); its rules stay in `audience`. Status,
+    schedule and counters are never edited here: they have named transitions.
+    """
+    if payload.personal_buttons():
+        raise ValidationError(
+            "A button's value is the same for everybody: a personal value in a link leaves "
+            "Wasla in a URL.",
+            error_code=PARAMETER_SOURCE_NOT_ALLOWED_CODE,
+        )
+    campaign, cleared = await campaigns.update_draft(
+        campaign_id,
+        version=_version(if_match) if if_match is not None else payload.version,
+        changes=payload.changes(),
+        actor=workspace.user,
+    )
+    read = await _read(campaigns, campaign, workspace)
+    read.audience_cleared = cleared
+    response.headers["ETag"] = f'"{campaign.version}"'
+    return read
+
+
+@router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a draft")
+async def delete_campaign(
+    campaign_id: uuid.UUID,
+    workspace: TenantAdminDep,
+    campaigns: CampaignServiceDep,
+) -> Response:
+    """Delete a draft nobody was sent (PG-04); anything else is 409 `campaign_not_deletable`."""
+    await campaigns.delete_draft(campaign_id, actor=workspace.user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{campaign_id}/duplicate",
+    response_model=CampaignRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Copy a campaign into a new draft",
+)
+async def duplicate_campaign(
+    campaign_id: uuid.UUID,
+    workspace: TenantAdminDep,
+    campaigns: CampaignServiceDep,
+) -> CampaignRead:
+    """A new draft with this campaign's composition and audience rules (PG-02).
+
+    Never its written list, schedule or results. Validated like a create.
+    """
+    return await _read(
+        campaigns, await campaigns.duplicate(campaign_id, actor=workspace.user), workspace
+    )
+
+
+@router.get(
+    "/{campaign_id}/activity",
+    response_model=CursorPage[CampaignActivityRead],
+    summary="What happened to a campaign",
+)
+async def campaign_activity(
+    campaign_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    campaigns: CampaignServiceDep,
+    limit: LimitQuery = 50,
+    cursor: CursorQuery = None,
+) -> CursorPage[CampaignActivityRead]:
+    """Newest first, from the audit trail (PG-05): people's actions and the system's.
+
+    Field names, counts and reasons only - never a contact or a value.
+    """
+    page = await campaigns.activity(campaign_id, limit=limit, cursor=cursor)
+    timezone = workspace.tenant.timezone
+    return CursorPage[CampaignActivityRead](
+        items=[CampaignActivityRead.from_entry(entry, timezone=timezone) for entry in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.post(

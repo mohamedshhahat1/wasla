@@ -104,3 +104,8 @@ class TenantScopedRepository[ModelT: Base](BaseRepository[ModelT], ABC):
             )
             raise TenantIsolationError()
         return entity
+
+
+def escape_like(value: str) -> str:
+    """`value` matched literally inside a LIKE pattern escaped with a backslash."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
