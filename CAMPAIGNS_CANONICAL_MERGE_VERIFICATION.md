@@ -13,7 +13,7 @@
 
 ## 1. Executive Summary
 
-**Verdict: recorded in section 21 after the first GitHub Actions run.** Every local gate is green and the merges are done.
+**Verdict: CAMPAIGNS MERGED AND PUSHED, CI GREEN.**
 
 The campaigns line - the audit, its remediation and the header media stage -
 was verified independently of the stages that built it, in detached worktrees
@@ -33,8 +33,8 @@ to the verified head.
 | Mutation spot-check | control 129 passed; every spot-check mutant killed by its named test (M-H02 the proven redundant guard) |
 | APP-E2E V-1..V-8 | all PASS; 0 secrets found |
 | Merges | `f43e454`, `a8e8f24` - normal merge commits, no conflicts, each tree byte-identical to its branch |
-| Push | section 16 |
-| First GitHub Actions run | section 17 |
+| Push | `989584b..450333e`, fast-forward, no force; origin = local |
+| First GitHub Actions run | run `38827475623` on `450333e`: **all 5 jobs success** |
 
 **One finding, CMV-01, found here and fixed in Part A.** The first independent
 verification (of `6d9728e`) passed every gate except one: the control of the
@@ -349,12 +349,34 @@ git fetch origin; origin == local HEAD
 ```
 
 No stage branch, helper worktree branch or tag is pushed; `main` is untouched.
-The result and the first GitHub Actions run are recorded in a follow-up
-commit of this file (section 17), as the previous canonical merge did.
+
+The first attempt was refused by the session's permission policy; nothing was
+sent. After the owner approved it in the conversation:
+
+```text
+2026-10-16T00:05:36Z
+git fetch origin --prune                         origin/worktree-billing-google-auth = 989584b
+git merge-base --is-ancestor origin/... HEAD     true
+git push origin worktree-billing-google-auth     989584b..450333e  worktree-billing-google-auth -> worktree-billing-google-auth
+git fetch origin                                 origin = local = 450333e8ee37a3e49859427b9ad5ed04edbb4c03
+```
 
 ## 17. First GitHub Actions Run
 
-Recorded after the push (follow-up commit).
+Workflow **CI**, run **38827475623** on `450333e`
+(https://github.com/mohamedshhahat1/wasla/actions/runs/38827475623), started
+2026-10-16T00:05:39Z, polled every two minutes:
+
+| Job | Conclusion | Time (UTC) | What it ran |
+| --- | --- | --- | --- |
+| Lint, format, types | **success** | 00:05:42 → 00:06:57 | ruff, black, mypy |
+| Tests and migrations | **success** | 00:05:42 → 00:40:07 | model-built suite with `--cov`: **7,036 passed, 15 skipped, 2 deselected**, 0 failed (local 7,035 + the tmpfs test CI can mount; skips OpenAI x11 and parity x4, all accounted for); object store not skipped; factory; upgrade/base/upgrade; preflight; `alembic check` |
+| Migration-built schema | **success** | 00:05:42 → 00:40:16 | parity 4 passed and not skipped; every integration and e2e suite migrated: **3,519 passed, 92 skipped, 0 failed** (progress marks; the job runs `-qq`; its skips are the object-store suites, as this job has no MinIO by design); kept-data sweep **301 passed, 0 skipped** |
+| Alert rules and receivers | **success** | 00:05:42 → 00:06:59 | promtool config, rules tests, amtool |
+| Docker build | **success** | 00:05:41 → 00:06:58 | runtime image; `/health/live` |
+
+Green on the first run: no CI-only fix was needed (section 33's procedure was
+not used).
 
 ## 18. Findings
 
@@ -402,4 +424,41 @@ whether and when the canonical branch is merged into main
 
 ## 21. Final Verdict
 
-Pending the first GitHub Actions run (section 17); recorded in the follow-up commit.
+**CAMPAIGNS MERGED AND PUSHED, CI GREEN.**
+
+Every condition of the brief's section 39 holds: Part A's header media uploads
+once per campaign and connection and sends one id to everyone, 2 and 4
+workers upload once and nobody receives twice, every header failure is
+campaign-level, LOCATION stays refused, every meaningful mutant is killed and
+both of Part A's lanes are 0 failed on its final code; the remediation's
+guarantees are unchanged; ancestry holds, 0001–0100 are byte-identical and
+0101–0107 added; a fresh database and origin's populated database reach 0107
+with no row lost and the old campaigns finish with nobody twice; both
+independent lanes are green with the known skips; the kept-data sweep and the
+races are 3 / 3; every invariant is 0; every spot-check mutant is killed (M-H02
+the proven redundant guard); APP-E2E V-1..V-8 pass with no secret or Meta media
+id leaked; the untracked files are unchanged; two normal merge commits, each
+tree byte-identical to its verified branch; the gates pass again on the final
+commit; the push was a fast-forward without force and origin equals local; the
+first GitHub Actions run is green in every job; `main` is untouched, nothing
+was deployed and no real provider was contacted. CMV-01 was a test defect,
+fixed in Part A and fully re-verified.
+
+**The closing question.** If a business uploaded its spring-sale photo
+tomorrow and scheduled a 5,000-person campaign on a deployment with three
+campaign workers, and the photo's Meta id expired halfway through a long
+pause:
+
+* **Every customer would see the photo exactly once.** The worker holding the
+  campaign's lease uploads the photo once and every send carries that one id;
+  who sends each person is decided by the per-recipient claim, so three
+  workers do not multiply anything (2- and 4-worker tests: 1 upload, nobody
+  twice; APP-E2E: 1 upload, 18 sends, 0 twice).
+* **Meta would receive the photo a handful of times, not 5,000.** Once at the
+  start; once more after the pause, because an id older than 25 days is
+  uploaded again before the next batch (and a send answered 131053 uploads it
+  once more); at most one extra copy if a worker's lease runs out mid-upload,
+  and that copy is never sent.
+* **That exact code is on GitHub with every CI job green:**
+  `worktree-billing-google-auth` = `450333e`, run 38827475623, 5 / 5 jobs
+  success.
