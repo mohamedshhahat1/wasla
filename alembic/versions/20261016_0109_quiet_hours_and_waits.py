@@ -46,7 +46,7 @@ WAIT_REASONS = ("quiet_hours", "daily_limit", "contact_cap", "limit_unknown")
 WINDOW_CHECK = "ck_tenants_campaign_quiet_hours_window"
 MINUTES_CHECK = "ck_tenants_campaign_quiet_hours_minutes"
 WAIT_CHECK = "ck_campaigns_waiting_reason_known"
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0113)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
 
 
 def upgrade() -> None:

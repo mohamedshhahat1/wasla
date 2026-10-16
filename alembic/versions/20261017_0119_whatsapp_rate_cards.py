@@ -37,7 +37,7 @@ depends_on = None
 LOCK_TIMEOUT = "15s"
 LABELS = ("rate_card_uploaded", "rate_card_activated")
 CATEGORIES = ("marketing", "utility", "authentication", "authentication_international", "service")
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0113)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
 
 
 def upgrade() -> None:

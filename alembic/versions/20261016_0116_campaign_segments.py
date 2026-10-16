@@ -52,7 +52,7 @@ INDEXES = (
         "contacts (tenant_id, last_seen_at DESC NULLS LAST, id)",
     ),
 )
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0113)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
 
 
 def upgrade() -> None:

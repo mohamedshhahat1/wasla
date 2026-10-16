@@ -48,7 +48,7 @@ LABELS = (
 )
 UNIQUE = "uq_campaigns_tenant_id_id"
 TABLE = "campaign_create_keys"
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0113)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
 
 
 def upgrade() -> None:

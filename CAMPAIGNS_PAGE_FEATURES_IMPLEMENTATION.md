@@ -25,7 +25,7 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 10 | Test send | committed | 7bfd4c5 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, audit, retention, metric, route-walking suites (4,461 passed, 1 failed: the tie-breaker rule on the new window query - fixed); test send (5); migration-built: parity, downgrade atomicity, test send (14) |
 | 11 | Results, summary, progress, CSV export | committed | 020a945 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
 | 12 | Rate cards, cost estimate | committed | afc271d | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
-| 13 | Invariants, observability, documentation, contract | in progress | invariants ce83f89; observability (this commit) | campaign invariants (16); campaign metrics, metric catalogue, metrics endpoint, delivery plan (31); promtool check config, test rules, amtool check-config |
+| 13 | Invariants, observability, documentation, contract | in progress | invariants ce83f89; observability c5468d9; documentation (this commit) | campaign invariants (16); campaign metrics, metric catalogue, metrics endpoint, delivery plan (31); promtool check config, test rules, amtool check-config |
 | 14 | Mutation matrix | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
@@ -639,3 +639,28 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   green.
 - `test_campaign_metrics.py::test_portfolios_are_counted_by_how_full_their_day_is`: 250 people on a
   TIER_250 portfolio move it from `<50` to `>=100`; no line carries a portfolio id.
+
+### Documentation
+
+- `DECISIONS.md`: ADR-145 (time zone, quiet hours), ADR-146 (Meta's messaging limit, ledger, 80 %,
+  spreading), ADR-147 (per-customer cap), ADR-148 (personalisation), ADR-149 (the page features),
+  ADR-150 (cost estimate); amendments to ADR-025 (test sends stay inside "wrote first"), ADR-026
+  (waits are timestamps), ADR-134 (no lease while waiting), ADR-137 (mappings), ADR-144 (a test
+  uploads for itself).
+- `docs/CAMPAIGNS.md`: the sending diagram with the waits and the deadline; new sections on quiet
+  hours, Meta's limit, the per-customer cap, personalisation, the page, and cost; statistics,
+  reason codes, stop reasons, API, configuration; "Known limits" rewritten - personalisation, the
+  limit and time zone entries closed, the WABA key, follow-ups at 100 %, the webhook subscription,
+  the cost upper bound and polling added.
+- `docs/API.md`: time zones, campaign settings, the messaging-limit route, every new campaign,
+  segment and contact route with its fields, headers and error codes, platform rate cards, the
+  timezone requirement on `POST /workspaces` and registration.
+- `docs/WHATSAPP.md`: the limit read on v24.0, `business_capability_update`, `account_alerts`,
+  held / 135000, the `campaign_test` origin. `docs/AUTHORIZATION.md`: the new composite keys and the
+  platform-level tables. `docs/SAAS.md`: the campaign platform settings. `docs/RUNBOOK.md`:
+  waiting reasons and `meta_quality_review` under "Campaigns are not sending", and "Campaign page
+  features (0108-0119)" with the deploy step (`python -m scripts.read_messaging_limits` after
+  `alembic upgrade head`, before the campaign workers start). Every migration's pointer now names
+  that section. `.env.example`: `CAMPAIGN_PARAMETER_MAX_CHARS`, `CAMPAIGN_TEST_SENDS_PER_DAY`,
+  `CAMPAIGN_EXPORTS_PER_HOUR`, `CAMPAIGN_REPLY_ATTRIBUTION_SECONDS` (the other four were added with
+  their phases).

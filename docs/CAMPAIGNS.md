@@ -56,6 +56,18 @@ Within that population, filters narrow. None of them widens:
 | `lead_statuses` | People with a lead at one of these stages |
 | `contact_ids` | Named contacts of this workspace |
 
+**Saved segments** ([ADR-149](../DECISIONS.md), PG-06) are named sets of these
+rules - recency and lead statuses, never contact ids - at most 100 per
+workspace (`/api/v1/campaign-segments`). Writing an audience from a segment
+copies its rules onto the campaign (`audience`, with `audience_segment_id`);
+filters sent with it can only narrow them, and editing or deleting the segment
+later changes no campaign that used it.
+
+**The contact picker** (`GET /api/v1/contacts`, PG-07) searches the workspace's
+contacts by name or number and, on a chosen number, says who a campaign could
+reach (`eligible_for_campaign`, `ineligible_reason: opted_out`). Picking
+somebody still goes through the audience, filtered by the base population.
+
 **Opt-out is part of the base population, not a filter.** It lives inside `AudienceRepository` so no future endpoint can build an audience that omits it, and it is re-checked at send time — a campaign may run for hours, and somebody who says stop in the middle of one must not receive the rest of it.
 
 ### The audience is written down, not computed
@@ -77,6 +89,9 @@ re-taken by id only while the row still carries this sweep's lease_token (ADR-13
     |
 workspace served? subscription not suspended? -- no --> PAUSED, status_reason (ADR-135)
 number active? template approved, MARKETING, parameters fit? -- no --> FAILED, status_reason
+deadline (send_until) passed? -- yes --> pending SKIPPED send_window_closed, COMPLETED
+inside the workspace's quiet hours? -- yes --> WAIT quiet_hours until the window ends
+number's messaging limit never read? -- yes --> WAIT limit_unknown, asked again in 5 min
     |
 claim the next batch of pending recipients not deferred (also SKIP LOCKED)
     |
@@ -88,16 +103,29 @@ for each recipient:
     hold: campaign still scheduled/running and still this worker's? renew the lease
           -- no --> stop here (a pause, a cancel, or a lost lease)
     workspace still served? -- no --> PAUSED, stop here
+    quiet hours began? deadline passed? -- yes --> stop here (the wait or the deadline)
     take: still pending and nobody else's? (one SELECT ... FOR UPDATE SKIP LOCKED,
           the row re-read) -- no --> skip this person, no send, no attempt
     opted out on this channel? -- yes --> SKIPPED opted_out, never retried
     linked to a message that may have left? -- yes --> FAILED delivery_unconfirmed
-    send the template with every component it needs; record the message row
+    values written for another contact? -- yes --> SKIPPED identity_changed (CR-15)
+    Meta's limit: under the portfolio's lock, past 80 %? -- yes --> WAIT daily_limit
+    marketing in the last 24 h to this contact? -- yes --> deferred a day, no attempt
+    send the template with this person's own values; record the message row
     |
 write next_send_at = batch end + batch / messages_per_minute; clear lease_token
     |
 nobody left (deferred people still count)? -- yes --> COMPLETED
+only capped people left? -- yes --> WAIT contact_cap
 ```
+
+**A wait is not a pause** (ADR-145..ADR-147). Quiet hours, Meta's daily limit,
+the per-customer cap and an unread limit leave the status `scheduled` or
+`running`, spend no attempt, re-arm nobody and keep no lease: the campaign
+records `waiting_reason` and `resumes_at` and the next sweep after that moment
+claims it again. Each transition into a wait is audited once
+(`campaign_waiting`, system) and counted once
+(`wasla_campaign_waits_total{reason}`); a campaign that sends again clears it.
 
 **One owner per recipient, whatever the number of workers** ([ADR-134](../DECISIONS.md), CMP-01). A batch's row locks end at its first send commit ([ADR-093](../DECISIONS.md)), so ownership is re-established before every person in two single statements: `hold` (the campaign is live and still carries this worker's `lease_token`, and the lease is renewed) and `take` (the recipient is still pending and not locked by another worker, re-read from the database). The lease therefore has to outlast one send - worst case 3 x 10 s plus 2 x 45 s of throttle waits, 120 s - not a batch; `CLAIM_LEASE_SECONDS` is 300. A lease that does run out is re-taken with a new token; the stalled worker stops at its next recipient, and the one send it had in flight was linked to its recipient before Meta was asked, so the new owner abandons rather than resends it. Campaign replicas are safe to run from this release on.
 
@@ -139,9 +167,129 @@ The default is 60 messages a minute and the ceiling is 600. Both are far below w
 
 The worker holds one HTTP connection pool per sweep, so a batch of fifty is fifty requests over one connection rather than fifty TLS handshakes to the same host.
 
+## Quiet hours
+
+Every workspace has a time zone, chosen at onboarding ([ADR-145](../DECISIONS.md)),
+and quiet hours in it - 22:00 to 09:00 by default, on for everybody
+(`GET/PUT /api/v1/workspace/campaign-settings`). No campaign sends inside them:
+the worker asks before a batch and before every recipient, and a campaign that
+reaches the window's start stops at the next person and waits for its end,
+computed as a local wall time with that date's rules (Cairo's DST is real). A
+schedule inside the window is accepted; its plan starts at the window's end
+with the notice `starts_after_quiet_hours`. Changing the zone never moves a
+`scheduled_at` (an instant with its offset) - it moves where the window falls
+from the next batch on; changing the window, or turning it off, releases waiting
+campaigns at their next sweep. Quiet hours protect the customer from
+broadcasts: they do not bind AI or human replies, follow-ups, or an admin's test
+to themself.
+
+## Meta's messaging limit
+
+Meta limits how many **unique** people a **business portfolio** may message
+outside a customer service window in a moving 24 hours - 250 for a new
+portfolio, then 2,000, 10,000, 100,000 and unlimited - shared by every number in
+it ([Messaging limits](https://developers.facebook.com/documentation/business-messaging/whatsapp/messaging-limits)).
+Meta documents no error for a send past it, so Wasla never relies on Meta
+refusing ([ADR-146](../DECISIONS.md)).
+
+- **Read** with `whatsapp_business_manager_messaging_limit` (Graph API v24.0 for
+  that one call) at connect, credential rotation, enable, at schedule when older
+  than six hours, and from `business_capability_update` webhooks. A value Wasla
+  does not recognise is treated as 250 and alerted (`MessagingLimitUnknown`). A
+  number whose limit was never read cannot schedule (422
+  `messaging_limit_unknown`) and its running campaigns wait `limit_unknown`.
+- **Counted per portfolio** in one ledger of business-initiated sends - every
+  template to somebody whose window (23 hours, an hour of margin) is closed,
+  from campaigns, manual templates, follow-ups and tests, reserved under the
+  portfolio's advisory lock before Meta is called and deleted only when Meta
+  provably did not take the message. Wasla keys the portfolio on the WABA: Meta
+  names no field for a WABA's portfolio (EXTERNAL VERIFICATION).
+- **Campaigns stop at 80 %** of the limit (`CAMPAIGN_PORTFOLIO_LIMIT_SHARE`),
+  every source counted. The campaign waits `daily_limit` until the first person
+  counted leaves the moving window (plus five minutes) and carries on by itself,
+  day after day, until everybody is reached or `send_until` passes. Somebody whose
+  window is open does not count. Follow-ups and manual templates are recorded and
+  not refused; `PortfolioLimitReached` warns when the whole limit is used.
+- **The plan** (`GET /campaigns/{id}/delivery-plan`, and with every schedule)
+  replays these rules: the days, how many people each, the completion, and
+  notices (`starts_after_quiet_hours`, `spreads_over_days`,
+  `limit_shared_with_other_numbers`, `limit_unknown`, `contact_cap_defers`,
+  `plan_exceeds_ttl` - a marketing template's messages live 30 days by default,
+  `deadline_leaves_recipients`). Spreading is the decided behaviour: nothing is
+  refused because of the plan.
+- **What the page may show**: `GET /api/v1/whatsapp/accounts/{id}/messaging-limit`
+  - tier, limit, the campaigns' budget, people used in 24 hours, what is
+  available now and when more will be. Aggregates only, even when another
+  workspace shares the portfolio.
+- **Pacing**: a send Meta answers `held_for_quality_assessment` is sent and
+  counted `held`; a held message Meta later drops (135000) pauses its campaign
+  `meta_quality_review`, because the portfolio cannot send templates during the
+  review.
+
+## One marketing message per customer per day
+
+A customer receives at most one marketing template from a workspace in a moving
+24 hours, from any campaign or sent by hand ([ADR-147](../DECISIONS.md)), claimed
+by one conditional update of the contact in the send's own transaction - two
+campaigns on two workers cannot both win. A capped campaign recipient is
+deferred a day and keeps their attempts; a manual marketing template inside the
+cap is 409 `contact_frequency_cap` with the moment it becomes possible. Meta's
+own per-user marketing limit (131049) has no published number; Wasla's cap is
+stricter, and a 131049 also pushes the customer's slot a day out.
+
+## Each person's own values
+
+A body or text-header placeholder can take a constant, or a field of the
+customer - their display name, or their active lead's name, interest, status or
+budget, or one of the workspace's lead custom fields - with a fallback for
+people without it ([ADR-148](../DECISIONS.md)). Never the phone number, never a
+button's value. Values are made one line (newlines, tabs and repeated spaces
+collapsed, control characters removed), fall back when empty or longer than
+`CAMPAIGN_PARAMETER_MAX_CHARS` (60), and fall back together when they would make
+the body longer than Meta's 1,024 characters. They are **written down with the
+audience**: each recipient keeps the values resolved for them, with the contact
+they were resolved for, and the send uses exactly those - renaming a contact
+afterwards changes nothing this campaign sends. `POST
+/campaigns/{id}/preview-messages` shows up to five chosen people's messages.
+
+## The campaigns page
+
+- **Search** by name (`?q=`), **duplicate** (a new draft with the composition and
+  audience rules), **edit** a draft from the version read (`PATCH`, `If-Match`;
+  changing the number, template, values or header file clears the written list),
+  **delete** a draft nobody was sent, and an **idempotent create**
+  (`Idempotency-Key`).
+- **Activity**: `GET /campaigns/{id}/activity`, from the audit trail - people's
+  actions and the system's (waits, completion, failure) - with field names,
+  counts and reasons, never a contact.
+- **Send a test to myself**: `POST /campaigns/{id}/test-send` to a contact of the
+  admin's who already wrote to the number; the same message a recipient would
+  get, never a recipient, ten a day per workspace.
+- **Results**: `replied` (an answer on the campaign's number within 72 hours of
+  their copy, credited to the customer's latest copy only), `opted_out_after`, a
+  `reasons` breakdown, the **KPI summary** (`GET /campaigns/summary`), **live
+  progress** for up to twenty campaigns in one request (`GET
+  /campaigns/progress`, with an ETag), the **ETA** on a campaign, and a **CSV
+  export** of the recipients (UTF-8 with a BOM, local times, formula cells
+  neutralised, five an hour).
+
+`docs/CAMPAIGNS_PAGE_CONTRACT.md` maps every element of the page to its route.
+
+## What a campaign costs
+
+Wasla does not charge for WhatsApp messages: Meta bills the business's WhatsApp
+Business Account directly, per delivered template, by category and by the
+recipient's country ([Pricing](https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing)).
+`GET /campaigns/{id}/cost-estimate` prices each recipient at the active rate
+card's marketing rate for their calling-code market, counting everybody as
+delivered - an upper bound, labelled an estimate ([ADR-150](../DECISIONS.md)).
+Platform staff upload Meta's rate card (`/platform/whatsapp-rate-cards`); without
+an active card the estimate has no total. Free entry point windows are not
+modelled.
+
 ## Stopping
 
-`PAUSED` and `CANCELLED` are deliberately different states. Every pause or failure records `status_reason`, from a closed vocabulary (`CampaignStopReason`): `workspace_suspended`, `workspace_deleted`, `subscription_suspended`, `admin_paused`, `template_removed`, `template_not_approved`, `template_withdrawn`, `template_category`, `template_parameters_refused`, `connection_disabled`, `credential_refused`, `connection_refused`, `provider_unreachable`, `repeated_batch_failure`, `header_media_unavailable`, `header_media_refused`. It is the one field that says why a campaign is not sending; `last_error` keeps its sentence for a person.
+`PAUSED` and `CANCELLED` are deliberately different states. Every pause or failure records `status_reason`, from a closed vocabulary (`CampaignStopReason`): `workspace_suspended`, `workspace_deleted`, `subscription_suspended`, `admin_paused`, `template_removed`, `template_not_approved`, `template_withdrawn`, `template_category`, `template_parameters_refused`, `connection_disabled`, `credential_refused`, `connection_refused`, `provider_unreachable`, `repeated_batch_failure`, `header_media_unavailable`, `header_media_refused`, `meta_quality_review`. It is the one field that says why a campaign is not sending; `last_error` keeps its sentence for a person.
 
 **A workspace that is not served does not broadcast** ([ADR-135](../DECISIONS.md), CMP-02, CMQ-11). Suspension by the platform, deletion by the owner, and a subscription suspended for an unpaid invoice pause the workspace's scheduled and running campaigns in the same transaction, one audit entry each. The worker asks the same "served" predicate the follow-up gate asks (`app/services/workspace_serving.py`) before every batch and every recipient, so a transition it could not see still stops it at the next person. `past_due` is the grace and keeps sending. Restoring a workspace or settling the invoice resumes nothing: an admin reschedules, and the reservation is taken again then.
 
@@ -207,10 +355,14 @@ A follow-up refused this way is `SKIPPED`, not failed. Consent does not come bac
 | `pending`, `sent`, `failed`, `skipped` | The recipient rows |
 | `delivered`, `read` | The message rows a delivery webhook advances |
 | `failed_after_send` | Recipients `sent` whose message Meta later reported `failed` (CMP-10) |
+| `held` | Recipients `sent` whose message Meta held for quality assessment (LIM-08) |
+| `replied` | Recipients who answered on the campaign's number within 72 hours, this being their latest copy (PG-10) |
+| `opted_out_after` | Recipients who opted out themselves within 72 hours after their copy |
+| `reasons` | Every recipient once, by status, reason code (`unrecorded` for none) and Meta's error code |
 
 A message Meta accepted is `sent`; whether it arrived is Meta's news to bring. A read message was also delivered, so `delivered` includes it — counting the two statuses separately would undercount delivery by everyone who read it.
 
-Every recipient that did not end `sent` carries `reason_code` (CMP-13): `opted_out`, `contact_gone`, `other_connection`, `identity_changed`, `channel_not_in_plan`, `recipient_opted_out_at_provider`, `marketing_limit_per_user`, `undeliverable`, `delivery_unconfirmed`, `attempts_exhausted`, `template_parameters_refused`. `last_error` keeps the sentence. Rows recorded before reason codes have none.
+Every recipient that did not end `sent` carries `reason_code` (CMP-13): `opted_out`, `contact_gone`, `other_connection`, `identity_changed`, `channel_not_in_plan`, `recipient_opted_out_at_provider`, `marketing_limit_per_user`, `undeliverable`, `delivery_unconfirmed`, `attempts_exhausted`, `template_parameters_refused`, `send_window_closed`, `contact_frequency_cap`. `last_error` keeps the sentence. Rows recorded before reason codes have none.
 
 ## API
 
@@ -230,12 +382,29 @@ Every recipient that did not end `sent` carries `reason_code` (CMP-13): `opted_o
 | `POST /api/v1/campaigns/{id}/cancel` | admin | Stop, finally |
 | `GET /api/v1/campaigns/{id}/statistics` | member | Outcomes and delivery |
 | `GET /api/v1/campaigns/{id}/recipients` | member | Who it reached, and who it did not - by `cursor`, filtered by `status` and `reason` |
+| `GET /api/v1/campaigns?q=` | member | Find campaigns by name |
+| `PATCH /api/v1/campaigns/{id}` | admin | Edit a draft (`If-Match`) |
+| `DELETE /api/v1/campaigns/{id}` | admin | Delete a draft nobody was sent |
+| `POST /api/v1/campaigns/{id}/duplicate` | admin | A new draft like this one |
+| `GET /api/v1/campaigns/{id}/activity` | member | What happened to it |
+| `POST /api/v1/campaigns/{id}/preview-messages` | admin | Up to five people's own messages |
+| `GET /api/v1/campaigns/{id}/delivery-plan` | admin | When it will reach whom |
+| `GET /api/v1/campaigns/{id}/cost-estimate` | admin | What it may cost at Meta's prices |
+| `POST /api/v1/campaigns/{id}/test-send` | admin | Send it to my own contact |
+| `GET /api/v1/campaigns/{id}/recipients/export.csv` | admin | The recipients as CSV |
+| `GET /api/v1/campaigns/summary` | member | KPI cards over a window |
+| `GET /api/v1/campaigns/progress?ids=` | member | Live state of up to 20 campaigns |
+| `GET/POST/PATCH/DELETE /api/v1/campaign-segments` | member reads, admin writes | Saved audience rules |
+| `GET /api/v1/contacts` | member | The contact picker |
+| `GET/PUT /api/v1/workspace/campaign-settings` | member reads, admin writes | Quiet hours |
+| `GET /api/v1/whatsapp/accounts/{id}/messaging-limit` | member | Meta's limit and how much of it is used |
+| `GET /api/v1/timezones` | public | The zones a workspace may choose |
 | `POST /api/v1/contacts/{id}/opt-out` | member | Record a refusal on one channel (`channel` required) |
 | `DELETE /api/v1/contacts/{id}/opt-out?channel=…` | admin | Undo one recorded in error, on that channel |
 
 Reading is ordinary inbox work. Composing, targeting and starting a campaign take an administrator, because a campaign writes to thousands of customers at once and is the least reversible thing this platform does. Recording an opt-out is any member's to do — the person handling the conversation is the one a customer says "stop" to — while clearing one takes an administrator, because undoing somebody's own refusal should be deliberate.
 
-Lifecycle changes are named transitions rather than a `PATCH` on `status`. Status is the only field with an operational meaning, and naming the transition keeps both the audit trail and the authorization legible.
+Lifecycle changes are named transitions rather than a `PATCH` on `status`. Status is the only field with an operational meaning, and naming the transition keeps both the audit trail and the authorization legible. `PATCH` edits a draft's composition and nothing else; a campaign's fields cannot change once it leaves `draft`.
 
 ## Configuration
 
@@ -246,18 +415,30 @@ Lifecycle changes are named transitions rather than a `PATCH` on `status`. Statu
 | `CAMPAIGN_PROVIDER_UNREACHABLE_PAUSE_HOURS` | 6 | How long Meta may be unreachable before a waiting campaign is paused |
 | `CAMPAIGN_BATCH_FAILURE_PAUSE_AFTER` | 5 | Batches in a row that may raise before a campaign is paused |
 | `CAMPAIGN_HEADER_MEDIA_REFRESH_SECONDS` | 2160000 (25 days) | How old Meta's id for a header file may be before it is uploaded again; Meta's expire after 30 days |
+| `CAMPAIGN_MESSAGING_LIMIT_REFRESH_SECONDS` | 21600 (6 hours) | How old a number's messaging limit may be before scheduling reads it again |
+| `META_MESSAGING_LIMIT_API_VERSION` | v24.0 | The Graph API version of the limit read alone |
+| `CAMPAIGN_PORTFOLIO_LIMIT_SHARE` | 0.80 | The share of Meta's limit campaigns may use; a platform setting |
+| `CAMPAIGN_CONTACT_MARKETING_INTERVAL_SECONDS` | 86400 | One marketing message per customer per this long |
+| `CAMPAIGN_PARAMETER_MAX_CHARS` | 60 | The longest a person's own value may be before the fallback |
+| `CAMPAIGN_TEST_SENDS_PER_DAY` | 10 | Tests per workspace in a moving day |
+| `CAMPAIGN_EXPORTS_PER_HOUR` | 5 | CSV exports per workspace in a moving hour |
+| `CAMPAIGN_REPLY_ATTRIBUTION_SECONDS` | 259200 (72 hours) | How long after a copy an answer counts as its reply |
 
 There is no campaign-specific credential. Sends use the platform Meta token, as every other outbound path does ([ADR-009](../DECISIONS.md)).
 
 ## Known limits
 
-- **No per-recipient personalisation.** A campaign's template variables are one list for the whole send. Filling `{{1}}` with each customer's name needs a source of per-recipient facts that nothing here has yet.
+- **Values come from the contact and their lead only.** A URL button's suffix and a copy code are the same for everybody, and a header file is one per campaign.
 - **The rate is per campaign unless a number has an allowance.** Two campaigns running at once on one number can exceed either one's rate while `CONNECTION_SENDS_PER_MINUTE` is unset; with it set (or a per-number override), they share the number's allowance and wait for it without spending attempts.
-- **Meta's portfolio messaging limit is not read or enforced** (CMP-17, EXT-CMP-01). Meta counts unique users messaged outside a customer-service window in a moving 24 hours, shared by every number of the business portfolio, with tiers of 250 (new), 2,000, 10,000, 100,000 and unlimited. A 50,000-person campaign on a 250-tier portfolio will be refused beyond the tier, with an error Meta does not document; keep first campaigns under the tier. Reading the limit and warning at scheduling is CMQ-06.
+- **The portfolio is keyed on the WABA.** Meta names no field for the portfolio a WABA belongs to; two WABAs of one portfolio are counted apart and could together exceed its limit (EXTERNAL VERIFICATION).
+- **Follow-ups and manual templates are not refused at the limit.** They are counted and alerted at 100 %; what a follow-up should do then is an open product decision.
+- **Without the `business_capability_update` webhook subscribed**, a changed limit is noticed by the six-hourly read only.
+- **The cost estimate is an upper bound** that counts everybody as delivered and ignores free entry point windows; +7 numbers are priced as Russia (Meta does not document the split with Kazakhstan).
 - **One header file per campaign.** IMAGE, VIDEO and DOCUMENT headers are sent with the campaign's header file, the same for everybody; a per-recipient picture is not supported. **LOCATION and GIF headers are refused** at composition (`template_unsupported`). Text headers, body (positional or named) and URL and copy-code buttons are filled.
 - **That Meta honours one uploaded id across many messages for 30 days** is what its pages imply (they recommend sending by uploaded id and state the lifetime) and is EXTERNAL VERIFICATION until a real campaign shows it.
-- **Workspace time zone.** A `scheduled_at` must carry its UTC offset (CMP-15); there are no quiet hours (CMQ-04).
+- **A `scheduled_at` still needs its UTC offset** (CMP-15): it is an instant, not a local time; quiet hours are in the workspace's zone.
 - **No import, deliberately.** See [ADR-025](../DECISIONS.md). Adding one means answering the consent question, not writing a CSV parser.
 - **No campaign analytics events.** Counts come from the recipient and message rows; the analytics event table arrives in Phase 12, and writing a second shape now would mean migrating two later.
-- **Nothing sweeps completed campaigns.** Recipient rows accumulate for the life of the workspace. They are the record of who was written to and when, so a retention policy is a product decision rather than a cleanup job.
+- **Nothing sweeps completed campaigns.** Recipient rows accumulate for the life of the workspace - each now with the values sent to that person. They are the record of who was written to and when, so a retention policy is a product decision rather than a cleanup job (CMQ-08).
+- **Live progress is polled**, not pushed: no WebSocket or Server-Sent Events.
 - **Opt-out is all-or-nothing.** A contact who opts out is out of every campaign, including a utility template they might have wanted. Per-category consent needs a vocabulary a business can actually explain to a customer.

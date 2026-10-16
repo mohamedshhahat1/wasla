@@ -301,6 +301,39 @@ An event older than the row's last write, an unmapped word, or a template the
 registry does not hold changes nothing. **The field must be subscribed in the
 Meta App** - an operator's action; until then nothing arrives.
 
+## Meta's messaging limit, and the two webhook fields that move it
+
+The business portfolio's messaging limit (ADR-146) is read with
+`GET /{phone-number-id}?fields=whatsapp_business_manager_messaging_limit`,
+through the number's own credential, on **Graph API v24.0 for this one call**
+(`META_MESSAGING_LIMIT_API_VERSION`): Meta documents the field from v24.0 on,
+and raising the global `META_API_VERSION` would change every call Wasla makes.
+Values `TIER_50`, `TIER_250`, `TIER_2K`, `TIER_10K`, `TIER_100K` and
+`TIER_UNLIMITED` map to numbers; anything else (`UNTIERED`, `TIER_NOT_SET`, a
+tier Meta adds) is treated as 250, counted and alerted, never guessed upward.
+A failed read keeps the last value; a number never read has no limit, and no
+campaign is scheduled or sent on it.
+
+Two webhook fields are handled - signature checked and idempotent like every
+delivery:
+
+- `business_capability_update`: `entry.id` is the WhatsApp Business Account;
+  `max_daily_conversations_per_business` (v24.0+, a `TIER_*` string, or the
+  integer the example shows) or the deprecated
+  `max_daily_conversation_per_phone` (integers, -1 unlimited) sets the
+  portfolio's limit. An older delivery than the stored value changes nothing,
+  and a new value releases the campaigns waiting on the portfolio.
+- `account_alerts`: recorded (`wasla_messaging_limit_alerts_total{alert_type}`,
+  a log line) - for example `INCREASED_CAPABILITIES_ELIGIBILITY_FAILED` - and
+  acted on in no other way.
+
+**Both fields must be subscribed in the Meta App** (an operator's action, with
+`message_template_status_update`); until then the periodic read (six hours, at
+schedule) is the only source, which is correct and only slower to notice.
+A send Meta answers `message_status: held_for_quality_assessment` is marked
+held; a `failed` status with `135000` (a held message dropped) pauses a campaign
+`meta_quality_review` (LIM-08).
+
 ## Status reconciliation
 
 A delivery status identifies itself by the **provider message id**, not by the number it arrived on — and that difference is the whole design. Resolving the workspace from the number and *then* looking the message up inside it finds nothing once the number has changed hands, so every message the previous owner had in flight at release time stayed `sent` with a null `delivered_at` for ever.
@@ -333,7 +366,7 @@ Nothing else carries a key. A campaign recipient and a follow-up are protected b
 
 ## Message origin
 
-`messages.origin` records what produced each line of the transcript: `customer`, `human`, `agent`, `campaign`, `follow_up`, `system`, and `external` — a reply a person typed in the provider's own app, known from its echo (ADR-129). It exists because inferring it from `sent_by_id` is wrong twice — a campaign carries its creator, so every broadcast read as that person's reply, and a follow-up carries nobody, so every nudge read as an AI reply. Both were recoverable by joining `campaign_recipients` or `follow_ups`, and neither was recoverable by reading the transcript, which is what an auditor, an analytics query and a colleague all actually do.
+`messages.origin` records what produced each line of the transcript: `customer`, `human`, `agent`, `campaign`, `follow_up`, `system`, `external` — a reply a person typed in the provider's own app, known from its echo (ADR-129) — and `campaign_test`, an admin's test of a campaign sent to their own contact (ADR-149). It exists because inferring it from `sent_by_id` is wrong twice — a campaign carries its creator, so every broadcast read as that person's reply, and a follow-up carries nobody, so every nudge read as an AI reply. Both were recoverable by joining `campaign_recipients` or `follow_ups`, and neither was recoverable by reading the transcript, which is what an auditor, an analytics query and a colleague all actually do.
 
 Set explicitly at every creation site rather than defaulted: a default is what an unlabelled send would silently inherit, and inheriting the wrong attribution is the defect the column removes.
 
@@ -362,7 +395,7 @@ A tap opts the customer out of marketing when its words are a stop phrase, or wh
 
 ## Graph API version
 
-`META_API_VERSION` is `v21.0`, which Meta retires on **2027-01-21** (Graph API changelog, read 2026-09-11). Start-up warns inside the final ninety days, from a table this repository maintains by hand in `app/integrations/whatsapp/versions.py`.
+`META_API_VERSION` is `v21.0` - except the messaging-limit read, which uses `META_MESSAGING_LIMIT_API_VERSION` (`v24.0`) for that one call - and Meta retires v21.0 on **2027-01-21** (Graph API changelog, read 2026-09-11). Start-up warns inside the final ninety days, from a table this repository maintains by hand in `app/integrations/whatsapp/versions.py`.
 
 **Maintaining it by hand is the design.** Fetching the changelog at boot would make starting the application depend on a third party's website being up and parseable, which is a worse failure than the one being prevented. So: when a version is added or retired, update `META_API_SUNSETS`. A version the table has never heard of warns too, because silence would make a typo look like an endorsement.
 

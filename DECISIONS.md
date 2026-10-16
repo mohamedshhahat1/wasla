@@ -7101,3 +7101,196 @@ The header file is uploaded by the worker holding the campaign's lease, after
 `hold()`, and Meta's id is written only while the row still carries the
 worker's token (ADR-144, HM-04) - the same rule `record_batch_failure`
 follows. The per-recipient claim and the lease arithmetic are unchanged.
+
+## ADR-145 — Every Workspace Has A Time Zone, And Campaigns Keep Its Quiet Hours (TZ-01 .. TZ-04, CMQ-04)
+
+**Context.** A campaign scheduled for "now" at 23:00 Cairo time wrote to
+customers in the night; `scheduled_at` needed an offset (CMP-15) precisely
+because no workspace had a zone to read it in. The owner decided on
+2026-10-16 that everything a campaign does follows the business's own time.
+
+**Decision.**
+
+1. **A zone per workspace, chosen at onboarding** (TZ-01). `tenants.timezone`
+   is an IANA name, NOT NULL; existing workspaces were backfilled
+   `Africa/Cairo` (every one was Egyptian). `POST /workspaces` and
+   `POST /auth/register` require it (422 `timezone_unknown`); `PATCH
+   /workspace` changes it (owner or admin, audited with the old and new name).
+   Names are validated against the tzdata package the application ships
+   (`tzdata` pinned), read from its own files, so Windows and Linux agree; the
+   accepted set is `zone.tab` and `zone1970.tab` together - aliases (`Egypt`,
+   `US/Eastern`, `Etc/*`) are refused.
+2. **The list it validates against is public** (TZ-02):
+   `GET /api/v1/timezones`, rate limited per client, suggested Arab-world
+   zones first, each zone's current offset, an ETag over the release and the
+   offsets.
+3. **Quiet hours, on by default** (TZ-03): 22:00-09:00 local, editable per
+   workspace (`/workspace/campaign-settings`). The worker asks before a batch
+   and before every recipient; inside the window the campaign **waits** -
+   status unchanged, no attempt spent, no lease kept, `waiting_reason =
+   quiet_hours`, `resumes_at` the window's end computed as a local wall time
+   with that date's rules (DST in Cairo is real). Quiet hours bind campaign
+   sends only - not AI or human replies, follow-ups, or an admin's test.
+4. **A schedule inside the window is accepted and says so** (TZ-04): the
+   plan's first send is the window's end, notice `starts_after_quiet_hours`.
+   Changing the zone never moves `scheduled_at` (an instant); it moves where
+   the window falls from the next batch on.
+
+**Consequences.** Every time the page shows - `resumes_at`, the ETA, the plan,
+the activity - comes in UTC and in the workspace's zone with its offset.
+Migrations 0108, 0109.
+
+## ADR-146 — Meta's Messaging Limit Is Read, Counted Per Portfolio, And Never Exceeded By Campaigns (LIM-01 .. LIM-08, CMP-17, CMQ-06)
+
+**Context.** Meta limits how many unique people a business portfolio may
+message outside a customer service window in a moving 24 hours (250 for a
+new portfolio). Wasla neither read nor respected it: a 600-person campaign on
+a fresh portfolio wrote to 600 in one window (the before-probe in
+CAMPAIGNS_PAGE_FEATURES_IMPLEMENTATION.md). Meta documents no error code for
+a send past the limit, so Wasla cannot rely on Meta refusing.
+
+**Decision.**
+
+1. **Read** (LIM-01): `whatsapp_business_manager_messaging_limit` on the
+   phone number, with that number's own credential, on Graph API v24.0 for
+   this one call (`META_MESSAGING_LIMIT_API_VERSION`; the global version stays
+   v21.0) - at connect, rotation, enable, and at schedule when older than six
+   hours; and from `business_capability_update` webhooks (ordered by time).
+   Known values map through one table; anything else is 250, counted and
+   alerted, never guessed upward. A limit never read refuses a schedule (422
+   `messaging_limit_unknown`) and makes a running campaign wait.
+2. **The unit is the portfolio** (LIM-02). Meta's WABA reference names no
+   field for the owning portfolio, so the key is the WABA - an EXTERNAL
+   VERIFICATION item: two WABAs of one portfolio could together exceed its
+   limit.
+3. **One ledger of business-initiated sends** (LIM-03),
+   `business_initiated_sends`: every WhatsApp template to a person whose
+   service window (23 hours, an hour of margin) is closed, whatever path sent
+   it, reserved under `pg_advisory_xact_lock` on the portfolio in the send
+   intent's transaction and deleted only when Meta provably did not accept the
+   message. Platform-level: the count binds every workspace on the portfolio.
+   Pruned after 48 hours by the retention sweep.
+4. **Campaigns stop at 80 %** (LIM-04): `floor(CAMPAIGN_PORTFOLIO_LIMIT_SHARE
+   x limit)` distinct people, every source counted. Refused, the campaign waits
+   `daily_limit` until the first counted person leaves the window (+5 minutes)
+   and carries on by itself, day after day. Follow-ups and manual templates are
+   recorded and not refused (an open product decision at 100 %).
+5. **The plan** (LIM-05): one pure function replays the worker's rules and
+   gives the days, the completion and the notices, for the schedule response,
+   `GET /campaigns/{id}/delivery-plan` and the ETA.
+6. **A deadline** (LIM-06): `send_until` skips whoever is still pending as
+   `send_window_closed`.
+7. **What the page may show** (LIM-07): tier, limit, share, budget, used in
+   24 h, available now, next capacity - aggregates only, even when another
+   workspace shares the portfolio.
+8. **Pacing** (LIM-08): `held_for_quality_assessment` marks the message held;
+   a dropped held message (135000) pauses its campaign `meta_quality_review`;
+   131049 pushes the person's marketing slot 24 hours out.
+
+**Consequences.** Counted at the fake Meta's transport: 600 people on 250 ->
+200 a day for three days with 1, 2 and 4 workers, two campaigns, two numbers
+and two workspaces on one portfolio; 40 races for the last place -> one
+winner. Invariant CR-12. Migrations 0110-0112. The deploy step reads every
+connection's limit before campaign workers start (docs/RUNBOOK.md).
+
+## ADR-147 — One Marketing Message Per Customer Per Day, Per Workspace (FREQ-01, CMQ-03)
+
+**Decision.** A contact receives at most one marketing template per moving
+24 hours (`CAMPAIGN_CONTACT_MARKETING_INTERVAL_SECONDS`) per workspace, across
+every campaign and every manual marketing send - claimed by one conditional
+`UPDATE contacts ... RETURNING` in the send intent's transaction, so two
+campaigns on two workers cannot both win. A capped campaign recipient is
+deferred to its moment (+5 minutes), no attempt spent; skipped
+`contact_frequency_cap` past a deadline; the campaign waits `contact_cap` when
+nobody else is sendable. A manual marketing send inside the cap is 409
+`contact_frequency_cap` with `available_at`. Not counted: tests, utility and
+authentication templates, follow-ups, replies. A provably undelivered send
+releases the claim. Stricter than any plausible value of Meta's undocumented
+per-user limit; 131049 stays terminal per person.
+
+**Consequences.** Invariant CR-11. Migration 0113.
+
+## ADR-148 — A Person's Own Values, Frozen With The Audience (PER-01 .. PER-05)
+
+**Decision.** A body or text-header placeholder takes a constant or a field
+of the contact or their active lead (display name; lead name, interest,
+status label, budget; one of the workspace's custom fields), each with a
+required fallback; never the phone number, never a button's value (a personal
+value in a URL leaves Wasla in a link). Values are normalised to one line,
+fall back when empty or past `CAMPAIGN_PARAMETER_MAX_CHARS`, and fall back
+together when they would carry the body past Meta's 1,024 characters. They are
+resolved once, when the audience is written, and stored on the recipient with
+the contact they were resolved for (`rendered_parameters`); the send uses
+exactly those, and a row resolved for someone else is skipped, never sent.
+`POST /campaigns/{id}/preview-messages` renders up to five chosen people's
+messages and nothing about anybody else.
+
+**Consequences.** A copy of each person's values per recipient row joins
+CMQ-08's retention question. Invariant CR-15. Migration 0114.
+
+## ADR-149 — The Campaigns Page's Features Each Have An Endpoint That Does What The Page Claims (PG-01 .. PG-14)
+
+**Decision.** Search by name (a literal "contains"); a versioned draft edit
+(PATCH, If-Match, drafts only - replacing the 405); delete of a draft nobody
+was sent; duplicate (composition and audience rules, never the list or
+results); an idempotent create (`Idempotency-Key`, one savepoint, a day); the
+activity log read from the audit trail through a closed vocabulary with
+whitelisted metadata (the worker now audits completion and failure); saved
+segments - rules, never people - copied onto a campaign and narrowed, never
+widened; a contact picker on a number (keyset, custom plans, the audience's
+own opt-out anti-join); a test send to the admin's own contact through the one
+send path, never a recipient; replies and opt-outs after a send attributed to
+the contact's latest copy within 72 hours at ingestion; a reasons breakdown;
+a KPI summary by the same aggregate queries as one campaign's statistics; one
+progress request for up to twenty campaigns with an ETag; a CSV export with a
+BOM, local times and formula cells neutralised. Polling, not WebSockets: there
+is no frontend yet, and a poll every ten seconds is six of the campaign
+bucket's thirty a minute.
+
+**Consequences.** `docs/CAMPAIGNS_PAGE_CONTRACT.md` maps every element of the
+page to its route. Invariants CR-13, CR-14. Migrations 0115-0118.
+
+## ADR-150 — Campaign Cost Is An Estimate From A Rate Card Platform Staff Entered (COST-01, COST-02)
+
+**Decision.** Meta publishes no price API. Platform staff upload Meta's rate
+card (CSV), parsed strictly into exact decimals, stored inactive with a
+preview against the active card, then activated. Each card carries its
+calling-code map - its own, or Meta's published regions transcribed into a
+code constant (+7, undocumented between Russia and Kazakhstan, as the higher
+Russia). `GET /campaigns/{id}/cost-estimate` multiplies each market's people
+by its marketing rate, every one counted as delivered: an upper bound,
+labelled an estimate, with no number at all when no card is active. Wasla does
+not charge for messages; Meta bills the business, and the answer says so.
+
+**Consequences.** Free entry point windows are not modelled. Migration 0119.
+
+## ADR-025 (amended 2026-10-17) — A Test Send Stays Inside "Wrote First"
+
+A campaign's test goes only to a contact who already has a conversation with
+the campaign's number (PG-09): the admin writes to the business from their own
+phone first. Segments and the contact picker narrow the base population; none
+widens it.
+
+## ADR-026 (amended 2026-10-17) — Waits Are Timestamps Too
+
+Quiet hours, Meta's daily limit and the per-contact cap make a campaign wait by
+setting `next_send_at` / `resumes_at`, never by sleeping (ADR-145, ADR-146,
+ADR-147).
+
+## ADR-134 (amended 2026-10-17) — No Lease While Waiting
+
+A waiting campaign gives up its lease: it is not paused, spends no attempt and
+re-arms nothing; the next sweep after `resumes_at` claims it like any due
+campaign.
+
+## ADR-137 (amended 2026-10-17) — Mappings Beside Constants
+
+A placeholder's value may be a mapping to a person's field with a fallback
+(ADR-148); the template's needs are still derived from its stored components,
+and the count check runs on the fallbacks.
+
+## ADR-144 (amended 2026-10-17) — A Test Uploads For Itself
+
+A test send reuses the campaign's Meta media id only while it is fresh and
+through the campaign's number; otherwise it uploads the file for the test,
+before any lock, and never writes the id onto the campaign (PG-09).

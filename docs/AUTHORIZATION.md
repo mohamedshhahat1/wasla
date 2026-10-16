@@ -842,6 +842,23 @@ relations a CRM write can name are now composite too:
 | `lead_notes` | `lead_id` | `leads` | `CASCADE` |
 | `lead_activities` | `lead_id` | `leads` | `CASCADE` |
 
+**Campaigns page, migrations 0115-0117 (ADR-149).** Every new tenant table
+carries `UNIQUE (tenant_id, id)`, and its references to other tenant rows are
+composite:
+
+| Child | Column(s) | Parent | On delete |
+|---|---|---|---|
+| `campaign_create_keys` | `campaign_id` | `campaigns` | `CASCADE` |
+| `campaign_segments` | `account_id` | `whatsapp_accounts` | `CASCADE` |
+| `campaigns` | `audience_segment_id` | `campaign_segments` | no action - the service clears it before a segment is deleted; CR-13 checks it |
+| `campaign_test_sends` | `campaign_id` | `campaigns` | `CASCADE` |
+| `campaign_test_sends` | `contact_id` | `contacts` | `CASCADE` |
+
+`business_initiated_sends`, `whatsapp_business_portfolios` and the rate-card
+tables are platform-level, not tenant data: a portfolio's count binds every
+workspace on it, and a rate card is Meta's price list for all (ADR-146,
+ADR-150). The ledger keeps `tenant_id` for erasure and cascades with it.
+
 `SET NULL (column)` nulls only the reference, never `tenant_id` beside it. The
 three-column key on `leads` also makes "a lead's conversation is with that
 lead's customer" a database fact whenever both are set. A follow-up's lead and

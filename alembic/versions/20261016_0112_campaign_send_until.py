@@ -47,7 +47,7 @@ REASONS_0104 = (
     "template_parameters_refused",
 )
 NEW_REASONS = ("send_window_closed",)
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0113)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
 
 
 def _reason_check(reasons: tuple[str, ...]) -> str:
