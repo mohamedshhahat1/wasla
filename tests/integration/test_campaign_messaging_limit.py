@@ -276,7 +276,7 @@ def new_waba() -> str:
 
 async def start(clock: SimClock) -> None:
     """Stand the simulated clock just after the real moment campaigns were scheduled."""
-    clock.now = datetime.now(UTC) + timedelta(seconds=1)
+    clock.stand(datetime.now(UTC) + timedelta(seconds=1))
 
 
 # --------------------------------------------------------------------------- the numbers

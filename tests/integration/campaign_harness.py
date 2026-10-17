@@ -253,13 +253,22 @@ class SimClock:
     by the time the batch takes, so a sweep started at 21:59:59 local and
     slowed by Meta's latency crosses 22:00 part-way, exactly as a real one
     would. `at` is that clock, for the fake Meta to stamp each request with.
+
+    The elapsed time is measured from the clock's creation until the first
+    sweep, never from 0: `perf_counter` counts from boot, and a request made
+    before any sweep on a machine up a day would be dated a day ahead (CPF-05).
     """
 
     now: datetime
-    _started: float = 0.0
+    _started: float = field(default_factory=perf_counter)
 
     def at(self) -> datetime:
         return self.now + timedelta(seconds=perf_counter() - self._started)
+
+    def stand(self, now: datetime) -> None:
+        """Move the clock to `now`, measuring elapsed time from this moment."""
+        self.now = now
+        self._started = perf_counter()
 
     async def sweep(self, replica: CampaignWorker) -> int:
         self._started = perf_counter()

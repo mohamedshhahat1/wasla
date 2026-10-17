@@ -424,6 +424,14 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   window at that moment is not recorded, and over-counting is the safe error.
   `test_campaign_page_migrations.py` seeds every case at 0119 and fails without the backfill.
 
+- **CPF-05** (test harness of this stage): `SimClock.at()` adds `perf_counter() - _started`, and
+  `_started` was 0 until the first sweep - so a request made before any sweep was dated "now +
+  the machine's uptime". `test_follow_ups_and_manual_templates_use_the_window_too` sends its 30
+  manual templates before the first sweep; once the machine had been up 24.3 hours they were dated
+  a day ahead and the transport count read 170 instead of 200. The clock now measures from its
+  creation, and `start()` re-stands it (`SimClock.stand`). The product was right; the measurement
+  was not.
+
 ## Phase 9 notes (PG-06, PG-07)
 
 - Migration **0116**: `campaign_segments` (tenant, name - unique per workspace, and the service also
