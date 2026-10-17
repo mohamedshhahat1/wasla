@@ -7208,7 +7208,7 @@ authentication templates, follow-ups, replies. A provably undelivered send
 releases the claim. Stricter than any plausible value of Meta's undocumented
 per-user limit; 131049 stays terminal per person.
 
-**Consequences.** Invariant CR-11. Migration 0113.
+**Consequences.** Invariant CR-11 (a pair whose later send was made under the cap, so two sends from before 0113 are not judged; migration 0120 fills the claim from the last day's sends, CPF-04). Migration 0113.
 
 ## ADR-148 — A Person's Own Values, Frozen With The Audience (PER-01 .. PER-05)
 

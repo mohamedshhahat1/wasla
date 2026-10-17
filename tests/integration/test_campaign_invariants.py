@@ -312,14 +312,19 @@ async def test_cr11_two_marketing_messages_to_one_contact_within_a_day(
     db_session: AsyncSession,
 ) -> None:
     _, _, conversation = await _world(db_session, "cr11")
+    # Two sends from before the cap existed (no claim), half an hour apart:
+    # history the cap never judged, not a breach.
     first = await _message(db_session, conversation, MessageDeliveryState.SENT)
     first.sent_at = datetime.now(UTC) - timedelta(hours=30)
+    history = await _message(db_session, conversation, MessageDeliveryState.SENT)
+    history.sent_at = datetime.now(UTC) - timedelta(hours=29, minutes=30)
     # A test of the campaign an hour later is not a marketing send to count.
     test = await _message(db_session, conversation, MessageDeliveryState.SENT)
     test.origin = MessageOrigin.CAMPAIGN_TEST
     test.sent_at = datetime.now(UTC) - timedelta(hours=29)
     second = await _message(db_session, conversation, MessageDeliveryState.SENT)
     second.sent_at = datetime.now(UTC) - timedelta(hours=2)
+    second.marketing_cap_claimed_at = second.sent_at
     before = await _counts(db_session)
 
     # A person's marketing template 23 hours after the first send's pair: the
@@ -327,6 +332,7 @@ async def test_cr11_two_marketing_messages_to_one_contact_within_a_day(
     manual = await _message(db_session, conversation, MessageDeliveryState.SENT)
     manual.origin = MessageOrigin.HUMAN
     manual.sent_at = datetime.now(UTC) - timedelta(hours=1)
+    manual.marketing_cap_claimed_at = manual.sent_at
 
     assert await _added(db_session, before) == {
         "cr11_two_marketing_messages_to_one_contact_within_a_day": 1

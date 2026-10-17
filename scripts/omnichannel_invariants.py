@@ -590,10 +590,14 @@ CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
     ),
     # CR-11: two marketing templates accepted for one contact of one workspace
     # within 24 hours - from campaigns or by hand, never a test (FREQ-01,
-    # CMQ-03). Counted per pair.
+    # CMQ-03). Counted per pair whose later send was made under the cap (its
+    # message carries the claim): two sends from before 0113 are history the
+    # cap never judged, while one from before it and one after is a breach
+    # (CPF-04).
     Check(
         "cr11_two_marketing_messages_to_one_contact_within_a_day",
-        "WITH marketing AS (SELECT m.id, m.tenant_id, v.contact_id, m.sent_at"
+        "WITH marketing AS (SELECT m.id, m.tenant_id, v.contact_id, m.sent_at,"
+        " m.marketing_cap_claimed_at IS NOT NULL AS claimed"
         " FROM messages m JOIN conversations v ON v.tenant_id = m.tenant_id"
         " AND v.id = m.conversation_id"
         " WHERE m.direction = 'outbound' AND m.origin IN ('campaign', 'human')"
@@ -602,7 +606,8 @@ CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
         " AND t.account_id = v.account_id AND t.name = m.template_name"
         " AND t.language = m.template_language AND t.category = 'marketing'))"
         " SELECT count(*) FROM marketing a JOIN marketing b ON b.tenant_id = a.tenant_id"
-        " AND b.contact_id = a.contact_id AND b.id <> a.id AND b.sent_at >= a.sent_at"
+        " AND b.contact_id = a.contact_id AND b.id <> a.id AND b.claimed"
+        " AND b.sent_at >= a.sent_at"
         " AND (b.sent_at > a.sent_at OR b.id > a.id)"
         " AND b.sent_at < a.sent_at + interval '24 hours'",
     ),

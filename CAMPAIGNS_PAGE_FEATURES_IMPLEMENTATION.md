@@ -432,6 +432,14 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   creation, and `start()` re-stands it (`SimClock.stand`). The product was right; the measurement
   was not.
 
+- **CR-11 refined** (with CPF-04): a populated upgrade whose 0107 data already held two marketing
+  sends to one person in a day (the base code had no cap) read CR-11 = 1 although nothing after the
+  upgrade sent anything twice. CR-11 now counts a pair only when its later send was made under the
+  cap (its message carries `marketing_cap_claimed_at`): a pre-cap pair is history the cap never
+  judged; a pre-cap send followed by a post-cap one (the CPF-04 case) is still counted. The
+  injection test adds a pre-cap pair that must not count. Re-run: after the upgrade, all 15
+  campaign checks 0.
+
 ## Phase 9 notes (PG-06, PG-07)
 
 - Migration **0116**: `campaign_segments` (tenant, name - unique per workspace, and the service also
