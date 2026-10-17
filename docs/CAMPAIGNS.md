@@ -203,7 +203,10 @@ refusing ([ADR-146](../DECISIONS.md)).
   from campaigns, manual templates, follow-ups and tests, reserved under the
   portfolio's advisory lock before Meta is called and deleted only when Meta
   provably did not take the message. Wasla keys the portfolio on the WABA: Meta
-  names no field for a WABA's portfolio (EXTERNAL VERIFICATION).
+  names no field for a WABA's portfolio (EXTERNAL VERIFICATION). Rows older than
+  48 hours are deleted by the retention sweep; a workspace purge leaves the
+  ledger alone (another workspace may share the portfolio's window), while its
+  segments, create keys and test sends go with its campaigns.
 - **Campaigns stop at 80 %** of the limit (`CAMPAIGN_PORTFOLIO_LIMIT_SHARE`),
   every source counted. The campaign waits `daily_limit` until the first person
   counted leaves the moving window (plus five minutes) and carries on by itself,

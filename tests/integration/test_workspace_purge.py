@@ -37,7 +37,7 @@ from app.db.models import (
 )
 from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import BillingInterval, Plan, Subscription, SubscriptionStatus
-from app.db.models.conversation import Contact, Conversation
+from app.db.models.conversation import Contact, Conversation, MessageDeliveryState
 from app.db.models.enums import TenantStatus
 from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.whatsapp import WhatsAppAccount
@@ -298,6 +298,70 @@ async def test_purging_erases_business_data_and_keeps_the_money(
     await db_session.refresh(tenant)
     assert tenant.purged_at == NOW
     assert tenant.is_purged
+
+
+async def test_purging_erases_a_campaigns_page_and_keeps_the_portfolio_count(
+    db_session: AsyncSession,
+) -> None:
+    """The campaigns page's tables, in an order their keys allow (CPF-07).
+
+    A segment a campaign names (no cascade), the draft an Idempotency-Key made,
+    a test send and its message are erased; the portfolio's ledger row stays -
+    another workspace may share the portfolio, and the retention sweep removes
+    it after 48 hours.
+    """
+    from app.db.models.business_initiated import BusinessInitiatedSend
+    from app.db.models.campaign import CampaignCreateKey, CampaignTestSend
+    from app.db.models.campaign_segment import CampaignSegment
+    from app.db.models.messaging_limit import WhatsAppBusinessPortfolio
+    from tests.integration.test_campaign_invariants import _message, _world
+
+    campaign, _, conversation = await _world(db_session, "purge-page")
+    tenant = await db_session.get(Tenant, campaign.tenant_id)
+    assert tenant is not None
+    tenant.deleted_at = NOW - timedelta(days=31)
+    tenant.purge_due_at = NOW - timedelta(days=1)
+    segment = CampaignSegment(
+        tenant_id=tenant.id, name="Wrote this month", rules={"last_inbound_within_days": 30}
+    )
+    db_session.add(segment)
+    await db_session.flush()
+    campaign.audience_segment_id = segment.id
+    db_session.add(
+        CampaignCreateKey(
+            tenant_id=tenant.id, key="draft-1", campaign_id=campaign.id, request_hash="0" * 64
+        )
+    )
+    test_message = await _message(db_session, conversation, MessageDeliveryState.SENT)
+    db_session.add(
+        CampaignTestSend(
+            tenant_id=tenant.id,
+            campaign_id=campaign.id,
+            contact_id=conversation.contact_id,
+            message_id=test_message.id,
+        )
+    )
+    portfolio = WhatsAppBusinessPortfolio(key_kind="waba", meta_key=f"purge-{tenant.id.hex}")
+    db_session.add(portfolio)
+    await db_session.flush()
+    db_session.add(
+        BusinessInitiatedSend(
+            portfolio_id=portfolio.id,
+            recipient="201000000099",
+            sent_at=NOW - timedelta(hours=1),
+            source="campaign_test",
+            tenant_id=tenant.id,
+            campaign_id=campaign.id,
+            message_id=test_message.id,
+        )
+    )
+    await db_session.flush()
+
+    await WorkspacePurgeService(db_session).purge(tenant, now=NOW)
+
+    for table in ("campaign_segments", "campaign_create_keys", "campaign_test_sends", "campaigns"):
+        assert await _count(db_session, table, tenant) == 0, table
+    assert await _count(db_session, "business_initiated_sends", tenant) == 1
 
 
 async def test_the_purge_is_audited_as_a_system_act(db_session: AsyncSession) -> None:
