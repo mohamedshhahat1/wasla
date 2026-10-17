@@ -115,7 +115,9 @@ async def _seed(url: str) -> dict[str, tuple[uuid.UUID, datetime | None]]:
             expected["human"] = (by_hand, at)
             newer, _ = await sent("newer", ago=timedelta(hours=3))
             claimed = now - timedelta(minutes=10)
-            (await session.get(Contact, newer)).last_marketing_sent_at = claimed
+            contact = await session.get(Contact, newer)
+            assert contact is not None
+            contact.last_marketing_sent_at = claimed
             expected["newer"] = (newer, claimed)
             await session.commit()
     finally:
