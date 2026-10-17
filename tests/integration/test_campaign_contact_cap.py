@@ -8,6 +8,7 @@ person. The clock moves in the workers only.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,7 @@ from typing import Any
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.campaign import Campaign, CampaignRecipient, CampaignStatus, RecipientStatus
 from app.db.models.conversation import Contact, Conversation, Message, MessageOrigin
@@ -170,6 +172,62 @@ async def test_two_campaigns_scheduled_a_minute_apart_reach_a_person_once_a_day(
             firsts.setdefault(to, at)
         for campaign_id in (first, second):
             assert await states(database, campaign_id) == Counter({"sent/0/None": 20})
+    finally:
+        await erase(database)
+        await database.dispose()
+        await db_b.dispose()
+
+
+async def test_two_workers_racing_for_a_person_whose_window_is_open_send_once(
+    prepared_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap's own statement decides a race no portfolio lock serialises.
+
+    A person whose service window is open is not counted toward Meta's limit,
+    so the ledger takes no lock for them (LIM-03): two campaigns on two
+    workers reach the cap's claim at once. Both are held at the claim until
+    both have arrived; the one conditional UPDATE lets exactly one through.
+    """
+    meta = FakeMeta()
+    clock = SimClock(now=datetime.now(UTC))
+    meta.clock = clock.at
+    a, database = worker(prepared_database, meta, name="a", claim_limit=1)
+    b, db_b = worker(prepared_database, meta, name="b", claim_limit=1)
+    arrived = 0
+    both = asyncio.Event()
+    original = AsyncSession.execute
+
+    async def held_at_the_claim(
+        self: AsyncSession, statement: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        nonlocal arrived
+        if "UPDATE contacts SET last_marketing_sent_at" in str(statement):
+            arrived += 1
+            if arrived >= 2:
+                both.set()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both.wait(), timeout=10)
+        return await original(self, statement, *args, **kwargs)
+
+    try:
+        await quiesce(database)
+        workspace = await seed(
+            database, recipients=1, last_inbound_at=datetime.now(UTC) - timedelta(hours=1)
+        )
+        first = await launch(database, workspace)
+        second = await launch(database, workspace)
+        clock.now = datetime.now(UTC) + timedelta(seconds=1)
+        monkeypatch.setattr(AsyncSession, "execute", held_at_the_claim)
+
+        await asyncio.gather(clock.sweep(a), clock.sweep(b))
+        monkeypatch.undo()
+
+        assert arrived == 2, "the two claims did not race"
+        assert len(meta.requests) == 1
+        tallies = [await states(database, campaign_id) for campaign_id in (first, second)]
+        assert sorted(tallies, key=str) == sorted(
+            [Counter({"sent/0/None": 1}), Counter({"pending/0/None": 1})], key=str
+        )
     finally:
         await erase(database)
         await database.dispose()
