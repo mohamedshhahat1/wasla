@@ -46,7 +46,7 @@ LOCK_TIMEOUT = "15s"
 TABLE = "whatsapp_business_portfolios"
 ACCOUNT_FK = "fk_whatsapp_accounts_portfolio_id_whatsapp_business_portfolios"
 INDEX = "ix_whatsapp_accounts_portfolio_id"
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0120)'"
 
 
 def upgrade() -> None:

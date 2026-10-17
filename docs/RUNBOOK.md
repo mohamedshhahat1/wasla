@@ -2100,9 +2100,9 @@ built in autocommit blocks. **The downgrade refuses** (nothing changed) while
 any header file exists, any campaign names one or Meta's id for one, any
 campaign stopped for a header reason, or any audit entry records an upload.
 
-### Campaign page features (0108-0119)
+### Campaign page features (0108-0120)
 
-Twelve additive migrations (CAMPAIGNS_PAGE_FEATURES_IMPLEMENTATION.md,
+Thirteen additive migrations (CAMPAIGNS_PAGE_FEATURES_IMPLEMENTATION.md,
 ADR-145..ADR-150):
 
 | Revision | Adds |
@@ -2119,6 +2119,7 @@ ADR-145..ADR-150):
 | 0117 | `message_origin` gains `campaign_test`; `campaign_test_sends` |
 | 0118 | `campaign_recipients.replied_at`, `opted_out_after_at` and their index (`CONCURRENTLY`) |
 | 0119 | `whatsapp_rate_cards`, their rates and calling-code maps; audit actions `rate_card_uploaded`, `rate_card_activated` |
+| 0120 | data only, from the last 24 hours' messages: each contact's `last_marketing_sent_at` (its latest marketing send) and a ledger row for every accepted template, under its number's portfolio (created unknown, keyed by the WABA), so neither the per-customer cap nor Meta's limit starts the first day from zero (CPF-04) |
 
 Online as 0101-0107: new tables are empty, new columns nullable or with a
 constant default (catalogue-only), constraints `NOT VALID` then validated under

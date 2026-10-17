@@ -78,7 +78,7 @@ REASONS_0112 = (
     "send_window_closed",
 )
 NEW_REASONS = ("contact_frequency_cap",)
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0120)'"
 
 
 def _check(column: str, values: tuple[str, ...]) -> str:

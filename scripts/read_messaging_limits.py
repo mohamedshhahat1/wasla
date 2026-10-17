@@ -4,7 +4,7 @@
     python -m scripts.read_messaging_limits --stale    # only those older than the refresh age
 
 **The deploy step of 0110** (docs/RUNBOOK.md, "Campaign page features
-(0108-0119)"). A number's business-portfolio limit is unknown until it is read,
+(0108-0120)"). A number's business-portfolio limit is unknown until it is read,
 and a campaign on a number whose limit is unknown is neither scheduled nor
 sent (LIM-01, fail closed). Every number connected before 0110 starts unknown,
 so a running campaign on one waits (`waiting_reason = limit_unknown`) until

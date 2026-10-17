@@ -33,7 +33,7 @@ depends_on = None
 
 LOCK_TIMEOUT = "15s"
 TABLE = "campaign_test_sends"
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0120)'"
 
 
 def upgrade() -> None:

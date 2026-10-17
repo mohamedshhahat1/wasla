@@ -26,7 +26,7 @@ replaces this draft with the sections listed in the stage brief (section 32).
 | 11 | Results, summary, progress, CSV export | committed | 020a945 | unit + campaign, WhatsApp, template, follow-up, contact, lead, conversation, messaging, analytics, webhook, ingestion, opt-out, omnichannel, audit, retention, metric, route-walking suites (4,728 passed, 1 failed: the endpoints stub's exact statistics body - intended); results (7); migration-built: parity, downgrade atomicity, results (16) |
 | 12 | Rate cards, cost estimate | committed | afc271d | unit + campaign, platform, WhatsApp, audit, retention, metric, route-walking suites (4,338 passed, 5 failed - the platform and upload policy rules, all fixed below; re-run of unit + every platform suite + cost + documentation + authorization + schema strictness: 3,724 passed); rate cards (21 unit, 3 integration); migration-built: parity, downgrade atomicity, cost (12) |
 | 13 | Invariants, observability, documentation, contract | committed | invariants ce83f89; observability c5468d9; documentation 0119585; contract (this commit) | campaign invariants (16); campaign metrics, metric catalogue, metrics endpoint, delivery plan (31); promtool check config, test rules, amtool check-config |
-| 14 | Mutation matrix | not started | | |
+| 14 | Mutation matrix | in progress (CPF-04 fixed first: 0120) | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
 
@@ -411,6 +411,18 @@ the zone), three in `test_request_text_storability.py` (the zone fields did not 
   have been ignored. Found when git warned it would check the fixture out with CRLF; the heading is
   now normalised with a regular expression, and a test parses the card with both line endings
   (failing without the fix, passing with it).
+
+- **CPF-04** (this stage's migrations 0111 and 0113; found by the populated upgrade, section 24):
+  the ledger and `contacts.last_marketing_sent_at` started empty, so for the first 24 hours after
+  the deploy neither saw the sends just before it. A customer sent a campaign minutes before the
+  upgrade could get a second one minutes after (the after-upgrade invariants measured CR-11 = 1),
+  and the first day's portfolio budget was counted from zero although Meta's window already held
+  those people. Migration **0120** (data only) fills both from the last 24 hours of messages: the
+  latest marketing send per contact (CR-11's own definition) and one ledger row per accepted
+  template under the number's WABA-keyed portfolio (created unknown, so the number still waits for
+  its limit to be read). A template sent inside the person's service window is counted too - the
+  window at that moment is not recorded, and over-counting is the safe error.
+  `test_campaign_page_migrations.py` seeds every case at 0119 and fails without the backfill.
 
 ## Phase 9 notes (PG-06, PG-07)
 

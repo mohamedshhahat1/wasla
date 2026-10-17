@@ -28,7 +28,7 @@ branch_labels = None
 depends_on = None
 
 LOCK_TIMEOUT = "15s"
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0120)'"
 
 
 def upgrade() -> None:

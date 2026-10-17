@@ -28,7 +28,7 @@ depends_on = None
 
 LOCK_TIMEOUT = "15s"
 INDEX = "ix_campaign_recipients_tenant_id_contact_id_sent_at"
-RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0119)'"
+RUNBOOK = "docs/RUNBOOK.md, 'Campaign page features (0108-0120)'"
 
 
 def upgrade() -> None:

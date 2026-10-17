@@ -84,7 +84,7 @@ def downgrade() -> None:
     if chosen:
         raise RuntimeError(
             "Workspace time zones cannot be downgraded "
-            "(docs/RUNBOOK.md, 'Campaign page features (0108-0119)'). "
+            "(docs/RUNBOOK.md, 'Campaign page features (0108-0120)'). "
             f"Nothing has been changed:\n  workspaces with a zone other than {BACKFILL}: {chosen}"
         )
     op.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
