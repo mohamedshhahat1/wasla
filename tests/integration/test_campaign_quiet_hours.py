@@ -13,6 +13,7 @@ one side of every transition - which the April and October tests catch.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -112,12 +113,14 @@ async def _drain(clock: SimClock, replica: Any, *, rounds: int = 20) -> None:
 async def test_a_batch_reaching_the_window_stops_at_the_next_person_and_resumes_in_the_morning(
     prepared_database: str,
 ) -> None:
-    """21:59:59 local, Meta answering in 0.3 s: the batch crosses 22:00 and stops there.
+    """21:58:59 local, Meta answering in 0.3 s: the batch crosses 21:59 and stops there.
 
-    Nobody is sent between 22:00 and 09:00 local; the rest go at 09:00; no
-    attempt is spent and the status never leaves `running`.
+    A campaign stops deciding sends `SEND_LEAD` (a minute) before the window
+    opens, so a send decided just before it still reaches Meta before 22:00
+    (CPF-08). Nobody is sent between 22:00 and 09:00 local; the rest go at
+    09:00; no attempt is spent and the status never leaves `running`.
     """
-    clock = SimClock(now=cairo(2026, 10, 20, 21, 59, 59.0))
+    clock = SimClock(now=cairo(2026, 10, 20, 21, 58, 59.0))
     meta = FakeMeta(latency=0.3)
     meta.clock = clock.at
     replica, db = worker(prepared_database, meta, name="quiet-edge")
@@ -131,6 +134,7 @@ async def test_a_batch_reaching_the_window_stops_at_the_next_person_and_resumes_
 
         assert 1 <= len(meta.requests) < 20
         assert sends_inside_quiet_hours(meta) == 0
+        assert all(entry["at"] < cairo(2026, 10, 20, 22) for entry in meta.requests)
         row = await campaign_row(db, campaign_id)
         assert row.status is CampaignStatus.RUNNING
         assert row.waiting_reason == "quiet_hours"
@@ -157,6 +161,51 @@ async def test_a_batch_reaching_the_window_stops_at_the_next_person_and_resumes_
         assert row.waiting_reason is None and row.resumes_at is None
         waits = await audit_waits(db, campaign_id)
         assert [entry["reason"] for entry in waits] == ["quiet_hours"]
+    finally:
+        await erase(db)
+        await db.dispose()
+
+
+async def test_a_slow_send_decided_just_before_the_window_never_reaches_meta_inside_it(
+    prepared_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A send's own preparation can be slow; the campaign stops a minute early (CPF-08).
+
+    Every send here spends 1.5 s between the worker's decision and its request
+    to Meta (the cap's claim, slowed). Two seconds before 22:00 a campaign that
+    asked only "is it night now?" would decide a send at 21:59:59.x that
+    reaches Meta after 22:00. Stopping `SEND_LEAD` before the window, it
+    decides none.
+    """
+    import app.services.contact_cap as contact_cap
+
+    original = contact_cap.claim
+
+    async def slow_claim(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(1.5)
+        return await original(*args, **kwargs)
+
+    clock = SimClock(now=cairo(2026, 10, 20, 21, 59, 58.0))
+    meta = FakeMeta()
+    meta.clock = clock.at
+    replica, db = worker(prepared_database, meta, name="quiet-slow")
+    try:
+        await quiesce(db)
+        workspace = await seed(db, recipients=5)
+        campaign_id = await compose(db, workspace)
+        await make_due(db, campaign_id, at=clock.now)
+        monkeypatch.setattr(contact_cap, "claim", slow_claim)
+
+        await clock.sweep(replica)
+
+        assert sends_inside_quiet_hours(meta) == 0
+        assert meta.requests == []
+        row = await campaign_row(db, campaign_id)
+        # Not started by a batch that could not send (TZ-03).
+        assert row.status is CampaignStatus.SCHEDULED
+        assert row.waiting_reason == "quiet_hours"
+        assert row.resumes_at == cairo(2026, 10, 21, 9)
+        assert set(await pending_attempts(db, campaign_id)) == {0}
     finally:
         await erase(db)
         await db.dispose()

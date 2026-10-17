@@ -1884,9 +1884,9 @@ class CampaignService:
         # scheduled or running, nobody's attempt spent, no lease kept. A
         # scheduled campaign is not started by a batch that cannot send.
         quiet = await self._quiet_hours()
-        if quiet.contains(moment):
+        if quiet.closed_to_sends(moment):
             return await self._wait(
-                campaign, CampaignWaitReason.QUIET_HOURS, until=quiet.ends_after(moment)
+                campaign, CampaignWaitReason.QUIET_HOURS, until=quiet.reopens_after(moment)
             )
         if not (await portfolio_limits.limit_for_account(self._session, campaign.account_id)).known:
             # **Fail closed** (LIM-01): nobody has read Meta's messaging limit
@@ -1983,13 +1983,13 @@ class CampaignService:
                     failed=failed,
                     skipped=skipped + closed.skipped,
                 )
-            if quiet.contains(clock()):
+            if quiet.closed_to_sends(clock()):
                 # The window opened while this batch was sending: it stops at
                 # the next person, like a pause (TZ-03, CMP-08), and waits.
                 return await self._wait(
                     campaign,
                     CampaignWaitReason.QUIET_HOURS,
-                    until=quiet.ends_after(clock()),
+                    until=quiet.reopens_after(clock()),
                     sent=sent,
                     failed=failed,
                     skipped=skipped,

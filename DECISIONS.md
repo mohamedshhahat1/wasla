@@ -7131,6 +7131,12 @@ because no workspace had a zone to read it in. The owner decided on
    quiet_hours`, `resumes_at` the window's end computed as a local wall time
    with that date's rules (DST in Cairo is real). Quiet hours bind campaign
    sends only - not AI or human replies, follow-ups, or an admin's test.
+   **A campaign stops deciding sends a minute before the window opens**
+   (`SEND_LEAD`, CPF-08): between the decision and the request lie the
+   person's claim, the cap, the ledger and the intent's commit, and under load
+   a send decided at 21:59:59 reached Meta after 22:00. With the lead, a send
+   decided outside the window reaches Meta before it unless its own
+   preparation takes over a minute; the plan uses the same rule.
 4. **A schedule inside the window is accepted and says so** (TZ-04): the
    plan's first send is the window's end, notice `starts_after_quiet_hours`.
    Changing the zone never moves `scheduled_at` (an instant); it moves where

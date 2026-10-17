@@ -174,7 +174,13 @@ and quiet hours in it - 22:00 to 09:00 by default, on for everybody
 (`GET/PUT /api/v1/workspace/campaign-settings`). No campaign sends inside them:
 the worker asks before a batch and before every recipient, and a campaign that
 reaches the window's start stops at the next person and waits for its end,
-computed as a local wall time with that date's rules (Cairo's DST is real). A
+computed as a local wall time with that date's rules (Cairo's DST is real).
+**It stops a minute early** (`SEND_LEAD`): a send decided before the window
+still has to take the person, claim the cap, reserve Meta's limit and commit
+before its request leaves, and under load that took long enough for a send
+decided at 21:59:59 to reach Meta after 22:00 (CPF-08). A send decided outside
+the window therefore reaches Meta before it unless its own preparation takes
+over a minute. The plan uses the same rule. A
 schedule inside the window is accepted; its plan starts at the window's end
 with the notice `starts_after_quiet_hours`. Changing the zone never moves a
 `scheduled_at` (an instant with its offset) - it moves where the window falls

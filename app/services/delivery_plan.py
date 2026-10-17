@@ -182,11 +182,11 @@ def plan(inputs: PlanInputs, *, now: datetime) -> DeliveryPlan:
         if inputs.send_until is not None and at >= inputs.send_until:
             basis.add(EtaBasis.DEADLINE)
             break
-        if inputs.quiet.contains(at):
+        if inputs.quiet.closed_to_sends(at):
             if not sent_at:
                 notices.add(PlanNotice.STARTS_AFTER_QUIET_HOURS)
             basis.add(EtaBasis.QUIET_HOURS)
-            at = inputs.quiet.ends_after(at)
+            at = inputs.quiet.reopens_after(at)
             continue
         # Everybody whose deferral has passed is ready, in the order they were.
         if deferred:

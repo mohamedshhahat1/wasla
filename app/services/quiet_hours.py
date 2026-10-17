@@ -16,18 +16,31 @@ the default, is the normal case. A boundary that falls in a daylight-saving
 gap (a local time that never happens) resolves to an instant after the gap
 (PEP 495's `fold=0`); Cairo's transitions are at midnight, away from the
 default window's ends.
+
+**Campaigns stop a minute early** (`SEND_LEAD`). The worker decides a send
+before it takes the person, claims the cap, reserves the ledger and commits
+the intent; only then does the request leave for Meta. Under load that takes
+long enough for a send decided at 21:59:59.9 to reach Meta after 22:00 - the
+full lanes measured two (CPF-08). So a campaign asks whether the window is
+open now *or a minute from now*: a send decided outside the window reaches
+Meta before it opens unless its own preparation takes more than a minute. The
+window's end is unchanged.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from app.core.timezones import zone
 
 if TYPE_CHECKING:
     from app.db.models.tenant import Tenant
+
+
+#: How long before the window opens a campaign stops deciding sends.
+SEND_LEAD: Final = timedelta(seconds=60)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +67,18 @@ class QuietHours:
         if self.crosses_midnight:
             return now >= self.start or now < self.end
         return self.start <= now < self.end
+
+    def closed_to_sends(self, at: datetime) -> bool:
+        """Whether a campaign may not decide a send at `at`: in or `SEND_LEAD` from the window."""
+        return self.contains(at) or self.contains(at + SEND_LEAD)
+
+    def reopens_after(self, at: datetime) -> datetime:
+        """When sends may be decided again; `at` itself when they may now."""
+        if self.contains(at):
+            return self.ends_after(at)
+        if self.contains(at + SEND_LEAD):
+            return self.ends_after(at + SEND_LEAD)
+        return at
 
     def _instant(self, day: date, wall: time) -> datetime:
         """The UTC instant of local `wall` on `day`, by the zone's rules for that date.
@@ -98,4 +123,4 @@ def from_tenant(tenant: Tenant) -> QuietHours:
     )
 
 
-__all__ = ["QuietHours", "from_tenant"]
+__all__ = ["SEND_LEAD", "QuietHours", "from_tenant"]

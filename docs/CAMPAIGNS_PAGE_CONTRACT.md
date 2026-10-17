@@ -132,6 +132,7 @@ There is no WebSocket or Server-Sent Events stream (ADR-149).
 | Route | `GET` (member) / `PUT` (admin) `/workspace/campaign-settings` - `{quiet_hours_enabled, quiet_hours_start, quiet_hours_end, timezone, utc_offset}` |
 | Bucket | W |
 | States | `422 quiet_hours_empty_window`; seconds refused |
+| Note | campaigns stop deciding sends one minute before the window opens, so nothing reaches Meta inside it; a last send at 21:59 for a 22:00 window is correct |
 | Must not claim | a per-campaign "respect quiet hours" checkbox - the design shows one, but quiet hours are the **workspace's** setting and bind every campaign. Show it read-only in the composer ("Quiet hours 22:00-09:00 Cairo apply") with a link to the settings |
 
 ### 9. Cost estimate (COST-02)
