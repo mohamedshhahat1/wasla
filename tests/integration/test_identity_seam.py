@@ -48,6 +48,7 @@ from app.main import create_app
 from app.services.email_service import open_email_context
 from tests.conftest import AllowingEntitlements
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -177,7 +178,9 @@ async def _workspace(
     slug: str,
     role: TenantRole = TenantRole.TENANT_OWNER,
 ) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     session.add(Membership(tenant_id=tenant.id, user_id=user.id, role=role))

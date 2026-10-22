@@ -51,6 +51,7 @@ from app.db.models.whatsapp_template import (
 from app.services.messaging_service import MessagingService
 from app.workers.campaign_worker import CampaignWorker
 from tests.fakes import as_messaging
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -110,7 +111,7 @@ async def _sending_campaign(
     template_status: TemplateStatus = TemplateStatus.APPROVED,
 ) -> Campaign:
     """A campaign the worker's claim should or should not pick up."""
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
 

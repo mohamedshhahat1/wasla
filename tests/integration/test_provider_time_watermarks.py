@@ -33,6 +33,7 @@ from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.messaging_service import MessagingService
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -45,7 +46,7 @@ async def _sent(
     adapter = SyntheticAdapter(Channel.MESSENGER, tagged=True)
     adapter.log.provider_clock_lag = lag
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Reads {tag}", slug=f"reads-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Reads {tag}", slug=f"reads-{tag}")
     session.add(tenant)
     await session.flush()
     connection = ChannelConnection(

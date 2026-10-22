@@ -65,6 +65,7 @@ from app.services.media_retention_service import MediaRetentionService
 from app.services.media_service import MediaService, content_hash
 from app.services.media_upload_service import MediaUploadReconciler
 from tests.fakes import as_whatsapp
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -220,7 +221,7 @@ async def storage() -> AsyncIterator[RecordingStore]:
 async def tenant_id(committing: async_sessionmaker[AsyncSession]) -> AsyncIterator[uuid.UUID]:
     """One workspace, removed afterwards along with everything under it."""
     async with committing() as session:
-        tenant = Tenant(name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
         session.add(tenant)
         await session.commit()
         created = tenant.id
@@ -958,7 +959,7 @@ async def test_reconciliation_settles_each_row_under_its_own_workspace(
     row that is settled, both come from the row that committed the intent.
     """
     async with committing() as session:
-        other = Tenant(name="Other", slug=f"other-{uuid.uuid4().hex[:8]}")
+        other = Tenant(timezone=TEST_TIMEZONE, name="Other", slug=f"other-{uuid.uuid4().hex[:8]}")
         session.add(other)
         await session.commit()
         other_id = other.id

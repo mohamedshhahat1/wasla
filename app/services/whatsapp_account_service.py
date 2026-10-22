@@ -39,6 +39,7 @@ from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.channel import Channel, ConnectionDisabledReason
+from app.db.models.messaging_limit import LimitSource
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.integrations.whatsapp.ownership import OwnershipVerifier
@@ -48,6 +49,7 @@ from app.services.audit_service import AuditTrail
 from app.services.channel_capacity import ChannelCapacityGuard
 from app.services.channel_connection_service import stop_automation
 from app.services.credential_service import CredentialService
+from app.services.messaging_limit_service import MessagingLimitService
 
 logger = get_logger(__name__)
 
@@ -62,8 +64,14 @@ class WhatsAppAccountService:
         ownership: OwnershipVerifier | None = None,
         credentials: CredentialService | None = None,
         default_plan_code: str | None = None,
+        limits: MessagingLimitService | None = None,
     ) -> None:
         self._session = session
+        # Meta's messaging limit for the number's portfolio (LIM-01), read on
+        # connect, rotation and enable - always before any lock is taken - and
+        # stored with the number. Optional: without it nothing is read and a
+        # campaign on the number waits until something reads it.
+        self._limits = limits
         # Without a verifier nothing can be connected. Optional in the
         # signature only so a caller that never connects - a test exercising
         # enable/disable - need not build one; `connect` refuses rather than
@@ -134,6 +142,15 @@ class WhatsAppAccountService:
             phone_number_id=number,
             claimed_waba_id=claimed_waba,
         )
+        # The portfolio's messaging limit, with the credential just proven
+        # (LIM-01): before the capacity lock, so no lock is held across Meta.
+        limit = (
+            await self._limits.read_quietly(
+                access_token=access_token, phone_number_id=verified.phone_number_id
+            )
+            if self._limits is not None
+            else None
+        )
 
         slot = await guard.reserve_or_refuse(Channel.WHATSAPP)
         account = await self._accounts(tenant_id).connect(
@@ -168,6 +185,9 @@ class WhatsAppAccountService:
                     "phone_number_id": account.phone_number_id,
                 },
             )
+
+        if self._limits is not None:
+            await self._limits.attach(account, limit, source=LimitSource.API)
 
         # created_at is a server default, and serialising an unrefreshed row
         # would trigger a lazy load outside the async greenlet context.
@@ -242,6 +262,14 @@ class WhatsAppAccountService:
             # rows this exists to rescue.
             claimed_waba_id=None,
         )
+        # A rotated credential reads the limit again (LIM-01), before any write.
+        limit = (
+            await self._limits.read_quietly(
+                access_token=access_token, phone_number_id=account.phone_number_id
+            )
+            if self._limits is not None
+            else None
+        )
 
         account.waba_id = verified.waba_id
         account.display_phone_number = verified.display_phone_number
@@ -255,6 +283,8 @@ class WhatsAppAccountService:
                 connection_id=account.id,
                 channel=Channel.WHATSAPP,
             )
+        if self._limits is not None:
+            await self._limits.attach(account, limit, source=LimitSource.API)
 
         await self._session.flush()
         await self._session.refresh(account)
@@ -320,12 +350,23 @@ class WhatsAppAccountService:
             raise ValueError("Use release() to give up a number.")
 
         account = await self._accounts(tenant_id).require_live_by_id(account_id)
+        limit: str | None = None
+        enabling = (
+            status is WhatsAppAccountStatus.ACTIVE
+            and account.status is not WhatsAppAccountStatus.ACTIVE
+        )
+        if enabling and self._limits is not None:
+            # Enabling reads the limit again with the number's own credential
+            # (LIM-01) - before the capacity lock, nothing held across Meta.
+            limit = await self._limits.read_with_stored_credential(account)
         connection = await ChannelConnectionRepository(
             self._session, tenant_id=tenant_id
         ).require_by_id(account.id)
         if status is WhatsAppAccountStatus.ACTIVE:
             if account.status is not WhatsAppAccountStatus.ACTIVE:
                 await self._guard(tenant_id).reserve_or_refuse(Channel.WHATSAPP)
+            if enabling and self._limits is not None:
+                await self._limits.attach(account, limit, source=LimitSource.API)
             connection.disabled_reason = None
             connection.disabled_at = None
             connection.disabled_by = None

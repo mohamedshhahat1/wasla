@@ -111,3 +111,11 @@ def test_the_campaign_metric_domains_are_the_vocabularies() -> None:
     from app.db.models.campaign import CampaignStopReason
 
     assert frozenset(reason.value for reason in CampaignStopReason) == CAMPAIGN_STOP_REASONS
+
+
+def test_the_campaign_wait_domain_is_the_vocabulary() -> None:
+    """TZ-03, LIM-04: `wasla_campaign_waits_total{reason}` is `CampaignWaitReason`, closed."""
+    from app.core.telemetry import CAMPAIGN_WAIT_REASONS
+    from app.db.models.campaign import CampaignWaitReason
+
+    assert frozenset(reason.value for reason in CampaignWaitReason) == CAMPAIGN_WAIT_REASONS

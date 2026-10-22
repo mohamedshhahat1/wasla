@@ -53,6 +53,7 @@ from app.services.entitlement_service import EntitlementService
 from tests.billing_fixtures import pin
 from tests.integration.plan_catalogue import own_plan
 from tests.paymob_orders import order_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -123,7 +124,7 @@ async def _workspace(
     status: SubscriptionStatus = SubscriptionStatus.ACTIVE,
 ) -> tuple[Tenant, Subscription, dict[str, Plan]]:
     """A workspace as registration leaves it: on the free plan, subscribed."""
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     plans = await _catalogue(session)

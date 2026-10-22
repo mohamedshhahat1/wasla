@@ -50,6 +50,7 @@ from app.schemas.platform_billing import PlanCreate
 from app.services.plan_catalog import PlanCatalog
 from tests.billing_fixtures import price_terms
 from tests.integration.topup_harness import product
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -85,7 +86,7 @@ class Workspace:
 async def _workspace(session: AsyncSession) -> Workspace:
     built = Workspace()
     tag = uuid.uuid4().hex[:10]
-    built.tenant = Tenant(name="Ledger", slug=f"integrity-{tag}")
+    built.tenant = Tenant(timezone=TEST_TIMEZONE, name="Ledger", slug=f"integrity-{tag}")
     built.plan = Plan(
         code=f"integrity-{tag}",
         name="Pro",

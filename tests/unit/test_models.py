@@ -24,6 +24,7 @@ from app.db.models import (
     User,
 )
 from tests.fakes import as_table
+from tests.workspace_timezone import TEST_TIMEZONE
 
 TENANT_SCOPED_TABLES = ("memberships", "tenant_invitations")
 
@@ -87,7 +88,7 @@ def test_stored_enum_values_are_stable() -> None:
 
 
 def test_tenant_is_usable_only_while_live() -> None:
-    tenant = Tenant(name="Acme", slug="acme", status=TenantStatus.ACTIVE)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug="acme", status=TenantStatus.ACTIVE)
     assert tenant.is_active
 
     tenant.status = TenantStatus.SUSPENDED

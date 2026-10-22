@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends
@@ -45,6 +46,8 @@ from app.services.agent_service import AgentService
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import AuthService
 from app.services.campaign_header_media_service import CampaignHeaderMediaService
+from app.services.campaign_planner import CampaignPlanner
+from app.services.campaign_segment_service import CampaignSegmentService
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
 from app.services.credential_service import CredentialService
@@ -58,6 +61,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.membership_service import MembershipService
+from app.services.messaging_limit_service import MessagingLimitService
 from app.services.messaging_service import MessagingService
 from app.services.payment_method_service import PaymentMethodService
 from app.services.plan_catalog import PlanCatalog
@@ -186,6 +190,8 @@ def get_whatsapp_account_service(
         # The channel capacity guard resolves a workspace without a serving
         # subscription to this plan (ENT-08); from settings, never a request.
         default_plan_code=settings.default_plan_code,
+        # Meta's messaging limit, read on connect, rotation and enable (LIM-01).
+        limits=MessagingLimitService(session, settings=settings),
     )
 
 
@@ -365,10 +371,41 @@ def get_campaign_service(
             tenant_id=workspace.tenant.id,
             default_plan_code=settings.default_plan_code,
         ),
+        # Reads Meta's messaging limit again before a schedule, when stale
+        # (LIM-01).
+        limits=MessagingLimitService(session, settings=settings),
+        parameter_max_chars=settings.campaign_parameter_max_chars,
     )
 
 
 CampaignServiceDep = Annotated[CampaignService, Depends(get_campaign_service)]
+
+
+def get_campaign_segment_service(
+    session: SessionDep, workspace: ActiveWorkspaceDep
+) -> CampaignSegmentService:
+    """A workspace's saved segments (PG-06)."""
+    return CampaignSegmentService(session, tenant_id=workspace.tenant.id)
+
+
+CampaignSegmentServiceDep = Annotated[CampaignSegmentService, Depends(get_campaign_segment_service)]
+
+
+def get_campaign_planner(
+    settings: SettingsDep,
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+) -> CampaignPlanner:
+    """Plans and ETAs for the active workspace's campaigns (LIM-05, PG-13)."""
+    return CampaignPlanner(
+        session,
+        tenant_id=workspace.tenant.id,
+        share=settings.campaign_portfolio_limit_share,
+        cap_interval=timedelta(seconds=settings.campaign_contact_marketing_interval_seconds),
+    )
+
+
+CampaignPlannerDep = Annotated[CampaignPlanner, Depends(get_campaign_planner)]
 
 
 def get_campaign_header_media_service(

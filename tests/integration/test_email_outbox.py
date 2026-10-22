@@ -32,6 +32,7 @@ from app.services.email_service import SENSITIVE_EMAIL_TEMPLATES, seal_email_con
 from app.services.email_templates import EmailTemplate
 from app.workers.email_worker import MAX_BACKOFF_SECONDS, EmailWorker
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY, as_database, as_settings
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -592,7 +593,7 @@ async def test_an_unknown_provider_id_finds_nothing(db_session: AsyncSession) ->
 
 
 async def test_a_tenant_scoped_email_keeps_its_tenant(db_session: AsyncSession) -> None:
-    tenant = Tenant(name="Acme", slug="acme-outbox")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug="acme-outbox")
     db_session.add(tenant)
     await db_session.flush()
 

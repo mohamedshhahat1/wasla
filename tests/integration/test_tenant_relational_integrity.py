@@ -59,8 +59,8 @@ async def _seed(session: AsyncSession, workspace: _Workspace) -> None:
     """One complete, internally consistent workspace, written by hand."""
     await session.execute(
         text(
-            "INSERT INTO tenants (id, name, slug, status, created_at, updated_at) "
-            "VALUES (:id, :name, :slug, 'active', now(), now())"
+            "INSERT INTO tenants (id, name, slug, status, timezone, created_at, updated_at) "
+            "VALUES (:id, :name, :slug, 'active', 'Africa/Cairo', now(), now())"
         ),
         {"id": workspace.tenant_id, "name": workspace.label, "slug": workspace.label},
     )

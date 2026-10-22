@@ -375,13 +375,7 @@ async def suspend_workspace(
         actor=staff.user,
         reason=payload.reason,
     )
-    return WorkspaceStateRead(
-        id=tenant.id,
-        name=tenant.name,
-        slug=tenant.slug,
-        status=tenant.status,
-        is_active=tenant.is_active,
-    )
+    return WorkspaceStateRead.from_tenant(tenant)
 
 
 @router.post(
@@ -415,13 +409,7 @@ async def restore_workspace(
     (docs/RUNBOOK.md).
     """
     tenant = await workspaces.restore(tenant_id=tenant_id, actor=staff.user)
-    return WorkspaceStateRead(
-        id=tenant.id,
-        name=tenant.name,
-        slug=tenant.slug,
-        status=tenant.status,
-        is_active=tenant.is_active,
-    )
+    return WorkspaceStateRead.from_tenant(tenant)
 
 
 @router.post(
@@ -470,10 +458,4 @@ async def repair_workspace_ownership(
         user_id=payload.user_id,
     )
     tenant = await workspaces.get(tenant_id=membership.tenant_id)
-    return WorkspaceStateRead(
-        id=tenant.id,
-        name=tenant.name,
-        slug=tenant.slug,
-        status=tenant.status,
-        is_active=tenant.is_active,
-    )
+    return WorkspaceStateRead.from_tenant(tenant)

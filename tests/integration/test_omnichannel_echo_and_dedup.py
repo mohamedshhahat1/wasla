@@ -55,6 +55,7 @@ from app.services.channel_ingestion_service import IngestionOutcome
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.queue import AgentJob, AgentQueue
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -104,7 +105,7 @@ def meta(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 async def _workspace(session: AsyncSession) -> tuple[Tenant, WhatsAppAccount, WhatsAppAccount]:
     """One workspace with two numbers."""
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Echo {tag}", slug=f"echo-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Echo {tag}", slug=f"echo-{tag}")
     session.add(tenant)
     await session.flush()
     numbers = []

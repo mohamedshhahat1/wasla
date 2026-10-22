@@ -37,6 +37,7 @@ from app.services.invoice_service import InvoiceService
 from app.services.plan_catalog import PlanCatalog
 from tests.billing_fixtures import price_terms
 from tests.paymob_orders import CARD_INTEGRATION_ID, order_for, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -64,7 +65,9 @@ async def _refused_at_commit(
 
 
 async def _tenant(session: AsyncSession) -> Tenant:
-    tenant = Tenant(name="Backstop", slug=f"backstop-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Backstop", slug=f"backstop-{uuid.uuid4().hex[:10]}"
+    )
     session.add(tenant)
     await session.flush()
     return tenant

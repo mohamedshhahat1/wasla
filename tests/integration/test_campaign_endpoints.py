@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Any
 
 import pytest
@@ -24,6 +24,7 @@ from httpx import AsyncClient
 from app.api.dependencies import (
     ActiveWorkspace,
     get_active_workspace,
+    get_campaign_planner,
     get_campaign_service,
 )
 from app.core.pagination import Cursor, Page
@@ -41,6 +42,10 @@ from app.db.models.campaign import (
     RecipientStatus,
 )
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
+from app.services.campaign_planner import Eta
+from app.services.delivery_plan import PlanInputs, plan
+from app.services.quiet_hours import QuietHours
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -106,6 +111,7 @@ class StubCampaigns:
         account_id: uuid.UUID | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        name_contains: str | None = None,
     ) -> Page[Campaign]:
         return Page(items=[_campaign()], next_cursor=NEXT_CURSOR)
 
@@ -119,7 +125,13 @@ class StubCampaigns:
         self.created.append(kwargs)
         return _campaign()
 
-    async def preview_audience(self, *, account_id: uuid.UUID, filters: AudienceFilter) -> int:
+    async def preview_audience(
+        self,
+        *,
+        account_id: uuid.UUID,
+        filters: AudienceFilter,
+        segment_id: uuid.UUID | None = None,
+    ) -> int:
         self.previews.append({"account_id": account_id, "filters": filters})
         return 7
 
@@ -129,9 +141,13 @@ class StubCampaigns:
         campaign_id: uuid.UUID,
         filters: AudienceFilter,
         actor: User | None = None,
+        segment_id: uuid.UUID | None = None,
     ) -> Campaign:
         self.audiences.append({"campaign_id": campaign_id, "filters": filters})
         return _campaign()
+
+    async def refresh_messaging_limit(self, campaign_id: uuid.UUID) -> None:
+        """The schedule route reads the number's limit first when stale (LIM-01)."""
 
     async def schedule(
         self,
@@ -139,6 +155,7 @@ class StubCampaigns:
         campaign_id: uuid.UUID,
         scheduled_at: datetime | None = None,
         actor: User | None = None,
+        send_until: datetime | None = None,
     ) -> Campaign:
         self.scheduled.append({"campaign_id": campaign_id, "scheduled_at": scheduled_at})
         return _campaign(CampaignStatus.SCHEDULED)
@@ -175,14 +192,41 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             tenant_id=TENANT_ID,
             role=role,
         ),
-        tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=TENANT_ID,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
+
+
+class StubPlanner:
+    """The plan and the ETA (LIM-05, PG-13) of a campaign that exists only in the stub."""
+
+    async def eta(self, campaign: Campaign, *, now: datetime) -> Eta:
+        return Eta(estimated_completion_at=None, basis=(), confidence=None, reason="draft")
+
+    async def plan(self, campaign: Campaign, *, now: datetime, observed: bool = False) -> Any:
+        return plan(
+            PlanInputs(
+                recipients=(),
+                rate=60,
+                quiet=QuietHours(
+                    enabled=False, start=time(22), end=time(9), timezone="Africa/Cairo"
+                ),
+                budget=None,
+            ),
+            now=now,
+        )
 
 
 @pytest.fixture
 def campaigns(app: FastAPI) -> StubCampaigns:
     stub = StubCampaigns()
     app.dependency_overrides[get_campaign_service] = lambda: stub
+    app.dependency_overrides[get_campaign_planner] = StubPlanner
     app.dependency_overrides[get_active_workspace] = lambda: _workspace(TenantRole.TENANT_ADMIN)
     return stub
 
@@ -230,6 +274,10 @@ async def test_statistics_report_delivery_as_well_as_outcome(
         "read": 1,
         "total": 4,
         "failed_after_send": 0,
+        "held": 0,
+        "replied": 0,
+        "opted_out_after": 0,
+        "reasons": [],
     }
 
 
@@ -346,7 +394,9 @@ async def test_there_is_no_way_to_set_a_status_directly(
 ) -> None:
     response = await client.patch(f"{PATH}/{CAMPAIGN_ID}", json={"status": "running"})
 
-    assert response.status_code == 405
+    # `PATCH` edits a draft's composition (PG-03); `status` is not one of its
+    # fields, and an unknown field is refused, not ignored.
+    assert response.status_code == 422
 
 
 # ------------------------------------------------------------------ the roles

@@ -22,6 +22,7 @@ from app.db.models.billing import BillingInterval, Plan, PlanVersion
 from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
 from app.db.models.tenant import Tenant
 from app.services.plan_catalog import PlanCatalog
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -35,7 +36,7 @@ async def _refused(session: AsyncSession, statement: str, params: dict[str, obje
 
 
 async def _tenant(session: AsyncSession) -> Tenant:
-    tenant = Tenant(name="Ledger", slug=f"ledger-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Ledger", slug=f"ledger-{uuid.uuid4().hex[:10]}")
     session.add(tenant)
     await session.flush()
     return tenant

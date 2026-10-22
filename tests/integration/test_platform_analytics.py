@@ -39,6 +39,7 @@ from app.platform.platform_analytics import (
 from app.platform.platform_usage import PlatformUsageService
 from app.repositories.usage_repository import UsageTotal
 from app.services.usage_service import UsageRecorder, resolve_window, summarise
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -55,7 +56,7 @@ async def _tenant(
     status: TenantStatus = TenantStatus.ACTIVE,
     name: str | None = None,
 ) -> Tenant:
-    tenant = Tenant(name=name or slug.title(), slug=slug, status=status)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=name or slug.title(), slug=slug, status=status)
     session.add(tenant)
     await session.flush()
     return tenant
@@ -340,6 +341,7 @@ class AnsweringPlatform:
             rows=[
                 WorkspaceRow(
                     tenant=Tenant(
+                        timezone=TEST_TIMEZONE,
                         id=uuid.uuid4(),
                         name="Acme",
                         slug="acme",

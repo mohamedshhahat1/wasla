@@ -49,6 +49,7 @@ from app.main import create_app
 from app.repositories import MembershipRepository, UserMembershipRepository
 from app.services.membership_service import MembershipService
 from tests.conftest import AllowingEntitlements, FakeDependency
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -71,7 +72,9 @@ async def _person(session: AsyncSession, email: str) -> User:
 
 
 async def _workspace(session: AsyncSession, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     return tenant

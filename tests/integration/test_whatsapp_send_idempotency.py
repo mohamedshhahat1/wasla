@@ -63,6 +63,7 @@ from app.db.models.whatsapp_template import (
 )
 from app.integrations.whatsapp import client as client_module
 from app.services.messaging_service import MessagingService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -173,7 +174,7 @@ async def _conversation(
     session: AsyncSession,
 ) -> tuple[Tenant, Conversation, WhatsAppAccount]:
     slug = f"idem-{uuid.uuid4().hex[:8]}"
-    tenant = Tenant(name="Idem", slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Idem", slug=slug)
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

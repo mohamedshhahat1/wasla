@@ -51,6 +51,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority
 from app.integrations.whatsapp.policy import WhatsAppChannelPolicy
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -202,6 +203,7 @@ def inbox(app: FastAPI) -> StubInbox:
             role=TenantRole.TENANT_OWNER,
         ),
         tenant=Tenant(
+            timezone=TEST_TIMEZONE,
             id=TENANT_ID,
             name="Acme",
             slug="acme",

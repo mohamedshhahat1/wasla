@@ -46,6 +46,7 @@ from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.ai_worker import AgentWorker
 from app.workers.queue import AgentJob, AgentQueue
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -99,7 +100,7 @@ async def test_a_text_message_hands_off_a_turn_naming_that_message(
     db_session: AsyncSession,
 ) -> None:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Live {tag}", slug=f"live-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Live {tag}", slug=f"live-{tag}")
     db_session.add(tenant)
     await db_session.flush()
     account = WhatsAppAccount(
@@ -150,8 +151,8 @@ async def test_a_live_text_turn_is_claimed_rather_than_dead_lettered(
     async with scratch_engine.begin() as connection:
         await connection.execute(
             text(
-                "INSERT INTO tenants (id, name, slug, status, created_at, updated_at) "
-                "VALUES (:id, 'Live turn', :slug, 'active', now(), now())"
+                "INSERT INTO tenants (id, name, slug, status, timezone, created_at, updated_at) "
+                "VALUES (:id, 'Live turn', :slug, 'active', 'Africa/Cairo', now(), now())"
             ),
             {"id": tenant_id, "slug": f"live-{tenant_id.hex[:10]}"},
         )

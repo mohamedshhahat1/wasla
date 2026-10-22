@@ -48,6 +48,7 @@ from app.repositories.conversation_repository import (
     provider_reported_failure,
 )
 from app.repositories.media_repository import MediaRepository
+from app.services.campaign_results import attribute_reply
 from app.services.contact_identity_service import SenderResolution
 from app.services.provider_feedback import act_on_failed_status
 from app.services.usage_service import UsageRecorder
@@ -193,6 +194,16 @@ class ConversationProjectionService:
         # Only now, for a message that is new and the customer's: this is what
         # reopens a closed conversation and opens the reply window.
         await self._conversations.touch_inbound(conversation, at=occurred_at)
+        # A reply to the campaign this customer last received on this number,
+        # if it reached them within the window (PG-10): one bounded UPDATE in
+        # the transaction that stores the message.
+        await attribute_reply(
+            self._session,
+            tenant_id=self._tenant_id,
+            contact_id=conversation.contact_id,
+            account_id=conversation.account_id,
+            at=occurred_at,
+        )
 
         meters = message_meters(connection.channel)
         if meters is not None:

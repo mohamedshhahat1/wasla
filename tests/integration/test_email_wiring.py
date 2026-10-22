@@ -45,6 +45,7 @@ from app.services.email_templates import EmailTemplate
 from app.services.invitation_service import InvitationService
 from app.services.subscription_service import SubscriptionService
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY, as_database
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -89,7 +90,9 @@ async def _user(session: AsyncSession, email: str, *, active: bool = True) -> Us
 
 
 async def _workspace(session: AsyncSession, *, slug: str, owner: User) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     session.add(

@@ -48,13 +48,14 @@ from app.db.models.whatsapp_template import (
     TemplateStatus,
     WhatsAppTemplate,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
 
 async def _tenant(session: AsyncSession) -> Tenant:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Schema {tag}", slug=f"schema-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Schema {tag}", slug=f"schema-{tag}")
     session.add(tenant)
     await session.flush()
     return tenant

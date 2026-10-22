@@ -638,7 +638,8 @@ SELECT round_number, call_ordinal, tool_name, state, reason_code, argument_field
 ### Campaigns are not sending
 
 ```sql
-SELECT status, status_reason, scheduled_at, next_send_at, lease_token,
+SELECT status, status_reason, waiting_reason, resumes_at, send_until,
+       scheduled_at, next_send_at, lease_token,
        consecutive_batch_failures, provider_unreachable_since, last_error
 FROM campaigns WHERE id = '<id>';
 ```
@@ -658,6 +659,21 @@ FROM campaigns WHERE id = '<id>';
 - `running` with `provider_unreachable_since` set - Meta cannot be reached at
   all (CMP-07). The campaign waits a minute at a time and spends no attempts;
   check outbound connectivity to `graph.facebook.com`.
+- `scheduled` or `running` with `waiting_reason` set - **waiting by design**,
+  not paused (ADR-145..ADR-147); it resumes by itself at `resumes_at`:
+
+| `waiting_reason` | Meaning | What to do |
+| --- | --- | --- |
+| `quiet_hours` | Inside the workspace's quiet hours (default 22:00-09:00 in its zone) | Nothing; the workspace changes them at `/workspace/campaign-settings` |
+| `daily_limit` | 80 % of the business portfolio's Meta messaging limit is used in the moving 24 hours | Nothing; it resumes when the first counted person leaves the window. `GET /whatsapp/accounts/{id}/messaging-limit` shows the use |
+| `contact_cap` | Everybody left was sent marketing by this workspace in the last 24 hours | Nothing; they become sendable a day after |
+| `limit_unknown` | The number's messaging limit was never read | Run `python -m scripts.read_messaging_limits`; check the number's credential; the campaign re-checks every 5 minutes |
+
+`paused` with `meta_quality_review`: Meta dropped a held message (135000) - it
+is reviewing the template's quality and the portfolio cannot send templates
+meanwhile (alert `CampaignMetaQualityReview`). Wait for the review in WhatsApp
+Manager, then reschedule. A schedule refused `messaging_limit_unknown` is the
+same cause as `limit_unknown`.
 
 `paused` or `failed`, by `status_reason`:
 
@@ -697,8 +713,11 @@ lease was re-taken while a worker was still sending: check replica clocks and
 
 **Meta's portfolio messaging limit** (250 new, 2,000, 10,000, 100,000,
 unlimited unique users per moving 24 h, shared by the portfolio's numbers) is
-not read by Wasla (CMP-17). A campaign larger than the tier will meet refusals
-past it; keep first campaigns under the tier.
+read and enforced (ADR-146): campaigns stop at 80 % and wait `daily_limit`.
+`PortfolioLimitReached` fires when follow-ups and manual templates have used
+the whole limit; those are recorded and not refused, and Meta may refuse them
+past it. A limit Meta answers outside the known tiers is treated as 250
+(`MessagingLimitUnknown`).
 
 ---
 
@@ -2080,6 +2099,55 @@ VALID` then validated under a 15 s `lock_timeout`, the label and the index are
 built in autocommit blocks. **The downgrade refuses** (nothing changed) while
 any header file exists, any campaign names one or Meta's id for one, any
 campaign stopped for a header reason, or any audit entry records an upload.
+
+### Campaign page features (0108-0120)
+
+Thirteen additive migrations (CAMPAIGNS_PAGE_FEATURES_IMPLEMENTATION.md,
+ADR-145..ADR-150):
+
+| Revision | Adds |
+| --- | --- |
+| 0108 | `tenants.timezone` (backfilled `Africa/Cairo` in batches, NOT NULL through a validated CHECK) |
+| 0109 | quiet hours on `tenants`; `campaigns.waiting_reason`, `resumes_at`; audit actions `campaign_settings_updated`, `campaign_waiting` |
+| 0110 | `whatsapp_business_portfolios`; `whatsapp_accounts.portfolio_id` |
+| 0111 | `business_initiated_sends` (the ledger), five indexes `CONCURRENTLY` |
+| 0112 | `campaigns.send_until`; reason code `send_window_closed` |
+| 0113 | `contacts.last_marketing_sent_at`; message cap and held columns; stop reason `meta_quality_review`; reason code `contact_frequency_cap` |
+| 0114 | `campaign_recipients.rendered_parameters` |
+| 0115 | `campaigns.version`, `uq_campaigns_tenant_id_id` (`CONCURRENTLY`), `campaign_create_keys`; seven campaign audit actions |
+| 0116 | `campaign_segments`, `campaigns.audience_segment_id`; the picker's indexes (`CONCURRENTLY`) |
+| 0117 | `message_origin` gains `campaign_test`; `campaign_test_sends` |
+| 0118 | `campaign_recipients.replied_at`, `opted_out_after_at` and their index (`CONCURRENTLY`) |
+| 0119 | `whatsapp_rate_cards`, their rates and calling-code maps; audit actions `rate_card_uploaded`, `rate_card_activated` |
+| 0120 | data only, from the last 24 hours' messages: each contact's `last_marketing_sent_at` (its latest marketing send) and a ledger row for every accepted template, under its number's portfolio (created unknown, keyed by the WABA), so neither the per-customer cap nor Meta's limit starts the first day from zero (CPF-04) |
+
+Online as 0101-0107: new tables are empty, new columns nullable or with a
+constant default (catalogue-only), constraints `NOT VALID` then validated under
+a 15 s `lock_timeout`, indexes and enum labels in autocommit blocks with an
+INVALID leftover dropped first. **Every downgrade refuses** (nothing changed)
+while its new columns or rows hold data, and leaves the stamp.
+
+**The deploy step.** After 0110 every connected number's messaging limit is
+*unknown*, and a campaign on a number whose limit is unknown is neither
+scheduled nor sent (fail closed): a running campaign waits `limit_unknown`.
+So, on the first deploy of these revisions:
+
+1. stop the previous image's campaign workers (as for any deploy);
+2. `alembic upgrade head`;
+3. `python -m scripts.read_messaging_limits` - reads every live number's limit
+   with its own credential, idempotent, one line per number, exit 1 if any read
+   failed (list them; those numbers' campaigns wait until a read succeeds);
+4. start the API and the workers.
+
+An operator who skips step 3 sees running campaigns with `waiting_reason =
+limit_unknown`; they resume within five minutes of a successful read (the
+script, a schedule, an enable or Meta's `business_capability_update`
+webhook). Subscribing the `business_capability_update` and `account_alerts`
+webhook fields in the Meta App is an external action; until then the six-hourly
+read is the only source and a change is noticed later, never wrongly.
+
+Every workspace starts in `Africa/Cairo` with quiet hours 22:00-09:00; a
+workspace in another zone sets its own (`PATCH /workspace`).
 
 ---
 

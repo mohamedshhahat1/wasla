@@ -64,6 +64,7 @@ from app.workers.billing_worker import BillingWorker
 from tests.billing_fixtures import erase_ledger
 from tests.channel_fakes import SyntheticAdapter
 from tests.fake_ownership import FakeOwnershipVerifier
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -94,7 +95,7 @@ async def _world(maker: async_sessionmaker[AsyncSession], *, slots: int) -> Worl
     tag = uuid.uuid4().hex[:8]
     now = datetime.now(UTC).replace(microsecond=0)
     async with maker() as session:
-        tenant = Tenant(name="Slots Co", slug=f"slots-{tag}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Slots Co", slug=f"slots-{tag}")
         owner = User(email=f"slots-{tag}@example.com", hashed_password="x", is_active=True)
         plan = Plan(
             code=f"slots-{tag}",

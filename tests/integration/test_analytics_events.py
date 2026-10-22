@@ -39,6 +39,7 @@ from app.services.inbox_service import InboxService
 from app.services.sentiment_reader import SentimentReading
 from app.services.sentiment_service import SentimentService
 from tests.fakes import as_analyzer
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -61,7 +62,7 @@ class StubAnalyzer:
 
 
 async def _conversation(session: AsyncSession, *, slug: str = "acme") -> tuple[Any, ...]:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
 

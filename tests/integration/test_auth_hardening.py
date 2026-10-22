@@ -55,6 +55,7 @@ from app.integrations.openai.types import ToolCall
 from app.main import create_app
 from tests.conftest import AllowingEntitlements, FakeDependency
 from tests.fakes import as_request, as_responses
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -447,7 +448,7 @@ async def _served(session: AsyncSession, *names: str) -> tuple[Tenant, Agent, Co
     cases below use this.
     """
     slug = f"served-{uuid.uuid4().hex[:8]}"
-    tenant = Tenant(name="Served", slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Served", slug=slug)
     session.add(tenant)
     await session.flush()
 

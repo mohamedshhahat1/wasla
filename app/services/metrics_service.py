@@ -67,6 +67,7 @@ from app.repositories.knowledge_repository import IndexingBacklog, IndexingSweep
 from app.repositories.media_purge_repository import MediaPurgeLedger
 from app.repositories.media_repository import PlatformMediaRepository
 from app.services.backup_status import read_backup_status
+from app.services.business_initiated_ledger import utilisation_census
 from app.services.entitlement_service import DEFAULT_AI_TURN_HOLD_TTL
 from app.services.media_horizons import claim_lease, release_horizon, unclaimed_horizon
 from app.workers.heartbeat import heartbeat_key
@@ -213,6 +214,7 @@ class MetricsService:
                 count, oldest = await DueCampaignClaim(session).stuck(
                     before=moment - STUCK_CAMPAIGN_AFTER, now=moment
                 )
+                utilisation = await utilisation_census(session, at=moment)
         except Exception:
             logger.warning(
                 "metrics.campaign_read_failed",
@@ -233,6 +235,16 @@ class MetricsService:
             ),
         ):
             lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        # How full the business portfolios' moving 24 hours are (LIM-07): a
+        # count of portfolios per bucket, never a portfolio's identity.
+        # `PortfolioLimitReached` alerts on the `>=100` bucket.
+        lines.extend(
+            render_gauge_lines(
+                "wasla_portfolio_limit_utilisation",
+                "Business portfolios by the share of Meta's messaging limit their last day used.",
+                [({"bucket": bucket}, float(count)) for bucket, count in utilisation.items()],
+            )
+        )
         return lines
 
     async def _entitlement_lines(self, *, now: datetime | None) -> list[str]:

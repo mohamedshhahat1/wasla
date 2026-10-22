@@ -32,6 +32,7 @@ from app.db.models.tenant import Tenant
 from app.integrations.billing.checkout import SavedPaymentMethod
 from app.services.payment_method_service import PaymentMethodService, remember_saved_method
 from tests.payment_tokens import SETTINGS, saved_card
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -49,7 +50,9 @@ async def _refused(session: AsyncSession, statement: str, params: dict[str, Any]
 
 
 async def _tenant(session: AsyncSession) -> Tenant:
-    tenant = Tenant(name="Invariants", slug=f"invariants-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Invariants", slug=f"invariants-{uuid.uuid4().hex[:10]}"
+    )
     session.add(tenant)
     await session.flush()
     return tenant
@@ -195,7 +198,7 @@ async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker
 
 async def _workspace(maker: async_sessionmaker[AsyncSession]) -> uuid.UUID:
     async with maker() as session:
-        tenant = Tenant(name="Cards", slug=f"cards-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Cards", slug=f"cards-{uuid.uuid4().hex[:10]}")
         session.add(tenant)
         await session.commit()
         return tenant.id

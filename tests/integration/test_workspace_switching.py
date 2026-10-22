@@ -42,6 +42,7 @@ from app.db.models.enums import TenantStatus
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
 from tests.fakes import as_table
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -164,7 +165,9 @@ async def _workspace(
     role: TenantRole = TenantRole.TENANT_OWNER,
     status: MembershipStatus = MembershipStatus.ACTIVE,
 ) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     session.add(
@@ -286,7 +289,9 @@ async def test_a_workspace_without_a_membership_is_not_switchable(
     """404 rather than 403: whether that workspace exists is not disclosed."""
     person = await _person(db_session)
     await _workspace(db_session, user=person, slug="alpha")
-    stranger = Tenant(name="Theirs", slug="theirs", status=TenantStatus.ACTIVE)
+    stranger = Tenant(
+        timezone=TEST_TIMEZONE, name="Theirs", slug="theirs", status=TenantStatus.ACTIVE
+    )
     db_session.add(stranger)
     await db_session.flush()
 
@@ -396,7 +401,9 @@ async def _stranger_workspace(session: AsyncSession, slug: str) -> Tenant:
     )
     session.add(other)
     await session.flush()
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     session.add(

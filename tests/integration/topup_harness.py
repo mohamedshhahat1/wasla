@@ -41,6 +41,7 @@ from app.services.topup_service import StartedTopupCheckout, TopupService
 from tests.billing_fixtures import add_owner
 from tests.integration.plan_catalogue import own_plan
 from tests.paymob_orders import CARD_INTEGRATION_ID, MOTO_INTEGRATION_ID, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 HMAC_SECRET = "topup-hmac-secret"
 GIB = 1024**3
@@ -203,7 +204,7 @@ async def workspace(
     path for plans is proved by the billing suites; here it is the ground the
     top-ups stand on.
     """
-    tenant = Tenant(name=name, slug=f"topup-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=name, slug=f"topup-{uuid.uuid4().hex[:10]}")
     session.add(tenant)
     await session.flush()
     owner = await add_owner(session, tenant)

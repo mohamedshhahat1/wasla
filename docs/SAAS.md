@@ -64,3 +64,22 @@ workspace, shared by every channel. See [BILLING.md](BILLING.md).
 An **AI turn** is one customer message an agent took on, however many provider calls answering it took — a sentiment classification and up to three inference rounds are one turn. The figure was written "AI requests" until the AI remediation; migration 0059 moved each plan's number to the turn allowance unchanged, and provider requests are now metered as cost only (ADR-104).
 
 Billing detail is in [BILLING.md](BILLING.md); usage metering is in [ANALYTICS.md](ANALYTICS.md).
+
+### Campaign platform settings
+
+Set by the deployment, never by a workspace ([CAMPAIGNS.md](CAMPAIGNS.md)):
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `CAMPAIGN_PORTFOLIO_LIMIT_SHARE` | 0.80 | The share of a business portfolio's Meta messaging limit campaigns may use (ADR-146) |
+| `CAMPAIGN_MESSAGING_LIMIT_REFRESH_SECONDS` | 21600 | How stale a number's limit may be before scheduling reads it again |
+| `CAMPAIGN_CONTACT_MARKETING_INTERVAL_SECONDS` | 86400 | One marketing message per customer per this long (ADR-147) |
+| `CAMPAIGN_PARAMETER_MAX_CHARS` | 60 | The longest a person's own value may be (ADR-148) |
+| `CAMPAIGN_TEST_SENDS_PER_DAY` | 10 | Test sends per workspace in a moving day |
+| `CAMPAIGN_EXPORTS_PER_HOUR` | 5 | Recipient-list exports per workspace in a moving hour |
+| `CAMPAIGN_REPLY_ATTRIBUTION_SECONDS` | 259200 | How long after a copy an answer counts as its reply |
+
+Each workspace chooses its own **time zone** at onboarding and its **quiet
+hours** (default 22:00-09:00, on) in it (ADR-145). Meta's **rate cards** for the
+campaign cost estimate are entered by platform staff (ADR-150); Wasla charges
+nothing for WhatsApp messages - Meta bills the business.

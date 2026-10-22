@@ -43,6 +43,7 @@ from app.db.models.whatsapp_template import (
 from app.repositories.analytics_repository import AnalyticsEventRepository
 from app.repositories.metrics_repository import TenantMetricsRepository
 from app.services.analytics_service import AnalyticsService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -59,7 +60,7 @@ NOON = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
 
 
 async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

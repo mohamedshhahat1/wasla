@@ -128,6 +128,10 @@ class MessageOrigin(StrEnum):
     # (OMNI-037, ADR-129). Nobody in Wasla sent it, and it is still the
     # business talking: the AI stops and a person has the conversation.
     EXTERNAL = "external"
+    # An admin's test of a campaign, sent to their own contact (PG-09): the
+    # campaign's composition, not one of its recipients, never in its
+    # statistics and not held to the per-contact cap. 0117.
+    CAMPAIGN_TEST = "campaign_test"
 
 
 class ReplyActionSource(StrEnum):
@@ -242,12 +246,27 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         # columns. `conversations` points here through one (ADR-100).
         UniqueConstraint("tenant_id", "id", name="uq_contacts_tenant_id_id"),
         Index("ix_contacts_tenant_id", "tenant_id"),
+        # The contact picker without a number, most recently seen first
+        # (PG-07). 0116.
+        Index(
+            "ix_contacts_tenant_id_last_seen_at",
+            "tenant_id",
+            text("last_seen_at DESC NULLS LAST"),
+            "id",
+        ),
     )
 
     # Deprecated: read a contact's identities instead (docs/API.md).
     wa_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When this workspace last sent the person a marketing template - from any
+    # campaign, or by hand (FREQ-01). Claimed by one conditional UPDATE in the
+    # send intent's transaction; at most one marketing message per 24 hours.
+    # Null for somebody never sent one. 0113.
+    last_marketing_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Marketing consent is not here: it is per channel, in
     # `contact_channel_consents` (ENT-19). A STOP on WhatsApp is not a STOP on
@@ -294,6 +313,15 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         # alone finds the workspace and then discards most of what it read
         # by filter, which costs more the longer a workspace has existed.
         Index("ix_conversations_tenant_id_created_at", "tenant_id", "created_at"),
+        # The campaign contact picker on one number, most recent inbound
+        # first (PG-07). 0116.
+        Index(
+            "ix_conversations_tenant_id_account_id_last_inbound_at",
+            "tenant_id",
+            "account_id",
+            text("last_inbound_at DESC NULLS LAST"),
+            "contact_id",
+        ),
         # The inbox narrowed to one connection, in the inbox's own order
         # (OMNI-014). Without it the filter walks the workspace's whole range
         # and discards by predicate - slowest for the largest, oldest
@@ -665,6 +693,19 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # would silently inherit - and inheriting the wrong attribution is the
     # defect this column exists to remove (MSG-16).
     origin: Mapped[MessageOrigin] = mapped_column(MESSAGE_ORIGIN_TYPE, nullable=False)
+    # The per-contact marketing claim this send made (FREQ-01) and the value it
+    # replaced, so a send Meta provably refused gives it back. 0113.
+    marketing_cap_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    marketing_cap_previous_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Meta accepted it with `message_status: held_for_quality_assessment`:
+    # held by its portfolio pacing (LIM-08). 0113.
+    provider_held_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # What the customer tapped, when this message is a tap (OMNI-030, ADR-124).
     # The title is also the body, so the transcript reads as words; the payload
     # is what routing and the opt-out match read, because display text is

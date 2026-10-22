@@ -42,6 +42,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.media_retention_service import MediaRetentionService, purge_reason
 from tests.fakes import store_object
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -110,7 +111,7 @@ class CountingStore:
 
 
 async def _tenant(session: AsyncSession) -> Tenant:
-    tenant = Tenant(name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
     session.add(tenant)
     await session.flush()
     return tenant

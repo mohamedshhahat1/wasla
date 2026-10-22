@@ -27,14 +27,15 @@ successor permission to send a burst.
 
 from __future__ import annotations
 
+import re
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Final
+from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -47,8 +48,10 @@ from app.channels.registry import PAUSED_RECHECK, ChannelPausedError
 from app.channels.throughput import ConnectionThrottledError
 from app.core.crypto import CredentialDecryptionError
 from app.core.exceptions import (
+    ConflictError,
     DependencyUnavailableError,
     ExternalServiceError,
+    NotFoundError,
     PlanLimitExceededError,
     RateLimitedError,
     ValidationError,
@@ -56,8 +59,14 @@ from app.core.exceptions import (
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.core.storage import MediaStorage, StorageError
-from app.core.telemetry import record_campaign_event, record_campaign_send, record_campaign_stop
-from app.db.models.audit import AuditAction, AuditActorKind
+from app.core.telemetry import (
+    record_campaign_event,
+    record_campaign_send,
+    record_campaign_stop,
+    record_campaign_wait,
+)
+from app.db import advisory_locks
+from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.billing import LimitKey, Subscription, SubscriptionStatus
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
@@ -69,6 +78,8 @@ from app.db.models.campaign import (
     CampaignRecipient,
     CampaignStatus,
     CampaignStopReason,
+    CampaignTestSend,
+    CampaignWaitReason,
     OptOutSource,
     OptOutVia,
     RecipientReason,
@@ -84,9 +95,12 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.enums import TenantRole
+from app.db.models.lead import Lead, LeadStatus
+from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEventType
 from app.db.models.user import User
-from app.db.models.whatsapp_template import TemplateStatus
+from app.db.models.whatsapp_template import PLACEHOLDER, TemplateStatus
 from app.db.session import released
 from app.integrations.whatsapp.client import (
     MARKETING_OPTED_OUT_CODE,
@@ -94,6 +108,7 @@ from app.integrations.whatsapp.client import (
     TEMPLATE_WITHDRAWN_CODES,
     MediaUploadRefusedError,
 )
+from app.repositories.audit_repository import AuditLogRepository
 from app.repositories.campaign_media_repository import CampaignHeaderMediaRepository
 from app.repositories.campaign_repository import (
     DEFAULT_RECIPIENT_BATCH,
@@ -102,6 +117,7 @@ from app.repositories.campaign_repository import (
     CampaignRecipientRepository,
     CampaignRepository,
     CampaignStatistics,
+    ExportRow,
 )
 from app.repositories.channel_repository import (
     ChannelConnectionRepository,
@@ -115,12 +131,21 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
+from app.services import contact_cap
+from app.services import messaging_limit_service as portfolio_limits
 from app.services import workspace_serving as serving
 from app.services.audit_service import AuditTrail
+from app.services.business_initiated_ledger import (
+    MessagingLimitUnknownError,
+    PortfolioLimitReachedError,
+)
+from app.services.campaign_activity import ActivityEntry, activity_entry
 from app.services.campaign_header_media_service import (
     CampaignHeaderMediaService,
     HeaderMediaUnavailableError,
 )
+from app.services.campaign_segment_service import CampaignSegmentService, narrowed
+from app.services.contact_cap import ContactFrequencyCapError
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
     EntitlementService,
@@ -132,6 +157,16 @@ from app.services.messaging_service import (
     safe_upload_filename,
 )
 from app.services.opt_out import record_opt_out, record_resume
+from app.services.personalisation import (
+    Mapping,
+    ParameterSource,
+    PersonFacts,
+    Rendered,
+    fill,
+    normalise,
+    resolve,
+)
+from app.services.quiet_hours import QuietHours
 from app.services.template_parameters import (
     FILE_HEADER_FORMATS,
     TEMPLATE_PARAMETER_CODES,
@@ -164,8 +199,57 @@ TEMPLATE_CATEGORY_CODE: Final = "template_category"
 # removed by retention (HM-02, HM-07).
 HEADER_MEDIA_NOT_STORED_CODE: Final = "header_media_not_stored"
 
+# The stable error codes of a composition's per-person values (PER-01, PER-03).
+PARAMETERS_CONFLICT_CODE: Final = "parameters_conflict"
+PARAMETER_VALUE_REQUIRED_CODE: Final = "parameter_value_required"
+PARAMETER_FALLBACK_REQUIRED_CODE: Final = "parameter_fallback_required"
+PARAMETER_FALLBACK_TOO_LONG_CODE: Final = "parameter_fallback_too_long"
+PARAMETER_KEY_UNKNOWN_CODE: Final = "parameter_key_unknown"
+PARAMETER_SOURCE_NOT_ALLOWED_CODE: Final = "parameter_source_not_allowed"
+
+# The export's stable error code, window and page (PG-14).
+EXPORT_LIMIT_CODE: Final = "export_limit"
+EXPORT_WINDOW: Final = timedelta(hours=1)
+EXPORT_PAGE: Final = 1000
+
+# The test send's stable error codes (PG-09).
+CAMPAIGN_NOT_TESTABLE_CODE: Final = "campaign_not_testable"
+TEST_CONTACT_NO_CONVERSATION_CODE: Final = "contact_has_no_conversation"
+TEST_CONTACT_OPTED_OUT_CODE: Final = "contact_opted_out"
+TEST_SEND_LIMIT_CODE: Final = "test_send_limit"
+PORTFOLIO_LIMIT_REACHED_CODE: Final = "portfolio_limit_reached"
+# The moving window a workspace's test allowance is counted over (PG-09).
+TEST_SEND_WINDOW: Final = timedelta(hours=24)
+
+# The draft lifecycle's stable error codes (PG-03, PG-04, PG-08).
+CAMPAIGN_NOT_EDITABLE_CODE: Final = "campaign_not_editable"
+CAMPAIGN_NOT_DELETABLE_CODE: Final = "campaign_not_deletable"
+CAMPAIGN_VERSION_CONFLICT_CODE: Final = "campaign_version_conflict"
+CAMPAIGN_VERSION_REQUIRED_CODE: Final = "campaign_version_required"
+IDEMPOTENCY_KEY_REUSED_CODE: Final = "idempotency_key_reused"
+# How long a create key names its draft (PG-08).
+CREATE_KEY_LIFETIME: Final = timedelta(hours=24)
+# What a draft edit may change (PG-03), and which of those are its composition.
+COMPOSITION_FIELDS: Final = frozenset(
+    {
+        "account_id",
+        "template_id",
+        "variables",
+        "header_variables",
+        "button_parameters",
+        "body_mappings",
+        "header_mappings",
+        "header_media_id",
+    }
+)
+DRAFT_FIELDS: Final = COMPOSITION_FIELDS | {"name", "description", "messages_per_minute"}
+
 # The stable error code for a `scheduled_at` without a UTC offset (CMP-15).
 NAIVE_SCHEDULE_CODE: Final = "scheduled_at_needs_offset"
+# The stable error codes for a deadline without an offset, or not after the
+# start (LIM-06).
+SEND_UNTIL_NAIVE_CODE: Final = "send_until_needs_offset"
+SEND_UNTIL_BEFORE_START_CODE: Final = "send_until_before_start"
 
 # How far ahead a campaign may be scheduled. The lower bound is zero: sending
 # now is a legitimate thing to ask for, unlike a follow-up, which exists
@@ -237,6 +321,9 @@ class CampaignService:
         provider_unreachable_pause: timedelta | None = None,
         storage: MediaStorage | None = None,
         header_media_refresh: timedelta | None = None,
+        limits: portfolio_limits.MessagingLimitService | None = None,
+        contact_cap_interval: timedelta | None = None,
+        parameter_max_chars: int | None = None,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -275,8 +362,16 @@ class CampaignService:
             if header_media_refresh is not None
             else DEFAULT_HEADER_MEDIA_REFRESH
         )
+        # Reads Meta's messaging limit before a schedule when the stored value
+        # is stale (LIM-01). A request supplies it; the worker never reads.
+        self._limits = limits
+        # One marketing message per contact per this long (FREQ-01).
+        self._cap_interval = contact_cap_interval or DEFAULT_CONTACT_CAP_INTERVAL
+        # The longest one person's value may be before the fallback is sent (PER-03).
+        self._parameter_max_chars = parameter_max_chars or DEFAULT_PARAMETER_MAX_CHARS
         self._campaigns = CampaignRepository(session, tenant_id=tenant_id)
         self._recipients = CampaignRecipientRepository(session, tenant_id=tenant_id)
+        self._segments = CampaignSegmentService(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._audience = AudienceRepository(session, tenant_id=tenant_id)
         self._accounts = WhatsAppAccountRepository(session, tenant_id=tenant_id)
@@ -314,6 +409,7 @@ class CampaignService:
         account_id: uuid.UUID | None = None,
         limit: int = 50,
         cursor: str | None = None,
+        name_contains: str | None = None,
     ) -> Page[Campaign]:
         after = Cursor.decode(cursor) if cursor else None
         rows = await self._campaigns.list_campaigns(
@@ -321,12 +417,187 @@ class CampaignService:
             account_id=account_id,
             limit=limit,
             after=after,
+            name_contains=name_contains,
         )
         return paginate(
             rows,
             limit=limit,
             key=lambda row: Cursor(sort_value=row.created_at, id=row.id),
         )
+
+    async def activity(
+        self, campaign_id: uuid.UUID, *, limit: int = 50, cursor: str | None = None
+    ) -> Page[ActivityEntry]:
+        """A campaign's activity, newest first (PG-05); another workspace's is not found."""
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        after = Cursor.decode(cursor) if cursor else None
+        rows = await AuditLogRepository(self._session, tenant_id=self._tenant_id).campaign_activity(
+            campaign.id,
+            limit=limit,
+            before=(after.sort_value, after.id) if after and after.sort_value else None,
+        )
+        # Paged on the trail's rows, then shown: an entry the page does not
+        # show never ends a page early.
+        page = paginate(rows, limit=limit, key=lambda row: Cursor(row[0].occurred_at, row[0].id))
+        shown = [activity_entry(entry, name, campaign.id) for entry, name in page.items]
+        return Page(
+            items=[entry for entry in shown if entry is not None], next_cursor=page.next_cursor
+        )
+
+    async def summary(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        account_id: uuid.UUID | None = None,
+    ) -> tuple[dict[str, int], CampaignStatistics]:
+        """Every campaign of the workspace created in `[since, until)` (PG-11).
+
+        Campaigns by status, and their recipients' statistics by the very
+        queries a single campaign's use - aggregate SQL, never a page of a list.
+        """
+        if until <= since:
+            raise ValidationError("The window's end must come after its start.")
+        chosen = select(Campaign.id).where(
+            Campaign.tenant_id == self._tenant_id,
+            Campaign.created_at >= since,
+            Campaign.created_at < until,
+        )
+        if account_id is not None:
+            chosen = chosen.where(Campaign.account_id == account_id)
+        by_status = {
+            status.value: int(count)
+            for status, count in (
+                await self._session.execute(
+                    select(Campaign.status, func.count())
+                    .where(Campaign.id.in_(chosen))
+                    .group_by(Campaign.status)
+                )
+            ).all()
+        }
+        statistics = await self._recipients.statistics_of(CampaignRecipient.campaign_id.in_(chosen))
+        return by_status, statistics
+
+    async def progress(
+        self, campaign_ids: Sequence[uuid.UUID]
+    ) -> tuple[list[Campaign], dict[uuid.UUID, dict[str, int]]]:
+        """Up to twenty campaigns' live state in two queries (PG-12).
+
+        An id of another workspace, or none, is not found.
+        """
+        unique = list(dict.fromkeys(campaign_ids))
+        found = {
+            campaign.id: campaign
+            for campaign in (
+                await self._session.execute(
+                    select(Campaign).where(
+                        Campaign.tenant_id == self._tenant_id, Campaign.id.in_(unique)
+                    )
+                )
+            ).scalars()
+        }
+        if len(found) != len(unique):
+            raise NotFoundError("One of those campaigns does not exist.")
+        return [found[campaign_id] for campaign_id in unique], await self._recipients.progress(
+            unique
+        )
+
+    async def export_recipients(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        status: RecipientStatus | None,
+        reason: RecipientReason | None,
+        actor: User,
+        per_hour: int,
+        now: datetime | None = None,
+    ) -> tuple[Campaign, Callable[[], AsyncIterator[ExportRow]]]:
+        """Allow and audit one CSV export, and return its rows a page at a time (PG-14).
+
+        At most `per_hour` exports per workspace in a moving hour, counted from
+        the audit trail itself under the export's advisory lock (429
+        `export_limit`). Audited with the filters and the row count - never
+        the rows. The rows are read in pages of 1,000 by recipient id.
+        """
+        moment = now or datetime.now(UTC)
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    advisory_locks.CAMPAIGN_EXPORTS, self._tenant_id.int & 0x7FFFFFFF
+                )
+            )
+        )
+        recent = list(
+            (
+                await self._session.execute(
+                    select(AuditLog.occurred_at)
+                    .where(
+                        AuditLog.tenant_id == self._tenant_id,
+                        AuditLog.action == AuditAction.CAMPAIGN_RECIPIENTS_EXPORTED,
+                        AuditLog.occurred_at > moment - EXPORT_WINDOW,
+                    )
+                    .order_by(AuditLog.occurred_at, AuditLog.id)
+                )
+            ).scalars()
+        )
+        if len(recent) >= per_hour:
+            raise RateLimitedError(
+                f"A workspace may export {per_hour} recipient lists an hour.",
+                error_code=EXPORT_LIMIT_CODE,
+                details={"reset_at": (recent[0] + EXPORT_WINDOW).isoformat()},
+            )
+        total = int(
+            await self._session.scalar(
+                select(func.count())
+                .select_from(CampaignRecipient)
+                .where(
+                    CampaignRecipient.tenant_id == self._tenant_id,
+                    CampaignRecipient.campaign_id == campaign.id,
+                    *((CampaignRecipient.status == status,) if status is not None else ()),
+                    *(
+                        (CampaignRecipient.reason_code == reason.value,)
+                        if reason is not None
+                        else ()
+                    ),
+                )
+            )
+            or 0
+        )
+        self._audit.record(
+            AuditAction.CAMPAIGN_RECIPIENTS_EXPORTED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={
+                "rows": total,
+                "filters": {
+                    "status": status.value if status is not None else None,
+                    "reason_code": reason.value if reason is not None else None,
+                },
+            },
+        )
+        await record_campaign_event("exported")
+        recipients = self._recipients
+
+        async def pages() -> AsyncIterator[ExportRow]:
+            after: uuid.UUID | None = None
+            while True:
+                page = await recipients.export_rows(
+                    campaign.id,
+                    status=status,
+                    reason=reason.value if reason is not None else None,
+                    after=after,
+                    limit=EXPORT_PAGE,
+                )
+                for row in page:
+                    yield row
+                if len(page) < EXPORT_PAGE:
+                    return
+                after = page[-1].id
+
+        return campaign, pages
 
     async def statistics(self, campaign_id: uuid.UUID) -> CampaignStatistics:
         campaign = await self._campaigns.require_by_id(campaign_id)
@@ -373,6 +644,10 @@ class CampaignService:
         button_parameters: dict[int, str] | None = None,
         header_media_id: uuid.UUID | None = None,
         actor: User | None = None,
+        body_mappings: list[Mapping] | None = None,
+        header_mappings: list[Mapping] | None = None,
+        idempotency_key: str | None = None,
+        request_hash: str | None = None,
     ) -> Campaign:
         """Compose a draft. Nothing is sent and no audience exists yet.
 
@@ -386,6 +661,103 @@ class CampaignService:
         HM-03): `header_media_id` names one of this workspace's header files,
         stored, of the kind the template's header names. Another workspace's
         id is not found. Fixed here: nothing changes it afterwards.
+
+        **Each person's own values** (PER-01): `body_mappings` and
+        `header_mappings` name, per placeholder, a constant or a field of the
+        contact or their active lead, with a fallback - in place of
+        `variables` and `header_variables`. Resolved per person when the
+        audience is written.
+
+        **A retried create makes one draft** (PG-08): with `idempotency_key`,
+        the same key in this workspace within a day returns the draft it made;
+        the key reused for a different request (`request_hash`) is refused 409
+        `idempotency_key_reused`.
+        """
+        if idempotency_key is not None:
+            earlier = await self._created_with(idempotency_key, request_hash)
+            if earlier is not None:
+                return earlier
+        composition = await self._composition(
+            account_id=account_id,
+            template_id=template_id,
+            variables=variables,
+            header_variables=header_variables,
+            button_parameters=button_parameters,
+            header_media_id=header_media_id,
+            body_mappings=body_mappings,
+            header_mappings=header_mappings,
+        )
+
+        campaign = self._campaigns.create(
+            account_id=account_id,
+            template_id=template_id,
+            name=_validated_name(name),
+            description=description,
+            variables=list(composition.parameters.body) or None,
+            messages_per_minute=_validated_rate(messages_per_minute),
+            created_by_id=created_by_id,
+        )
+        campaign.template_parameters = composition.stored()
+        campaign.header_media_id = header_media_id
+        if idempotency_key is not None:
+            # The draft and its key in one savepoint: a concurrent retry that
+            # holds the key first makes this draft vanish and that one answer.
+            savepoint = await self._session.begin_nested()
+            await self._session.flush()
+            claimed = await self._campaigns.claim_create_key(
+                key=idempotency_key,
+                campaign_id=campaign.id,
+                request_hash=request_hash or "",
+                stale_before=datetime.now(UTC) - CREATE_KEY_LIFETIME,
+            )
+            if not claimed:
+                await savepoint.rollback()
+                earlier = await self._created_with(idempotency_key, request_hash)
+                if earlier is None:  # pragma: no cover - the holder rolled back
+                    raise ConflictError(
+                        "Another request with this key is still being handled. Try again.",
+                        error_code=IDEMPOTENCY_KEY_REUSED_CODE,
+                    )
+                return earlier
+            await savepoint.commit()
+        # Flushed so the caller can read the generated id and the timestamps.
+        # Without it a route serialising this row answers 500: the primary key
+        # default and the server defaults are applied at flush, and the request
+        # commits after the response has already been built.
+        await self._session.flush()
+        # Audited (CMP-14): composing a broadcast is where its template and
+        # number are chosen. The template's parameters stay out of the trail.
+        self._audit.record(
+            AuditAction.CAMPAIGN_CREATED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={
+                "account_id": str(account_id),
+                "template_id": str(template_id),
+                "messages_per_minute": campaign.messages_per_minute,
+            },
+        )
+        logger.info("campaign.created", extra={"campaign_id": str(campaign.id)})
+        return campaign
+
+    async def _composition(
+        self,
+        *,
+        account_id: uuid.UUID,
+        template_id: uuid.UUID,
+        variables: list[str] | None,
+        header_variables: list[str] | None,
+        button_parameters: dict[int, str] | None,
+        header_media_id: uuid.UUID | None,
+        body_mappings: list[Mapping] | None,
+        header_mappings: list[Mapping] | None,
+    ) -> _Composition:
+        """Everything a campaign is composed of, validated - the one validator (PG-03).
+
+        Create and the draft edit both go through here, so a draft can never
+        be edited into something create would have refused.
         """
         account = await self._accounts.require_by_id(account_id)
         if not account.is_active:
@@ -423,57 +795,98 @@ class CampaignService:
                     "This header file is not stored. Upload it again.",
                     error_code=HEADER_MEDIA_NOT_STORED_CODE,
                 )
+        body_sources = await self._validated_mappings(body_mappings, variables, "body")
+        header_sources = await self._validated_mappings(header_mappings, header_variables, "header")
         supplied = CampaignParameters(
-            body=tuple(variables or ()),
-            header=tuple(header_variables or ()),
+            body=(
+                tuple(mapping.default() for mapping in body_sources)
+                if body_sources is not None
+                else tuple(variables or ())
+            ),
+            header=(
+                tuple(mapping.default() for mapping in header_sources)
+                if header_sources is not None
+                else tuple(header_variables or ())
+            ),
             buttons=dict(button_parameters or {}),
             header_file_kind=header_file.kind if header_file is not None else None,
         )
         refused = parameter_refusal(parameter_spec(template.components), supplied)
         if refused is not None:
             raise refused
+        return _Composition(
+            parameters=supplied,
+            body_sources=body_sources,
+            header_sources=header_sources,
+        )
 
-        campaign = self._campaigns.create(
-            account_id=account_id,
-            template_id=template_id,
-            name=_validated_name(name),
-            description=description,
-            variables=list(supplied.body) or None,
-            messages_per_minute=_validated_rate(messages_per_minute),
-            created_by_id=created_by_id,
+    async def _validated_mappings(
+        self, mappings: list[Mapping] | None, constants: list[str] | None, part: str
+    ) -> tuple[Mapping, ...] | None:
+        """A part's mappings, checked (PER-01, PER-03); None when it has constants only."""
+        if mappings is None:
+            return None
+        if constants:
+            raise ValidationError(
+                f"Give the {part}'s values either as constants or as mappings, not both.",
+                error_code=PARAMETERS_CONFLICT_CODE,
+            )
+        checked: list[Mapping] = []
+        for mapping in mappings:
+            if mapping.source is ParameterSource.CONSTANT:
+                if mapping.value is None:
+                    raise ValidationError(
+                        "A constant needs its value.", error_code=PARAMETER_VALUE_REQUIRED_CODE
+                    )
+                checked.append(Mapping(source=mapping.source, value=mapping.value))
+                continue
+            fallback = normalise(mapping.fallback)
+            if not fallback:
+                raise ValidationError(
+                    "A value taken from the contact or the lead needs a fallback for people "
+                    "without it.",
+                    error_code=PARAMETER_FALLBACK_REQUIRED_CODE,
+                )
+            if len(fallback) > self._parameter_max_chars:
+                raise ValidationError(
+                    f"A fallback is at most {self._parameter_max_chars} characters.",
+                    error_code=PARAMETER_FALLBACK_TOO_LONG_CODE,
+                )
+            key = None
+            if mapping.source is ParameterSource.LEAD_CUSTOM_FIELD:
+                key = (mapping.key or "").strip()
+                if not key or not await self._custom_field_exists(key):
+                    raise ValidationError(
+                        "No lead in this workspace has that custom field.",
+                        error_code=PARAMETER_KEY_UNKNOWN_CODE,
+                    )
+            checked.append(Mapping(source=mapping.source, key=key, fallback=fallback))
+        return tuple(checked)
+
+    async def _custom_field_exists(self, key: str) -> bool:
+        found = await self._session.scalar(
+            select(Lead.id)
+            .where(Lead.tenant_id == self._tenant_id, Lead.custom_fields.has_key(key))
+            .limit(1)
         )
-        campaign.template_parameters = supplied.as_dict()
-        campaign.header_media_id = header_media_id
-        # Flushed so the caller can read the generated id and the timestamps.
-        # Without it a route serialising this row answers 500: the primary key
-        # default and the server defaults are applied at flush, and the request
-        # commits after the response has already been built.
-        await self._session.flush()
-        # Audited (CMP-14): composing a broadcast is where its template and
-        # number are chosen. The template's parameters stay out of the trail.
-        self._audit.record(
-            AuditAction.CAMPAIGN_CREATED,
-            actor=actor,
-            target_type="campaign",
-            target_id=campaign.id,
-            target_label=campaign.name,
-            meta={
-                "account_id": str(account_id),
-                "template_id": str(template_id),
-                "messages_per_minute": campaign.messages_per_minute,
-            },
-        )
-        logger.info("campaign.created", extra={"campaign_id": str(campaign.id)})
-        return campaign
+        return found is not None
 
     async def preview_audience(
         self,
         *,
         account_id: uuid.UUID,
         filters: AudienceFilter,
+        segment_id: uuid.UUID | None = None,
     ) -> int:
-        """How many people this filter would reach, without writing anything."""
+        """How many people this filter - over a saved segment's rules - would reach.
+
+        Nothing is written.
+        """
         await self._accounts.require_by_id(account_id)
+        if segment_id is not None:
+            filters = narrowed(
+                await self._segments.for_audience(segment_id, account_id=account_id), filters
+            )
         return await self._audience.count_eligible(account_id=account_id, filters=filters)
 
     async def set_audience(
@@ -482,6 +895,7 @@ class CampaignService:
         campaign_id: uuid.UUID,
         filters: AudienceFilter,
         actor: User | None = None,
+        segment_id: uuid.UUID | None = None,
     ) -> Campaign:
         """Materialise the recipient list.
 
@@ -504,6 +918,15 @@ class CampaignService:
         campaign = await self._campaigns.lock_by_id(campaign_id)
         if campaign.status is not CampaignStatus.DRAFT:
             raise ValidationError("An audience can only be set while the campaign is a draft.")
+        if segment_id is not None:
+            # The segment's rules, narrowed by the filters given with it, are
+            # copied onto the campaign below (PG-06): a later edit of the
+            # segment changes nothing here.
+            filters = narrowed(
+                await self._segments.for_audience(segment_id, account_id=campaign.account_id),
+                filters,
+            )
+        campaign.audience_segment_id = segment_id
         # The campaign allowance's lock, taken after the row's as `schedule`
         # takes them, so nothing that reads promised recipients interleaves.
         await hold_limit_lock(
@@ -522,20 +945,32 @@ class CampaignService:
             )
 
         already = await self._recipients.existing_contact_ids(campaign.id)
+        # Each person's own values, resolved now and written down with them
+        # (PER-02): what this campaign will send them, whatever changes later.
+        renderer = await self._renderer(campaign)
+        facts = (
+            await self._facts([contact for contact, _ in members if contact.id not in already])
+            if renderer is not None
+            else {}
+        )
         added = 0
         for contact, participant_identity_id in members:
             if contact.id in already:
                 continue
             # The exact identity this copy is addressed to (OMNI-004).
-            self._recipients.create(
+            recipient = self._recipients.create(
                 campaign_id=campaign.id,
                 contact_id=contact.id,
                 participant_identity_id=participant_identity_id,
             )
+            if renderer is not None:
+                recipient.rendered_parameters = renderer(facts[contact.id]).as_dict()
             added += 1
 
         campaign.audience = filters.as_dict()
         campaign.audience_size = len(already) + added
+        # Writing the list is an edit of the draft (PG-03).
+        campaign.version += 1
         # Audited (CMP-14) with how many and which filters - the number of
         # hand-picked contacts, never who they are.
         summary = filters.as_dict()
@@ -546,7 +981,11 @@ class CampaignService:
             target_type="campaign",
             target_id=campaign.id,
             target_label=campaign.name,
-            meta={"recipients": campaign.audience_size, "filters": summary},
+            meta={
+                "recipients": campaign.audience_size,
+                "filters": summary,
+                "segment_id": str(segment_id) if segment_id is not None else None,
+            },
         )
         logger.info(
             "campaign.audience_set",
@@ -554,7 +993,579 @@ class CampaignService:
         )
         return campaign
 
+    async def _renderer(self, campaign: Campaign) -> Callable[[PersonFacts], Rendered] | None:
+        """How to resolve one person's values for this campaign; None if nothing is personal."""
+        stored = campaign.template_parameters or {}
+        body = tuple(Mapping.from_dict(entry) for entry in stored.get("body_sources") or ())
+        header = tuple(Mapping.from_dict(entry) for entry in stored.get("header_sources") or ())
+        if not any(mapping.personal for mapping in body + header):
+            return None
+        if not body:
+            body = tuple(
+                Mapping(ParameterSource.CONSTANT, value=v) for v in campaign.variables or ()
+            )
+        if not header:
+            header = tuple(
+                Mapping(ParameterSource.CONSTANT, value=str(v)) for v in stored.get("header") or ()
+            )
+        template = await self._templates.require_by_id(campaign.template_id)
+        spec = parameter_spec(template.components)
+        body_names = spec.body if spec is not None else ()
+        max_chars = self._parameter_max_chars
+
+        def render(facts: PersonFacts) -> Rendered:
+            return resolve(
+                body=body,
+                header=header,
+                facts=facts,
+                max_chars=max_chars,
+                body_text=template.body_text,
+                body_names=body_names,
+            )
+
+        return render
+
+    async def _facts(self, contacts: Sequence[Contact]) -> dict[uuid.UUID, PersonFacts]:
+        """What each contact and their active lead say, in one read (PER-01)."""
+        ids = [contact.id for contact in contacts]
+        leads = {
+            lead.contact_id: lead
+            for lead in (
+                await self._session.execute(
+                    select(Lead).where(
+                        Lead.tenant_id == self._tenant_id,
+                        Lead.contact_id.in_(ids),
+                        Lead.status.not_in([LeadStatus.WON, LeadStatus.LOST]),
+                    )
+                )
+            ).scalars()
+        }
+        facts: dict[uuid.UUID, PersonFacts] = {}
+        for contact in contacts:
+            lead = leads.get(contact.id)
+            facts[contact.id] = PersonFacts(
+                contact_id=contact.id,
+                display_name=contact.display_name,
+                lead_name=lead.name if lead is not None else None,
+                lead_interest=lead.interest if lead is not None else None,
+                lead_status=lead.status.value if lead is not None else None,
+                lead_budget_amount=lead.budget_amount if lead is not None else None,
+                lead_budget_currency=lead.budget_currency if lead is not None else None,
+                lead_custom_fields=lead.custom_fields if lead is not None else None,
+            )
+        return facts
+
+    async def preview_messages(
+        self, campaign_id: uuid.UUID, contact_ids: Sequence[uuid.UUID]
+    ) -> list[MessagePreview]:
+        """What each of these people would receive (PER-04): theirs, and nobody else's.
+
+        A contact of the campaign's written audience is shown the values
+        written for them; before the audience is written, any contact of the
+        eligible population is resolved now. Anybody else - another
+        workspace's contact, somebody outside the audience - is not found.
+        """
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        template = await self._templates.require_by_id(campaign.template_id)
+        spec = parameter_spec(template.components)
+        written = await self._recipients.rendered_for(campaign.id, contact_ids)
+        has_audience = campaign.audience_size > 0
+        renderer = await self._renderer(campaign)
+        eligible = (
+            {
+                contact.id: contact
+                for contact, _ in await self._audience.list_eligible_members(
+                    account_id=campaign.account_id,
+                    filters=AudienceFilter(contact_ids=tuple(contact_ids)),
+                    limit=len(contact_ids) + 1,
+                )
+            }
+            if not has_audience
+            else {}
+        )
+        facts = await self._facts(list(eligible.values())) if renderer is not None else {}
+        defaults = CampaignParameters.from_campaign(
+            campaign.variables, campaign.template_parameters
+        )
+        previews: list[MessagePreview] = []
+        for contact_id in contact_ids:
+            if has_audience and contact_id not in written:
+                raise NotFoundError("That contact is not in this campaign's audience.")
+            if not has_audience and contact_id not in eligible:
+                raise NotFoundError("That contact is not in this campaign's audience.")
+            stored = written.get(contact_id)
+            rendered = (
+                Rendered.from_dict(stored)
+                if stored
+                else (renderer(facts[contact_id]) if renderer is not None else None)
+            )
+            parameters = _personal(defaults, rendered)
+            header_text = _header_text(template.components)
+            previews.append(
+                MessagePreview(
+                    contact_id=contact_id,
+                    header=(
+                        fill(header_text, spec.header, parameters.header)
+                        if spec is not None and header_text
+                        else None
+                    ),
+                    body=fill(template.body_text, spec.body if spec else (), parameters.body),
+                    buttons=_button_texts(template.components, parameters.buttons),
+                    body_fallbacks=rendered.body_fallbacks if rendered else (),
+                    header_fallbacks=rendered.header_fallbacks if rendered else (),
+                )
+            )
+        return previews
+
+    # ---------------------------------------------------------------- drafts
+
+    async def _created_with(self, key: str, request_hash: str | None) -> Campaign | None:
+        """The draft this create key already made in the last day, if any (PG-08)."""
+        found = await self._campaigns.created_with_key(
+            key, since=datetime.now(UTC) - CREATE_KEY_LIFETIME
+        )
+        if found is None:
+            return None
+        row, campaign = found
+        if row.request_hash != (request_hash or ""):
+            raise ConflictError(
+                "That idempotency key was already used for a different campaign.",
+                error_code=IDEMPOTENCY_KEY_REUSED_CODE,
+            )
+        return campaign
+
+    def _inputs(self, campaign: Campaign) -> dict[str, Any]:
+        """A draft's composition as `_composition` takes it: constants or mappings."""
+        stored = campaign.template_parameters or {}
+        body_sources = stored.get("body_sources")
+        header_sources = stored.get("header_sources")
+        return {
+            "account_id": campaign.account_id,
+            "template_id": campaign.template_id,
+            "variables": None if body_sources is not None else campaign.variables,
+            "header_variables": (
+                None
+                if header_sources is not None
+                else [str(value) for value in stored.get("header") or []] or None
+            ),
+            "button_parameters": {
+                int(entry["index"]): str(entry["value"])
+                for entry in stored.get("buttons") or []
+                if isinstance(entry, dict) and "index" in entry and "value" in entry
+            },
+            "header_media_id": campaign.header_media_id,
+            "body_mappings": (
+                [Mapping.from_dict(entry) for entry in body_sources]
+                if body_sources is not None
+                else None
+            ),
+            "header_mappings": (
+                [Mapping.from_dict(entry) for entry in header_sources]
+                if header_sources is not None
+                else None
+            ),
+        }
+
+    async def update_draft(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        version: int | None,
+        changes: dict[str, Any],
+        actor: User | None = None,
+    ) -> tuple[Campaign, bool]:
+        """Edit a draft (PG-03); returns it and whether its written list was cleared.
+
+        Drafts only, under the row lock, from the version the editor read:
+        another edit in between is refused 409 `campaign_version_conflict` with
+        the current version. Validated by the one validator `create` uses. A
+        change to the number, the template, the values or the header file
+        clears the written list - its people's values were resolved for the
+        old composition - and keeps its rules; the page writes it again.
+        Audited with the names of the changed fields, never their values.
+        """
+        unknown = set(changes) - DRAFT_FIELDS
+        if unknown:  # pragma: no cover - the request schema admits nothing else
+            raise ValidationError(f"Not editable: {', '.join(sorted(unknown))}.")
+        campaign = await self._campaigns.lock_by_id(campaign_id)
+        if campaign.status is not CampaignStatus.DRAFT:
+            raise ConflictError(
+                "Only a draft can be edited.", error_code=CAMPAIGN_NOT_EDITABLE_CODE
+            )
+        if version is None:
+            raise ValidationError(
+                "Say which version you edited: If-Match or `version`.",
+                error_code=CAMPAIGN_VERSION_REQUIRED_CODE,
+            )
+        if version != campaign.version:
+            raise ConflictError(
+                "Somebody changed this draft since you opened it. Reload it and edit again.",
+                error_code=CAMPAIGN_VERSION_CONFLICT_CODE,
+                details={"version": campaign.version},
+            )
+
+        changed: set[str] = set()
+        cleared = False
+        if set(changes) & COMPOSITION_FIELDS:
+            inputs = self._inputs(campaign)
+            # Constants and mappings replace each other: giving one drops the other.
+            for constants, mappings in (
+                ("variables", "body_mappings"),
+                ("header_variables", "header_mappings"),
+            ):
+                if constants in changes and mappings not in changes:
+                    inputs[mappings] = None
+                if mappings in changes and constants not in changes:
+                    inputs[constants] = None
+            for field in COMPOSITION_FIELDS & set(changes):
+                inputs[field] = changes[field]
+            inputs["button_parameters"] = dict(inputs["button_parameters"] or {})
+            composition = await self._composition(**inputs)
+            stored = composition.stored()
+            body = list(composition.parameters.body) or None
+            before = {
+                "account_id": campaign.account_id,
+                "template_id": campaign.template_id,
+                "variables": campaign.variables,
+                "template_parameters": campaign.template_parameters,
+                "header_media_id": campaign.header_media_id,
+            }
+            after = {
+                "account_id": inputs["account_id"],
+                "template_id": inputs["template_id"],
+                "variables": body,
+                "template_parameters": stored,
+                "header_media_id": inputs["header_media_id"],
+            }
+            changed |= {field for field in before if before[field] != after[field]}
+            if changed:
+                campaign.account_id = inputs["account_id"]
+                campaign.template_id = inputs["template_id"]
+                campaign.template_parameters = stored
+                campaign.variables = body
+                campaign.header_media_id = inputs["header_media_id"]
+                if await self._recipients.delete_all(campaign.id) or campaign.audience_size:
+                    cleared = True
+                campaign.audience_size = 0
+        if "name" in changes:
+            name = _validated_name(changes["name"])
+            if name != campaign.name:
+                campaign.name = name
+                changed.add("name")
+        if "description" in changes and changes["description"] != campaign.description:
+            campaign.description = changes["description"]
+            changed.add("description")
+        if "messages_per_minute" in changes:
+            rate = _validated_rate(changes["messages_per_minute"])
+            if rate != campaign.messages_per_minute:
+                campaign.messages_per_minute = rate
+                changed.add("messages_per_minute")
+        if not changed:
+            return campaign, False
+
+        campaign.version += 1
+        await self._session.flush()
+        # `updated_at` is the database's: read back, so the response can show it.
+        await self._session.refresh(campaign, ["updated_at"])
+        self._audit.record(
+            AuditAction.CAMPAIGN_UPDATED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"fields": sorted(changed), "audience_cleared": cleared},
+        )
+        logger.info(
+            "campaign.updated",
+            extra={"campaign_id": str(campaign.id), "fields": sorted(changed)},
+        )
+        return campaign, cleared
+
+    async def delete_draft(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> None:
+        """Delete a draft and its never-sent list (PG-04).
+
+        A scheduled campaign is cancelled first; anything else is refused 409
+        `campaign_not_deletable`. A campaign anybody was ever sent to is never
+        deletable, whatever its status says. Its header file stays: another
+        campaign may use it, and retention decides when it goes. The audit
+        entry keeps the id and the name.
+        """
+        campaign = await self._campaigns.lock_by_id(campaign_id)
+        if campaign.status is not CampaignStatus.DRAFT or await self._recipients.ever_sent(
+            campaign.id
+        ):
+            raise ConflictError(
+                "Only a draft nobody was sent can be deleted. Cancel a scheduled campaign first.",
+                error_code=CAMPAIGN_NOT_DELETABLE_CODE,
+            )
+        removed = await self._recipients.delete_all(campaign.id)
+        self._audit.record(
+            AuditAction.CAMPAIGN_DELETED,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"name": campaign.name, "recipients": removed},
+        )
+        await self._session.delete(campaign)
+        await self._session.flush()
+        logger.info("campaign.deleted", extra={"campaign_id": str(campaign_id)})
+
+    async def duplicate(self, campaign_id: uuid.UUID, *, actor: User | None = None) -> Campaign:
+        """A new draft composed like this campaign (PG-02).
+
+        Copies the name (" (copy)"), description, number, template, values and
+        their mappings, header file, rate and the audience's rules - never the
+        written list, the schedule, results, stop reasons, Meta's media id,
+        the lease or counters. Validated like a create: a template withdrawn or
+        a number disabled since is refused with create's codes.
+        """
+        source = await self._campaigns.require_by_id(campaign_id)
+        inputs = self._inputs(source)
+        composition = await self._composition(**inputs)
+        copy = self._campaigns.create(
+            account_id=source.account_id,
+            template_id=source.template_id,
+            name=_copy_name(source.name),
+            description=source.description,
+            variables=list(composition.parameters.body) or None,
+            messages_per_minute=source.messages_per_minute,
+            created_by_id=actor.id if actor is not None else None,
+        )
+        copy.template_parameters = composition.stored()
+        copy.header_media_id = source.header_media_id
+        copy.audience = dict(source.audience) if source.audience is not None else None
+        copy.audience_segment_id = source.audience_segment_id
+        await self._session.flush()
+        self._audit.record(
+            AuditAction.CAMPAIGN_DUPLICATED,
+            actor=actor,
+            target_type="campaign",
+            target_id=copy.id,
+            target_label=copy.name,
+            meta={"source_id": str(source.id)},
+        )
+        logger.info(
+            "campaign.duplicated",
+            extra={"campaign_id": str(copy.id), "source_id": str(source.id)},
+        )
+        await record_campaign_event("duplicated")
+        return copy
+
+    # ------------------------------------------------------------- test send
+
+    async def send_test(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        contact_id: uuid.UUID,
+        actor: User,
+        sender_role: TenantRole,
+        messaging: MessagingService,
+        storage: MediaStorage,
+        per_day: int,
+        now: datetime | None = None,
+    ) -> Message:
+        """Send this campaign's message to one contact - the admin's own (PG-09).
+
+        The same composition a recipient gets: the one component builder, this
+        contact's own values (resolved now), the header file. Sent as a
+        `campaign_test` message through the same client and send path, but it
+        is not a recipient: never in the list or the statistics, not under the
+        per-contact cap or quiet hours. Counted in Meta's messaging limit
+        like any business-initiated send outside the service window, and
+        refused only when the portfolio has nothing left at all.
+
+        ADR-025 holds: the contact must already have a conversation with this
+        number - the admin writes to the business first. At most `per_day`
+        tests per workspace in a moving 24 hours (429 `test_send_limit`).
+        """
+        moment = now or datetime.now(UTC)
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        if campaign.status is CampaignStatus.CANCELLED:
+            raise ConflictError(
+                "A cancelled campaign cannot be tested.", error_code=CAMPAIGN_NOT_TESTABLE_CODE
+            )
+        contact = await self._contacts.require_by_id(contact_id)
+        conversation = await self._conversations.get_for_contact(
+            contact_id=contact.id, account_id=campaign.account_id
+        )
+        if conversation is None:
+            raise ValidationError(
+                "Write to this WhatsApp number from that phone first: a test reaches only a "
+                "contact who already has a conversation with it.",
+                error_code=TEST_CONTACT_NO_CONVERSATION_CODE,
+            )
+        if not await ContactConsentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).accepts_marketing(contact.id, conversation.channel):
+            raise ValidationError(
+                "This contact has opted out of marketing messages.",
+                error_code=TEST_CONTACT_OPTED_OUT_CODE,
+            )
+        template = await self._templates.require_by_id(campaign.template_id)
+        spec = parameter_spec(template.components)
+        refused = (
+            parameter_refusal(
+                spec,
+                CampaignParameters.from_campaign(
+                    campaign.variables,
+                    campaign.template_parameters,
+                    header_file_kind=await self._header_file_kind(campaign),
+                ),
+            )
+            if spec is not None
+            else None
+        )
+        if spec is None or refused is not None:
+            raise refused or ValidationError("This template's components are not known yet.")
+
+        # The header file first, outside any lock (ADR-093): the campaign's
+        # own id while it is fresh, otherwise uploaded for this test - and
+        # never written onto the campaign, whose upload is the worker's.
+        header_file = await self._test_header_file(campaign, messaging=messaging, storage=storage)
+
+        # The allowance and the record as one step.
+        await self._session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    advisory_locks.CAMPAIGN_TEST_SENDS, self._tenant_id.int & 0x7FFFFFFF
+                )
+            )
+        )
+        since = moment - TEST_SEND_WINDOW
+        recent = list(
+            (
+                await self._session.execute(
+                    select(CampaignTestSend.created_at)
+                    .where(
+                        CampaignTestSend.tenant_id == self._tenant_id,
+                        CampaignTestSend.created_at > since,
+                    )
+                    .order_by(CampaignTestSend.created_at, CampaignTestSend.id)
+                )
+            ).scalars()
+        )
+        if len(recent) >= per_day:
+            reset_at = recent[0] + TEST_SEND_WINDOW
+            raise RateLimitedError(
+                f"A workspace may send {per_day} campaign tests in 24 hours.",
+                error_code=TEST_SEND_LIMIT_CODE,
+                details={"reset_at": reset_at.isoformat()},
+            )
+        record = CampaignTestSend(
+            tenant_id=self._tenant_id,
+            campaign_id=campaign.id,
+            contact_id=contact.id,
+            sent_by_id=actor.id,
+        )
+        self._session.add(record)
+        await self._session.flush()
+
+        renderer = await self._renderer(campaign)
+        rendered = (
+            renderer((await self._facts([contact]))[contact.id]) if renderer is not None else None
+        )
+        components = send_components(
+            spec,
+            _personal(
+                CampaignParameters.from_campaign(
+                    campaign.variables, campaign.template_parameters, header_file=header_file
+                ),
+                rendered,
+            ),
+        )
+        try:
+            message = await messaging.send_template(
+                conversation_id=conversation.id,
+                name=template.name,
+                language=template.language,
+                components=components,
+                sent_by_id=actor.id,
+                origin=MessageOrigin.CAMPAIGN_TEST,
+                sender_role=sender_role,
+                campaign_id=campaign.id,
+            )
+        except PortfolioLimitReachedError as error:
+            raise ConflictError(
+                "This business has reached its WhatsApp messaging limit for now.",
+                error_code=PORTFOLIO_LIMIT_REACHED_CODE,
+                details={"available_at": error.resumes_at.isoformat()},
+            ) from error
+        except MessagingLimitUnknownError as error:
+            raise ValidationError(
+                "This number's WhatsApp messaging limit has not been read yet.",
+                error_code=portfolio_limits.LIMIT_UNKNOWN_CODE,
+            ) from error
+        record.message_id = message.id
+        self._audit.record(
+            AuditAction.CAMPAIGN_TEST_SENT,
+            actor=actor,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"contact_id": str(contact.id)},
+        )
+        logger.info(
+            "campaign.test_sent",
+            extra={"campaign_id": str(campaign.id), "message_id": str(message.id)},
+        )
+        await record_campaign_event("test_sent")
+        return message
+
+    async def _test_header_file(
+        self, campaign: Campaign, *, messaging: MessagingService, storage: MediaStorage
+    ) -> HeaderFileParameter | None:
+        if campaign.header_media_id is None:
+            return None
+        asset = await self._header_files.get_by_id(campaign.header_media_id)
+        if asset is None:
+            raise ValidationError(
+                "This campaign's header file is gone.", error_code=HEADER_MEDIA_NOT_STORED_CODE
+            )
+        now = datetime.now(UTC)
+        if (
+            campaign.header_provider_media_id is not None
+            and campaign.header_provider_account_id == campaign.account_id
+            and campaign.header_provider_uploaded_at is not None
+            and now - campaign.header_provider_uploaded_at < self._header_refresh
+        ):
+            return _header_parameter(asset, campaign.header_provider_media_id)
+        loader = CampaignHeaderMediaService(
+            session=self._session, tenant_id=self._tenant_id, storage=storage
+        )
+        try:
+            header_bytes = await loader.load_for_upload(asset)
+        except HeaderMediaUnavailableError as error:
+            raise ValidationError(
+                "This campaign's header file is not stored. Upload it again.",
+                error_code=HEADER_MEDIA_NOT_STORED_CODE,
+            ) from error
+        provider_media_id = await messaging.upload_header_file(
+            connection_id=campaign.account_id,
+            content=header_bytes.content,
+            mime_type=header_bytes.mime_type,
+            filename=_upload_name(asset),
+        )
+        return _header_parameter(asset, provider_media_id)
+
     # -------------------------------------------------------------- lifecycle
+
+    async def refresh_messaging_limit(self, campaign_id: uuid.UUID) -> None:
+        """Read the sending number's limit again if it is older than the refresh age (LIM-01).
+
+        Called by the schedule route before `schedule`, outside any lock: a
+        Graph call is never made under a row or advisory lock (ADR-093). A
+        read that fails leaves the stored value in force; one never read
+        leaves the schedule to refuse.
+        """
+        if self._limits is None:
+            return
+        campaign = await self._campaigns.require_by_id(campaign_id)
+        account = await self._accounts.get_by_id(campaign.account_id)
+        if account is None:
+            return
+        await self._limits.refresh_if_stale(account)
 
     async def schedule(
         self,
@@ -562,6 +1573,7 @@ class CampaignService:
         campaign_id: uuid.UUID,
         scheduled_at: datetime | None = None,
         actor: User | None = None,
+        send_until: datetime | None = None,
     ) -> Campaign:
         """Hand the campaign to the worker, now or at a moment in the future.
 
@@ -574,10 +1586,21 @@ class CampaignService:
         campaign = await self._campaigns.lock_by_id(campaign_id)
         if campaign.status not in SCHEDULABLE_FROM:
             raise ValidationError(f"A {campaign.status.value} campaign cannot be scheduled.")
+        # A paused or failed campaign scheduled again is resumed (PG-05).
+        resumed = campaign.status is not CampaignStatus.DRAFT
 
         pending = await self._recipients.pending_count(campaign.id)
         if pending == 0:
             raise ValidationError("This campaign has nobody left to send to.")
+        if not (await portfolio_limits.limit_for_account(self._session, campaign.account_id)).known:
+            # **Never against a limit nobody has read** (LIM-01): Meta's
+            # messaging limit for this number's portfolio could not be read
+            # yet. Refused, and read again at the next attempt.
+            raise ValidationError(
+                "WhatsApp's messaging limit for this number could not be read yet. "
+                "Try again in a moment.",
+                error_code=portfolio_limits.LIMIT_UNKNOWN_CODE,
+            )
         if campaign.header_media_id is not None:
             # A header file retention has removed since composition (HM-07):
             # refused here, rather than scheduled to pause at its first batch.
@@ -631,14 +1654,29 @@ class CampaignService:
             raise ValidationError(
                 f"A campaign cannot be scheduled more than {MAX_SCHEDULE_AHEAD.days} days ahead."
             )
+        if send_until is not None:
+            # A deadline, like a start, is an instant: it needs its offset, and
+            # it comes after the start it ends (LIM-06).
+            if send_until.utcoffset() is None:
+                raise ValidationError(
+                    "A deadline needs a UTC offset, for example 2026-10-23T23:59:00+03:00.",
+                    error_code=SEND_UNTIL_NAIVE_CODE,
+                )
+            if send_until <= max(when, now):
+                raise ValidationError(
+                    "The deadline must come after the campaign starts.",
+                    error_code=SEND_UNTIL_BEFORE_START_CODE,
+                )
 
         campaign.status = CampaignStatus.SCHEDULED
         campaign.scheduled_at = max(when, now)
+        campaign.send_until = send_until
         campaign.next_send_at = None
         # A fresh schedule is owned by nobody until a sweep claims it.
         campaign.lease_token = None
         campaign.last_error = None
         campaign.status_reason = None
+        _clear_wait(campaign)
         # Writing to thousands of people who did not just say something is the
         # single most consequential thing a workspace can do here, so who
         # authorised it and how many it would reach are both recorded.
@@ -648,7 +1686,12 @@ class CampaignService:
             target_type="campaign",
             target_id=campaign.id,
             target_label=campaign.name,
-            meta={"recipients": pending, "scheduled_at": campaign.scheduled_at.isoformat()},
+            meta={
+                "recipients": pending,
+                "scheduled_at": campaign.scheduled_at.isoformat(),
+                "send_until": send_until.isoformat() if send_until is not None else None,
+                "resumed": resumed,
+            },
         )
         logger.info(
             "campaign.scheduled",
@@ -676,6 +1719,7 @@ class CampaignService:
 
         campaign.status = CampaignStatus.PAUSED
         campaign.status_reason = CampaignStopReason.ADMIN_PAUSED.value
+        _clear_wait(campaign)
         # Audited like scheduling and cancelling (CMP-14): stopping a
         # broadcast part-way is a decision somebody is answerable for.
         self._audit.record(
@@ -751,6 +1795,7 @@ class CampaignService:
 
         campaign.status = CampaignStatus.CANCELLED
         campaign.cancelled_at = datetime.now(UTC)
+        _clear_wait(campaign)
         self._audit.record(
             AuditAction.CAMPAIGN_CANCELLED,
             actor=actor,
@@ -820,6 +1865,11 @@ class CampaignService:
             # Paused with the reason; no send, no attempt spent.
             return await self._pause_unserved(campaign, unserved)
 
+        if campaign.send_until is not None and moment >= campaign.send_until:
+            # **The deadline has passed** (LIM-06): whoever is still pending is
+            # not going to be sent; the campaign completes.
+            return await self._close_at_deadline(campaign, moment)
+
         blocked = await self._blocking_reason(campaign)
         if blocked is not None:
             reason, detail = blocked
@@ -828,6 +1878,26 @@ class CampaignService:
         messaging = self._messaging
         if messaging is None:
             raise RuntimeError("CampaignService needs a messaging service to send.")
+
+        # **Quiet hours** (TZ-03): night in the workspace's own time. The
+        # campaign sends nothing and comes back when the window ends - still
+        # scheduled or running, nobody's attempt spent, no lease kept. A
+        # scheduled campaign is not started by a batch that cannot send.
+        quiet = await self._quiet_hours()
+        if quiet.closed_to_sends(moment):
+            return await self._wait(
+                campaign, CampaignWaitReason.QUIET_HOURS, until=quiet.reopens_after(moment)
+            )
+        if not (await portfolio_limits.limit_for_account(self._session, campaign.account_id)).known:
+            # **Fail closed** (LIM-01): nobody has read Meta's messaging limit
+            # for this number's portfolio - a number connected before 0110,
+            # say, before the deploy step read it. Nothing is sent against an
+            # unknown limit; the campaign waits and looks again.
+            return await self._wait(
+                campaign,
+                CampaignWaitReason.LIMIT_UNKNOWN,
+                until=moment + LIMIT_UNKNOWN_RECHECK,
+            )
 
         if campaign.status is CampaignStatus.SCHEDULED:
             campaign.status = CampaignStatus.RUNNING
@@ -840,8 +1910,17 @@ class CampaignService:
             if deferred_until is not None:
                 # Only people deferred by Meta's pair limit remain (CMP-18):
                 # not finished, just waiting for the earliest of them.
+                if await self._recipients.capped_pending(
+                    campaign.id, since=moment - self._cap_interval
+                ):
+                    # Everybody left was sent a marketing message in the last
+                    # 24 hours (FREQ-01): the campaign waits for the first.
+                    return await self._wait(
+                        campaign, CampaignWaitReason.CONTACT_CAP, until=max(deferred_until, moment)
+                    )
                 campaign.next_send_at = max(deferred_until, moment)
                 campaign.lease_token = None
+                _clear_wait(campaign)
                 return BatchOutcome(campaign.id, campaign.status)
             return self._complete(campaign, moment)
 
@@ -893,6 +1972,27 @@ class CampaignService:
                 # person, exactly like a cancel (CMP-02).
                 return await self._pause_unserved(
                     campaign, unserved, sent=sent, failed=failed, skipped=skipped
+                )
+            if campaign.send_until is not None and clock() >= campaign.send_until:
+                # The deadline passed while this batch was sending (LIM-06).
+                closed = await self._close_at_deadline(campaign, clock())
+                return BatchOutcome(
+                    campaign.id,
+                    closed.status,
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped + closed.skipped,
+                )
+            if quiet.closed_to_sends(clock()):
+                # The window opened while this batch was sending: it stops at
+                # the next person, like a pause (TZ-03, CMP-08), and waits.
+                return await self._wait(
+                    campaign,
+                    CampaignWaitReason.QUIET_HOURS,
+                    until=quiet.reopens_after(clock()),
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped,
                 )
             if await self._recipients.take(recipient) is None:
                 # Another worker owns this person right now, or finished them
@@ -973,6 +2073,31 @@ class CampaignService:
                 # staged, so the recipient is untouched; the campaign waits.
                 throttled_until = moment + PAUSED_RECHECK
                 break
+            except PortfolioLimitReachedError as reached:
+                # **The portfolio's campaign share of Meta's limit is used for
+                # this moving 24 hours** (LIM-04). Refused under the
+                # portfolio's lock before anything was staged: this person is
+                # untouched - no attempt, still pending - and so is everybody
+                # after them. The campaign waits until the first person
+                # counted leaves the window, and carries on by itself.
+                return await self._wait(
+                    campaign,
+                    CampaignWaitReason.DAILY_LIMIT,
+                    until=reached.resumes_at,
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped,
+                )
+            except MessagingLimitUnknownError:
+                # Nobody has read the limit (LIM-01): nothing is sent.
+                return await self._wait(
+                    campaign,
+                    CampaignWaitReason.LIMIT_UNKNOWN,
+                    until=clock() + LIMIT_UNKNOWN_RECHECK,
+                    sent=sent,
+                    failed=failed,
+                    skipped=skipped,
+                )
             except _CampaignWideRefusalError as refusal:
                 # The template is refused for everybody (CMP-05, CMP-19): the
                 # campaign fails once with the reason and Meta's code, and the
@@ -1053,6 +2178,8 @@ class CampaignService:
             campaign.next_send_at = throttled_until
         # The batch is over, and with it this worker's claim.
         campaign.lease_token = None
+        # It sent, or tried: whatever it was waiting for is over.
+        _clear_wait(campaign)
         # A batch that ran resets the run of failed ones (CMP-20).
         campaign.consecutive_batch_failures = 0
         if reached_provider:
@@ -1110,7 +2237,12 @@ class CampaignService:
         """
         try:
             return await self._deliver(
-                campaign, recipient, messaging=messaging, now=now, header_file=header.file
+                campaign,
+                recipient,
+                messaging=messaging,
+                now=now,
+                header_file=header.file,
+                at=clock(),
             )
         except _HeaderFileRejectedError:
             pass
@@ -1137,7 +2269,12 @@ class CampaignService:
             return None
         try:
             return await self._deliver(
-                campaign, recipient, messaging=messaging, now=now, header_file=header.file
+                campaign,
+                recipient,
+                messaging=messaging,
+                now=now,
+                header_file=header.file,
+                at=clock(),
             )
         except _HeaderFileRejectedError:
             raise _BatchEndedError(await self._header_refused(campaign, token=token)) from None
@@ -1511,6 +2648,77 @@ class CampaignService:
         campaign.status_reason = reason.value
         campaign.next_send_at = None
         campaign.lease_token = None
+        _clear_wait(campaign)
+
+    async def _quiet_hours(self) -> QuietHours:
+        """This workspace's quiet hours as committed now (TZ-03).
+
+        Read by columns rather than as a `Tenant` object, which the session
+        may hold from earlier in its life: a window an admin moved is honoured
+        from the next batch on.
+        """
+        row = (
+            await self._session.execute(
+                select(
+                    Tenant.campaign_quiet_hours_enabled,
+                    Tenant.campaign_quiet_hours_start,
+                    Tenant.campaign_quiet_hours_end,
+                    Tenant.timezone,
+                ).where(Tenant.id == self._tenant_id)
+            )
+        ).one()
+        return QuietHours(enabled=row[0], start=row[1], end=row[2], timezone=row[3])
+
+    async def _wait(
+        self,
+        campaign: Campaign,
+        reason: CampaignWaitReason,
+        *,
+        until: datetime,
+        sent: int = 0,
+        failed: int = 0,
+        skipped: int = 0,
+    ) -> BatchOutcome:
+        """End the batch without sending, and come back at `until` (TZ-03, LIM-04, FREQ-01).
+
+        **A wait is not a pause.** The status stays `scheduled` or `running`,
+        no recipient's state or attempts change, the lease is given up - a
+        waiting campaign is nobody's - and `next_send_at` is the moment it is
+        due again, which is how the rate limit has always been stored (ADR-026):
+        a timestamp, never a sleep. Recorded once per transition into a wait -
+        an audit entry by the system and `wasla_campaign_waits_total` - never
+        once per batch.
+        """
+        entering = campaign.waiting_reason != reason.value
+        campaign.waiting_reason = reason.value
+        campaign.resumes_at = until
+        campaign.next_send_at = until
+        if campaign.send_until is not None and campaign.send_until < until:
+            # Woken at the deadline to close, not after it (LIM-06).
+            campaign.next_send_at = campaign.send_until
+        campaign.lease_token = None
+        campaign.consecutive_batch_failures = 0
+        if entering:
+            self._audit.record(
+                AuditAction.CAMPAIGN_WAITING,
+                actor=None,
+                actor_kind=AuditActorKind.SYSTEM,
+                target_type="campaign",
+                target_id=campaign.id,
+                target_label=campaign.name,
+                meta={"reason": reason.value, "resumes_at": until.isoformat()},
+            )
+            await record_campaign_wait(reason.value)
+            logger.info(
+                "campaign.waiting",
+                extra={
+                    "event": "campaign.waiting",
+                    "campaign_id": str(campaign.id),
+                    "reason": reason.value,
+                    "resumes_at": until.isoformat(),
+                },
+            )
+        return BatchOutcome(campaign.id, campaign.status, sent=sent, failed=failed, skipped=skipped)
 
     async def _deliver(
         self,
@@ -1520,8 +2728,13 @@ class CampaignService:
         messaging: MessagingService,
         now: datetime,
         header_file: HeaderFileParameter | None = None,
+        at: datetime | None = None,
     ) -> RecipientStatus | _Deferred:
-        """Send one person's copy and record what happened to it."""
+        """Send one person's copy and record what happened to it.
+
+        `at` is the worker's clock at this send - what the business-initiated
+        ledger dates it with (LIM-03).
+        """
         contact = await self._contacts.get_by_id(recipient.contact_id)
         if contact is None:
             return self._skip(
@@ -1603,6 +2816,19 @@ class CampaignService:
             """
             recipient.message_id = message.id
 
+        rendered = (
+            Rendered.from_dict(recipient.rendered_parameters)
+            if recipient.rendered_parameters
+            else None
+        )
+        if rendered is not None and rendered.contact_id != recipient.contact_id:
+            # Values resolved for somebody else are never sent (CR-15): this
+            # person is left out rather than sent a stranger's name.
+            return self._skip(
+                recipient,
+                "This copy's values were not written for this contact.",
+                RecipientReason.IDENTITY_CHANGED,
+            )
         template = await self._templates.require_by_id(campaign.template_id)
         spec = parameter_spec(template.components)
         if spec is None:  # pragma: no cover - `_blocking_reason` refused it first
@@ -1620,12 +2846,15 @@ class CampaignService:
                 # before, and Meta refused every recipient for the rest.
                 components=send_components(
                     spec,
-                    CampaignParameters.from_campaign(
-                        campaign.variables,
-                        campaign.template_parameters,
-                        # The one id the campaign's upload returned, the same
-                        # for everybody (HM-04).
-                        header_file=header_file,
+                    _personal(
+                        CampaignParameters.from_campaign(
+                            campaign.variables,
+                            campaign.template_parameters,
+                            # The one id the campaign's upload returned, the
+                            # same for everybody (HM-04).
+                            header_file=header_file,
+                        ),
+                        rendered,
                     ),
                 ),
                 sent_by_id=campaign.created_by_id,
@@ -1635,6 +2864,10 @@ class CampaignService:
                 # up* and made every broadcast read as their own reply
                 # (MSG-16).
                 origin=MessageOrigin.CAMPAIGN,
+                # Reserved in the business-initiated ledger against the
+                # portfolio's campaign share, at the worker's clock (LIM-04).
+                at=at or now,
+                campaign_id=campaign.id,
             )
         except ProviderConnectionRefusedError:
             # Let out rather than filed against this recipient. The credential
@@ -1644,10 +2877,29 @@ class CampaignService:
             # single thing to tell anybody (MSG-18). `dispatch_batch` fails the
             # campaign once instead.
             raise
-        except (ConnectionThrottledError, ChannelPausedError, ProviderUnreachableError):
+        except (
+            ConnectionThrottledError,
+            ChannelPausedError,
+            ProviderUnreachableError,
+            PortfolioLimitReachedError,
+            MessagingLimitUnknownError,
+        ):
             # Not this recipient's failure: `dispatch_batch` waits for the
-            # window, or for the outage to pass (CMP-07).
+            # window, for the outage to pass (CMP-07), or for the portfolio's
+            # moving 24 hours to free a place (LIM-04).
             raise
+        except ContactFrequencyCapError as capped:
+            # **One marketing message per person per 24 hours** (FREQ-01):
+            # another campaign, or a colleague, reached this person less than
+            # a day ago. Refused by the claim before anything was staged, so
+            # no attempt is spent: the person waits for their moment, and the
+            # campaign goes on with the others - unless the deadline comes
+            # first, when they are skipped.
+            until = capped.available_at + CONTACT_CAP_MARGIN
+            if campaign.send_until is not None and until >= campaign.send_until:
+                return self._skip(recipient, _CONTACT_CAPPED, RecipientReason.CONTACT_FREQUENCY_CAP)
+            recipient.not_before = until
+            return _DEFERRED
         except TemplateRefusedError as error:
             # The registry refuses the template - withdrawn by Meta through
             # another send since this batch began. Nothing was staged and this
@@ -1721,6 +2973,13 @@ class CampaignService:
                 recipient.message_id = None
                 recipient.status = RecipientStatus.FAILED
                 recipient.reason_code = TERMINAL_PER_PERSON_CODES[code]
+                if code == MARKETING_LIMIT_PER_USER_CODE:
+                    # Meta: "wait at least 24 hours before resending" - so
+                    # this workspace sends the person no marketing for a day,
+                    # whatever campaign asks next (LIM-08, FREQ-01).
+                    await contact_cap.push(
+                        self._session, tenant_id=self._tenant_id, contact_id=contact.id, at=now
+                    )
                 recipient.last_error = (message.failure_reason or "Rejected by WhatsApp.")[
                     :MAX_ERROR_LENGTH
                 ]
@@ -1828,11 +3087,37 @@ class CampaignService:
             skipped=skipped,
         )
 
+    async def _close_at_deadline(self, campaign: Campaign, now: datetime) -> BatchOutcome:
+        """Skip everybody still pending and complete the campaign (LIM-06)."""
+        skipped = await self._recipients.skip_pending(
+            campaign.id,
+            reason=RecipientReason.SEND_WINDOW_CLOSED.value,
+            detail=_DEADLINE_PASSED,
+        )
+        logger.info(
+            "campaign.deadline_passed",
+            extra={
+                "event": "campaign.deadline_passed",
+                "campaign_id": str(campaign.id),
+                "skipped": skipped,
+            },
+        )
+        outcome = self._complete(campaign, now)
+        return BatchOutcome(campaign.id, outcome.status, skipped=skipped)
+
     def _complete(self, campaign: Campaign, now: datetime) -> BatchOutcome:
         campaign.status = CampaignStatus.COMPLETED
         campaign.completed_at = now
         campaign.next_send_at = None
         campaign.lease_token = None
+        _clear_wait(campaign)
+        # The system's own end of a campaign, once (PG-05).
+        self._audit.record(
+            AuditAction.CAMPAIGN_COMPLETED,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+        )
         logger.info("campaign.completed", extra={"campaign_id": str(campaign.id)})
         return BatchOutcome(campaign.id, CampaignStatus.COMPLETED)
 
@@ -1844,6 +3129,14 @@ class CampaignService:
         campaign.status_reason = reason.value
         campaign.next_send_at = None
         campaign.lease_token = None
+        _clear_wait(campaign)
+        self._audit.record(
+            AuditAction.CAMPAIGN_FAILED,
+            target_type="campaign",
+            target_id=campaign.id,
+            target_label=campaign.name,
+            meta={"reason": reason.value},
+        )
         logger.warning(
             "campaign.blocked",
             extra={"campaign_id": str(campaign.id), "detail": detail, "reason": reason.value},
@@ -1953,6 +3246,107 @@ HEADER_MEDIA_REJECTED_CODE: Final = 131053
 # five days before (HM-05; `campaign_header_media_refresh_seconds`).
 DEFAULT_HEADER_MEDIA_REFRESH: Final = timedelta(days=25)
 DEFAULT_PROVIDER_UNREACHABLE_PAUSE: Final = timedelta(hours=6)
+# One marketing message per contact per 24 hours (FREQ-01), and the margin a
+# capped person waits beyond their moment, so they are never asked a second early.
+DEFAULT_CONTACT_CAP_INTERVAL: Final = timedelta(hours=24)
+# `CAMPAIGN_PARAMETER_MAX_CHARS` (PER-03).
+DEFAULT_PARAMETER_MAX_CHARS: Final = 60
+CONTACT_CAP_MARGIN: Final = timedelta(minutes=5)
+# Meta's per-user marketing limit (131049).
+MARKETING_LIMIT_PER_USER_CODE: Final = 131049
+# How often a campaign whose number's messaging limit was never read looks
+# again (LIM-01). The deploy step reads every connection's limit; this is what
+# a campaign does until it has.
+LIMIT_UNKNOWN_RECHECK: Final = timedelta(minutes=5)
+
+
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """A validated composition: the send's parameters and the mappings behind them."""
+
+    parameters: CampaignParameters
+    body_sources: tuple[Mapping, ...] | None = None
+    header_sources: tuple[Mapping, ...] | None = None
+
+    def stored(self) -> dict[str, Any] | None:
+        stored = self.parameters.as_dict() or {}
+        if self.body_sources is not None:
+            stored["body_sources"] = [mapping.as_dict() for mapping in self.body_sources]
+        if self.header_sources is not None:
+            stored["header_sources"] = [mapping.as_dict() for mapping in self.header_sources]
+        if self.body_sources is not None or self.header_sources is not None:
+            stored.setdefault("header", list(self.parameters.header))
+            stored.setdefault("buttons", [])
+        return stored or None
+
+
+@dataclass(frozen=True, slots=True)
+class MessagePreview:
+    """What one person would receive (PER-04)."""
+
+    contact_id: uuid.UUID
+    header: str | None
+    body: str
+    buttons: tuple[str, ...]
+    body_fallbacks: tuple[int, ...]
+    header_fallbacks: tuple[int, ...]
+
+
+def _personal(defaults: CampaignParameters, rendered: Rendered | None) -> CampaignParameters:
+    """The campaign's parameters with one person's own values, when there are any (PER-02)."""
+    if rendered is None:
+        return defaults
+    return CampaignParameters(
+        body=rendered.body or defaults.body,
+        header=rendered.header or defaults.header,
+        buttons=defaults.buttons,
+        header_file_kind=defaults.header_file_kind,
+        header_file=defaults.header_file,
+    )
+
+
+def _header_text(components: Any) -> str | None:
+    for component in components if isinstance(components, list) else ():
+        if (
+            isinstance(component, dict)
+            and str(component.get("type", "")).upper() == "HEADER"
+            and str(component.get("format", "TEXT")).upper() == "TEXT"
+        ):
+            text = component.get("text")
+            return text if isinstance(text, str) else None
+    return None
+
+
+def _literal(value: str) -> Callable[[re.Match[str]], str]:
+    def replace(_match: re.Match[str]) -> str:
+        return value
+
+    return replace
+
+
+def _button_texts(components: Any, values: dict[int, str]) -> tuple[str, ...]:
+    """Each button's label, a URL button's link with its suffix filled in."""
+    found: list[str] = []
+    for component in components if isinstance(components, list) else ():
+        if not isinstance(component, dict) or str(component.get("type", "")).upper() != "BUTTONS":
+            continue
+        for index, button in enumerate(component.get("buttons") or []):
+            if not isinstance(button, dict):
+                continue
+            label = str(button.get("text", ""))
+            url = button.get("url")
+            if isinstance(url, str) and index in values:
+                # A function, not a replacement string: a backslash in the
+                # value is text, not a group reference.
+                url = PLACEHOLDER.sub(_literal(values[index]), url, count=1)
+            found.append(f"{label} ({url})" if isinstance(url, str) else label)
+    return tuple(found)
+
+
+def _clear_wait(campaign: Campaign) -> None:
+    """A campaign that sends, or leaves the live statuses, is not waiting for anything."""
+    campaign.waiting_reason = None
+    campaign.resumes_at = None
 
 
 def _send_outcome(recipient: CampaignRecipient, outcome: RecipientStatus) -> str:
@@ -1998,6 +3392,12 @@ class _HeaderState:
     reuploaded: bool = False
 
 
+_DEADLINE_PASSED: Final = "The campaign's deadline passed before this person was sent."
+_CONTACT_CAPPED: Final = (
+    "This customer was sent a marketing message in the last 24 hours, "
+    "and the campaign's deadline came first."
+)
+
 _HEADER_REFUSED_TWICE: Final = (
     "WhatsApp refused the header file twice (code 131053), once after uploading it again."
 )
@@ -2022,6 +3422,12 @@ def _validated_name(name: str) -> str:
     if not trimmed:
         raise ValidationError("A campaign needs a name.")
     return trimmed[:MAX_CAMPAIGN_NAME_LENGTH]
+
+
+def _copy_name(name: str) -> str:
+    """A duplicate's name: the original's with " (copy)", within the column (PG-02)."""
+    suffix = " (copy)"
+    return name[: MAX_CAMPAIGN_NAME_LENGTH - len(suffix)].rstrip() + suffix
 
 
 def _validated_rate(messages_per_minute: int) -> int:

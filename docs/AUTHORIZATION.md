@@ -139,17 +139,34 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/billing/subscription/cancel` | **OWNER** | yes | workspace | - |
 | `POST` | `/api/v1/billing/subscription/plan` | **OWNER** | yes | workspace | - |
 | `POST` | `/api/v1/billing/subscription/resume` | **OWNER** | yes | workspace | - |
+| `GET` | `/api/v1/campaign-segments` | **MEMBER** | yes | workspace | - |
+| `POST` | `/api/v1/campaign-segments` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaign-segments/{segment_id}` | **MEMBER** | yes | workspace | - |
+| `PATCH` | `/api/v1/campaign-segments/{segment_id}` | **ADMIN** | yes | workspace | - |
+| `DELETE` | `/api/v1/campaign-segments/{segment_id}` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/audience/preview` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/progress` | **MEMBER** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/summary` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}` | **MEMBER** | yes | workspace | - |
+| `PATCH` | `/api/v1/campaigns/{campaign_id}` | **ADMIN** | yes | workspace | - |
+| `DELETE` | `/api/v1/campaigns/{campaign_id}` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/activity` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/audience` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/cancel` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/cost-estimate` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/delivery-plan` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/duplicate` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/pause` | **ADMIN** | yes | workspace | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/preview-messages` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/recipients` | **MEMBER** | yes | workspace | - |
+| `GET` | `/api/v1/campaigns/{campaign_id}/recipients/export.csv` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/campaigns/{campaign_id}/schedule` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/campaigns/{campaign_id}/statistics` | **MEMBER** | yes | workspace | - |
+| `POST` | `/api/v1/campaigns/{campaign_id}/test-send` | **ADMIN** | yes | workspace | - |
 | `DELETE` | `/api/v1/contacts/{contact_id}/opt-out` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/contacts` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/contacts/{contact_id}/opt-out` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/channel-connections` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/conversations` | **MEMBER** | yes | workspace | - |
@@ -199,9 +216,14 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/platform/invoices/{invoice_id}/void` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/platform/overview` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/platform/tenants` | **PLATFORM_STAFF** | no | none | - |
+| `GET` | `/api/v1/platform/whatsapp-rate-cards` | **PLATFORM_STAFF** | no | none | - |
+| `POST` | `/api/v1/platform/whatsapp-rate-cards` | **PLATFORM_STAFF** | no | none | - |
+| `GET` | `/api/v1/platform/whatsapp-rate-cards/{card_id}` | **PLATFORM_STAFF** | no | none | - |
+| `POST` | `/api/v1/platform/whatsapp-rate-cards/{card_id}/activate` | **PLATFORM_STAFF** | no | none | - |
 | `POST` | `/api/v1/platform/users/{user_id}/disable` | **PLATFORM_STAFF** | no | none | - |
 | `POST` | `/api/v1/platform/users/{user_id}/enable` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/templates` | **MEMBER** | yes | workspace | - |
+| `GET` | `/api/v1/timezones` | **ANON** | no | none | - |
 | `POST` | `/api/v1/templates/sync` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/templates/{template_id}` | **MEMBER** | yes | workspace | - |
 | `GET` | `/api/v1/usage` | **ADMIN** | yes | workspace | - |
@@ -212,8 +234,11 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/whatsapp/accounts` | **ADMIN** | yes | workspace | channel_connections, allowed_channel_types (409) |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/disable` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/enable` | **ADMIN** | yes | workspace | channel_connections, allowed_channel_types (409) |
+| `GET` | `/api/v1/whatsapp/accounts/{account_id}/messaging-limit` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/release` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/verify` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/workspace/campaign-settings` | **MEMBER** | yes | workspace | - |
+| `PUT` | `/api/v1/workspace/campaign-settings` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/workspace/members` | **MEMBER** | yes | workspace | - |
 | `DELETE` | `/api/v1/workspace/members/{user_id}` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/workspace/members/{user_id}/reinstate` | **ADMIN** | yes | workspace | team_members |
@@ -260,6 +285,7 @@ is what removes the enumeration surface rather than mitigating it (ADR-043).
 | `POST /webhooks/whatsapp` | Meta cannot hold a credential of ours | HMAC-SHA256 signature; **never** rate-limited (ADR-032); 1 MB body cap |
 | `POST /webhooks/paymob` | A payment processor cannot hold a credential of ours | HMAC-SHA512 over twenty documented fields, `compare_digest`; **never** rate-limited (ADR-032); a saved-card callback is verified under its own eight-field scheme (ADR-046) |
 | `POST /webhooks/email` | Resend cannot hold a credential of ours | Svix signature over the raw body; **never** rate-limited (ADR-032) |
+| `GET /timezones` | A workspace's zone is chosen at signup, before any account exists (TZ-02) | Client-address limit (`PublicRateLimit`); canonical IANA names and offsets only, nothing about a customer; cached an hour with an ETag |
 | `GET /health`, `/health/live`, `/health/ready` | A load balancer has no credential | Report status and a version, never a connection string or a dependency error |
 | `GET /metrics` | A metrics scraper has no credential, and a shared token every scraper holds would protect a document that carries no customer data (ADR-070) | Not routable from outside: the API publishes no port and `nginx.conf` answers 404 for this path on the public listener. Every label value is refused unless it is a bounded category — no identifier, address or phone number can become a series. `METRICS_ENABLED=false` removes it |
 
@@ -815,6 +841,23 @@ relations a CRM write can name are now composite too:
 | `leads` | `conversation_id`, `contact_id` | `conversations(tenant_id, id, contact_id)` | `SET NULL (conversation_id)` |
 | `lead_notes` | `lead_id` | `leads` | `CASCADE` |
 | `lead_activities` | `lead_id` | `leads` | `CASCADE` |
+
+**Campaigns page, migrations 0115-0117 (ADR-149).** Every new tenant table
+carries `UNIQUE (tenant_id, id)`, and its references to other tenant rows are
+composite:
+
+| Child | Column(s) | Parent | On delete |
+|---|---|---|---|
+| `campaign_create_keys` | `campaign_id` | `campaigns` | `CASCADE` |
+| `campaign_segments` | `account_id` | `whatsapp_accounts` | `CASCADE` |
+| `campaigns` | `audience_segment_id` | `campaign_segments` | no action - the service clears it before a segment is deleted; CR-13 checks it |
+| `campaign_test_sends` | `campaign_id` | `campaigns` | `CASCADE` |
+| `campaign_test_sends` | `contact_id` | `contacts` | `CASCADE` |
+
+`business_initiated_sends`, `whatsapp_business_portfolios` and the rate-card
+tables are platform-level, not tenant data: a portfolio's count binds every
+workspace on it, and a rate card is Meta's price list for all (ADR-146,
+ADR-150). The ledger keeps `tenant_id` for erasure and cascades with it.
 
 `SET NULL (column)` nulls only the reference, never `tenant_id` beside it. The
 three-column key on `leads` also makes "a lead's conversation is with that

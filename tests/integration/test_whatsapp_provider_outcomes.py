@@ -54,6 +54,7 @@ from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp import client as client_module
 from app.integrations.whatsapp.client import ProviderAuthError
 from app.services.messaging_service import WHATSAPP_TEXT_MAX_CHARS, MessagingService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -135,7 +136,7 @@ async def _graph(monkeypatch: pytest.MonkeyPatch, handler: Handler) -> AsyncIter
 
 async def _conversation(session: AsyncSession) -> tuple[Tenant, Conversation]:
     slug = f"outcomes-{uuid.uuid4().hex[:8]}"
-    tenant = Tenant(name="Outcomes", slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Outcomes", slug=slug)
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

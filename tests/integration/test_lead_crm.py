@@ -36,12 +36,13 @@ from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount
 from app.repositories.lead_repository import LeadFilters, LeadRepository
 from app.services.lead_service import ExtractedLead, LeadService, LeadUpdate
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

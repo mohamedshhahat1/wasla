@@ -25,6 +25,7 @@ from app.db.models.tenant import Tenant
 from app.services.channel_ingestion_service import ChannelIngestionService
 from app.workers.queue import AgentQueue
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +42,7 @@ async def test_a_postback_is_stored_with_its_action_and_answered(
     db_session: AsyncSession,
 ) -> None:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Postback {tag}", slug=f"postback-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Postback {tag}", slug=f"postback-{tag}")
     db_session.add(tenant)
     await db_session.flush()
     connection = ChannelConnection(

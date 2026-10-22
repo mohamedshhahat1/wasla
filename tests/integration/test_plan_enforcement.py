@@ -31,6 +31,7 @@ from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.billing import LimitKey
 from app.services.channel_capacity import ChannelCapacityExceededError
 from app.services.entitlement_service import Entitlement
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -71,7 +72,13 @@ def _workspace(role: TenantRole = TenantRole.TENANT_OWNER) -> ActiveWorkspace:
     return ActiveWorkspace(
         user=User(id=USER_ID, email="owner@example.com", is_active=True),
         membership=Membership(id=uuid.uuid4(), user_id=USER_ID, tenant_id=TENANT_ID, role=role),
-        tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=TENANT_ID,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
 
 

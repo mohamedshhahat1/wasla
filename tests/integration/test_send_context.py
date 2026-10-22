@@ -37,6 +37,7 @@ from app.schemas.conversation import ReplyPolicyRead
 from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.messaging_service import MessagingService
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -45,7 +46,7 @@ async def _conversation(
     session: AsyncSession, adapter: SyntheticAdapter, *, customer_wrote: timedelta
 ) -> Conversation:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Context {tag}", slug=f"context-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Context {tag}", slug=f"context-{tag}")
     session.add(tenant)
     await session.flush()
     connection = ChannelConnection(

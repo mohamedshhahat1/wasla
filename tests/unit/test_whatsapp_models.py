@@ -95,6 +95,9 @@ def test_whatsapp_tables_declare_the_indexes_the_migrations_create() -> None:
         # point of it: released rows are exactly what the historical ownership
         # resolver reads, so the live-only index cannot serve that query.
         "ix_whatsapp_accounts_phone_number_id_ownership_started_at",
+        # Migration 0110. Partial: the numbers of one business portfolio
+        # (LIM-02), and what deleting a portfolio sets null.
+        "ix_whatsapp_accounts_portfolio_id",
     }
     assert _index_names(as_table(WhatsAppEvent.__table__)) == {
         "ix_whatsapp_events_tenant_id",

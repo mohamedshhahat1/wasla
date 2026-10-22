@@ -85,5 +85,29 @@ class WhatsAppAccountResponse(BaseModel):
     has_own_credential: bool = False
 
 
+class MessagingLimitRead(BaseModel):
+    """A number's business-portfolio messaging limit, and how much of it is used (LIM-07).
+
+    Aggregates of the whole portfolio - every number, every workspace on it -
+    and nothing that names another workspace. `messaging_limit` null with
+    `known` true is unlimited; `known` false means it was never read and no
+    campaign on this number is scheduled or sent.
+    """
+
+    tier: str | None
+    known: bool
+    messaging_limit: int | None
+    checked_at: datetime | None
+    source: str | None
+    campaign_share: float
+    campaign_budget: int | None
+    used_last_24h: int
+    campaign_available_now: int | None
+    next_capacity_at: datetime | None
+    next_capacity_at_local: datetime | None = None
+    shared_with_other_numbers: bool
+    shared_with_other_workspaces: bool
+
+
 class WhatsAppAccountListResponse(BaseModel):
     accounts: list[WhatsAppAccountResponse]

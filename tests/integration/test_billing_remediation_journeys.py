@@ -70,6 +70,7 @@ from tests.fakes import as_database
 from tests.integration.plan_catalogue import own_plan
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, PROTECTOR, saved_card
 from tests.paymob_orders import CARD_INTEGRATION_ID, MOTO_INTEGRATION_ID, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -181,7 +182,7 @@ async def _workspace(
     """A workspace as registration leaves it: an owner, on Starter."""
     if catalogue:
         await _catalogue(session)
-    tenant = Tenant(name="Journey", slug=f"journey-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Journey", slug=f"journey-{uuid.uuid4().hex[:10]}")
     session.add(tenant)
     await session.flush()
     owner = await add_owner(session, tenant)

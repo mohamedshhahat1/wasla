@@ -46,6 +46,7 @@ from app.db.session import Database
 from app.main import create_app
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
@@ -203,6 +204,7 @@ async def _register(
         json={
             "email": email,
             "password": PASSWORD,
+            "timezone": TEST_TIMEZONE,
             "workspace_name": slug.title(),
             "workspace_slug": slug,
         },
@@ -398,7 +400,7 @@ async def test_an_account_with_no_workspace_onboards_into_one(
 
             created = await client.post(
                 f"{API}/workspaces",
-                json={"name": "Their Own Business", "slug": own_slug},
+                json={"timezone": TEST_TIMEZONE, "name": "Their Own Business", "slug": own_slug},
                 headers=_bearer(session),
             )
             assert created.status_code == 201, created.text
@@ -544,7 +546,7 @@ async def test_closing_one_workspace_leaves_an_unrelated_one_open(
             session = await _login(client, owner)
             second = await client.post(
                 f"{API}/workspaces",
-                json={"name": "Kept", "slug": kept},
+                json={"timezone": TEST_TIMEZONE, "name": "Kept", "slug": kept},
                 headers=_bearer(session),
             )
             assert second.status_code == 201, second.text

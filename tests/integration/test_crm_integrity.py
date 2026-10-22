@@ -36,6 +36,7 @@ from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.main import create_app
 from app.services.lead_service import LeadService
 from tests.conftest import AllowingEntitlements, FakeDependency
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -60,7 +61,9 @@ class Desk:
 
 
 async def _desk(session: AsyncSession, settings: Settings, *, slug: str) -> Desk:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     users = [
         User(
             email=f"{name}@{slug}.example",

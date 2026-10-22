@@ -75,6 +75,7 @@ from app.workers.media_queue import MediaJob
 from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob, AgentQueue, ReliableQueue
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -146,7 +147,9 @@ async def database(prepared_database: str) -> AsyncIterator[Database]:
 async def tenant_id(committing: async_sessionmaker[AsyncSession]) -> AsyncIterator[uuid.UUID]:
     """One workspace, removed afterwards along with everything under it."""
     async with committing() as session:
-        tenant = Tenant(name="Visibility", slug=f"visibility-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name="Visibility", slug=f"visibility-{uuid.uuid4().hex[:8]}"
+        )
         session.add(tenant)
         await session.commit()
         created = tenant.id
@@ -529,7 +532,9 @@ async def test_another_workspaces_conversation_is_still_not_found(
     does - the one-shot door widens the retry budget, never the query.
     """
     async with committing() as owner:
-        other = Tenant(name="Somebody else", slug=f"other-{uuid.uuid4().hex[:8]}")
+        other = Tenant(
+            timezone=TEST_TIMEZONE, name="Somebody else", slug=f"other-{uuid.uuid4().hex[:8]}"
+        )
         owner.add(other)
         await owner.flush()
         conversation_id, message_id = await _uncommitted_conversation(owner, other.id)

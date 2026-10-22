@@ -53,6 +53,7 @@ from app.services.media_service import MediaService
 from app.services.workspace_purge_service import WorkspacePurgeService
 from app.workers.purge_worker import PurgeWorker
 from tests.fakes import as_whatsapp
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -128,7 +129,9 @@ async def doomed(
 ) -> AsyncIterator[tuple[uuid.UUID, uuid.UUID]]:
     """A workspace with one conversation, deleted, its retention not yet run out."""
     async with committing() as session:
-        tenant = Tenant(name="Doomed", slug=f"doomed-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name="Doomed", slug=f"doomed-{uuid.uuid4().hex[:8]}"
+        )
         session.add(tenant)
         await session.flush()
         account = WhatsAppAccount(

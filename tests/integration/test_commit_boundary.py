@@ -44,6 +44,7 @@ from app.core.redis import RedisClient
 from app.db.session import Database
 from app.main import create_app
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -104,6 +105,7 @@ async def _register(client: httpx.AsyncClient, *, email: str, slug: str) -> http
         json={
             "email": email,
             "password": PASSWORD,
+            "timezone": TEST_TIMEZONE,
             "workspace_name": f"Boundary {slug}",
             "workspace_slug": slug,
         },

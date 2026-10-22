@@ -32,6 +32,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services import messaging_service as messaging_module
 from app.services.messaging_service import MessagingService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -93,7 +94,7 @@ async def _conversation(
     *,
     last_inbound_at: datetime | None,
 ) -> tuple[Any, ...]:
-    tenant = Tenant(name="Acme", slug="acme")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug="acme")
     session.add(tenant)
     await session.flush()
 

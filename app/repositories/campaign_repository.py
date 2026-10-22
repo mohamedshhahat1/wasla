@@ -14,11 +14,13 @@ name that says so, exactly as `DueFollowUpClaim` is.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Select, and_, func, or_, select, update
+from sqlalchemy import ColumnElement, Select, and_, delete, false, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -26,13 +28,14 @@ from app.core.pagination import Cursor
 from app.core.telemetry import record_campaign_event
 from app.db.models.campaign import (
     Campaign,
+    CampaignCreateKey,
     CampaignRecipient,
     CampaignStatus,
     RecipientStatus,
 )
 from app.db.models.conversation import Contact, Conversation, Message, MessageStatus
 from app.db.models.lead import Lead, LeadStatus
-from app.repositories.base import BaseRepository, TenantScopedRepository
+from app.repositories.base import BaseRepository, TenantScopedRepository, escape_like
 from app.repositories.consent_repository import refused
 
 logger = get_logger(__name__)
@@ -60,14 +63,41 @@ class AudienceFilter:
     last_inbound_within_days: int | None = None
     lead_statuses: tuple[LeadStatus, ...] = ()
     contact_ids: tuple[uuid.UUID, ...] = ()
+    #: A segment and filters naming lead statuses with none in common (PG-06):
+    #: what was asked for reaches nobody.
+    nobody: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """The record kept on the campaign, so a person can read what was targeted."""
-        return {
+        record: dict[str, Any] = {
             "last_inbound_within_days": self.last_inbound_within_days,
             "lead_statuses": [status.value for status in self.lead_statuses],
             "contact_ids": [str(contact_id) for contact_id in self.contact_ids],
         }
+        if self.nobody:
+            record["nobody"] = True
+        return record
+
+
+#: A recipient without a reason code - sent, or written before reason codes.
+UNRECORDED_REASON: Final = "unrecorded"
+
+
+@dataclass(frozen=True, slots=True)
+class ExportRow:
+    """One recipient as the CSV export writes it (PG-14)."""
+
+    id: uuid.UUID
+    contact_name: str | None
+    phone: str | None
+    status: RecipientStatus
+    reason_code: str | None
+    provider_code: int | None
+    sent_at: datetime | None
+    delivered_at: datetime | None
+    read_at: datetime | None
+    replied_at: datetime | None
+    opted_out_after_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +117,14 @@ class CampaignStatistics:
     read: int = 0
     #: Sent - Meta accepted them - and reported `failed` afterwards (CMP-10).
     failed_after_send: int = 0
+    #: Accepted and held by Meta's portfolio pacing (LIM-08).
+    held: int = 0
+    #: Answered on the campaign's number within the attribution window (PG-10).
+    replied: int = 0
+    #: Opted out by their own decision within the window after the send.
+    opted_out_after: int = 0
+    #: `(status, reason_code, provider_code, count)`, every recipient once.
+    reasons: tuple[tuple[str, str, int | None, int], ...] = ()
 
     @property
     def total(self) -> int:
@@ -257,13 +295,20 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
         account_id: uuid.UUID | None = None,
         limit: int = 50,
         after: Cursor | None = None,
+        name_contains: str | None = None,
     ) -> list[Campaign]:
-        """Newest first, paged by keyset."""
+        """Newest first, paged by keyset.
+
+        `name_contains` matches anywhere in the name, ignoring case, as typed:
+        `%` and `_` are the characters they are, not wildcards (PG-01).
+        """
         query = self._select()
         if statuses:
             query = query.where(Campaign.status.in_(statuses))
         if account_id is not None:
             query = query.where(Campaign.account_id == account_id)
+        if name_contains:
+            query = query.where(Campaign.name.ilike(f"%{escape_like(name_contains)}%", escape="\\"))
         if after is not None:
             query = query.where(_after_created(after))
         return await self._all(
@@ -296,6 +341,65 @@ class CampaignRepository(TenantScopedRepository[Campaign]):
                 created_by_id=created_by_id,
             )
         )
+
+    async def created_with_key(
+        self, key: str, *, since: datetime
+    ) -> tuple[CampaignCreateKey, Campaign | None] | None:
+        """The draft a create key made in the last day, and the key's row (PG-08)."""
+        row = await self.session.scalar(
+            select(CampaignCreateKey).where(
+                CampaignCreateKey.tenant_id == self.tenant_id,
+                CampaignCreateKey.key == key,
+                CampaignCreateKey.created_at >= since,
+            )
+        )
+        if row is None:
+            return None
+        return row, await self.get_by_id(row.campaign_id)
+
+    async def claim_create_key(
+        self, *, key: str, campaign_id: uuid.UUID, request_hash: str, stale_before: datetime
+    ) -> bool:
+        """Record that `key` made `campaign_id`; False when another request holds it.
+
+        A key older than a day is forgotten first. The insert waits for a
+        concurrent request holding the same key to commit or roll back, so two
+        retries racing each other make exactly one draft.
+        """
+        await self.session.execute(
+            delete(CampaignCreateKey).where(
+                CampaignCreateKey.tenant_id == self.tenant_id,
+                CampaignCreateKey.key == key,
+                CampaignCreateKey.created_at < stale_before,
+            )
+        )
+        result = await self.session.execute(
+            pg_insert(CampaignCreateKey)
+            .values(
+                id=uuid.uuid4(),
+                tenant_id=self.tenant_id,
+                key=key,
+                campaign_id=campaign_id,
+                request_hash=request_hash,
+            )
+            .on_conflict_do_nothing(index_elements=["tenant_id", "key"])
+            .returning(CampaignCreateKey.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+
+async def prune_create_keys(session: AsyncSession, *, before: datetime) -> int:
+    """Delete every workspace's create keys older than `before` (PG-08, retention).
+
+    Unscoped on purpose: the retention sweep runs for the whole platform, and a
+    key past its day names nothing anybody can ask for again.
+    """
+    result = await session.execute(
+        delete(CampaignCreateKey)
+        .where(CampaignCreateKey.created_at < before)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
 class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
@@ -423,6 +527,85 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         result = await self.session.execute(statement)
         return list(result.scalars().all())
 
+    async def skip_pending(self, campaign_id: uuid.UUID, *, reason: str, detail: str) -> int:
+        """Skip everybody still pending, in one statement (LIM-06). Returns how many.
+
+        Rows another worker holds between its check and its send intent are
+        waited for, not skipped from under it: the statement takes each row's
+        lock as it updates it.
+        """
+        result = await self.session.execute(
+            update(CampaignRecipient)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == RecipientStatus.PENDING,
+            )
+            .values(status=RecipientStatus.SKIPPED, reason_code=reason, last_error=detail)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def ever_sent(self, campaign_id: uuid.UUID) -> bool:
+        """Whether anybody on this list was ever handed to Meta (PG-04)."""
+        found = await self.session.scalar(
+            select(CampaignRecipient.id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                or_(
+                    CampaignRecipient.sent_at.is_not(None),
+                    CampaignRecipient.message_id.is_not(None),
+                    CampaignRecipient.attempts > 0,
+                ),
+            )
+            .limit(1)
+        )
+        return found is not None
+
+    async def delete_all(self, campaign_id: uuid.UUID) -> int:
+        """Drop a draft's written list: its rules stay on the campaign (PG-03, PG-04)."""
+        result = await self.session.execute(
+            delete(CampaignRecipient).where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+            )
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def rendered_for(
+        self, campaign_id: uuid.UUID, contact_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, dict[str, Any] | None]:
+        """The values written for these contacts in this campaign, by contact (PER-04)."""
+        rows = (
+            await self.session.execute(
+                select(CampaignRecipient.contact_id, CampaignRecipient.rendered_parameters).where(
+                    CampaignRecipient.tenant_id == self.tenant_id,
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.contact_id.in_(list(contact_ids)),
+                )
+            )
+        ).all()
+        found: dict[uuid.UUID, dict[str, Any] | None] = {}
+        for contact_id, rendered in rows:
+            found[contact_id] = rendered
+        return found
+
+    async def capped_pending(self, campaign_id: uuid.UUID, *, since: datetime) -> bool:
+        """Whether a pending person was sent a marketing message after `since` (FREQ-01)."""
+        found = await self.session.scalar(
+            select(CampaignRecipient.id)
+            .join(Contact, Contact.id == CampaignRecipient.contact_id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.status == RecipientStatus.PENDING,
+                Contact.last_marketing_sent_at > since,
+            )
+            .limit(1)
+        )
+        return found is not None
+
     async def earliest_deferral(self, campaign_id: uuid.UUID) -> datetime | None:
         """When the first pending recipient deferred by a pair limit may be asked (CMP-18)."""
         moment: datetime | None = await self.session.scalar(
@@ -468,30 +651,43 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
         return (await self.session.execute(statement)).scalars().one_or_none()
 
     async def statistics(self, campaign_id: uuid.UUID) -> CampaignStatistics:
-        """Counts per outcome, plus what Meta has since said about delivery.
+        """Counts per outcome, plus what Meta has since said about delivery."""
+        return await self.statistics_of(CampaignRecipient.campaign_id == campaign_id)
 
-        Two queries rather than one. The outcome counts come from the recipient
-        rows; delivery and read come from the message rows a webhook advances,
-        and joining them into a single grouped query would double-count the
-        recipients that have no message yet.
+    async def statistics_of(self, campaigns: ColumnElement[bool]) -> CampaignStatistics:
+        """The statistics of every recipient `campaigns` selects, in this workspace.
+
+        One campaign's (`campaign_id = ...`) or many (the KPI summary,
+        PG-11): the same queries, so the summary equals the sum of the
+        campaigns' statistics by construction rather than by care.
+
+        Separate queries rather than one. The outcome counts come from the
+        recipient rows; delivery and read come from the message rows a webhook
+        advances, and joining them into a single grouped query would
+        double-count the recipients that have no message yet.
         """
+        scope = and_(CampaignRecipient.tenant_id == self.tenant_id, campaigns)
         counts = await self.session.execute(
-            select(CampaignRecipient.status, func.count())
-            .where(
-                CampaignRecipient.tenant_id == self.tenant_id,
-                CampaignRecipient.campaign_id == campaign_id,
+            select(
+                CampaignRecipient.status,
+                func.count(),
+                func.count(CampaignRecipient.replied_at),
+                func.count(CampaignRecipient.opted_out_after_at),
             )
+            .where(scope)
             .group_by(CampaignRecipient.status)
         )
-        tally = {status: int(count) for status, count in counts.all()}
+        tally: dict[RecipientStatus, int] = {}
+        replied = opted_out_after = 0
+        for status, count, answered, refused_after in counts.all():
+            tally[status] = int(count)
+            replied += int(answered)
+            opted_out_after += int(refused_after)
 
         delivery = await self.session.execute(
             select(Message.status, func.count())
             .join(CampaignRecipient, CampaignRecipient.message_id == Message.id)
-            .where(
-                CampaignRecipient.tenant_id == self.tenant_id,
-                CampaignRecipient.campaign_id == campaign_id,
-            )
+            .where(scope)
             .group_by(Message.status)
         )
         by_message = {status: int(count) for status, count in delivery.all()}
@@ -501,14 +697,44 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
             .select_from(CampaignRecipient)
             .join(Message, Message.id == CampaignRecipient.message_id)
             .where(
-                CampaignRecipient.tenant_id == self.tenant_id,
-                CampaignRecipient.campaign_id == campaign_id,
+                scope,
                 CampaignRecipient.status == RecipientStatus.SENT,
                 Message.status == MessageStatus.FAILED,
             )
         )
+        held = await self.session.scalar(
+            select(func.count())
+            .select_from(CampaignRecipient)
+            .join(Message, Message.id == CampaignRecipient.message_id)
+            .where(scope, Message.provider_held_at.is_not(None))
+        )
+        # Why people were not reached, or what Meta said: every recipient once,
+        # by its status, its closed reason code ("unrecorded" for a row from
+        # before reason codes, or a sent one) and Meta's error code if any.
+        breakdown = await self.session.execute(
+            select(
+                CampaignRecipient.status,
+                CampaignRecipient.reason_code,
+                Message.failure_code,
+                func.count(),
+            )
+            .select_from(CampaignRecipient)
+            .outerjoin(Message, Message.id == CampaignRecipient.message_id)
+            .where(scope)
+            .group_by(CampaignRecipient.status, CampaignRecipient.reason_code, Message.failure_code)
+            .order_by(
+                CampaignRecipient.status,
+                CampaignRecipient.reason_code,
+                Message.failure_code,
+            )
+        )
+        reasons = tuple(
+            (status.value, reason or UNRECORDED_REASON, code, int(count))
+            for status, reason, code, count in breakdown.all()
+        )
 
         return CampaignStatistics(
+            held=int(held or 0),
             pending=tally.get(RecipientStatus.PENDING, 0),
             sent=tally.get(RecipientStatus.SENT, 0),
             failed=tally.get(RecipientStatus.FAILED, 0),
@@ -519,7 +745,103 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
             delivered=by_message.get(MessageStatus.DELIVERED, 0) + read,
             read=read,
             failed_after_send=int(failed_after_send or 0),
+            replied=replied,
+            opted_out_after=opted_out_after,
+            reasons=reasons,
         )
+
+    async def progress(self, campaign_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, dict[str, int]]:
+        """Recipient counts per campaign in one grouped query (PG-12)."""
+        rows = await self.session.execute(
+            select(
+                CampaignRecipient.campaign_id,
+                CampaignRecipient.status,
+                func.count(),
+                func.count(CampaignRecipient.replied_at),
+            )
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id.in_(list(campaign_ids)),
+            )
+            .group_by(CampaignRecipient.campaign_id, CampaignRecipient.status)
+        )
+        counts: dict[uuid.UUID, dict[str, int]] = {
+            campaign_id: {
+                "sent": 0,
+                "failed": 0,
+                "skipped": 0,
+                "pending": 0,
+                "replied": 0,
+                "delivered": 0,
+                "read": 0,
+            }
+            for campaign_id in campaign_ids
+        }
+        for campaign_id, status, count, answered in rows.all():
+            counts[campaign_id][status.value] = int(count)
+            counts[campaign_id]["replied"] += int(answered)
+        delivery = await self.session.execute(
+            select(CampaignRecipient.campaign_id, Message.status, func.count())
+            .join(Message, Message.id == CampaignRecipient.message_id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id.in_(list(campaign_ids)),
+                Message.status.in_([MessageStatus.DELIVERED, MessageStatus.READ]),
+            )
+            .group_by(CampaignRecipient.campaign_id, Message.status)
+        )
+        for campaign_id, status, count in delivery.all():
+            counts[campaign_id]["delivered"] += int(count)
+            if status is MessageStatus.READ:
+                counts[campaign_id]["read"] += int(count)
+        return counts
+
+    async def export_rows(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        status: RecipientStatus | None,
+        reason: str | None,
+        after: uuid.UUID | None,
+        limit: int,
+    ) -> list[ExportRow]:
+        """One page of the CSV export, by recipient id (PG-14)."""
+        statement = (
+            select(
+                CampaignRecipient.id,
+                Contact.display_name,
+                Contact.wa_id,
+                CampaignRecipient.status,
+                CampaignRecipient.reason_code,
+                Message.failure_code,
+                CampaignRecipient.sent_at,
+                Message.delivered_at,
+                Message.read_at,
+                CampaignRecipient.replied_at,
+                CampaignRecipient.opted_out_after_at,
+            )
+            .select_from(CampaignRecipient)
+            .join(
+                Contact,
+                and_(
+                    Contact.id == CampaignRecipient.contact_id,
+                    Contact.tenant_id == self.tenant_id,
+                ),
+            )
+            .outerjoin(Message, Message.id == CampaignRecipient.message_id)
+            .where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+            )
+        )
+        if status is not None:
+            statement = statement.where(CampaignRecipient.status == status)
+        if reason is not None:
+            statement = statement.where(CampaignRecipient.reason_code == reason)
+        if after is not None:
+            statement = statement.where(CampaignRecipient.id > after)
+        rows = await self.session.execute(statement.order_by(CampaignRecipient.id).limit(limit))
+        return [ExportRow(*row) for row in rows.all()]
 
 
 class AudienceRepository(TenantScopedRepository[Contact]):
@@ -556,6 +878,8 @@ class AudienceRepository(TenantScopedRepository[Contact]):
             )
         )
 
+        if filters.nobody:
+            query = query.where(false())
         if filters.contact_ids:
             query = query.where(Contact.id.in_(filters.contact_ids))
 

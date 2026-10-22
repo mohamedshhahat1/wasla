@@ -80,6 +80,7 @@ from tests.fake_embeddings import FakeEmbeddings, embed_text
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_embeddings
 from tests.knowledge_seed import add_generation
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -89,7 +90,9 @@ FORBIDDEN_MODEL = "o1-pro"
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}"
+    )
     session.add(tenant)
     await session.flush()
     return tenant
@@ -795,7 +798,9 @@ async def test_concurrent_reservations_cannot_oversell_the_allowance(
         # Seeded through the ORM and committed, so every connection below sees
         # it. Raw SQL here would have to restate the schema and would rot.
         async with factory() as setup:
-            tenant = Tenant(name="Race", slug=f"race-{uuid.uuid4().hex[:8]}")
+            tenant = Tenant(
+                timezone=TEST_TIMEZONE, name="Race", slug=f"race-{uuid.uuid4().hex[:8]}"
+            )
             plan = Plan(
                 code=f"race-{uuid.uuid4().hex[:8]}",
                 name="Race",

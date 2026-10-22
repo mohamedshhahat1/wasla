@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from app.core.exceptions import ConflictError, NotFoundError
+from app.core.timezones import validated as validated_timezone
 from app.db.models import Tenant, TenantStatus
 from app.repositories.base import BaseRepository
 
@@ -85,10 +86,18 @@ class TenantRepository(BaseRepository[Tenant]):
         )
         return await self._all(statement)
 
-    async def create(self, *, name: str, slug: str) -> Tenant:
+    async def create(self, *, name: str, slug: str, timezone: str) -> Tenant:
+        """Stage a workspace. `timezone` is required: nothing creates one undecided (TZ-01)."""
         normalised = normalise_slug(slug)
         if await self.get_by_slug(normalised) is not None:
             # The unique constraint is the real guard; this check exists only to
             # return a useful conflict instead of an integrity error.
             raise ConflictError("That workspace address is already taken.")
-        return self.add(Tenant(name=name.strip(), slug=normalised, status=TenantStatus.ACTIVE))
+        return self.add(
+            Tenant(
+                name=name.strip(),
+                slug=normalised,
+                status=TenantStatus.ACTIVE,
+                timezone=validated_timezone(timezone),
+            )
+        )

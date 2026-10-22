@@ -49,6 +49,7 @@ from app.services.email_verification_service import (
 )
 from tests.conftest import AllowingEntitlements
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -760,6 +761,7 @@ async def test_registering_queues_a_verification_code_in_the_same_transaction(
         json={
             "email": "fresh@acme-example.com",
             "password": PASSWORD,
+            "timezone": TEST_TIMEZONE,
             "workspace_name": "Fresh",
             "workspace_slug": "fresh",
         },
@@ -814,6 +816,7 @@ async def test_registration_does_not_return_the_code(
         json={
             "email": "silent@acme-example.com",
             "password": PASSWORD,
+            "timezone": TEST_TIMEZONE,
             "workspace_name": "Silent",
             "workspace_slug": "silent",
         },

@@ -31,6 +31,8 @@ per-address limit instead.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, time
+
 from fastapi import APIRouter, status
 
 from app.api.dependencies import (
@@ -42,8 +44,12 @@ from app.api.dependencies import (
 )
 from app.api.rate_limits import AuthRateLimit, WorkspaceRateLimit
 from app.api.route import CommittingRoute
+from app.core.dependencies import SessionDep
+from app.core.timezones import format_offset, offset_of
 from app.db.models import Tenant
 from app.schemas.workspace import (
+    CampaignSettingsRead,
+    CampaignSettingsUpdateRequest,
     OwnershipTransferRequest,
     OwnershipTransferResponse,
     WorkspaceCreatedResponse,
@@ -52,19 +58,16 @@ from app.schemas.workspace import (
     WorkspaceRead,
     WorkspaceUpdateRequest,
 )
+from app.services.campaign_settings_service import (
+    CampaignSettings,
+    CampaignSettingsService,
+)
 
 router = APIRouter(route_class=CommittingRoute, tags=["Workspace"])
 
 
 def _read(tenant: Tenant) -> WorkspaceRead:
-    return WorkspaceRead(
-        id=tenant.id,
-        name=tenant.name,
-        slug=tenant.slug,
-        status=tenant.status,
-        is_active=tenant.is_active,
-        automation_disclosure=tenant.automation_disclosure,
-    )
+    return WorkspaceRead.from_tenant(tenant)
 
 
 @router.post(
@@ -114,6 +117,7 @@ async def create_workspace(
         owner=current_user.user,
         name=payload.name,
         slug=payload.slug,
+        timezone=payload.timezone,
     )
     return WorkspaceCreatedResponse(
         workspace=_read(created.tenant),
@@ -168,8 +172,67 @@ async def update_workspace(
             if payload.automation_disclosure is not None
             else None
         ),
+        timezone=payload.timezone,
     )
     return _read(tenant)
+
+
+def _settings_read(settings: CampaignSettings) -> CampaignSettingsRead:
+    return CampaignSettingsRead(
+        quiet_hours_enabled=settings.quiet_hours_enabled,
+        quiet_hours_start=settings.quiet_hours_start.strftime("%H:%M"),
+        quiet_hours_end=settings.quiet_hours_end.strftime("%H:%M"),
+        timezone=settings.timezone,
+        utc_offset=format_offset(offset_of(settings.timezone, datetime.now(UTC))),
+    )
+
+
+def _clock(value: str) -> time:
+    hours, minutes = value.split(":")
+    return time(int(hours), int(minutes))
+
+
+@router.get(
+    "/workspace/campaign-settings",
+    response_model=CampaignSettingsRead,
+    summary="This workspace's quiet hours",
+)
+async def read_campaign_settings(
+    workspace: ActiveWorkspaceDep,
+    session: SessionDep,
+    limit: WorkspaceRateLimit,
+) -> CampaignSettingsRead:
+    """Any member. The window campaigns do not write in, in the workspace's own zone (TZ-03)."""
+    return _settings_read(CampaignSettingsService(session, tenant=workspace.tenant).read())
+
+
+@router.put(
+    "/workspace/campaign-settings",
+    response_model=CampaignSettingsRead,
+    summary="Change this workspace's quiet hours",
+    responses={422: {"description": "quiet_hours_empty_window: the start equals the end."}},
+)
+async def update_campaign_settings(
+    payload: CampaignSettingsUpdateRequest,
+    workspace: TenantAdminDep,
+    session: SessionDep,
+    limit: WorkspaceRateLimit,
+) -> CampaignSettingsRead:
+    """Owner or administrator; audited, old and new (TZ-03).
+
+    Takes effect at each campaign's next batch. A window crossing midnight -
+    22:00 to 09:00 - is the normal case; a start equal to the end is refused.
+    Quiet hours bind every campaign send, never a reply, a follow-up or a test
+    send.
+    """
+    settings = await CampaignSettingsService(session, tenant=workspace.tenant).update(
+        actor=workspace.user,
+        actor_role=workspace.role,
+        quiet_hours_enabled=payload.quiet_hours_enabled,
+        quiet_hours_start=_clock(payload.quiet_hours_start),
+        quiet_hours_end=_clock(payload.quiet_hours_end),
+    )
+    return _settings_read(settings)
 
 
 @router.post(

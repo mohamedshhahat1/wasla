@@ -38,6 +38,7 @@ from app.workers.media_worker import MediaWorker
 from app.workers.queue import AgentJob
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_media_reader, as_whatsapp
+from tests.workspace_timezone import TEST_TIMEZONE
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
 TEXT = b"the warranty lasts two years"
@@ -136,7 +137,7 @@ class Scene:
 
 
 async def scene(session: AsyncSession, *, slug: str = "acme") -> Scene:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
 

@@ -62,6 +62,7 @@ from app.repositories.invoice_repository import PlatformInvoiceRepository
 from tests.billing_fixtures import renewal_invoice
 from tests.conftest import AllowingEntitlements
 from tests.payment_tokens import saved_card
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -190,7 +191,9 @@ async def _workspace(
     plan: Plan | None = None,
     status: SubscriptionStatus = SubscriptionStatus.ACTIVE,
 ) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+    )
     session.add(tenant)
     await session.flush()
     session.add(Membership(tenant_id=tenant.id, user_id=owner.id, role=TenantRole.TENANT_OWNER))

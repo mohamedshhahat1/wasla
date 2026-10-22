@@ -76,6 +76,7 @@ from app.services.recurring_service import RecurringService
 from tests.billing_fixtures import erase_ledger
 from tests.fakes import as_recurring, as_responses
 from tests.payment_tokens import PROTECTOR, saved_card
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -176,7 +177,7 @@ async def workspace(
     factory = one_connection.session_factory
     suffix = uuid.uuid4().hex[:8]
     async with factory() as session:
-        tenant = Tenant(name="Pool Pressure", slug=f"pool-{suffix}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Pool Pressure", slug=f"pool-{suffix}")
         session.add(tenant)
         await session.flush()
         agent = Agent(
@@ -657,7 +658,11 @@ async def renewals(one_connection: Database) -> AsyncIterator[list[uuid.UUID]]:
 
     async with factory() as session:
         for index in range(TURNS):
-            tenant = Tenant(name=f"Pool {index}", slug=f"pool-bill-{uuid.uuid4().hex[:10]}")
+            tenant = Tenant(
+                timezone=TEST_TIMEZONE,
+                name=f"Pool {index}",
+                slug=f"pool-bill-{uuid.uuid4().hex[:10]}",
+            )
             plan = Plan(
                 code=f"pool-bill-{uuid.uuid4().hex[:8]}",
                 name="Pool",

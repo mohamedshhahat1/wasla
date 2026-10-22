@@ -45,6 +45,7 @@ from app.db.models import Membership, Tenant, TenantRole, User
 from app.db.models.enums import TenantStatus
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -177,7 +178,9 @@ async def account(db_session: AsyncSession) -> User:
         hashed_password=hash_password(PASSWORD),
         is_active=True,
     )
-    tenant = Tenant(name="Outage", slug="outage", status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Outage", slug="outage", status=TenantStatus.ACTIVE
+    )
     db_session.add_all([user, tenant])
     await db_session.flush()
     db_session.add(

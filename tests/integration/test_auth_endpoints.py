@@ -24,6 +24,7 @@ from app.services.auth_service import (
     WorkspaceAccess,
     WorkspaceContext,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -31,6 +32,7 @@ REGISTRATION = {
     "email": "owner@example.com",
     "password": "correct horse battery staple",
     "full_name": "Owner",
+    "timezone": TEST_TIMEZONE,
     "workspace_name": "Acme",
     "workspace_slug": "acme",
 }
@@ -55,6 +57,7 @@ def user() -> User:
 @pytest.fixture
 def workspace(user: User) -> WorkspaceContext:
     tenant = Tenant(
+        timezone=TEST_TIMEZONE,
         id=uuid.uuid4(),
         name="Acme",
         slug="acme",

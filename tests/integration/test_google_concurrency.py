@@ -34,6 +34,7 @@ from tests.integration.test_google_endpoints import (
     _FixedKeyRing,
     _id_token,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 PASSWORD = "correct horse battery staple"
@@ -207,7 +208,11 @@ async def test_registration_and_google_login_cannot_auto_link_by_email(race: Rac
                     settings=race.settings,
                     token_store=RefreshTokenStore(race.redis),
                 ).register(
-                    email=email, password=PASSWORD, workspace_name="Collision", workspace_slug=slug
+                    email=email,
+                    password=PASSWORD,
+                    timezone=TEST_TIMEZONE,
+                    workspace_name="Collision",
+                    workspace_slug=slug,
                 )
             return "registered"
         except EmailAlreadyRegisteredError:

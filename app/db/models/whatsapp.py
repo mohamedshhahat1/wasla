@@ -26,11 +26,13 @@ control of it to Meta at claim time. See ADR-037.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
     DateTime,
+    ForeignKey,
     Index,
     String,
     Text,
@@ -39,6 +41,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -126,6 +129,13 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
         # - `id` is already the primary key - but a composite foreign key can
         # only reference a uniquely constrained set of columns.
         UniqueConstraint("tenant_id", "id", name="uq_whatsapp_accounts_tenant_id_id"),
+        # The numbers of one portfolio (LIM-02, LIM-07): whether a limit is
+        # shared, and what deleting a portfolio sets null. 0110.
+        Index(
+            "ix_whatsapp_accounts_portfolio_id",
+            "portfolio_id",
+            postgresql_where=text("portfolio_id IS NOT NULL"),
+        ),
     )
 
     phone_number_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -182,6 +192,16 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     # Nullable, because a workspace without one falls back to the platform
     # token - which is how every workspace worked before this column existed.
     access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # The business portfolio whose messaging limit this number sends under
+    # (LIM-01, LIM-02): learned from Meta on connect, rotation, enable and
+    # schedule, never typed in. Null until the limit has been read; a campaign
+    # on a number without one is neither scheduled nor sent. 0110.
+    portfolio_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("whatsapp_business_portfolios.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     @property
     def is_active(self) -> bool:

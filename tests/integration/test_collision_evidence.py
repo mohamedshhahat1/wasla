@@ -34,13 +34,14 @@ from app.repositories.channel_event_repository import (
 )
 from app.services.channel_ingestion_service import ChannelIngestionService, IngestionOutcome
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
 
 async def _workspace(session: AsyncSession) -> Tenant:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Collisions {tag}", slug=f"collisions-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Collisions {tag}", slug=f"collisions-{tag}")
     session.add(tenant)
     await session.flush()
     return tenant

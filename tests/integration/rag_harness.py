@@ -47,6 +47,7 @@ from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
 from tests.fake_embeddings import FAKE_MODEL, embed_text
 from tests.integration.ai_harness import JsonObject, embedding_response, settings_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 REDIS_URL = os.environ.get("WASLA_TEST_REDIS_URL", "redis://localhost:6379/15")
 POLICY = "Refund policy\n\nItems may be returned within fourteen days for a full refund."
@@ -157,7 +158,9 @@ class Indexing:
 
     async def workspace(self) -> uuid.UUID:
         async with self.database.session() as session:
-            tenant = Tenant(name="Indexing", slug=f"idx-{uuid.uuid4().hex[:10]}")
+            tenant = Tenant(
+                timezone=TEST_TIMEZONE, name="Indexing", slug=f"idx-{uuid.uuid4().hex[:10]}"
+            )
             session.add(tenant)
             await session.flush()
             tenant_id = tenant.id

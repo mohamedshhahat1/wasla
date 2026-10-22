@@ -26,6 +26,7 @@ from app.core.exceptions import AuthenticationError
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.main import create_app
 from tests.conftest import FakeDependency
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -55,7 +56,13 @@ def _workspace(tenant_id: uuid.UUID) -> ActiveWorkspace:
             tenant_id=tenant_id,
             role=TenantRole.TENANT_OWNER,
         ),
-        tenant=Tenant(id=tenant_id, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=tenant_id,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
 
 
@@ -144,6 +151,7 @@ async def test_registration_shares_the_authentication_budget(
         json={
             "email": "new@example.com",
             "password": "a-very-long-password-1",
+            "timezone": TEST_TIMEZONE,
             "workspace_name": "New",
             "workspace_slug": "new",
         },

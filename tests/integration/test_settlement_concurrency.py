@@ -84,6 +84,7 @@ from app.services.settlement_service import InvoiceSettlement
 from app.services.topup_service import TopupService
 from tests.billing_fixtures import add_owner, erase_ledger, price_terms
 from tests.paymob_orders import CARD_INTEGRATION_ID, order_for, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -199,7 +200,7 @@ async def _base(session: AsyncSession, *, status: SubscriptionStatus) -> World:
     """Tenant, owner, platform staff and a 99 EGP plan the workspace is on."""
     now = datetime.now(UTC).replace(microsecond=0)
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name="Settlement Race", slug=f"settle-race-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Settlement Race", slug=f"settle-race-{tag}")
     staff = User(
         email=f"settle-staff-{tag}@example.com",
         hashed_password="x",

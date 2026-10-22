@@ -62,6 +62,7 @@ from tests.integration.test_omnichannel_operations import (  # noqa: F401 - `met
     _tenant,
     meta,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -119,7 +120,9 @@ async def http(inbox_app: FastAPI) -> AsyncIterator[AsyncClient]:
 @pytest_asyncio.fixture
 async def desk(db_session: AsyncSession, settings: Settings) -> Desk:
     tag = uuid.uuid4().hex[:8]
-    tenant = Tenant(name=f"Inbox {tag}", slug=f"inbox-{tag}", status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=f"Inbox {tag}", slug=f"inbox-{tag}", status=TenantStatus.ACTIVE
+    )
     owner = User(
         email=f"owner@{tag}.example",
         hashed_password="x",

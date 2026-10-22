@@ -21,6 +21,7 @@ from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.media_queue import MediaJob
 from app.workers.queue import AgentJob
 from tests.fakes import as_agent_queue, as_media_queue
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -31,7 +32,7 @@ SENT_AT = "1786000000"
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

@@ -31,6 +31,7 @@ from app.api.dependencies import (
 from app.core.exceptions import ConflictError, TenantIsolationError
 from app.db.models import Membership, PlatformRole, Tenant, TenantRole, TenantStatus, User
 from app.db.models.invoice import Invoice, InvoicePurpose, InvoiceStatus, Payment, PaymentStatus
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -166,7 +167,13 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             email_verified_at=NOW,
         ),
         membership=Membership(id=uuid.uuid4(), user_id=USER_ID, tenant_id=TENANT_ID, role=role),
-        tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=TENANT_ID,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
 
 

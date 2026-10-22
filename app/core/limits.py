@@ -96,6 +96,8 @@ UPLOAD_ALLOWANCES: Final[tuple[BodyAllowance, ...]] = (
     BodyAllowance("POST", re.compile(r"/conversations/[^/]+/messages/media"), UPLOAD),
     # A campaign's template header file (HM-02); the same cap, the same reader.
     BodyAllowance("POST", re.compile(r"/campaigns/header-media"), UPLOAD),
+    # Meta's rate card as CSV, read to 1 MB inside (COST-01).
+    BodyAllowance("POST", re.compile(r"/platform/whatsapp-rate-cards"), UPLOAD),
     # A knowledge document as text or base64, up to 400 000 characters.
     BodyAllowance("POST", re.compile(r"/knowledge/bases/[^/]+/documents"), DOCUMENT),
 )

@@ -49,6 +49,7 @@ from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.enums import TenantStatus
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -136,7 +137,7 @@ async def _workspace(
     owner: User,
     status: TenantStatus = TenantStatus.ACTIVE,
 ) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug, status=status)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=status)
     session.add(tenant)
     await session.flush()
     session.add(Membership(tenant_id=tenant.id, user_id=owner.id, role=TenantRole.TENANT_OWNER))
@@ -254,7 +255,7 @@ async def test_a_verified_account_with_no_workspace_can_create_its_first(
 
     response = await http.post(
         f"{API}/workspaces",
-        json={"name": "Nile Finishing", "slug": "nile-finishing"},
+        json={"timezone": TEST_TIMEZONE, "name": "Nile Finishing", "slug": "nile-finishing"},
         headers=_bearer(session),
     )
 
@@ -287,7 +288,7 @@ async def test_the_new_workspace_is_immediately_usable_through_a_switched_token(
     session = await _login(http, user.email)
     created = await http.post(
         f"{API}/workspaces",
-        json={"name": "Delta Works", "slug": "delta-works"},
+        json={"timezone": TEST_TIMEZONE, "name": "Delta Works", "slug": "delta-works"},
         headers=_bearer(session),
     )
     assert created.status_code == 201, created.text
@@ -310,7 +311,7 @@ async def test_a_slug_already_taken_is_a_conflict_not_a_crash(
 
     response = await http.post(
         f"{API}/workspaces",
-        json={"name": "Something Else", "slug": "taken-slug"},
+        json={"timezone": TEST_TIMEZONE, "name": "Something Else", "slug": "taken-slug"},
         headers=_bearer(session),
     )
 
@@ -339,7 +340,7 @@ async def test_the_slug_of_a_deleted_workspace_stays_reserved(
     session = await _login(http, newcomer.email)
     response = await http.post(
         f"{API}/workspaces",
-        json={"name": "Not The Same Business", "slug": "closed-shop"},
+        json={"timezone": TEST_TIMEZONE, "name": "Not The Same Business", "slug": "closed-shop"},
         headers=_bearer(session),
     )
 
@@ -367,12 +368,12 @@ async def test_creation_is_refused_past_the_configured_ceiling(
 
     first = await http.post(
         f"{API}/workspaces",
-        json={"name": "First", "slug": "collector-one"},
+        json={"timezone": TEST_TIMEZONE, "name": "First", "slug": "collector-one"},
         headers=_bearer(session),
     )
     second = await http.post(
         f"{API}/workspaces",
-        json={"name": "Second", "slug": "collector-two"},
+        json={"timezone": TEST_TIMEZONE, "name": "Second", "slug": "collector-two"},
         headers=_bearer(session),
     )
 
@@ -398,7 +399,7 @@ async def test_an_unverified_account_cannot_create_a_workspace(
 
     response = await http.post(
         f"{API}/workspaces",
-        json={"name": "Premature", "slug": "premature"},
+        json={"timezone": TEST_TIMEZONE, "name": "Premature", "slug": "premature"},
         headers=_bearer(session),
     )
 

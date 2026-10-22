@@ -42,6 +42,7 @@ from app.services.entitlement_service import EntitlementService
 from app.services.plan_catalog import PlanCatalog
 from tests.integration.annual_billing_oracle import ledger_violations, oracle_entitlement
 from tests.integration.plan_catalogue import own_plan
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -121,7 +122,9 @@ async def _population(session: AsyncSession, rng: random.Random) -> list[dict[st
         status = STATUSES[index % len(STATUSES)]
         anchor = _anchor(rng)
         end = billing_calendar.add_interval(anchor, price.billing_interval)
-        tenant = Tenant(name=f"Oracle {index}", slug=f"oracle-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name=f"Oracle {index}", slug=f"oracle-{uuid.uuid4().hex[:10]}"
+        )
         session.add(tenant)
         await session.flush()
         # A stale stored cycle on half the yearly ones: the sweep has not run.

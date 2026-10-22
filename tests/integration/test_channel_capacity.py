@@ -68,6 +68,7 @@ from app.services.subscription_service import SubscriptionService
 from tests.billing_fixtures import add_owner
 from tests.channel_fakes import SyntheticAdapter
 from tests.integration.plan_catalogue import own_plan
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -190,7 +191,7 @@ async def _plan(
 async def _workspace(
     session: AsyncSession, app: FastAPI | None, *, plan: Plan, name: str = "Capacity Co"
 ) -> tuple[Tenant, User]:
-    tenant = Tenant(name=name, slug=f"cap-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=name, slug=f"cap-{uuid.uuid4().hex[:10]}")
     session.add(tenant)
     await session.flush()
     owner = await add_owner(session, tenant)

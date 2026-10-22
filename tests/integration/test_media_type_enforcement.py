@@ -43,6 +43,7 @@ from app.services import messaging_service as messaging_module
 from app.services.media_service import MediaService
 from app.services.messaging_service import MessagingService
 from tests.fakes import as_whatsapp
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -135,7 +136,7 @@ def meta(monkeypatch: pytest.MonkeyPatch) -> Recorder:
 
 
 async def _conversation(session: AsyncSession) -> tuple[Any, ...]:
-    tenant = Tenant(name="Acme", slug="acme-media-types")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug="acme-media-types")
     session.add(tenant)
     await session.flush()
 

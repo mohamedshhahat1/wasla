@@ -38,6 +38,7 @@ from app.db.models.lead import (
 )
 from app.repositories.lead_repository import LeadFilters, LeadStatistics
 from app.services.lead_service import LeadUpdate
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -248,6 +249,7 @@ def _workspace(role: TenantRole) -> ActiveWorkspace:
             role=role,
         ),
         tenant=Tenant(
+            timezone=TEST_TIMEZONE,
             id=TENANT_ID,
             name="Acme",
             slug="acme",

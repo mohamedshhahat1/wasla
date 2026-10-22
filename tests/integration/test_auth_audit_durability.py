@@ -50,6 +50,7 @@ from app.db.models.enums import InvitationStatus, MembershipStatus
 from app.db.session import Database
 from app.main import create_app
 from tests.fakes import TEST_CREDENTIAL_ENCRYPTION_KEY
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -422,7 +423,7 @@ async def _seed_invitation(
             is_active=True,
             email_verified_at=datetime.now(UTC),
         )
-        tenant = Tenant(name=slug.title(), slug=slug)
+        tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
         session.add_all([inviter, tenant])
         await session.flush()
         session.add(
@@ -634,7 +635,7 @@ async def test_a_foreign_workspace_cannot_revoke_and_records_nothing(
                     is_active=True,
                     email_verified_at=datetime.now(UTC),
                 )
-                tenant = Tenant(name=owned.title(), slug=owned)
+                tenant = Tenant(timezone=TEST_TIMEZONE, name=owned.title(), slug=owned)
                 session.add_all([outsider, tenant])
                 await session.flush()
                 session.add(

@@ -4,8 +4,8 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **212 operations**, of which
-17 are unauthenticated and each is listed with what bounds it in
+The production shape - `DOCS_ENABLED=false` - serves **237 operations**, of which
+18 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
 dependency graph and compares it with the figure above, and
@@ -51,7 +51,7 @@ Liveness deliberately does not touch PostgreSQL: a database outage must not make
 
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
-| POST | `/api/v1/auth/register` | Create an account and its first workspace (`201`) | Public |
+| POST | `/api/v1/auth/register` | Create an account and its first workspace (`201`); `timezone` required (TZ-01) | Public |
 | POST | `/api/v1/auth/login` | Exchange credentials for tokens | Public |
 | POST | `/api/v1/auth/refresh` | Rotate a refresh token | Public |
 | POST | `/api/v1/auth/logout` | Revoke a refresh token (`204`) | Public |
@@ -163,10 +163,38 @@ Only the hash of an invitation token is stored, so a database disclosure does no
 
 Accepting an invitation for an address that already has an account adds or reinstates the membership and changes nothing about the account — a `password` in the body is ignored. Only the branch that *creates* an account sets one. Somebody who signed up with Google and wants a password uses `POST /api/v1/auth/password/set`.
 
+## Time zones
+
+`GET /api/v1/timezones` (public, rate limited per client like the other public
+routes; TZ-02): `{tzdata_version, suggested: [...], timezones: [{id, label,
+utc_offset, offset_minutes, region}]}` - canonical IANA names only, the very
+list `POST /workspaces`, `POST /auth/register` and `PATCH /workspace` accept
+(anything else `422 timezone_unknown`). Suggested first: Cairo, Riyadh, Dubai,
+Kuwait, Qatar, Bahrain, Muscat, Amman, Baghdad, Casablanca, Tunis, Algiers,
+Tripoli, Beirut, London, Istanbul. Sorted by current offset, then name;
+`?q=` (at most 64 characters) filters by id or label. `Cache-Control: public,
+max-age=3600` and an `ETag` that changes with the tzdata release or any zone's
+offset (304 on `If-None-Match`).
+
+## Workspace campaign settings
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/workspace/campaign-settings` | Any workspace member |
+| PUT | `/api/v1/workspace/campaign-settings` | Owner or admin; audited `campaign_settings_updated` |
+
+`{quiet_hours_enabled, quiet_hours_start, quiet_hours_end}` - `HH:MM` in the
+workspace's own zone (TZ-03); default on, 22:00-09:00; a window crossing
+midnight is the normal case; start = end is `422 quiet_hours_empty_window`;
+seconds are refused. The response also carries `timezone` and its current
+`utc_offset`. `GET /api/v1/workspace` returns `timezone` and `utc_offset`;
+`PATCH /api/v1/workspace` changes the zone (owner or admin).
+
 ## WhatsApp accounts
 
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
+| GET | `/api/v1/whatsapp/accounts/{account_id}/messaging-limit` | Meta's messaging limit for the number's business portfolio and how much of it is used (LIM-07) | Workspace member |
 | POST | `/api/v1/whatsapp/accounts` | Connect a WhatsApp number (`201`) | Tenant admin |
 | GET | `/api/v1/whatsapp/accounts` | List connected numbers | Workspace member |
 | POST | `/api/v1/whatsapp/accounts/{account_id}/disable` | Stop accepting traffic | Tenant admin |
@@ -175,6 +203,15 @@ Accepting an invitation for an address that already has an account adds or reins
 | POST | `/api/v1/whatsapp/accounts/{account_id}/release` | Give the number up, keeping its history | Tenant admin |
 
 `phone_number_id` is unique across the platform, not per workspace: it is how an inbound webhook is attributed to a workspace, so two workspaces claiming one number would make attribution ambiguous.
+
+**Meta's messaging limit** (ADR-146) is read when a number is connected,
+re-authorised or enabled. `GET .../messaging-limit` answers `{tier, known (false: never read -
+no campaign on the number is scheduled or sent),
+messaging_limit (null with known = unlimited), checked_at, source, campaign_share,
+campaign_budget, used_last_24h, campaign_available_now, next_capacity_at,
+next_capacity_at_local, shared_with_other_numbers,
+shared_with_other_workspaces}` - aggregates of the whole portfolio, never
+another workspace's name, number, campaign or count by source.
 
 **A number is a channel connection, and an active one takes a channel slot** (ADR-131). Connecting and enabling go through the channel capacity guard - asked once before Wasla calls Meta, so a workspace at capacity never causes a Graph call, and again under the workspace's lock in the transaction that activates the number. The refusals are `409 channel_capacity_exceeded` (`details`: `effective_limit`, `active`, `channel`, `typed_capacity`, `over_limit`) and `409 channel_type_not_allowed` (`details`: `channel`, `allowed_channel_types`); when both apply, capacity is the one returned. They replace the `402` a second number used to get. Disabling and releasing are never refused, and free the slot; re-authorising an active number's credential takes no new one. A workspace in a capacity reduction's grace, or with a scheduled downgrade the new connection would not fit, is refused too. See [BILLING.md](BILLING.md).
 
@@ -543,6 +580,24 @@ Listing filters by `account_id`, `status` and `category`. Not cursor-paged, unli
 | POST | `/api/v1/campaigns/{campaign_id}/cancel` | Owner or admin |
 | GET | `/api/v1/campaigns/{campaign_id}/statistics` | Any workspace member |
 | GET | `/api/v1/campaigns/{campaign_id}/recipients` | Any workspace member |
+| PATCH | `/api/v1/campaigns/{campaign_id}` | Owner or admin; drafts only, `If-Match` |
+| DELETE | `/api/v1/campaigns/{campaign_id}` | Owner or admin (`204`); drafts nobody was sent |
+| POST | `/api/v1/campaigns/{campaign_id}/duplicate` | Owner or admin (`201`) |
+| GET | `/api/v1/campaigns/{campaign_id}/activity` | Any workspace member |
+| POST | `/api/v1/campaigns/{campaign_id}/preview-messages` | Owner or admin |
+| GET | `/api/v1/campaigns/{campaign_id}/delivery-plan` | Owner or admin |
+| GET | `/api/v1/campaigns/{campaign_id}/cost-estimate` | Owner or admin |
+| POST | `/api/v1/campaigns/{campaign_id}/test-send` | Owner or admin (`201`, the message) |
+| GET | `/api/v1/campaigns/{campaign_id}/recipients/export.csv` | Owner or admin |
+| GET | `/api/v1/campaigns/summary` | Any workspace member |
+| GET | `/api/v1/campaigns/progress?ids=` | Any workspace member |
+| GET | `/api/v1/campaign-segments` | Any workspace member |
+| GET | `/api/v1/campaign-segments/{segment_id}` | Any workspace member |
+| POST | `/api/v1/campaign-segments` | Owner or admin (`201`) |
+| PATCH | `/api/v1/campaign-segments/{segment_id}` | Owner or admin; `If-Match` |
+| DELETE | `/api/v1/campaign-segments/{segment_id}` | Owner or admin (`204`) |
+
+All of these share the campaign rate bucket (`RATE_LIMIT_CAMPAIGN_PER_MINUTE`, 30 a minute with templates).
 
 Reading is ordinary inbox work. Composing, targeting and starting take an administrator: a campaign writes to thousands of customers at once and is the least reversible thing the platform does.
 
@@ -558,16 +613,86 @@ Behaviours worth knowing:
 - **An audience can only be set on a draft.** Rebuilding a part-sent list would duplicate some people and drop others. Checked under the campaign's row lock: a materialisation racing a schedule is refused `422` once the campaign is scheduled (CMP-04).
 - **Scheduling with no `scheduled_at` means now**, and still returns immediately: the worker sends, so no request is held open behind a broadcast.
 - **`pause` and `cancel` are different.** Paused is resumable — schedule again. Cancelled is final, and what was sent stays sent.
-- **Lifecycle changes are named transitions.** There is no `PATCH` that sets `status`.
+- **Lifecycle changes are named transitions.** There is no `PATCH` that sets `status`; `PATCH` edits a draft's composition (below).
+
+The campaigns page (ADR-145..ADR-150; the element-by-element contract is
+[CAMPAIGNS_PAGE_CONTRACT.md](CAMPAIGNS_PAGE_CONTRACT.md)):
+
+- **Times in two zones.** `resumes_at`, `send_until`, the ETA, the plan's days
+  and the activity carry a `..._local` twin in the workspace's zone with its
+  offset.
+- **Waits.** `waiting_reason` (`quiet_hours`, `daily_limit`, `contact_cap`,
+  `limit_unknown`) and `resumes_at` on a live campaign that is not sending and
+  will by itself. Not a pause.
+- **Schedule.** `send_until` (optional, with an offset, after the start: `422
+  send_until_needs_offset`, `422 send_until_before_start`) skips whoever is still
+  pending then as `send_window_closed`. A number whose messaging limit was never
+  read: `422 messaging_limit_unknown`. The response carries `delivery_plan`
+  `{timezone, days: [{local_date, first_send_at(_local), last_send_at(_local),
+  recipients}], first_send_at, estimated_completion_at, recipients_planned,
+  notices, basis}`; nothing is refused because of the plan.
+- **Each person's values** (PER-01): `body_parameters` / `header_parameters`
+  `[{source, value?, key?, fallback?}]` in place of `variables` /
+  `header_variables`, one per placeholder; `source` is `constant`,
+  `contact.display_name`, `lead.name`, `lead.interest`, `lead.status`,
+  `lead.budget` or `lead.custom_fields` (with `key`). Codes:
+  `parameters_conflict` (both forms), `parameter_value_required`,
+  `parameter_fallback_required`, `parameter_fallback_too_long`,
+  `parameter_key_unknown`, `parameter_source_not_allowed` (a button's source).
+  `POST .../preview-messages` `{contact_ids: [<=5]}` -> `{previews: [{contact_id,
+  header, body, buttons, fallbacks}]}`; a contact outside the audience `404`.
+- **Draft lifecycle.** `PATCH` (`If-Match: "<version>"` or `version`): `409
+  campaign_not_editable` unless a draft, `409 campaign_version_conflict`
+  (`details.version`), `422 campaign_version_required`; a change to the number,
+  template, values or header file answers `audience_cleared: true`. `ETag` is the
+  new version. `DELETE`: `409 campaign_not_deletable`. `POST` with
+  `Idempotency-Key` (1-128): the same key within a day returns the same draft;
+  reused for another body `409 idempotency_key_reused`. `GET /campaigns?q=` (<=
+  100) finds names containing it. `CampaignRead` gains `version`,
+  `audience_ready`.
+- **Activity.** `{items: [{id, action, occurred_at, occurred_at_local, actor:
+  {type, id, name}, metadata}], next_cursor}`; actions `created`, `updated`,
+  `duplicated_from`, `duplicated_to`, `audience_set`, `scheduled`, `resumed`,
+  `paused`, `cancelled`, `deleted`, `waiting`, `completed`, `failed`,
+  `test_sent`, `recipients_exported`.
+- **Segments.** `{name, description?, rules: {last_inbound_within_days?,
+  lead_statuses?}, account_id?}`; contact ids are refused; `409
+  segment_name_taken`, `409 segment_limit_reached` (100), `409
+  segment_version_conflict`. `segment_id` on audience and preview requests;
+  another number's segment `422 segment_account_mismatch`.
+- **Test send.** `{contact_id}` -> the message (`origin: campaign_test`); `422
+  contact_has_no_conversation`, `422 contact_opted_out`, `409
+  campaign_not_testable` (cancelled), `409 portfolio_limit_reached`
+  (`details.available_at`), `429 test_send_limit` (`details.reset_at`).
+- **Results.** Statistics gain `held`, `replied`, `opted_out_after` and `reasons:
+  [{status, reason_code, provider_code, count}]`. `GET /campaigns/summary?from=&to=&account_id=`
+  (aware datetimes, else `422 summary_window_needs_offset`; default the last 30
+  days from local midnight) -> `{campaigns_by_status, recipients, rates,
+  window}`. `GET /campaigns/progress?ids=` (1-20) -> `{items: [{id, status,
+  waiting_reason, resumes_at(_local), counts, eta, updated_at}],
+  poll_after_seconds}` with an `ETag`; `If-None-Match` -> `304`.
+- **Export.** `GET .../recipients/export.csv?status=&reason=` - UTF-8 with a BOM,
+  formula cells prefixed `'`; `429 export_limit` (`details.reset_at`) past
+  `CAMPAIGN_EXPORTS_PER_HOUR`.
+- **Cost.** `GET .../cost-estimate` -> `{label: "estimate", currency, total,
+  per_market: [{market, recipients, rate, subtotal}], category, recipients_counted,
+  excluded, rate_card, computed_at, reason, assumptions}`; money as exact decimal
+  strings; no active rate card -> `total: null`, `reason: no_rate_card`.
+- **One marketing message per customer a day** (FREQ-01): a person's manual
+  marketing template inside it is `409 contact_frequency_cap`
+  (`details.available_at`).
 
 ## Contacts
 
-**Status: Implemented.** Only the marketing opt-out; a contact is created by the webhook from what Meta reports and has nothing else a person edits.
+**Status: Implemented.** The marketing opt-out and the campaigns page's contact picker; a contact is created by the webhook from what Meta reports and has nothing else a person edits.
 
 | Method | Path | Role |
 | --- | --- | --- |
+| GET | `/api/v1/contacts?q=&account_id=&eligible_for_campaign=&limit=&cursor=` | Any workspace member (PG-07) |
 | POST | `/api/v1/contacts/{contact_id}/opt-out` | Any workspace member. Body `{"channel", "source"?}` |
 | DELETE | `/api/v1/contacts/{contact_id}/opt-out?channel=` | Owner or admin |
+
+The picker answers `{items: [{id, display_name, wa_id, lead: {id, name, status} | null, last_inbound_at, opted_out_at, eligible_for_campaign, ineligible_reason}], next_cursor}`, newest activity first, at most 50 a page. `q` of digits searches the number, otherwise the name or the active lead's name. With `account_id`: contacts with a conversation on that number and whether a campaign from it could reach them; `eligible_for_campaign=true` needs `account_id` (`422 account_required`).
 
 Recording is any member's to do — the person handling the conversation is the one a customer says "stop" to. Clearing takes an administrator, because undoing somebody's own refusal should be deliberate.
 
@@ -678,7 +803,8 @@ staff, suspending and restoring.
 ### Creating one
 
 `POST /workspaces` is the only route on this group that does **not** resolve a workspace,
-because it is the request that creates one. It takes a `name` and a `slug` and nothing
+because it is the request that creates one. It takes a `name`, a `slug` and a `timezone`
+(required, an IANA name from `GET /timezones`; `422 timezone_unknown`, ADR-145) and nothing
 else — no role, no plan, no owner: the caller is the owner because they made it, the plan
 is `DEFAULT_PLAN_CODE`, and the status is active. The tenant, the owner membership and
 the subscription are one unit of work; a workspace without its owner membership is the
@@ -1038,6 +1164,21 @@ limits (`null` is unlimited, `0` is none) - `channel_connections` among them,
 never `whatsapp_numbers` - and `allowed_channel_types`, a list of channel
 labels with no wildcard; a priced one assigned `now` needs a
 `financial_basis` of `customer_checkout`, `manual_payment` or `complimentary`.
+
+## Platform rate cards
+
+| Method | Path | Role |
+| --- | --- | --- |
+| POST | `/api/v1/platform/whatsapp-rate-cards?currency=&effective_from=` | Platform staff (`201`, multipart `file`, optional `market_map`) |
+| POST | `/api/v1/platform/whatsapp-rate-cards/{card_id}/activate` | Platform staff |
+| GET | `/api/v1/platform/whatsapp-rate-cards` | Platform staff |
+| GET | `/api/v1/platform/whatsapp-rate-cards/{card_id}` | Platform staff |
+
+Meta's rate card saved as CSV (COST-01, ADR-150): parsed strictly - `422
+rate_card_invalid` with `details.line` - stored inactive and answered with every
+rate and `changes_from_active`; nothing is priced with it until it is activated.
+The optional `market_map` is `calling_code,market` rows; without it Meta's
+published regions are used. Rates are exact decimal strings.
 
 ## Planned platform endpoints
 

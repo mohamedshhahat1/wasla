@@ -55,6 +55,7 @@ from app.services.checkout_service import (
 )
 from tests.billing_fixtures import erase_ledger
 from tests.paymob_orders import order_for, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -116,7 +117,7 @@ async def workspace(
     """
     slug = f"conc-{uuid.uuid4().hex[:10]}"
     async with committing() as session:
-        tenant = Tenant(name="Concurrent", slug=slug)
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Concurrent", slug=slug)
         plan = Plan(
             code=f"pro-{slug}",
             name="Pro",
@@ -414,7 +415,7 @@ async def test_one_workspaces_key_does_not_block_anothers(
 
     other_slug = f"conc-{uuid.uuid4().hex[:10]}"
     async with committing() as session:
-        other = Tenant(name="Other", slug=other_slug)
+        other = Tenant(timezone=TEST_TIMEZONE, name="Other", slug=other_slug)
         session.add(other)
         await session.commit()
         other_id = other.id

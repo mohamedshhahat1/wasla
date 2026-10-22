@@ -229,6 +229,62 @@ def _no_live_dns(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(socket, "getaddrinfo", guarded)
 
 
+@pytest.fixture(autouse=True)
+def _quiet_hours_only_where_tested(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quiet hours bind only the tests that are about them (TZ-03).
+
+    Every workspace has quiet hours on from the start - 22:00 to 09:00 in its
+    own zone - and most suites drive campaigns at the real time of day. Left
+    alone, the same suite would pass by day and wait at night: a campaign
+    suite run at 23:00 Cairo time would find every campaign waiting for the
+    morning. So outside a test marked `quiet_hours` the window is never open,
+    exactly as for a workspace that switched quiet hours off. Every test of
+    the window itself carries the mark and runs the real check, at times it
+    chooses.
+    """
+    if request.node.get_closest_marker("quiet_hours") is not None:
+        return
+    from app.services.quiet_hours import QuietHours
+
+    monkeypatch.setattr(QuietHours, "contains", lambda self, at: False)
+
+
+@pytest.fixture(autouse=True)
+def _messaging_limit_only_where_tested(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Meta's messaging limit binds only the tests that are about it (LIM-01, LIM-04).
+
+    A number whose portfolio limit was never read is neither scheduled nor
+    sent (fail closed), and seventy-odd suites build numbers directly, with no
+    portfolio, and drive campaigns through them. Outside a test marked
+    `messaging_limit` every number's limit therefore reads as known and
+    unlimited - the world every one of those suites was written in - and the
+    limit read never reaches the network. Every test of the limit, the ledger
+    and the budget carries the mark and runs the real reads, rows and locks.
+    """
+    if request.node.get_closest_marker("messaging_limit") is not None:
+        return
+    from app.integrations.whatsapp.messaging_limit import (
+        MessagingLimitUnreadableError,
+        MetaMessagingLimitReader,
+    )
+    from app.services import messaging_limit_service
+
+    async def unlimited(session: Any, account_id: Any) -> Any:
+        return messaging_limit_service.PortfolioLimit(
+            portfolio_id=None, known=True, messaging_limit=None
+        )
+
+    async def unreadable(self: Any, *, access_token: str, phone_number_id: str) -> str:
+        raise MessagingLimitUnreadableError()
+
+    monkeypatch.setattr(messaging_limit_service, "limit_for_account", unlimited)
+    monkeypatch.setattr(MetaMessagingLimitReader, "read", unreadable)
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(

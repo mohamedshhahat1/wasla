@@ -56,6 +56,10 @@ OPEN_ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/webhooks/whatsapp"): "Meta cannot hold a credential of ours",
     ("POST", "/webhooks/paymob"): "a payment processor cannot hold a credential of ours",
     ("POST", "/webhooks/email"): "Resend cannot hold a credential of ours",
+    # Reference data a signup form reads before any account exists (TZ-02):
+    # canonical IANA zone names and their offsets, nothing about a customer.
+    # Carries `PublicRateLimit`, counted by client address.
+    ("GET", "/timezones"): "the zone is chosen at signup, before any account",
     ("GET", "/health"): "a load balancer has no credential",
     ("GET", "/health/live"): "a load balancer has no credential",
     ("GET", "/health/ready"): "a load balancer has no credential",
@@ -210,7 +214,7 @@ def test_no_documented_open_route_has_quietly_been_closed(
 
 def test_the_documented_count_matches_the_graph(graph: dict[tuple[str, str], set[str]]) -> None:
     """`docs/AUTHORIZATION.md` states a number. This is that number."""
-    assert len(_open(graph)) == 17
+    assert len(_open(graph)) == 18
 
 
 def test_every_other_route_resolves_a_workspace_or_is_an_account_route(

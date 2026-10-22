@@ -37,6 +37,7 @@ from app.db.models.conversation import Message
 from app.schemas.auth import MAXIMUM_NAME_LENGTH
 from tests.conftest import AllowingEntitlements, FakeDependency
 from tests.integration.test_crm_integrity import Desk, _desk
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -91,7 +92,7 @@ async def test_nul_in_a_new_workspace_name_is_refused(
 
     response = await http.post(
         f"{API}/workspaces",
-        json={"name": NUL, "slug": f"nul-new-{uuid.uuid4().hex[:6]}"},
+        json={"timezone": TEST_TIMEZONE, "name": NUL, "slug": f"nul-new-{uuid.uuid4().hex[:6]}"},
         headers=desk.headers,
     )
 

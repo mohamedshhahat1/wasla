@@ -80,6 +80,7 @@ from app.workers.billing_worker import BillingWorker
 from tests.conftest import AllowingEntitlements
 from tests.integration.plan_catalogue import own_plan
 from tests.paymob_orders import order_for, order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -236,7 +237,7 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 
 async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

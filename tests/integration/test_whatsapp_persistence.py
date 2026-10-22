@@ -30,6 +30,7 @@ from app.repositories import (
     WhatsAppEventRepository,
 )
 from tests.channel_slots import whatsapp_slot
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +42,7 @@ PAYLOAD = {"messages": [{"id": "wamid.one", "text": {"body": "hello"}}]}
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.capitalize(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.capitalize(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

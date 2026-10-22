@@ -50,6 +50,7 @@ from tests.integration.test_billing_sweep_concurrency import (  # noqa: F401
     committing,
 )
 from tests.payment_tokens import saved_card
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -98,7 +99,9 @@ async def world(
             reason="Synthetic race price.",
         )
         session.add(yearly)
-        tenant = Tenant(name="Race Co", slug=f"race-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name="Race Co", slug=f"race-{uuid.uuid4().hex[:10]}"
+        )
         session.add(tenant)
         await session.flush()
         owner = await add_owner(session, tenant)

@@ -40,6 +40,7 @@ from app.main import create_app
 from tests.conftest import AllowingEntitlements
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, PROTECTOR
 from tests.paymob_orders import order_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -126,7 +127,7 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 async def _paid_checkout(session: AsyncSession) -> tuple[Invoice, Payment]:
     """A workspace with an open invoice and a pending payment against it."""
-    tenant = Tenant(name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
     session.add(tenant)
     plan = Plan(
         code=f"pro-{uuid.uuid4().hex[:6]}",

@@ -32,6 +32,7 @@ from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.services.agent_service import AgentService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -42,7 +43,7 @@ async def _setup(
     session: AsyncSession, settings: Settings
 ) -> tuple[Tenant, Agent, User, AgentService]:
     slug = f"grants-{uuid.uuid4().hex[:8]}"
-    tenant = Tenant(name="Grants", slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Grants", slug=slug)
     admin = User(
         email=f"{slug}@example.test",
         hashed_password="x" * 20,

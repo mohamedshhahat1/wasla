@@ -40,6 +40,7 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -134,7 +135,13 @@ def media_service(app: FastAPI) -> StubMediaService:
             tenant_id=TENANT_ID,
             role=TenantRole.TENANT_OWNER,
         ),
-        tenant=Tenant(id=TENANT_ID, name="Acme", slug="acme", status=TenantStatus.ACTIVE),
+        tenant=Tenant(
+            timezone=TEST_TIMEZONE,
+            id=TENANT_ID,
+            name="Acme",
+            slug="acme",
+            status=TenantStatus.ACTIVE,
+        ),
     )
     return stub
 

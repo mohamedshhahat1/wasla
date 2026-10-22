@@ -35,6 +35,7 @@ from app.core.config import Settings
 from app.core.exceptions import _safe_validation_errors
 from app.main import create_app
 from tests.conftest import FakeDependency
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -83,6 +84,7 @@ async def test_a_rejected_password_is_not_read_back_to_the_caller(http: AsyncCli
             # handler under test runs.
             "password": SECRET + ("z" * 200),
             "email": "someone@example.com",
+            "timezone": TEST_TIMEZONE,
             "workspace_name": "Workspace",
             "workspace_slug": "workspace",
         },

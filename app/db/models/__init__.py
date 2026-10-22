@@ -30,16 +30,20 @@ from .billing import (
     SubscriptionStatus,
 )
 from .billing_incident import BillingIncident, BillingIncidentKind, BillingIncidentStatus
+from .business_initiated import BusinessInitiatedSend, LedgerSource
 from .campaign import (
     MAX_RECIPIENT_ATTEMPTS,
     TERMINAL_CAMPAIGN_STATUSES,
     Campaign,
+    CampaignCreateKey,
     CampaignRecipient,
     CampaignStatus,
+    CampaignTestSend,
     OptOutSource,
     RecipientStatus,
 )
 from .campaign_media import CampaignHeaderMedia, HeaderMediaKind
+from .campaign_segment import CampaignSegment
 from .channel import (
     Channel,
     ChannelConnection,
@@ -135,9 +139,11 @@ from .lead import (
 from .media import UNRESOLVED_MEDIA_STATUSES, MediaStatus, MessageMedia
 from .media_purge import MediaPurgeObject
 from .membership import Membership
+from .messaging_limit import LimitSource, PortfolioKeyKind, WhatsAppBusinessPortfolio
 from .password_reset import PasswordResetToken
 from .payment_event import PaymentEvent
 from .payment_method import PaymentMethod, PaymentMethodStatus
+from .rate_card import WhatsAppRateCard, WhatsAppRateCardMarket, WhatsAppRateCardRate
 from .sentiment import (
     PRIORITY_RANK,
     SENTIMENT_PRIORITY,
@@ -235,10 +241,14 @@ __all__ = [
     "BillingIncidentKind",
     "BillingIncidentStatus",
     "BillingInterval",
+    "BusinessInitiatedSend",
     "Campaign",
+    "CampaignCreateKey",
     "CampaignHeaderMedia",
     "CampaignRecipient",
+    "CampaignSegment",
     "CampaignStatus",
+    "CampaignTestSend",
     "CapacityReductionCause",
     "CapacityReductionStatus",
     "Channel",
@@ -287,7 +297,9 @@ __all__ = [
     "LeadNote",
     "LeadSource",
     "LeadStatus",
+    "LedgerSource",
     "LimitKey",
+    "LimitSource",
     "MediaPurgeObject",
     "MediaStatus",
     "Membership",
@@ -312,6 +324,7 @@ __all__ = [
     "PlanVersion",
     "PlanVersionMigration",
     "PlatformRole",
+    "PortfolioKeyKind",
     "RecipientStatus",
     "ScheduledChangeSource",
     "SentimentLabel",
@@ -339,9 +352,13 @@ __all__ = [
     "User",
     "WhatsAppAccount",
     "WhatsAppAccountStatus",
+    "WhatsAppBusinessPortfolio",
     "WhatsAppEvent",
     "WhatsAppEventKind",
     "WhatsAppEventState",
+    "WhatsAppRateCard",
+    "WhatsAppRateCardMarket",
+    "WhatsAppRateCardRate",
     "WhatsAppTemplate",
     "clamp_score",
     "count_placeholders",

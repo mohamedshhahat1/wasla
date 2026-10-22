@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.timezones import local
 from app.db.models.campaign import (
     DEFAULT_MESSAGES_PER_MINUTE,
     MAX_CAMPAIGN_NAME_LENGTH,
@@ -29,6 +30,7 @@ from app.db.models.campaign import (
     CampaignRecipient,
     CampaignStatus,
     CampaignStopReason,
+    CampaignWaitReason,
     OptOutSource,
     OptOutVia,
     RecipientReason,
@@ -41,14 +43,24 @@ from app.db.models.conversation import Contact
 from app.db.models.lead import LeadStatus
 from app.repositories.campaign_repository import AudienceFilter, CampaignStatistics
 from app.schemas.text import StorableText
+from app.services.campaign_activity import ActivityEntry, ActivityKind
+from app.services.campaign_planner import Eta
 from app.services.campaign_service import MAX_AUDIENCE_SIZE
+from app.services.delivery_plan import DeliveryPlan, EtaBasis, PlanNotice
 from app.services.entitlement_terms import ordered
+from app.services.personalisation import (
+    MAX_CUSTOM_FIELD_KEY_LENGTH,
+    Mapping,
+    ParameterSource,
+)
 
 # How many variables a template can plausibly want. Meta's own limit is higher;
 # this is a bound on a request body, not a statement about templates.
 MAX_TEMPLATE_VARIABLES = 20
 MAX_VARIABLE_LENGTH = 1024
 MAX_TEMPLATE_BUTTONS = 10
+# How many people one preview may show (PER-04).
+MAX_PREVIEW_CONTACTS = 5
 # A campaign description is a note to whoever runs the campaign next, and the
 # column is `Text` - so nothing but this decides how long it may be. Two
 # thousand characters is several paragraphs, which is more than anybody writes
@@ -71,6 +83,29 @@ class ButtonParameterRequest(_Payload):
     # Meta allows up to ten buttons on a template.
     index: int = Field(ge=0, le=MAX_TEMPLATE_BUTTONS - 1)
     value: str = Field(min_length=1, max_length=MAX_VARIABLE_LENGTH)
+    # Always a constant (PER-01): a personal value in a URL leaves Wasla in a
+    # link. Anything else is refused, 422 `parameter_source_not_allowed`.
+    source: ParameterSource = ParameterSource.CONSTANT
+
+
+class ParameterSourceRequest(_Payload):
+    """Where one body or text-header placeholder's value comes from (PER-01).
+
+    `constant` with its `value`; or a field of the contact or their active lead
+    - `contact.display_name`, `lead.name`, `lead.interest`, `lead.status`,
+    `lead.budget`, `lead.custom_fields` with its `key` - and a `fallback` for
+    people without it. The phone number is not a source.
+    """
+
+    source: ParameterSource
+    value: StorableText | None = Field(default=None, max_length=MAX_VARIABLE_LENGTH)
+    key: StorableText | None = Field(
+        default=None, min_length=1, max_length=MAX_CUSTOM_FIELD_KEY_LENGTH
+    )
+    fallback: StorableText | None = Field(default=None, max_length=MAX_VARIABLE_LENGTH)
+
+    def to_mapping(self) -> Mapping:
+        return Mapping(source=self.source, value=self.value, key=self.key, fallback=self.fallback)
 
 
 class CampaignCreateRequest(_Payload):
@@ -111,6 +146,124 @@ class CampaignCreateRequest(_Payload):
     # an id from `POST /campaigns/header-media` (HM-02). Required by such a
     # template, refused by any other; fixed once the campaign is composed.
     header_media_id: uuid.UUID | None = None
+    # Each person's own values (PER-01), in place of `variables` and
+    # `header_variables`: one entry per placeholder, in placeholder order.
+    body_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    header_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+
+
+class CampaignUpdateRequest(_Payload):
+    """A draft's edit (PG-03): only the fields sent change.
+
+    The values are given as in a create - constants, or per-placeholder
+    `body_parameters` / `header_parameters` - and replace the draft's; a field
+    left out keeps its value. `version` is the draft's version the edit was
+    made from, unless it comes as the `If-Match` header.
+    """
+
+    name: StorableText | None = Field(
+        default=None, min_length=1, max_length=MAX_CAMPAIGN_NAME_LENGTH
+    )
+    description: StorableText | None = Field(
+        default=None, max_length=MAX_CAMPAIGN_DESCRIPTION_LENGTH
+    )
+    account_id: uuid.UUID | None = None
+    template_id: uuid.UUID | None = None
+    variables: list[StorableText] | None = Field(default=None, max_length=MAX_TEMPLATE_VARIABLES)
+    header_variables: list[StorableText] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    button_parameters: list[ButtonParameterRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_BUTTONS
+    )
+    body_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    header_parameters: list[ParameterSourceRequest] | None = Field(
+        default=None, max_length=MAX_TEMPLATE_VARIABLES
+    )
+    header_media_id: uuid.UUID | None = None
+    messages_per_minute: int | None = Field(
+        default=None, ge=MIN_MESSAGES_PER_MINUTE, le=MAX_MESSAGES_PER_MINUTE
+    )
+    version: int | None = Field(default=None, ge=1)
+
+    def changes(self) -> dict[str, Any]:
+        """The fields sent, in the service's terms (PG-03)."""
+        sent = self.model_fields_set - {"version"}
+        changes: dict[str, Any] = {}
+        for field in sent:
+            value = getattr(self, field)
+            if field == "button_parameters":
+                changes[field] = {entry.index: entry.value for entry in value or []}
+            elif field in ("body_parameters", "header_parameters"):
+                target = "body_mappings" if field == "body_parameters" else "header_mappings"
+                changes[target] = (
+                    [entry.to_mapping() for entry in value] if value is not None else None
+                )
+            else:
+                changes[field] = value
+        return changes
+
+    def personal_buttons(self) -> bool:
+        return any(
+            entry.source is not ParameterSource.CONSTANT for entry in self.button_parameters or []
+        )
+
+
+class CampaignActivityRead(BaseModel):
+    """One line of a campaign's activity (PG-05)."""
+
+    id: uuid.UUID
+    action: ActivityKind
+    occurred_at: datetime
+    # The same moment in the workspace's own time, with its offset.
+    occurred_at_local: datetime
+    # `user` with their id and name, or `system`.
+    actor: dict[str, Any]
+    # Field names, counts, reasons and times only.
+    metadata: dict[str, Any]
+
+    @classmethod
+    def from_entry(cls, entry: ActivityEntry, *, timezone: str) -> Self:
+        return cls(
+            id=entry.id,
+            action=entry.kind,
+            occurred_at=entry.occurred_at,
+            occurred_at_local=local(entry.occurred_at, timezone),
+            actor={"type": entry.actor_type, "id": entry.actor_id, "name": entry.actor_name},
+            metadata=entry.metadata,
+        )
+
+
+class TestSendRequest(_Payload):
+    """Who a campaign's test goes to: the admin's own contact (PG-09)."""
+
+    contact_id: uuid.UUID
+
+
+class MessagePreviewRequest(_Payload):
+    """Up to five people of the campaign's audience (PER-04)."""
+
+    contact_ids: list[uuid.UUID] = Field(min_length=1, max_length=MAX_PREVIEW_CONTACTS)
+
+
+class MessagePreviewRead(BaseModel):
+    """What one person would receive, and which of their values fell back."""
+
+    contact_id: uuid.UUID
+    header: str | None
+    body: str
+    buttons: list[str]
+    fallbacks: dict[str, list[int]]
+
+
+class MessagePreviewResponse(BaseModel):
+    previews: list[MessagePreviewRead]
 
 
 class AudienceRequest(_Payload):
@@ -121,6 +274,10 @@ class AudienceRequest(_Payload):
     # Contacts of this workspace, chosen by hand. Still filtered by everything
     # else: naming somebody who opted out does not reach them.
     contact_ids: list[uuid.UUID] = Field(default_factory=list, max_length=1000)
+    # A saved segment of this workspace (PG-06): its rules are the starting
+    # point, and the filters above can only narrow them. Copied onto the
+    # campaign when the list is written.
+    segment_id: uuid.UUID | None = None
 
     def to_filter(self) -> AudienceFilter:
         return AudienceFilter(
@@ -146,6 +303,102 @@ class CampaignScheduleRequest(_Payload):
     """When to send. Omitting the time means now."""
 
     scheduled_at: datetime | None = None
+    # When to stop trying (LIM-06): whoever is still pending then is skipped
+    # `send_window_closed` and the campaign completes. With its UTC offset,
+    # after the start.
+    send_until: datetime | None = None
+
+
+class PlanDayRead(BaseModel):
+    """One local day of a delivery plan (LIM-05)."""
+
+    local_date: date
+    first_send_at: datetime
+    first_send_at_local: datetime
+    last_send_at: datetime
+    last_send_at_local: datetime
+    recipients: int
+
+
+class DeliveryPlanRead(BaseModel):
+    """When the campaign is expected to reach its people, day by day (LIM-05).
+
+    A prediction from the campaign's rate, the workspace's quiet hours, the
+    portfolio's campaign budget and what it has already used, and per-person
+    deferrals - never a guarantee. `notices` says what shaped it.
+    """
+
+    computed_at: datetime
+    timezone: str
+    first_send_at: datetime | None
+    first_send_at_local: datetime | None
+    estimated_completion_at: datetime | None
+    estimated_completion_at_local: datetime | None
+    recipients_planned: int
+    recipients_left_by_deadline: int
+    days: list[PlanDayRead]
+    notices: list[PlanNotice]
+    basis: list[EtaBasis]
+
+    @classmethod
+    def from_plan(cls, planned: DeliveryPlan) -> Self:
+        tz = planned.timezone
+
+        def at(moment: datetime | None) -> datetime | None:
+            return local(moment, tz) if moment is not None else None
+
+        return cls(
+            computed_at=planned.computed_at,
+            timezone=tz,
+            first_send_at=planned.first_send_at,
+            first_send_at_local=at(planned.first_send_at),
+            estimated_completion_at=planned.estimated_completion_at,
+            estimated_completion_at_local=at(planned.estimated_completion_at),
+            recipients_planned=planned.planned,
+            recipients_left_by_deadline=planned.left_by_deadline,
+            days=[
+                PlanDayRead(
+                    local_date=day.local_date,
+                    first_send_at=day.first_send_at,
+                    first_send_at_local=local(day.first_send_at, tz),
+                    last_send_at=day.last_send_at,
+                    last_send_at_local=local(day.last_send_at, tz),
+                    recipients=day.recipients,
+                )
+                for day in planned.days
+            ],
+            notices=list(planned.notices),
+            basis=list(planned.basis),
+        )
+
+
+class EtaRead(BaseModel):
+    """When a live campaign is expected to finish (PG-13) - an estimate, never a promise.
+
+    Null `estimated_completion_at` with a `reason` for a campaign that will not
+    send by itself (draft, paused, failed, cancelled, completed) or whose
+    number's limit is unknown.
+    """
+
+    estimated_completion_at: datetime | None
+    estimated_completion_at_local: datetime | None
+    basis: list[EtaBasis]
+    confidence: str | None
+    reason: str | None
+
+    @classmethod
+    def from_eta(cls, eta: Eta, *, timezone: str) -> Self:
+        return cls(
+            estimated_completion_at=eta.estimated_completion_at,
+            estimated_completion_at_local=(
+                local(eta.estimated_completion_at, timezone)
+                if eta.estimated_completion_at is not None
+                else None
+            ),
+            basis=list(eta.basis),
+            confidence=eta.confidence,
+            reason=eta.reason,
+        )
 
 
 class OptOutRequest(_Payload):
@@ -231,16 +484,62 @@ class CampaignRead(BaseModel):
     # The header file it is sent with (HM-08), or null for a template whose
     # header is text or absent. Meta's id for it is never shown.
     header_media: HeaderMediaRead | None = None
+    # Why a live campaign is sending nothing right now and will by itself
+    # (TZ-03, LIM-04, FREQ-01): `quiet_hours`, `daily_limit`, `contact_cap`,
+    # `limit_unknown`. Not a pause - the status stays scheduled or running.
+    # Null while it sends, and in every other status.
+    waiting_reason: CampaignWaitReason | None = None
+    # When it will send again, in UTC and in the workspace's own time with
+    # its offset (TZ-03). Null unless it is waiting.
+    resumes_at: datetime | None = None
+    resumes_at_local: datetime | None = None
+    # Its deadline (LIM-06), in UTC and in the workspace's own time.
+    send_until: datetime | None = None
+    send_until_local: datetime | None = None
+    # When a live campaign is expected to finish (PG-13). Computed for one
+    # campaign's read, a list of live ones and the progress route.
+    eta: EtaRead | None = None
+    # The plan, on the schedule response only (LIM-05); `GET
+    # /campaigns/{id}/delivery-plan` recomputes it at any time.
+    delivery_plan: DeliveryPlanRead | None = None
+    # A draft's edit counter (PG-03): send it back as If-Match (or `version`)
+    # with an edit. Also the response's ETag.
+    version: int = 1
+    # Whether the draft's list is written and it can be scheduled (PG-08):
+    # false for a draft whose audience step has not run, or was cleared.
+    audience_ready: bool = False
+    # On a draft edit's response only (PG-03): true when the edit cleared the
+    # written list, which the page writes again from `audience`.
+    audience_cleared: bool | None = None
     created_at: datetime
     updated_at: datetime
 
+    @field_validator("version", mode="before")
+    @classmethod
+    def _unflushed(cls, value: object) -> object:
+        # The column's default is applied at insert: a row read before its
+        # first flush is version 1.
+        return 1 if value is None else value
+
     @classmethod
     def from_model(
-        cls, campaign: Campaign, *, header_media: CampaignHeaderMedia | None = None
+        cls,
+        campaign: Campaign,
+        *,
+        header_media: CampaignHeaderMedia | None = None,
+        timezone: str | None = None,
+        eta: Eta | None = None,
     ) -> Self:
         read = cls.model_validate(campaign)
+        read.audience_ready = campaign.audience_size > 0
         if header_media is not None:
             read.header_media = HeaderMediaRead.from_model(header_media)
+        if timezone is not None and read.resumes_at is not None:
+            read.resumes_at_local = local(read.resumes_at, timezone)
+        if timezone is not None and read.send_until is not None:
+            read.send_until_local = local(read.send_until, timezone)
+        if timezone is not None and eta is not None:
+            read.eta = EtaRead.from_eta(eta, timezone=timezone)
         return read
 
 
@@ -276,6 +575,15 @@ class RecipientListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class ReasonCountRead(BaseModel):
+    """How many recipients ended in one status for one reason (PG-10)."""
+
+    status: str
+    reason_code: str
+    provider_code: int | None
+    count: int
+
+
 class CampaignStatisticsRead(BaseModel):
     """Outcomes, plus what Meta has since said about delivery."""
 
@@ -288,6 +596,17 @@ class CampaignStatisticsRead(BaseModel):
     total: int
     # Sent - Meta accepted them - then reported `failed` (CMP-10).
     failed_after_send: int = 0
+    # Accepted, and held by Meta's portfolio pacing while it gathers feedback
+    # (LIM-08). Counted among `sent`.
+    held: int = 0
+    # Answered on the campaign's number within the attribution window after
+    # their copy - their latest campaign there (PG-10).
+    replied: int = 0
+    # Opted out by their own decision within the window after their copy.
+    opted_out_after: int = 0
+    # Every recipient once, by status, closed reason code ("unrecorded" for
+    # none) and Meta's error code (PG-10). Sums to `total`.
+    reasons: list[ReasonCountRead] = Field(default_factory=list)
 
     @classmethod
     def from_statistics(cls, statistics: CampaignStatistics) -> Self:
@@ -300,7 +619,43 @@ class CampaignStatisticsRead(BaseModel):
             read=statistics.read,
             total=statistics.total,
             failed_after_send=statistics.failed_after_send,
+            held=statistics.held,
+            replied=statistics.replied,
+            opted_out_after=statistics.opted_out_after,
+            reasons=[
+                ReasonCountRead(status=status, reason_code=reason, provider_code=code, count=count)
+                for status, reason, code, count in statistics.reasons
+            ],
         )
+
+
+class CampaignSummaryRead(BaseModel):
+    """The campaigns page's KPI cards (PG-11): every campaign created in the window."""
+
+    campaigns_by_status: dict[str, int]
+    recipients: dict[str, int]
+    # Delivered / sent, read / delivered, replied / sent; null with nothing to divide by.
+    rates: dict[str, float | None]
+    window: dict[str, Any]
+
+
+class CampaignProgressItem(BaseModel):
+    """One campaign's live state (PG-12)."""
+
+    id: uuid.UUID
+    status: CampaignStatus
+    waiting_reason: CampaignWaitReason | None
+    resumes_at: datetime | None
+    resumes_at_local: datetime | None
+    counts: dict[str, int]
+    eta: EtaRead | None
+    updated_at: datetime
+
+
+class CampaignProgressRead(BaseModel):
+    items: list[CampaignProgressItem]
+    # Ask again after this many seconds: 10 while any is live, 60 otherwise.
+    poll_after_seconds: int
 
 
 class ContactIdentityRead(BaseModel):
@@ -403,14 +758,28 @@ __all__ = [
     "AudiencePreviewResponse",
     "AudienceRequest",
     "ButtonParameterRequest",
+    "CampaignActivityRead",
     "CampaignCreateRequest",
+    "CampaignProgressItem",
+    "CampaignProgressRead",
     "CampaignRead",
     "CampaignScheduleRequest",
     "CampaignStatisticsRead",
+    "CampaignSummaryRead",
+    "CampaignUpdateRequest",
     "ChannelConsentRead",
     "ContactIdentityRead",
     "ContactOptOutRead",
+    "DeliveryPlanRead",
+    "EtaRead",
+    "MessagePreviewRead",
+    "MessagePreviewRequest",
+    "MessagePreviewResponse",
     "OptOutRequest",
+    "ParameterSourceRequest",
+    "PlanDayRead",
+    "ReasonCountRead",
     "RecipientListResponse",
     "RecipientRead",
+    "TestSendRequest",
 ]

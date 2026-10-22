@@ -124,11 +124,20 @@ PURGED_TABLES: tuple[str, ...] = (
     # keys: deleted first, the actions the parents' deletes fire find nothing
     # to update (DB-002). Their lookups are indexed as well (migration 0075),
     # so the order is a saving, not the fix.
+    # A campaign's test sends (PG-09): they name the test message (SET NULL),
+    # the campaign and the contact. Before `messages`, like the recipients.
+    "campaign_test_sends",
     "campaign_recipients",
     "follow_ups",
     "messages",
     "conversations",
+    # The drafts an Idempotency-Key made (PG-08). Before `campaigns`, which
+    # each one names.
+    "campaign_create_keys",
     "campaigns",
+    # Saved audience rules (PG-06). After `campaigns`, which name a segment
+    # without a cascade; before `whatsapp_accounts`, which a segment may name.
+    "campaign_segments",
     # A campaign's header files (HM-07): after `campaigns`, which name them,
     # and through the ledger like `message_media`, so their objects are
     # deleted once the rows are.
@@ -205,6 +214,13 @@ RETAINED_TABLES: frozenset[str] = frozenset(
         # has not yet been confirmed (MEDIA-07). Each row is removed once its
         # object is gone, so a fully purged workspace has none.
         "media_purge_objects",
+        # The platform's count of Meta's moving 24-hour window per business
+        # portfolio (LIM-03, ADR-146). A portfolio may be shared with other
+        # workspaces, and erasing a purged workspace's last day would make
+        # the shared window look emptier than Meta counts it. It holds only the
+        # number a template went to, and the retention sweep deletes every row
+        # after 48 hours, so a purged workspace keeps none past that.
+        "business_initiated_sends",
     }
 )
 

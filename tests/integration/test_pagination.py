@@ -29,6 +29,7 @@ from app.db.models.conversation import (
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.inbox_service import InboxService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -36,7 +37,7 @@ START = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
 
 
 async def _workspace(session: AsyncSession, *, slug: str = "acme") -> tuple[Any, ...]:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

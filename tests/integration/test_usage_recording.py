@@ -65,6 +65,7 @@ from app.workers.ai_worker import AgentWorker, _TurnProgress
 from app.workers.queue import AgentJob
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_database, as_media_reader, as_redis_client, as_whatsapp
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -137,7 +138,7 @@ def refusing_meta(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

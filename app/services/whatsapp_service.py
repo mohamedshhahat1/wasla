@@ -22,14 +22,20 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
-from app.integrations.whatsapp.payload import template_status_events
+from app.integrations.whatsapp.payload import (
+    account_alert_events,
+    capability_events,
+    template_status_events,
+)
 from app.services.channel_ingestion_service import (
     AGENT_NOT_QUEUED,
     MEDIA_NOT_QUEUED,
     ChannelIngestionService,
     IngestionOutcome,
 )
+from app.services.messaging_limit_service import MessagingLimitService
 from app.services.template_status_updates import apply_template_status_events
 from app.workers.media_queue import MediaQueue
 from app.workers.queue import AgentQueue
@@ -64,6 +70,15 @@ class WhatsAppIngestionService:
         # Template status changes ride the same subscription and signature,
         # and are applied to the registry rather than projected (CMQ-05).
         await apply_template_status_events(self._session, template_status_events(payload))
+        # So do a portfolio's messaging limit and Meta's account alerts
+        # (LIM-01): applied, never projected. Correct without them - the limit
+        # is also read on connect, enable and schedule - only slower to notice.
+        capabilities = capability_events(payload)
+        alerts = account_alert_events(payload)
+        if capabilities or alerts:
+            limits = MessagingLimitService(self._session, settings=get_settings())
+            await limits.apply_capability_events(capabilities)
+            await limits.apply_account_alerts(alerts)
         return outcome
 
 

@@ -52,6 +52,7 @@ from app.db.models.enums import TenantStatus
 from app.main import create_app
 from app.services.workspace_entitlement_service import WorkspaceEntitlementService
 from tests.conftest import AllowingEntitlements
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -188,6 +189,7 @@ async def _owned_workspace(
     role: TenantRole = TenantRole.TENANT_OWNER,
 ) -> Tenant:
     tenant = Tenant(
+        timezone=TEST_TIMEZONE,
         name=slug.title(),
         slug=slug,
         status=status,
@@ -220,7 +222,7 @@ async def _headers(http: AsyncClient, email: str) -> dict[str, str]:
 async def _create(http: AsyncClient, headers: dict[str, str], slug: str) -> Any:
     return await http.post(
         f"{API}/workspaces",
-        json={"name": slug.title(), "slug": slug},
+        json={"timezone": TEST_TIMEZONE, "name": slug.title(), "slug": slug},
         headers=headers,
     )
 
@@ -527,7 +529,9 @@ async def test_the_tenant_scoped_service_refuses_an_account_limit(
     """
     from app.services.entitlement_service import EntitlementService
 
-    tenant = Tenant(name="Scoped", slug="scoped-refusal", status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Scoped", slug="scoped-refusal", status=TenantStatus.ACTIVE
+    )
     db_session.add(tenant)
     await db_session.flush()
     service = EntitlementService(session=db_session, tenant_id=tenant.id, default_plan_code=None)

@@ -32,6 +32,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.follow_up_service import DispatchOutcome, FollowUpService
 from app.workers.follow_up_worker import FollowUpWorker
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -57,7 +58,7 @@ class SessionHandle:
 async def _due_follow_up(
     session: AsyncSession, *, slug: str, wa_id: str, minutes_late: int = 5
 ) -> FollowUp:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
 

@@ -37,6 +37,7 @@ from app.workers.retention_worker import RetentionWorker
 from tests.channel_slots import whatsapp_slot
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import as_redis
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -51,7 +52,7 @@ PAYLOAD = {"entry": [{"changes": [{"value": {"messages": [{"text": {"body": "hi"
 
 async def _workspace(session: AsyncSession) -> tuple[Tenant, WhatsAppAccount]:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name="Retention", slug=f"retention-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Retention", slug=f"retention-{tag}")
     session.add(tenant)
     await session.flush()
     account = await WhatsAppAccountRepository(session, tenant_id=tenant.id).connect(

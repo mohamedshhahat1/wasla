@@ -31,6 +31,7 @@ from app.db.models.knowledge import (
 )
 from app.db.models.tenant import Tenant
 from tests.knowledge_seed import add_generation
+from tests.workspace_timezone import TEST_TIMEZONE
 
 ANN_INDEX = "ix_document_chunks_embedding_hnsw"
 
@@ -82,7 +83,7 @@ class Corpus:
 
 
 async def _workspace(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

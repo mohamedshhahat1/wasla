@@ -59,6 +59,7 @@ from app.integrations.billing.paymob import PaymobProvider
 from app.services.payment_reconciliation_service import PaymentReconciler
 from tests.billing_fixtures import erase_ledger
 from tests.paymob_orders import order_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -163,7 +164,7 @@ async def attempt(
     the tenant, the invoice and the payment.
     """
     async with committing() as session:
-        tenant = Tenant(name="Recon", slug=f"recon-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Recon", slug=f"recon-{uuid.uuid4().hex[:10]}")
         plan = Plan(
             code=f"recon-{uuid.uuid4().hex[:8]}",
             name="Recon",

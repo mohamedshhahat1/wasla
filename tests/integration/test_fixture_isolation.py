@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.db.models.knowledge import KnowledgeBase
 from app.db.models.tenant import Tenant
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +42,7 @@ async def test_the_database_starts_empty(db_session: AsyncSession) -> None:
 
 
 async def test_a_test_may_write_freely(db_session: AsyncSession) -> None:
-    db_session.add(Tenant(name="Probe", slug=SHARED_SLUG))
+    db_session.add(Tenant(timezone=TEST_TIMEZONE, name="Probe", slug=SHARED_SLUG))
     await db_session.flush()
 
     assert await _count(db_session, Tenant) == 1
@@ -55,7 +56,7 @@ async def test_the_previous_tests_writes_are_gone(db_session: AsyncSession) -> N
     """
     assert await _count(db_session, Tenant) == 0
 
-    db_session.add(Tenant(name="Probe", slug=SHARED_SLUG))
+    db_session.add(Tenant(timezone=TEST_TIMEZONE, name="Probe", slug=SHARED_SLUG))
     await db_session.flush()
 
     assert await _count(db_session, Tenant) == 1
@@ -68,7 +69,7 @@ async def test_a_commit_inside_a_test_does_not_escape_it(db_session: AsyncSessio
     every test that follows, and that failure depends on ordering, which makes
     it miserable to diagnose.
     """
-    db_session.add(Tenant(name="Committed", slug="committed-probe"))
+    db_session.add(Tenant(timezone=TEST_TIMEZONE, name="Committed", slug="committed-probe"))
     await db_session.commit()
 
     assert await _count(db_session, Tenant) == 1
@@ -85,7 +86,7 @@ async def test_flush_makes_rows_visible_within_the_test(db_session: AsyncSession
     The fixture has to preserve that reading, or half the suite would be
     testing something the application never does.
     """
-    tenant = Tenant(name="Flushed", slug="flushed-probe")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Flushed", slug="flushed-probe")
     db_session.add(tenant)
     await db_session.flush()
 
@@ -95,10 +96,10 @@ async def test_flush_makes_rows_visible_within_the_test(db_session: AsyncSession
 
 async def test_a_rolled_back_savepoint_leaves_the_test_usable(db_session: AsyncSession) -> None:
     """A failed flush must not poison the rest of the test."""
-    db_session.add(Tenant(name="First", slug="unique-probe"))
+    db_session.add(Tenant(timezone=TEST_TIMEZONE, name="First", slug="unique-probe"))
     await db_session.flush()
 
-    db_session.add(Tenant(name="Duplicate", slug="unique-probe"))
+    db_session.add(Tenant(timezone=TEST_TIMEZONE, name="Duplicate", slug="unique-probe"))
     with pytest.raises(IntegrityError):
         await db_session.flush()
     await db_session.rollback()
@@ -111,7 +112,7 @@ async def test_the_schema_carries_every_table_not_just_the_ones_touched(
     db_session: AsyncSession,
 ) -> None:
     """The session-scoped build must create everything, not a subset."""
-    tenant = Tenant(name="Probe", slug="schema-probe")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Probe", slug="schema-probe")
     db_session.add(tenant)
     await db_session.flush()
 
@@ -138,8 +139,8 @@ async def test_identifiers_are_generated_without_a_committed_sequence(
     db_session: AsyncSession,
 ) -> None:
     """UUID keys, so rollback reuse cannot collide the way a serial would."""
-    first = Tenant(name="One", slug=f"probe-{uuid.uuid4().hex[:8]}")
-    second = Tenant(name="Two", slug=f"probe-{uuid.uuid4().hex[:8]}")
+    first = Tenant(timezone=TEST_TIMEZONE, name="One", slug=f"probe-{uuid.uuid4().hex[:8]}")
+    second = Tenant(timezone=TEST_TIMEZONE, name="Two", slug=f"probe-{uuid.uuid4().hex[:8]}")
     db_session.add_all([first, second])
     await db_session.flush()
 

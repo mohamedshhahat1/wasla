@@ -61,6 +61,7 @@ from app.workers.billing_worker import BillingWorker
 from tests.billing_fixtures import erase_ledger, price_terms
 from tests.fakes import as_database
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -206,7 +207,9 @@ async def tenants(committing: async_sessionmaker[AsyncSession]) -> AsyncIterator
     created: list[uuid.UUID] = []
     async with committing() as session:
         for index in range(COHORT):
-            tenant = Tenant(name=f"Sweep {index}", slug=f"sweep-{uuid.uuid4().hex[:10]}")
+            tenant = Tenant(
+                timezone=TEST_TIMEZONE, name=f"Sweep {index}", slug=f"sweep-{uuid.uuid4().hex[:10]}"
+            )
             session.add(tenant)
             await session.flush()
             created.append(tenant.id)

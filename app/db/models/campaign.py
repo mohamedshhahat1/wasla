@@ -122,9 +122,36 @@ class CampaignStopReason(StrEnum):
     HEADER_MEDIA_UNAVAILABLE = "header_media_unavailable"
     #: Meta refused the header's file, on upload or on a send twice (HM-06).
     HEADER_MEDIA_REFUSED = "header_media_refused"
+    #: Meta dropped a message its portfolio pacing held (135000): the portfolio
+    #: is under quality review and cannot send templates (LIM-08).
+    META_QUALITY_REVIEW = "meta_quality_review"
 
 
 MAX_STOP_REASON_LENGTH: Final = 40
+
+
+class CampaignWaitReason(StrEnum):
+    """Why a live campaign is sending nothing right now, and will by itself (TZ-03, LIM-04).
+
+    A wait is not a pause: the campaign stays `scheduled` or `running`, no
+    recipient spends an attempt or changes state, no lease is held, and the
+    worker comes back at `resumes_at` without anybody doing anything. Cleared
+    by the next batch that sends, and by every transition out of the live
+    statuses.
+    """
+
+    #: It is night in the workspace's own time (TZ-03).
+    QUIET_HOURS = "quiet_hours"
+    #: The business portfolio's share of Meta's messaging limit is used for
+    #: this moving 24 hours (LIM-04).
+    DAILY_LIMIT = "daily_limit"
+    #: Everybody left was sent a marketing message in the last 24 hours
+    #: (FREQ-01).
+    CONTACT_CAP = "contact_cap"
+    #: Meta's messaging limit for the sending number has never been read
+    #: (LIM-01): fail closed until it is.
+    LIMIT_UNKNOWN = "limit_unknown"
+
 
 # Meta's media ids are short numeric strings; the bound is the one inbound
 # handles use (`MAX_MEDIA_HANDLE_LENGTH`).
@@ -161,6 +188,11 @@ class RecipientReason(StrEnum):
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"
     #: Meta refused the template's parameters for this send (CMP-05).
     TEMPLATE_PARAMETERS_REFUSED = "template_parameters_refused"
+    #: Still pending when the campaign's deadline passed (LIM-06).
+    SEND_WINDOW_CLOSED = "send_window_closed"
+    #: Sent a marketing message less than 24 hours earlier, and the deadline
+    #: came first (FREQ-01).
+    CONTACT_FREQUENCY_CAP = "contact_frequency_cap"
 
 
 class RecipientStatus(StrEnum):
@@ -257,6 +289,15 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Index("ix_campaigns_tenant_id_status", "tenant_id", "status"),
         Index("ix_campaigns_tenant_id_created_at", "tenant_id", "created_at"),
         Index("ix_campaigns_account_id", "account_id"),
+        # The target of a tenant-composite foreign key (ADR-100): a create key
+        # names a campaign of its own workspace (PG-08). 0115.
+        Index("uq_campaigns_tenant_id_id", "tenant_id", "id", unique=True),
+        # Which campaigns a segment was used by (PG-06). Partial: most none.
+        Index(
+            "ix_campaigns_audience_segment_id",
+            "audience_segment_id",
+            postgresql_where=text("audience_segment_id IS NOT NULL"),
+        ),
         Index("ix_campaigns_template_id", "template_id"),
         # Which campaigns name an asset: retention keeps a live campaign's
         # file (HM-07), and the asset's foreign key is checked through it.
@@ -281,7 +322,18 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             name="status_reason_known",
         ),
         CheckConstraint(
+            "waiting_reason IS NULL OR waiting_reason IN ("
+            + ", ".join(f"'{reason.value}'" for reason in CampaignWaitReason)
+            + ")",
+            name="waiting_reason_known",
+        ),
+        CheckConstraint(
             "consecutive_batch_failures >= 0", name="consecutive_batch_failures_non_negative"
+        ),
+        # A deadline comes after the start it ends (LIM-06). 0112.
+        CheckConstraint(
+            "send_until IS NULL OR scheduled_at IS NULL OR send_until > scheduled_at",
+            name="send_until_after_start",
         ),
         # The send rate the schema and the service already bound, held by the
         # column too (CMP-22). 0106.
@@ -308,6 +360,14 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         ),
         # The connection Meta's media id was uploaded through, of this
         # workspace (HM-04, CR-09).
+        # The segment its audience rules were copied from, of its own workspace
+        # (PG-06, CR-13). No action on delete: deleting a segment clears the
+        # reference first, and the campaign keeps the rules it copied. 0116.
+        ForeignKeyConstraint(
+            ["tenant_id", "audience_segment_id"],
+            ["campaign_segments.tenant_id", "campaign_segments.id"],
+            name="fk_campaigns_tenant_audience_segment",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "header_provider_account_id"],
             ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
@@ -419,6 +479,25 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     header_provider_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
+    # Why a live campaign is sending nothing right now, from `CampaignWaitReason`
+    # (TZ-03, LIM-04), and when it will by itself. Text with a CHECK, like
+    # `status_reason`. Null while sending, and in every other status. 0109.
+    waiting_reason: Mapped[str | None] = mapped_column(
+        String(MAX_STOP_REASON_LENGTH), nullable=True
+    )
+    resumes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the campaign stops trying (LIM-06): whoever is still pending then is
+    # skipped `send_window_closed` and the campaign completes. An offer that
+    # ends on Friday stops on Friday, however long the limit spread it. 0112.
+    send_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A draft's edit counter (PG-03): an edit names the version it was made
+    # from, and an edit made from an older one is refused 409. Bumped by the
+    # draft edit and by writing the audience, never by the worker. 0115.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # The saved segment the audience's rules were copied from (PG-06); the
+    # rules themselves are in `audience`. Null when written from filters alone,
+    # or when the segment was deleted since. 0116.
+    audience_segment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     @property
     def is_running(self) -> bool:
@@ -472,6 +551,15 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
             "campaign_id",
             "id",
             postgresql_where=text("status = 'pending'"),
+        ),
+        # A contact's latest accepted copies, newest first: what a reply or an
+        # opt-out is attributed to (PG-10). Partial: unsent rows never are. 0118.
+        Index(
+            "ix_campaign_recipients_tenant_id_contact_id_sent_at",
+            "tenant_id",
+            "contact_id",
+            text("sent_at DESC"),
+            postgresql_where=text("sent_at IS NOT NULL"),
         ),
         Index(
             "ix_campaign_recipients_participant_identity_id",
@@ -548,6 +636,19 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     # the rest of the campaign goes on. The claim skips it until then.
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # This person's own values, resolved once when the audience was written
+    # (PER-02): `{"contact_id", "body", "header", "fallbacks", "body_too_long"}`.
+    # The send uses exactly these. Null for a campaign with nothing personal.
+    # A copy of a name per row: retention is CMQ-08. 0114.
+    rendered_parameters: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # The customer answered on the campaign's number within the attribution
+    # window after this copy was accepted - this copy being their latest
+    # (PG-10). Recorded once, at ingestion. 0118.
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The customer opted out within the window after this copy, their latest.
+    opted_out_after_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     @property
     def is_pending(self) -> bool:
@@ -558,10 +659,100 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
         return self.attempts >= MAX_RECIPIENT_ATTEMPTS
 
 
+#: The longest `Idempotency-Key` a campaign create accepts (PG-08).
+MAX_CREATE_KEY_LENGTH: Final = 128
+
+
+class CampaignCreateKey(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
+    """A retried "create the draft" names the draft it already made (PG-08).
+
+    The composer's first step sends an `Idempotency-Key`; the same key in the
+    same workspace within a day returns that draft instead of making a second.
+    `request_hash` is the request it was first used with: the key reused for a
+    different request is refused rather than answered with a draft the person
+    did not ask for. Rows older than a day are deleted by the retention sweep.
+    0115.
+    """
+
+    __tablename__ = "campaign_create_keys"
+    __table_args__ = (
+        Index("ix_campaign_create_keys_tenant_id", "tenant_id"),
+        Index("ix_campaign_create_keys_created_at", "created_at"),
+        Index("ix_campaign_create_keys_campaign_id", "campaign_id"),
+        UniqueConstraint("tenant_id", "key", name="uq_campaign_create_keys_tenant_id_key"),
+        UniqueConstraint("tenant_id", "id", name="uq_campaign_create_keys_tenant_id_id"),
+        # The draft is one of the key's own workspace (ADR-100); deleting the
+        # draft deletes its key.
+        ForeignKeyConstraint(
+            ["tenant_id", "campaign_id"],
+            ["campaigns.tenant_id", "campaigns.id"],
+            name="fk_campaign_create_keys_tenant_campaign",
+            ondelete="CASCADE",
+        ),
+    )
+
+    key: Mapped[str] = mapped_column(String(MAX_CREATE_KEY_LENGTH), nullable=False)
+    campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class CampaignTestSend(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
+    """One test of a campaign, sent to an admin's own contact (PG-09). 0117.
+
+    Not a recipient: the campaign's list, statistics and per-contact cap never
+    see it (CR-14). It is what a workspace's daily allowance of tests is
+    counted from, and the link between the test message and its campaign.
+    """
+
+    __tablename__ = "campaign_test_sends"
+    __table_args__ = (
+        Index("ix_campaign_test_sends_tenant_id_created_at", "tenant_id", "created_at"),
+        Index("ix_campaign_test_sends_campaign_id", "campaign_id"),
+        Index(
+            "ix_campaign_test_sends_message_id",
+            "message_id",
+            postgresql_where=text("message_id IS NOT NULL"),
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_campaign_test_sends_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "campaign_id"],
+            ["campaigns.tenant_id", "campaigns.id"],
+            name="fk_campaign_test_sends_tenant_campaign",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "contact_id"],
+            ["contacts.tenant_id", "contacts.id"],
+            name="fk_campaign_test_sends_tenant_contact",
+            ondelete="CASCADE",
+        ),
+    )
+
+    campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    contact_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    sent_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 __all__ = [
     "CAMPAIGN_STATUS_TYPE",
     "DEFAULT_MESSAGES_PER_MINUTE",
     "MAX_CAMPAIGN_NAME_LENGTH",
+    "MAX_CREATE_KEY_LENGTH",
     "MAX_MESSAGES_PER_MINUTE",
     "MAX_RECIPIENT_ATTEMPTS",
     "MIN_MESSAGES_PER_MINUTE",
@@ -569,9 +760,12 @@ __all__ = [
     "RECIPIENT_STATUS_TYPE",
     "TERMINAL_CAMPAIGN_STATUSES",
     "Campaign",
+    "CampaignCreateKey",
     "CampaignRecipient",
     "CampaignStatus",
     "CampaignStopReason",
+    "CampaignTestSend",
+    "CampaignWaitReason",
     "OptOutSource",
     "RecipientReason",
     "RecipientStatus",

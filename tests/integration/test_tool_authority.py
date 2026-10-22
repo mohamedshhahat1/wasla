@@ -61,6 +61,7 @@ from tests.integration.ai_harness import (
     tool_call_response,
     tool_calls_response,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -403,7 +404,7 @@ async def test_the_handoff_tool_refuses_a_conversation_a_colleague_already_owns(
 async def _human_conversation(session: AsyncSession) -> tuple[Tenant, Conversation]:
     """A conversation a colleague has taken over, with their own reason on it."""
     slug = f"owned-{uuid.uuid4().hex[:8]}"
-    tenant = Tenant(name="Owned", slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Owned", slug=slug)
     session.add(tenant)
     await session.flush()
 

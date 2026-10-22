@@ -58,6 +58,7 @@ from tests.integration.test_campaign_worker import (
     StubMessaging,
     _sending_campaign,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -259,7 +260,7 @@ async def test_suspended_a_follow_up_on_instagram_is_skipped(
         },
     )
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Plan {tag}", slug=f"plan-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Plan {tag}", slug=f"plan-{tag}")
     db_session.add(tenant)
     await db_session.flush()
     connection = ChannelConnection(

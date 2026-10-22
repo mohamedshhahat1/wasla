@@ -62,6 +62,12 @@ dependencies = [
     "opentelemetry-api>=1.44,<2",
     "opentelemetry-sdk>=1.44,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
+    # The IANA time zone database, as a package (TZ-01, ADR-145). A workspace's
+    # time zone is validated against it and its quiet hours are computed in
+    # it, and `zoneinfo` on Windows has no system database to fall back on -
+    # so the zones a workspace may choose, and their offsets, come from this
+    # one pinned copy on every platform (`app/core/timezones.py`).
+    "tzdata>=2026.2,<2028",
 ]
 
 [project.optional-dependencies]
@@ -141,6 +147,12 @@ module = ["argon2.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# tzdata is a data package with no py.typed marker. Only `IANA_VERSION` - a
+# string - is read from it; the zones themselves come through `zoneinfo`.
+module = ["tzdata"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # pgvector ships no py.typed marker. Only the Vector column type is imported
 # from it, and the model declares that column's Python type itself, so nothing
 # downstream loses checking.
@@ -158,4 +170,10 @@ markers = [
     # Opt-in, and skipped without OPENAI_API_KEY so CI stays green without
     # credentials. These call the real provider and cost real money.
     "real_provider: calls a real external provider; needs credentials",
+    # Without it a workspace's quiet hours never bind (tests/conftest.py):
+    # suites run at any hour, and only these test the window (TZ-03).
+    "quiet_hours: exercises the real quiet-hours window rather than daytime",
+    # Without it every number's messaging limit reads as known and unlimited
+    # (tests/conftest.py); only these exercise the limit and the ledger.
+    "messaging_limit: exercises Meta's real portfolio limit, ledger and budget",
 ]

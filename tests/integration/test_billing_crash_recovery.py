@@ -95,6 +95,7 @@ from app.workers.billing_worker import BillingWorker
 from tests.billing_fixtures import erase_ledger, price_terms
 from tests.fakes import as_database
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY, saved_card
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -225,7 +226,7 @@ async def workspace(
     and the card. The plan is global and goes separately.
     """
     async with committing() as session:
-        tenant = Tenant(name="Crash", slug=f"crash-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Crash", slug=f"crash-{uuid.uuid4().hex[:10]}")
         plan = Plan(
             code=f"crash-{uuid.uuid4().hex[:8]}",
             name="Crash",

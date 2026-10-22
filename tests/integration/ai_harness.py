@@ -55,6 +55,7 @@ from app.db.session import Database
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.ai_worker import AgentWorker
 from app.workers.queue import AgentJob, AgentQueue
+from tests.workspace_timezone import TEST_TIMEZONE
 
 # A logical database of its own by default, and overridable so a run can point
 # the whole AI suite at a disposable container instead of a developer's Redis.
@@ -363,7 +364,9 @@ class TurnRunner:
 
     async def workspace(self, *, grants: Sequence[str] = (), **agent_fields: Any) -> Workspace:
         async with self.database.session() as session:
-            tenant = Tenant(name="AI turns", slug=f"ai-{uuid.uuid4().hex[:10]}")
+            tenant = Tenant(
+                timezone=TEST_TIMEZONE, name="AI turns", slug=f"ai-{uuid.uuid4().hex[:10]}"
+            )
             session.add(tenant)
             await session.flush()
             account = WhatsAppAccount(

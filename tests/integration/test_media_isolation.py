@@ -53,6 +53,7 @@ from app.main import create_app
 from tests.conftest import AllowingEntitlements
 from tests.fake_queue_redis import FakeQueueRedis
 from tests.fakes import store_object
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -140,7 +141,12 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
 async def _workspace(session: AsyncSession, slug: str) -> tuple[Tenant, User]:
     """A workspace with an owner who can actually sign in."""
     suffix = uuid.uuid4().hex[:8]
-    tenant = Tenant(name=slug.title(), slug=f"{slug}-{suffix}", status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE,
+        name=slug.title(),
+        slug=f"{slug}-{suffix}",
+        status=TenantStatus.ACTIVE,
+    )
     user = User(
         email=f"{slug}-{suffix}@example.com",
         full_name=f"{slug.title()} Owner",

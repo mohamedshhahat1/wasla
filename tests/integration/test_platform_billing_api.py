@@ -48,6 +48,7 @@ from tests.billing_fixtures import renewal_invoice
 from tests.integration.plan_catalogue import own_plan
 from tests.payment_tokens import ENCRYPTION_KEY, FINGERPRINT_KEY
 from tests.paymob_orders import order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -199,7 +200,7 @@ def _act_as(app: FastAPI, user: User | None) -> None:
 async def _workspace(session: AsyncSession) -> tuple[Tenant, User]:
     await own_plan(session, code="starter", price=Decimal("0.00"), limits={"agents": 1})
     await own_plan(session, code="pro", price=Decimal("99.00"), limits={"agents": 5})
-    tenant = Tenant(name="Customer", slug=f"cust-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Customer", slug=f"cust-{uuid.uuid4().hex[:10]}")
     session.add(tenant)
     await session.flush()
     owner = await _user(session)

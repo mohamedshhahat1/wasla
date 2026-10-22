@@ -33,6 +33,7 @@ from app.services.audit_service import AuditTrail
 from app.services.subscription_service import SubscriptionService
 from app.services.whatsapp_account_service import WhatsAppAccountService
 from tests.fake_ownership import FakeOwnershipVerifier
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -40,7 +41,7 @@ NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
 async def _tenant(session: AsyncSession, slug: str = "acme") -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

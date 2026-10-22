@@ -9,6 +9,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.core.security import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
+from app.core.timezones import MAX_TIMEZONE_LENGTH
 from app.db.models import PlatformRole, TenantRole
 from app.schemas.text import StorableText
 
@@ -55,6 +56,9 @@ class RegistrationRequest(_Payload):
         max_length=MAXIMUM_SLUG_LENGTH,
         pattern=SLUG_PATTERN,
     )
+    # The new workspace's IANA zone, from `GET /api/v1/timezones` (TZ-01).
+    # Required; a name outside the list is 422 `timezone_unknown`.
+    timezone: StorableText = Field(min_length=1, max_length=MAX_TIMEZONE_LENGTH)
 
 
 class LoginRequest(_Payload):

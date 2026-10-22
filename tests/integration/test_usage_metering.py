@@ -19,6 +19,7 @@ from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEvent, UsageEventType, UsageUnit
 from app.repositories.usage_repository import PlatformUsageRepository, UsageEventRepository
 from app.services.usage_service import UsageRecorder, UsageService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -28,7 +29,7 @@ INSIDE = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
 
 async def _tenant(session: AsyncSession, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

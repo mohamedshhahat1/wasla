@@ -519,6 +519,11 @@ PLATFORM_ROUTE_POLICY = {
     ("GET", "/platform/billing/tenants/{tenant_id}/custom-offers"): "staff",
     ("POST", "/platform/billing/tenants/{tenant_id}/custom-offers"): "staff",
     ("POST", "/platform/billing/custom-offers/{offer_id}/cancel"): "staff",
+    # Meta's rate cards (COST-01): prices, not anybody's account.
+    ("GET", "/platform/whatsapp-rate-cards"): "staff",
+    ("POST", "/platform/whatsapp-rate-cards"): "staff",
+    ("GET", "/platform/whatsapp-rate-cards/{card_id}"): "staff",
+    ("POST", "/platform/whatsapp-rate-cards/{card_id}/activate"): "staff",
 }
 
 

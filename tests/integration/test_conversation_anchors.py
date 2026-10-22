@@ -32,6 +32,7 @@ from app.db.session import Database
 from app.integrations.whatsapp.policy import WhatsAppChannelPolicy
 from app.repositories.conversation_repository import ConversationRepository
 from app.services.whatsapp_service import WhatsAppIngestionService
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -40,7 +41,7 @@ CUSTOMER = "201000000636"
 
 async def _number(session: AsyncSession) -> WhatsAppAccount:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Anchors {tag}", slug=f"anchors-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Anchors {tag}", slug=f"anchors-{tag}")
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(

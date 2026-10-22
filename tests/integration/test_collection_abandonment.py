@@ -58,6 +58,7 @@ from app.services.recurring_service import (
 from tests.billing_fixtures import add_owner, renewal_invoice
 from tests.payment_tokens import PROTECTOR, saved_card
 from tests.paymob_orders import order_from_request
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -163,7 +164,9 @@ async def _workspace(
     slug: str = "acme",
 ) -> tuple[Tenant, Subscription, Invoice]:
     """A workspace mid-period with an unpaid renewal and a saved card."""
-    tenant = Tenant(name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name=slug.title(), slug=f"{slug}-{uuid.uuid4().hex[:8]}"
+    )
     plan = Plan(
         code=f"pro-{uuid.uuid4().hex[:6]}",
         name="Pro",

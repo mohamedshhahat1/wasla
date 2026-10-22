@@ -135,7 +135,8 @@ def _assert_whole_head(url: str) -> None:
 
 def _tenant(tenant: uuid.UUID) -> tuple[str, dict[str, Any]]:
     return (
-        "INSERT INTO tenants (id, name, slug, status) VALUES (:t, 'Atomic', :slug, 'active')",
+        "INSERT INTO tenants (id, name, slug, status, timezone)"
+        " VALUES (:t, 'Atomic', :slug, 'active', 'Africa/Cairo')",
         {"t": tenant, "slug": f"atomic-{tenant.hex[:12]}"},
     )
 

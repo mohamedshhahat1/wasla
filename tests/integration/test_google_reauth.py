@@ -54,6 +54,7 @@ from tests.fakes import (
     as_id_token_verifier,
     as_redis_client,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -754,7 +755,9 @@ async def test_the_deletion_still_refuses_a_last_owner(
     from app.db.models.enums import TenantStatus
 
     user = await _google_user(db_session, email="owner-google@example.com")
-    tenant = Tenant(name="Owned", slug="google-owned", status=TenantStatus.ACTIVE)
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Owned", slug="google-owned", status=TenantStatus.ACTIVE
+    )
     db_session.add(tenant)
     await db_session.flush()
     db_session.add(Membership(tenant_id=tenant.id, user_id=user.id, role=TenantRole.TENANT_OWNER))

@@ -228,6 +228,18 @@ template_webhook); opt-outs gain `via="provider_status"`. Gauges
 `wasla_campaigns_stuck` and `wasla_campaigns_stuck_oldest_age_seconds` are read
 at scrape time. No label names a workspace, campaign, connection or person.
 
+The campaigns page stage (ADR-145..ADR-150) adds `wasla_campaign_waits_total{reason}`
+(`quiet_hours`, `daily_limit`, `contact_cap`, `limit_unknown` - once per transition
+into a wait, never per sweep), `wasla_campaign_messaging_limit_unknown_total`
+(Meta answered a limit outside the known tiers; treated as 250),
+`wasla_messaging_limit_alerts_total{alert_type}` (Meta's `account_alerts`), the
+`wasla_campaign_events_total` events `duplicated`, `test_sent`, `exported` and
+`plan_spread` (a schedule Meta's limit spreads over days), the stop reason
+`meta_quality_review`, and the scrape-time gauge
+`wasla_portfolio_limit_utilisation{bucket}` - how many business portfolios' last
+24 hours used `<50`, `50-80`, `80-100` or `>=100` per cent of Meta's whole limit,
+every source counted. The gauge counts portfolios per bucket; it never names one.
+
 | Alert | Fires when | Severity |
 |---|---|---|
 | `CampaignsStuck` | `wasla_campaigns_stuck > 0` for 15m - campaigns due and no worker sending | warning |
@@ -235,6 +247,9 @@ at scrape time. No label names a workspace, campaign, connection or person.
 | `CampaignsPausedProviderUnreachable` | A campaign paused `provider_unreachable` in the last hour | warning |
 | `CampaignsPausedRepeatedBatchFailure` | A campaign paused `repeated_batch_failure` in the last hour | warning |
 | `CampaignHeaderMediaRefused` | A campaign failed `header_media_refused` in the last hour - Meta refused its header file (ADR-144) | warning |
+| `PortfolioLimitReached` | `wasla_portfolio_limit_utilisation{bucket=">=100"} > 0` for 5m - a portfolio reached Meta's whole limit (ADR-146) | warning |
+| `CampaignMetaQualityReview` | A campaign paused `meta_quality_review` in the last hour - Meta dropped a held message (135000) | warning |
+| `MessagingLimitUnknown` | Any limit Meta answered outside the known tiers in the last hour - treated as 250 | warning |
 
 Each was proved with `promtool test rules` to fire, clear, and stay silent on
 ordinary traffic (an admin's pause, a lease takeover alone).

@@ -42,6 +42,7 @@ from app.repositories import (
 from app.services.auth_service import AuthService
 from app.services.invitation_service import InvitationService
 from tests.fakes import as_redis_client
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -93,7 +94,7 @@ def invitations(db_session: AsyncSession) -> InvitationService:
 
 
 async def _tenant(db_session: AsyncSession, *, name: str, slug: str) -> Tenant:
-    tenant = await TenantRepository(db_session).create(name=name, slug=slug)
+    tenant = await TenantRepository(db_session).create(timezone=TEST_TIMEZONE, name=name, slug=slug)
     await db_session.flush()
     return tenant
 
@@ -199,6 +200,7 @@ async def test_registration_creates_an_owner_membership(
     session = await auth.register(
         email="Owner@Example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="Acme",
     )
@@ -220,6 +222,7 @@ async def test_a_registered_account_can_log_in_and_a_wrong_password_cannot(
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -236,6 +239,7 @@ async def test_a_second_registration_with_the_same_address_conflicts(auth: AuthS
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -244,6 +248,7 @@ async def test_a_second_registration_with_the_same_address_conflicts(auth: AuthS
         await auth.register(
             email="owner@example.com",
             password=PASSWORD,
+            timezone=TEST_TIMEZONE,
             workspace_name="Other",
             workspace_slug="other",
         )
@@ -253,6 +258,7 @@ async def test_a_refresh_token_works_once_and_then_never_again(auth: AuthService
     registered = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -271,6 +277,7 @@ async def test_a_workspace_the_caller_does_not_belong_to_looks_missing(
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -290,6 +297,7 @@ async def test_a_disabled_account_cannot_log_in(
     await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -308,6 +316,7 @@ async def test_an_invitation_grants_membership_exactly_once(
     owner_session = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
@@ -343,12 +352,14 @@ async def test_an_invited_member_lands_in_the_inviting_workspace_only(
     owner_session = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )
     outsider = await auth.register(
         email="outsider@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Other",
         workspace_slug="other",
     )
@@ -384,6 +395,7 @@ async def test_an_administrator_cannot_invite_an_owner(
     owner_session = await auth.register(
         email="owner@example.com",
         password=PASSWORD,
+        timezone=TEST_TIMEZONE,
         workspace_name="Acme",
         workspace_slug="acme",
     )

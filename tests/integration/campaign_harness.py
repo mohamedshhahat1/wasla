@@ -28,6 +28,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -50,19 +51,23 @@ from app.db.models.conversation import (
     MessageOrigin,
 )
 from app.db.models.media import MediaStorageState
+from app.db.models.messaging_limit import LimitSource
 from app.db.models.tenant import Tenant
 from app.db.models.usage import UsageEvent, UsageEventType
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import TemplateCategory, TemplateStatus, WhatsAppTemplate
 from app.db.session import Database
+from app.integrations.whatsapp.messaging_limit import MetaMessagingLimitReader
 from app.repositories.campaign_repository import AudienceFilter
 from app.services.campaign_service import CampaignService
 from app.services.entitlement_service import EntitlementService
+from app.services.messaging_limit_service import MessagingLimitService
 from app.services.messaging_service import MessagingService
 from app.workers.campaign_worker import CampaignWorker
 from tests.billing_fixtures import erase_ledger
 from tests.channel_plans import EVERY_CHANNEL, allow_channels
+from tests.workspace_timezone import TEST_TIMEZONE
 
 PLATFORM_TOKEN = "harness-platform-token"
 
@@ -130,6 +135,17 @@ class FakeMeta:
     #: Seconds to wait before answering particular upload numbers (1-based).
     upload_stall: dict[int, float] = field(default_factory=dict)
     on_upload: Callable[[int], Awaitable[None]] | None = None
+    #: The simulated time a request reached Meta at (`SimClock.at`); real time
+    #: when unset. What "never inside quiet hours" and "never over the limit in
+    #: a moving 24 hours" are counted by.
+    clock: Callable[[], datetime] | None = None
+    #: What `GET /{phone-number-id}?fields=whatsapp_business_manager_messaging_limit`
+    #: answers (LIM-01): Meta's value (`TIER_250`, ...), or an `httpx.Response`
+    #: to answer instead (a refusal). Shaped as "Messaging limits" documents it,
+    #: `{"whatsapp_business_manager_messaging_limit": "TIER_250", "id": ...}`
+    #: (developers.facebook.com, read 2026-10-16).
+    messaging_limit: str | int | httpx.Response = "TIER_UNLIMITED"
+    limit_reads: list[dict[str, Any]] = field(default_factory=list)
 
     async def upload(self, request: httpx.Request, *, worker: str) -> httpx.Response:
         n = len(self.uploads) + 1
@@ -168,7 +184,28 @@ class FakeMeta:
             found.append(media_id)
         return found
 
+    def read_limit(self, request: httpx.Request) -> httpx.Response:
+        number = request.url.path.rstrip("/").split("/")[-1]
+        self.limit_reads.append(
+            {
+                "phone_number_id": number,
+                "version": request.url.path.strip("/").split("/")[0],
+                "fields": request.url.params.get("fields"),
+                "authorization": request.headers.get("authorization"),
+            }
+        )
+        if isinstance(self.messaging_limit, httpx.Response):
+            return self.messaging_limit
+        return httpx.Response(
+            200,
+            json={"whatsapp_business_manager_messaging_limit": self.messaging_limit, "id": number},
+        )
+
     async def handle(self, request: httpx.Request, *, worker: str) -> httpx.Response:
+        if request.method == "GET" and "whatsapp_business_manager_messaging_limit" in (
+            request.url.params.get("fields") or ""
+        ):
+            return self.read_limit(request)
         if request.url.path.rstrip("/").endswith("/media"):
             return await self.upload(request, worker=worker)
         payload = json.loads(request.content or b"{}")
@@ -179,6 +216,7 @@ class FakeMeta:
                 "worker": worker,
                 "payload": payload,
                 "n": n,
+                "at": self.clock() if self.clock is not None else datetime.now(UTC),
             }
         )
         if self.on_request is not None:
@@ -205,6 +243,78 @@ class FakeMeta:
 
     def by_worker(self) -> Counter[str]:
         return Counter(str(entry["worker"]) for entry in self.requests)
+
+
+@dataclass
+class SimClock:
+    """The worker's clock in a test: a moment the test chooses, advancing as a sweep runs.
+
+    `CampaignWorker.run_once(now=...)` dates a batch from `now` and advances it
+    by the time the batch takes, so a sweep started at 21:59:59 local and
+    slowed by Meta's latency crosses 22:00 part-way, exactly as a real one
+    would. `at` is that clock, for the fake Meta to stamp each request with.
+
+    The elapsed time is measured from the clock's creation until the first
+    sweep, never from 0: `perf_counter` counts from boot, and a request made
+    before any sweep on a machine up a day would be dated a day ahead (CPF-05).
+    """
+
+    now: datetime
+    _started: float = field(default_factory=perf_counter)
+
+    def at(self) -> datetime:
+        return self.now + timedelta(seconds=perf_counter() - self._started)
+
+    def stand(self, now: datetime) -> None:
+        """Move the clock to `now`, measuring elapsed time from this moment."""
+        self.now = now
+        self._started = perf_counter()
+
+    async def sweep(self, replica: CampaignWorker) -> int:
+        self._started = perf_counter()
+        return await replica.run_once(now=self.now)
+
+
+async def read_limit(
+    database: Database,
+    meta: FakeMeta,
+    account_id: uuid.UUID,
+    *,
+    at: datetime | None = None,
+) -> None:
+    """Read a number's messaging limit through the real service and reader, from the fake Meta.
+
+    What connecting, enabling or the deploy step does (LIM-01): the reader
+    asks the transport for `whatsapp_business_manager_messaging_limit` with
+    the number's credential, and the portfolio row is written.
+    """
+    async with database.session_factory() as session:
+        account = await session.get(WhatsAppAccount, account_id)
+        assert account is not None
+        limits = MessagingLimitService(
+            session,
+            settings=harness_settings(database.engine.url.render_as_string(hide_password=False)),
+            reader=MetaMessagingLimitReader(http=meta.client("limit-read")),
+        )
+        value = await limits.read_with_stored_credential(account)
+        await limits.attach(account, value, source=LimitSource.API, at=at)
+        await session.commit()
+
+
+async def make_due(database: Database, campaign_id: uuid.UUID, *, at: datetime) -> None:
+    """Put a scheduled campaign's moment at `at`, as if it had been scheduled for then.
+
+    `schedule()` refuses a time in the past and moves a past one to now; a
+    test standing at a daylight-saving transition in April needs the campaign
+    to be due at that simulated moment instead.
+    """
+    async with database.session_factory() as session:
+        await session.execute(
+            update(Campaign)
+            .where(Campaign.id == campaign_id)
+            .values(scheduled_at=at, next_send_at=None)
+        )
+        await session.commit()
 
 
 def worker(
@@ -260,18 +370,29 @@ async def seed(
     variable_count: int = 0,
     body_text: str = "Hello.",
     channels: Iterable[Channel] = EVERY_CHANNEL,
+    timezone: str = TEST_TIMEZONE,
+    last_inbound_at: datetime | None = None,
+    waba_id: str | None = None,
+    numbers: list[str] | None = None,
 ) -> Workspace:
-    """A workspace with one number, an approved template and N people who wrote first."""
+    """A workspace with one number, an approved template and N people who wrote first.
+
+    In `timezone` (TZ-01), with the default quiet hours. Every person last
+    wrote two days ago - their service window closed - unless
+    `last_inbound_at` says otherwise.
+    """
     suffix = uuid.uuid4().hex[:10]
     async with database.session_factory() as session:
-        tenant = Tenant(name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}")
+        tenant = Tenant(
+            timezone=timezone, name=f"Harness {suffix}", slug=f"{TENANT_PREFIX}{suffix}"
+        )
         session.add(tenant)
         await session.flush()
         await allow_channels(session, tenant.id, channels, limits=limits)
         account = WhatsAppAccount(
             tenant_id=tenant.id,
             phone_number_id=f"pn-{suffix}",
-            waba_id=f"waba-{suffix}",
+            waba_id=waba_id or f"waba-{suffix}",
             display_phone_number="+201000000000",
         )
         session.add(account)
@@ -291,7 +412,8 @@ async def seed(
         contact_ids: list[uuid.UUID] = []
         base = int(suffix[:6], 16) % 10**6
         for index in range(recipients):
-            contact = Contact(tenant_id=tenant.id, wa_id=f"20{base:06d}{index:05d}")
+            wa_id = numbers[index] if numbers is not None else f"20{base:06d}{index:05d}"
+            contact = Contact(tenant_id=tenant.id, wa_id=wa_id)
             session.add(contact)
             await session.flush()
             session.add(
@@ -301,7 +423,11 @@ async def seed(
                     account_id=account.id,
                     status=ConversationStatus.OPEN,
                     mode=ConversationMode.AI,
-                    last_inbound_at=datetime.now(UTC) - timedelta(days=2),
+                    last_inbound_at=(
+                        last_inbound_at
+                        if last_inbound_at is not None
+                        else datetime.now(UTC) - timedelta(days=2)
+                    ),
                 )
             )
             contact_ids.append(contact.id)
@@ -505,14 +631,17 @@ __all__ = [
     "USER_DOMAIN",
     "FakeMeta",
     "Ledger",
+    "SimClock",
     "Workspace",
     "accepted",
     "compose",
     "erase",
     "harness_settings",
     "ledger",
+    "make_due",
     "meta_error",
     "quiesce",
+    "read_limit",
     "seed",
     "store_file",
     "worker",

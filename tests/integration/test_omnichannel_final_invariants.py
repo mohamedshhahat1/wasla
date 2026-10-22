@@ -27,13 +27,14 @@ from app.services.channel_ingestion_service import ChannelIngestionService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from scripts.omnichannel_invariants import census, violations
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
 
 async def _number(session: AsyncSession) -> WhatsAppAccount:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Invariants {tag}", slug=f"invariants-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Invariants {tag}", slug=f"invariants-{tag}")
     session.add(tenant)
     await session.flush()
     account = WhatsAppAccount(
@@ -218,7 +219,9 @@ async def test_an_undisclosed_ai_reply_on_a_disclosure_channel_is_counted(
     db_session: AsyncSession,
 ) -> None:
     """OMNI-041: Messenger and Instagram require the disclosure on every AI conversation."""
-    tenant = Tenant(name="Disclosure oracle", slug=f"oracle-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Disclosure oracle", slug=f"oracle-{uuid.uuid4().hex[:10]}"
+    )
     db_session.add(tenant)
     await db_session.flush()
     connection = ChannelConnection(

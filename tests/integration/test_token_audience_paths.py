@@ -35,6 +35,7 @@ from app.db.models import Membership, Tenant, TenantRole, User
 from app.db.models.enums import TenantStatus
 from app.main import create_app
 from tests.conftest import AllowingEntitlements
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -157,7 +158,9 @@ async def account(db_session: AsyncSession) -> User:
     db_session.add(user)
     await db_session.flush()
     for slug in ("first-space", "second-space"):
-        tenant = Tenant(name=slug.title(), slug=slug, status=TenantStatus.ACTIVE)
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name=slug.title(), slug=slug, status=TenantStatus.ACTIVE
+        )
         db_session.add(tenant)
         await db_session.flush()
         db_session.add(
@@ -200,6 +203,7 @@ async def test_login_after_registration_issues_a_pair_with_the_audiences(
             "email": "brand-new@example.com",
             "password": PASSWORD,
             "full_name": "Brand New",
+            "timezone": TEST_TIMEZONE,
             "workspace_name": "Brand New Space",
             "workspace_slug": f"space-{uuid.uuid4().hex[:8]}",
         },

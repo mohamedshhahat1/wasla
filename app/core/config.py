@@ -590,6 +590,38 @@ class Settings(BaseSettings):
     campaign_header_media_refresh_seconds: int = Field(
         default=25 * 24 * 3600, ge=60, le=29 * 24 * 3600
     )
+    # The Graph API version the one read of a number's messaging limit is made
+    # on (LIM-01, ADR-146). `whatsapp_business_manager_messaging_limit` exists
+    # on v24.0 and newer (changelog 2025-10-08); this call names that version
+    # rather than raising `META_API_VERSION` for every request Wasla makes.
+    meta_messaging_limit_api_version: str = "v24.0"
+    # How old a number's stored messaging limit may be before scheduling a
+    # campaign on it reads it again (LIM-01). Six hours: Meta raises a
+    # portfolio's limit "within 6 hours" of qualifying, and a webhook says so
+    # sooner where it is subscribed.
+    campaign_messaging_limit_refresh_seconds: int = Field(default=6 * 3600, ge=60, le=7 * 24 * 3600)
+    # The share of a business portfolio's messaging limit campaigns may use in
+    # a moving 24 hours (LIM-04, ADR-146): campaigns stop at floor(share x
+    # limit) unique people and wait for the window to move. The rest stays
+    # free for follow-ups, manual templates and other numbers' work. A
+    # platform setting, never a workspace's.
+    campaign_portfolio_limit_share: float = Field(default=0.80, gt=0, le=1)
+    # The longest one person's value - a name, an interest - may be before the
+    # fallback is sent instead (PER-03). A fallback is held to it too.
+    campaign_parameter_max_chars: int = Field(default=60, ge=1, le=1024)
+    # How many test sends of its campaigns a workspace may make in a moving
+    # 24 hours (PG-09).
+    campaign_test_sends_per_day: int = Field(default=10, ge=1, le=1000)
+    # How long after a campaign copy was accepted a customer's message counts
+    # as their reply to it, and their opt-out as following it (PG-10).
+    campaign_reply_attribution_seconds: int = Field(default=259_200, ge=3600, le=30 * 86_400)
+    # How many recipient-list exports a workspace may make in an hour (PG-14).
+    campaign_exports_per_hour: int = Field(default=5, ge=1, le=100)
+    # One marketing message per customer per this many seconds, per workspace
+    # (FREQ-01): across every campaign and every manual marketing template.
+    campaign_contact_marketing_interval_seconds: int = Field(
+        default=86_400, ge=3600, le=30 * 86_400
+    )
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

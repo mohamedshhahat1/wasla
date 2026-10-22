@@ -446,6 +446,29 @@ class AuditAction(StrEnum):
     CAMPAIGN_PAUSED = "campaign_paused"
     # A file uploaded for a campaign's template header (HM-02). 0107.
     CAMPAIGN_HEADER_MEDIA_UPLOADED = "campaign_header_media_uploaded"
+    # A workspace's campaign settings - its quiet hours - changed (TZ-03), and
+    # a live campaign that began waiting by itself: quiet hours, the daily
+    # limit, the per-contact cap (LIM-04, FREQ-01). Once per transition, never
+    # per batch. 0109.
+    CAMPAIGN_SETTINGS_UPDATED = "campaign_settings_updated"
+    CAMPAIGN_WAITING = "campaign_waiting"
+    # The campaigns page (PG-02 .. PG-05): a draft edited (the names of the
+    # fields only), duplicated (from / to), deleted (id and name kept); and
+    # the system's own ends of a campaign, once per transition. 0115.
+    CAMPAIGN_UPDATED = "campaign_updated"
+    CAMPAIGN_DUPLICATED = "campaign_duplicated"
+    CAMPAIGN_DELETED = "campaign_deleted"
+    CAMPAIGN_COMPLETED = "campaign_completed"
+    CAMPAIGN_FAILED = "campaign_failed"
+    # A test sent to an admin's own contact (PG-09) and a recipient list
+    # exported as CSV (PG-14): the contact's id and the row count, never the
+    # rows. 0115.
+    CAMPAIGN_TEST_SENT = "campaign_test_sent"
+    CAMPAIGN_RECIPIENTS_EXPORTED = "campaign_recipients_exported"
+    # Platform staff entered Meta's rate card, and made one the active card
+    # (COST-01). Platform actions: no workspace. 0119.
+    RATE_CARD_UPLOADED = "rate_card_uploaded"
+    RATE_CARD_ACTIVATED = "rate_card_activated"
 
     # What the agents are allowed to say (RAG-17, docs/RAG.md).
     #
@@ -655,6 +678,20 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "campaign_paused",
     # 0107
     "campaign_header_media_uploaded",
+    # 0109
+    "campaign_settings_updated",
+    "campaign_waiting",
+    # 0115
+    "campaign_updated",
+    "campaign_duplicated",
+    "campaign_deleted",
+    "campaign_completed",
+    "campaign_failed",
+    "campaign_test_sent",
+    "campaign_recipients_exported",
+    # 0119
+    "rate_card_uploaded",
+    "rate_card_activated",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

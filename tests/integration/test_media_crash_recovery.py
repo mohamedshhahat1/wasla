@@ -52,6 +52,7 @@ from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.services.media_upload_service import MediaUploadReconciler
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -91,7 +92,7 @@ async def committing(prepared_database: str) -> AsyncIterator[async_sessionmaker
 
 
 async def _seed(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
-    tenant = Tenant(name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Acme", slug=f"acme-{uuid.uuid4().hex[:8]}")
     session.add(tenant)
     await session.flush()
 

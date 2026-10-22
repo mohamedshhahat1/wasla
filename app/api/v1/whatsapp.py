@@ -13,6 +13,7 @@ failed claim cannot be used to squat a number either.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, status
 
@@ -22,13 +23,18 @@ from app.api.dependencies import (
     WhatsAppAccountServiceDep,
 )
 from app.api.route import CommittingRoute
+from app.core.dependencies import SessionDep, SettingsDep
+from app.core.timezones import local
 from app.db.models import WhatsAppAccountStatus
+from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.schemas.whatsapp import (
+    MessagingLimitRead,
     WhatsAppAccountConnectRequest,
     WhatsAppAccountListResponse,
     WhatsAppAccountResponse,
     WhatsAppAccountVerifyRequest,
 )
+from app.services.business_initiated_ledger import limit_view
 
 router = APIRouter(route_class=CommittingRoute, prefix="/whatsapp/accounts", tags=["WhatsApp"])
 
@@ -184,3 +190,51 @@ async def release_account(
         account_id=account_id,
     )
     return WhatsAppAccountResponse.model_validate(account)
+
+
+@router.get(
+    "/{account_id}/messaging-limit",
+    response_model=MessagingLimitRead,
+    summary="Meta's messaging limit for this number's business portfolio, and its use",
+)
+async def read_messaging_limit(
+    account_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> MessagingLimitRead:
+    """Any member. The portfolio's limit, the campaigns' share and what is used now (LIM-07).
+
+    Counted across every number and workspace on the portfolio - Meta's limit
+    is the portfolio's - and returned only as aggregates: nothing names
+    another workspace, its numbers, its campaigns or how its sends split.
+    Another workspace's number is not found.
+    """
+    account = await WhatsAppAccountRepository(session, tenant_id=workspace.tenant.id).require_by_id(
+        account_id
+    )
+    view = await limit_view(
+        session,
+        account,
+        share=settings.campaign_portfolio_limit_share,
+        at=datetime.now(UTC),
+    )
+    return MessagingLimitRead(
+        tier=view.tier,
+        known=view.known,
+        messaging_limit=view.messaging_limit,
+        checked_at=view.checked_at,
+        source=view.source,
+        campaign_share=view.campaign_share,
+        campaign_budget=view.campaign_budget,
+        used_last_24h=view.used_last_24h,
+        campaign_available_now=view.campaign_available_now,
+        next_capacity_at=view.next_capacity_at,
+        next_capacity_at_local=(
+            local(view.next_capacity_at, workspace.tenant.timezone)
+            if view.next_capacity_at is not None
+            else None
+        ),
+        shared_with_other_numbers=view.shared_with_other_numbers,
+        shared_with_other_workspaces=view.shared_with_other_workspaces,
+    )

@@ -27,6 +27,7 @@ from app.db.models.user import User
 from app.services.auth_service import AuthService
 from app.services.membership_service import MembershipService
 from tests.fakes import as_redis_client
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -68,7 +69,7 @@ async def _users(session: AsyncSession, count: int) -> list[User]:
 async def test_the_roster_is_two_statements_for_two_hundred_members(
     db_session: AsyncSession,
 ) -> None:
-    tenant = Tenant(name="Roster", slug=f"roster-{uuid.uuid4().hex[:10]}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name="Roster", slug=f"roster-{uuid.uuid4().hex[:10]}")
     db_session.add(tenant)
     await db_session.flush()
     for index, user in enumerate(await _users(db_session, MEMBERS)):
@@ -93,7 +94,9 @@ async def test_the_workspace_switcher_is_two_statements_for_many_workspaces(
 ) -> None:
     (person,) = await _users(db_session, 1)
     for index in range(40):
-        tenant = Tenant(name=f"W{index}", slug=f"switch-{uuid.uuid4().hex[:10]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name=f"W{index}", slug=f"switch-{uuid.uuid4().hex[:10]}"
+        )
         db_session.add(tenant)
         await db_session.flush()
         db_session.add(

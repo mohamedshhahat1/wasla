@@ -90,8 +90,8 @@ async def workspace(engine: AsyncEngine) -> AsyncIterator[dict[str, Any]]:
     async with engine.begin() as connection:
         await connection.execute(
             text(
-                "INSERT INTO tenants (id, name, slug, status, created_at, updated_at)"
-                " VALUES (:id, 'Race', :slug, 'active', now(), now())"
+                "INSERT INTO tenants (id, name, slug, status, timezone, created_at, updated_at)"
+                " VALUES (:id, 'Race', :slug, 'active', 'Africa/Cairo', now(), now())"
             ),
             {"id": tenant, "slug": f"race-{tag}"},
         )

@@ -36,6 +36,7 @@ from app.db.models.lead import Lead, LeadActivity, LeadSource, LeadStatus
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
 from app.db.session import Database
 from tests.integration.ai_harness import settings_for, wait_for_lock_waiter
+from tests.workspace_timezone import TEST_TIMEZONE
 
 __all__ = ["CrmWorld", "World", "crm"]
 
@@ -76,7 +77,9 @@ class CrmWorld:
     async def world(self, *, mode: ConversationMode = ConversationMode.AI) -> World:
         tag = uuid.uuid4().hex[:10]
         async with self.database.session() as session:
-            tenant = Tenant(name="CRM", slug=f"crm-{tag}", status=TenantStatus.ACTIVE)
+            tenant = Tenant(
+                timezone=TEST_TIMEZONE, name="CRM", slug=f"crm-{tag}", status=TenantStatus.ACTIVE
+            )
             session.add(tenant)
             owner = _user(f"owner-{tag}")
             alice = _user(f"alice-{tag}")

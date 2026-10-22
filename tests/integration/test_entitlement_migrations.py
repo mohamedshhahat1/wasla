@@ -435,8 +435,8 @@ def test_a_downgrade_refused_below_0094_rolls_back_the_whole_run(database_url: s
                 target,
                 [
                     (
-                        "INSERT INTO tenants (id, name, slug, status)"
-                        " VALUES (:t, 'Bots', :slug, 'active')",
+                        "INSERT INTO tenants (id, name, slug, status, timezone)"
+                        " VALUES (:t, 'Bots', :slug, 'active', 'Africa/Cairo')",
                         {"t": tenant, "slug": f"bots-{tenant.hex[:10]}"},
                     ),
                     (

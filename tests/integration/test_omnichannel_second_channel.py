@@ -66,6 +66,7 @@ from app.workers.media_queue import MediaJob, MediaQueue
 from app.workers.queue import AgentJob, AgentQueue
 from tests.channel_fakes import SyntheticAdapter, synthetic_payload
 from tests.channel_plans import allow_channels
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -135,7 +136,7 @@ def registry(adapter: SyntheticAdapter) -> ChannelRegistry:
 
 async def _workspace(session: AsyncSession) -> Tenant:
     tag = uuid.uuid4().hex[:10]
-    tenant = Tenant(name=f"Second {tag}", slug=f"second-{tag}")
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=f"Second {tag}", slug=f"second-{tag}")
     session.add(tenant)
     await session.flush()
     return tenant

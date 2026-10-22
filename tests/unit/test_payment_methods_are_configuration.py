@@ -73,6 +73,10 @@ NOT_PAYMOB_IDS: set[tuple[str, str]] = {
     ("app/services/campaign_service.py", "131026"),
     # Meta's "Unable to upload the media used in the message" (HM-06).
     ("app/services/campaign_service.py", "131053"),
+    # Meta's held message dropped after portfolio review, and its per-user
+    # marketing limit, on a later status (LIM-08, FREQ-01).
+    ("app/services/provider_feedback.py", "135000"),
+    ("app/services/provider_feedback.py", "131049"),
 }
 
 BASE = {

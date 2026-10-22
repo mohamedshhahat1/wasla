@@ -63,6 +63,7 @@ from app.schemas.campaign import CampaignRead
 from app.services.campaign_service import CampaignService
 from tests.consent import seed_opt_out
 from tests.fakes import as_messaging
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -88,6 +89,8 @@ class StubMessaging:
         sent_by_id: uuid.UUID | None = None,
         link: Callable[[Message], None] | None = None,
         origin: MessageOrigin,
+        at: datetime | None = None,
+        campaign_id: uuid.UUID | None = None,
     ) -> Message:
         """The real protocol's shape, minus the commits (ADR-093).
 
@@ -132,7 +135,7 @@ class StubMessaging:
 
 
 async def _tenant(session: AsyncSession, *, slug: str) -> Tenant:
-    tenant = Tenant(name=slug.title(), slug=slug)
+    tenant = Tenant(timezone=TEST_TIMEZONE, name=slug.title(), slug=slug)
     session.add(tenant)
     await session.flush()
     return tenant

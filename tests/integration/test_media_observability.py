@@ -43,6 +43,7 @@ from app.services.media_outcomes import MediaReason
 from app.services.metrics_service import MetricsService
 from tests import media_harness as h
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -163,7 +164,9 @@ async def test_stranded_media_and_owed_purge_deletes_are_gauged(
     settings = Settings(_env_file=None, environment="test", database_url=prepared_database)
     now = datetime.now(UTC)
     async with committing() as session:
-        tenant = Tenant(name="Gauged", slug=f"gauged-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(
+            timezone=TEST_TIMEZONE, name="Gauged", slug=f"gauged-{uuid.uuid4().hex[:8]}"
+        )
         session.add(tenant)
         await session.flush()
         account = WhatsAppAccount(

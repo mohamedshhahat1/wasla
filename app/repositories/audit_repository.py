@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, Select, literal, tuple_
+from sqlalchemy import ColumnElement, Select, and_, literal, or_, select, tuple_
 
 from app.db.models.audit import AuditAction, AuditLog
 from app.repositories.base import BaseRepository, TenantScopedRepository
@@ -70,6 +70,48 @@ class AuditLogRepository(TenantScopedRepository[AuditLog]):
         return await self._all(
             statement.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(limit)
         )
+
+    async def campaign_activity(
+        self,
+        campaign_id: uuid.UUID,
+        *,
+        limit: int,
+        before: tuple[datetime, uuid.UUID] | None = None,
+    ) -> list[tuple[AuditLog, str | None]]:
+        """One campaign's entries, newest first, with each person's name (PG-05).
+
+        Everything recorded against the campaign, and the copies made of it
+        (`campaign_duplicated` names its source). Keyset-paged by
+        `(occurred_at, id)`; `before` is the last entry of the previous page.
+        """
+        from app.db.models.user import User
+
+        statement = (
+            select(AuditLog, User.full_name)
+            .outerjoin(User, User.id == AuditLog.actor_id)
+            .where(
+                self._tenant_filter(),
+                or_(
+                    and_(AuditLog.target_type == "campaign", AuditLog.target_id == campaign_id),
+                    and_(
+                        AuditLog.action == AuditAction.CAMPAIGN_DUPLICATED,
+                        AuditLog.meta["source_id"].astext == str(campaign_id),
+                    ),
+                ),
+            )
+        )
+        if before is not None:
+            statement = statement.where(
+                tuple_(AuditLog.occurred_at, AuditLog.id)
+                < tuple_(
+                    literal(before[0], AuditLog.occurred_at.type),
+                    literal(before[1], AuditLog.id.type),
+                )
+            )
+        rows = await self.session.execute(
+            statement.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(limit)
+        )
+        return [(entry, name) for entry, name in rows.all()]
 
 
 class PlatformAuditLogRepository(BaseRepository[AuditLog]):

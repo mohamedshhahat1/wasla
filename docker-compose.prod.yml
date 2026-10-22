@@ -193,6 +193,10 @@ services:
       # nothing broke - but a deployment that cannot pin the version cannot
       # respond to Meta deprecating one either.
       META_API_VERSION: ${META_API_VERSION:-v21.0}
+      # The one read of a number's messaging limit names its own version
+      # (LIM-01): the API reads it on connect and schedule, the worker never
+      # does, and both carry it so the two cannot disagree.
+      META_MESSAGING_LIMIT_API_VERSION: ${META_MESSAGING_LIMIT_API_VERSION:-v24.0}
       META_MEDIA_HOST_ROOTS: ${META_MEDIA_HOST_ROOTS:-graph.facebook.com,fbsbx.com,fbcdn.net}
       # --- Media storage (ADR-077) ---
       #
@@ -416,6 +420,10 @@ services:
       # version is a deployment where a message sends and its media download
       # does not.
       META_API_VERSION: ${META_API_VERSION:-v21.0}
+      # The one read of a number's messaging limit names its own version
+      # (LIM-01): the API reads it on connect and schedule, the worker never
+      # does, and both carry it so the two cannot disagree.
+      META_MESSAGING_LIMIT_API_VERSION: ${META_MESSAGING_LIMIT_API_VERSION:-v24.0}
       META_MEDIA_HOST_ROOTS: ${META_MEDIA_HOST_ROOTS:-graph.facebook.com,fbsbx.com,fbcdn.net}
       # `META_APP_SECRET` and `META_VERIFY_TOKEN` are deliberately absent: only
       # the API serves the webhook, so only the API verifies a signature or

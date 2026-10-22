@@ -46,6 +46,7 @@ from app.db.models.whatsapp import WhatsAppAccount, WhatsAppEvent
 from app.main import create_app
 from app.services.channel_ingestion_service import ChannelIngestionService
 from tests.redis_url import redis_url_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -145,7 +146,7 @@ async def workspace(
 ) -> AsyncIterator[tuple[uuid.UUID, str]]:
     phone_number_id = f"pn-{uuid.uuid4().hex[:10]}"
     async with committing() as session:
-        tenant = Tenant(name="Names", slug=f"names-{uuid.uuid4().hex[:8]}")
+        tenant = Tenant(timezone=TEST_TIMEZONE, name="Names", slug=f"names-{uuid.uuid4().hex[:8]}")
         session.add(tenant)
         await session.flush()
         session.add(

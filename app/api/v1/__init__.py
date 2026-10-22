@@ -31,6 +31,7 @@ from app.api.v1 import (
     audit,
     auth,
     billing,
+    campaign_segments,
     campaigns,
     channel_connections,
     contacts,
@@ -49,7 +50,9 @@ from app.api.v1 import (
     platform_billing,
     platform_commercial,
     platform_entitlements,
+    platform_rate_cards,
     templates,
+    timezones,
     usage,
     webhooks,
     whatsapp,
@@ -102,6 +105,8 @@ MIXED_ROUTERS = (invitations.router, workspaces.router)
 # Expensive and rare: a broadcast, a template sync against Meta.
 CAMPAIGN_ROUTERS = (
     campaigns.router,
+    # Saved audience rules, read and written from the campaigns page (PG-06).
+    campaign_segments.router,
     templates.router,
 )
 
@@ -134,8 +139,14 @@ UNLIMITED_ROUTERS = (
     # The reduction queue, a workspace's channels and the channel vocabulary:
     # the same prefix and authority (ADR-132).
     platform_entitlements.router,
+    # Meta's rate cards, for campaign cost estimates (COST-01).
+    platform_rate_cards.router,
     webhooks.router,
     email_webhooks.router,
+    # Public reference data read at signup, before any account exists (TZ-02).
+    # Not unguarded: its one route declares `PublicRateLimit`, counted by
+    # client address; the workspace limit would need a workspace.
+    timezones.router,
     # A payment provider cannot hold a credential of ours and retries anything
     # that is not a 2xx, so the same reasoning as the other two: an HMAC is its
     # authorization, and a 429 here would lose a payment notification.

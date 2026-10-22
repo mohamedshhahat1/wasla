@@ -44,6 +44,7 @@ from app.main import create_app
 from tests.channel_plans import allow_channels
 from tests.conftest import AllowingEntitlements
 from tests.fake_queue_redis import FakeQueueRedis
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -131,7 +132,11 @@ async def _desk(
     desk = Desk()
     tag = uuid.uuid4().hex[:8]
     tenant = Tenant(
-        id=desk.tenant_id, name=f"Media {tag}", slug=f"hm-{tag}", status=TenantStatus.ACTIVE
+        timezone=TEST_TIMEZONE,
+        id=desk.tenant_id,
+        name=f"Media {tag}",
+        slug=f"hm-{tag}",
+        status=TenantStatus.ACTIVE,
     )
     owner = User(
         email=f"owner@{tag}.example", hashed_password="x", email_verified_at=datetime.now(UTC)
@@ -466,27 +471,39 @@ async def test_no_campaign_response_carries_metas_id_or_a_key(
     assert row.storage_key not in json.dumps(campaign)
 
 
-async def test_the_header_file_cannot_be_changed_after_composition(
+async def test_the_header_file_changes_only_through_a_draft_s_versioned_edit(
     http: AsyncClient, db_session: AsyncSession, settings: Settings
 ) -> None:
-    """There is no route that changes a campaign's fields: only named transitions (HM-02).
+    """A draft's file changes through the draft edit, from the version read (HM-02, PG-03).
 
-    The file is chosen in the create request; the audience and schedule
-    requests refuse an unknown field rather than ignoring it.
+    Before this stage `PATCH` answered 405; it now edits drafts only, and an
+    edit that does not say which version it was made from is refused. The
+    audience and schedule requests still refuse an unknown field rather than
+    ignoring it.
     """
     desk = await _desk(db_session, settings)
     first = (await _upload(http, desk, PNG)).json()["id"]
     second = (await _upload(http, desk, JPEG, name="b.jpg", content_type="image/jpeg")).json()["id"]
-    campaign = (await _compose(http, desk, "IMAGE", first)).json()["id"]
+    composed = (await _compose(http, desk, "IMAGE", first)).json()
+    campaign = composed["id"]
 
-    assert (
-        await http.patch(
-            f"/api/v1/campaigns/{campaign}", headers=desk.admin, json={"header_media_id": second}
-        )
-    ).status_code == 405
+    unversioned = await http.patch(
+        f"/api/v1/campaigns/{campaign}", headers=desk.admin, json={"header_media_id": second}
+    )
+    assert unversioned.status_code == 422
+    assert unversioned.json()["error"]["code"] == "campaign_version_required"
     for step in ("audience", "schedule"):
         path = f"/api/v1/campaigns/{campaign}/{step}"
         refused = await http.post(path, headers=desk.admin, json={"header_media_id": second})
         assert refused.status_code == 422
     read = await http.get(f"/api/v1/campaigns/{campaign}", headers=desk.admin)
     assert read.json()["header_media"]["id"] == first
+
+    edited = await http.patch(
+        f"/api/v1/campaigns/{campaign}",
+        headers={**desk.admin, "If-Match": f'"{composed["version"]}"'},
+        json={"header_media_id": second},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["header_media"]["id"] == second
+    assert edited.json()["version"] == composed["version"] + 1

@@ -45,6 +45,7 @@ from tests.integration.ai_harness import (
     text_response,
     tool_calls_response,
 )
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -139,10 +140,10 @@ async def test_a_database_error_from_this_application_quotes_no_parameters(
     slug = f"hidden-{uuid.uuid4().hex[:8]}"
     try:
         async with database.session() as session:
-            session.add(Tenant(name=SENTINEL_NAME, slug=slug))
+            session.add(Tenant(timezone=TEST_TIMEZONE, name=SENTINEL_NAME, slug=slug))
         with pytest.raises(IntegrityError) as failure:
             async with database.session() as session:
-                session.add(Tenant(name=SENTINEL_NAME, slug=slug))
+                session.add(Tenant(timezone=TEST_TIMEZONE, name=SENTINEL_NAME, slug=slug))
     finally:
         async with database.session() as session:
             await session.execute(delete(Tenant).where(Tenant.slug == slug))

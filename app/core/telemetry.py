@@ -483,6 +483,27 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Campaign ownership events: lease takeovers, leases lost, recipients owned elsewhere.",
         ("event",),
     ),
+    # A live campaign that began waiting by itself (TZ-03, LIM-04, FREQ-01):
+    # quiet hours, the portfolio's daily share used, the per-contact cap, or a
+    # messaging limit never read. Once per transition into a wait, never per
+    # sweep. Closed vocabulary (`CampaignWaitReason`).
+    "wasla_campaign_waits_total": (
+        "Campaigns that began waiting by themselves, by reason.",
+        ("reason",),
+    ),
+    # A business portfolio's messaging limit Meta stated in a value Wasla does
+    # not recognise (LIM-01): treated as the lowest level, 250, never guessed
+    # upward. Unlabelled; any increase is alerted (MessagingLimitUnknown).
+    "wasla_campaign_messaging_limit_unknown_total": (
+        "Messaging limit values Meta stated that Wasla did not recognise.",
+        (),
+    ),
+    # Meta's `account_alerts`, by the documented limit-increase alert types
+    # and `other` (LIM-01).
+    "wasla_messaging_limit_alerts_total": (
+        "Account alerts from Meta, by alert type.",
+        ("alert_type",),
+    ),
     # Template registry status changes, by what reported them (CMP-10,
     # CMQ-05): a refused send, a provider `failed` status, or Meta's
     # template status webhook.
@@ -1146,6 +1167,7 @@ CAMPAIGN_STOP_REASONS: Final = frozenset(
         "repeated_batch_failure",
         "header_media_unavailable",
         "header_media_refused",
+        "meta_quality_review",
     }
 )
 CAMPAIGN_EVENTS: Final = frozenset(
@@ -1159,7 +1181,17 @@ CAMPAIGN_EVENTS: Final = frozenset(
         "header_media_uploaded",
         "header_media_refreshed",
         "header_media_reupload_on_send",
+        # The campaigns page (PG-02, PG-09, PG-14, LIM-05): a draft copied, a
+        # test sent to the admin, a recipient list exported, and a schedule
+        # whose plan spreads over more than one day.
+        "duplicated",
+        "test_sent",
+        "exported",
+        "plan_spread",
     }
+)
+CAMPAIGN_WAIT_REASONS: Final = frozenset(
+    {"quiet_hours", "daily_limit", "contact_cap", "limit_unknown"}
 )
 TEMPLATE_STATUS_SOURCES: Final = frozenset({"send_writeback", "status_webhook", "template_webhook"})
 
@@ -1185,6 +1217,36 @@ async def record_campaign_event(event: str) -> None:
     await _increment(
         "wasla_campaign_events_total",
         {"event": event if event in CAMPAIGN_EVENTS else "other"},
+    )
+
+
+async def record_campaign_wait(reason: str) -> None:
+    """One live campaign that began waiting by itself (TZ-03, LIM-04). Best-effort."""
+    await _increment(
+        "wasla_campaign_waits_total",
+        {"reason": reason if reason in CAMPAIGN_WAIT_REASONS else "other"},
+    )
+
+
+MESSAGING_LIMIT_ALERT_TYPES: Final = frozenset(
+    {
+        "INCREASED_CAPABILITIES_ELIGIBILITY_DEFERRED",
+        "INCREASED_CAPABILITIES_ELIGIBILITY_FAILED",
+        "INCREASED_CAPABILITIES_ELIGIBILITY_NEED_MORE_INFO",
+    }
+)
+
+
+async def record_messaging_limit_unknown() -> None:
+    """One messaging limit value Wasla did not recognise (LIM-01). Best-effort."""
+    await _increment("wasla_campaign_messaging_limit_unknown_total", {})
+
+
+async def record_messaging_limit_alert(alert_type: str) -> None:
+    """One `account_alerts` delivery, by type (LIM-01). Best-effort."""
+    await _increment(
+        "wasla_messaging_limit_alerts_total",
+        {"alert_type": alert_type if alert_type in MESSAGING_LIMIT_ALERT_TYPES else "other"},
     )
 
 

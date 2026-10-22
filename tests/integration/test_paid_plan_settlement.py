@@ -60,6 +60,7 @@ from app.services.subscription_service import SubscriptionService
 from tests.billing_fixtures import renewal_invoice
 from tests.conftest import AllowingEntitlements
 from tests.paymob_orders import order_for
+from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
 
@@ -141,7 +142,9 @@ async def http(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 
 async def _tenant(session: AsyncSession, slug: str | None = None) -> Tenant:
-    tenant = Tenant(name="Acme", slug=slug or f"acme-{uuid.uuid4().hex[:8]}")
+    tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Acme", slug=slug or f"acme-{uuid.uuid4().hex[:8]}"
+    )
     session.add(tenant)
     await session.flush()
     return tenant
