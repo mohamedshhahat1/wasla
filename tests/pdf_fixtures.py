@@ -155,3 +155,40 @@ def failing_parser_child(directory: Path, escape_class: str) -> Path:
         encoding="utf-8",
     )
     return script
+
+
+def stalling_parser_child(directory: Path) -> Path:
+    """A stand-in for `extraction.CHILD_SCRIPT` whose parser never finishes a page.
+
+    It runs the real `pdf_extract_child` - its resource limits, its answer - with
+    `pypdf`'s page text extraction replaced by a loop that burns a core and never
+    returns, which is what the audit's amplifying PDF did to the `pypdf` of its
+    day. Whether a given release still stalls on that file is `pypdf`'s
+    business: 6.21 refuses it after a few seconds ("maximum number of tokens per
+    stream"). This stalls on any release, so only the parent's clock can end it.
+    Patch it in with `monkeypatch.setattr(extraction, "CHILD_SCRIPT", ...)`.
+    """
+    from app.services import extraction
+
+    script = directory / "stalling_pdf_child.py"
+    child_path = str(extraction.CHILD_SCRIPT)
+    script.write_text(
+        "import importlib.util\n"
+        "import sys\n"
+        "\n"
+        "import pypdf\n"
+        "\n"
+        "\n"
+        "def _stall(*_args, **_kwargs):\n"
+        "    while True:\n"
+        "        pass\n"
+        "\n"
+        "\n"
+        "pypdf.PageObject.extract_text = _stall\n"
+        f"spec = importlib.util.spec_from_file_location('pdf_extract_child', {child_path!r})\n"
+        "child = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(child)\n"
+        "sys.exit(child.main(sys.argv))\n",
+        encoding="utf-8",
+    )
+    return script

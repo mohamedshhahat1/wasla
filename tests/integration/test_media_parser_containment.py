@@ -36,6 +36,7 @@ from tests.pdf_fixtures import (
     failing_parser_child,
     paged_pdf,
     poison_pdf,
+    stalling_parser_child,
 )
 
 pytestmark = pytest.mark.integration
@@ -195,7 +196,10 @@ async def test_cancellation_is_not_mistaken_for_an_unreadable_file(
 
 
 async def test_an_amplifying_pdf_is_killed_on_time_while_the_loop_keeps_running(
-    db_session: AsyncSession, tmp_path: Path, settings: Settings
+    db_session: AsyncSession,
+    tmp_path: Path,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """P5, reversed, through the worker. The 16 MB-inflating PDF is 25 KB.
 
@@ -204,9 +208,14 @@ async def test_an_amplifying_pdf_is_killed_on_time_while_the_loop_keeps_running(
     set while the worker handles the file: the child is killed at the
     extraction deadline, the loop never stalls, the parent does not grow, the
     row is terminal, and the conversation is released.
+
+    The child's parser stalls on purpose (`stalling_parser_child`), so the
+    deadline is what ends it whatever `pypdf` release is installed; the real
+    parser against the same file is the next test.
     """
     pdf = amplifying_pdf(16)
     assert len(pdf) < 64 * 1024
+    monkeypatch.setattr(extraction, "CHILD_SCRIPT", stalling_parser_child(tmp_path))
 
     where = await h.scene(db_session)
     media = await h.attachment(
@@ -254,5 +263,64 @@ async def test_an_amplifying_pdf_is_killed_on_time_while_the_loop_keeps_running(
     assert len(gaps) > EXTRACTION_TIMEOUT_SECONDS * 5
     assert max(gaps) < 1.0
     # The parse's memory lived and died in the child.
+    if baseline is not None and resident:
+        assert max(resident) - baseline < 150 * 1024 * 1024
+
+
+async def test_the_audit_amplifying_pdf_is_refused_or_killed_and_never_stalls_the_loop(
+    db_session: AsyncSession, tmp_path: Path, settings: Settings
+) -> None:
+    """The same 25 KB file against the installed `pypdf` and the real child.
+
+    A release that parses it slowly is killed at the deadline (the test above);
+    one that guards against it, as 6.21 does, refuses it sooner. Either way the
+    row is terminal, nothing past the deadline, the loop never stalls and the
+    parent does not grow.
+    """
+    pdf = amplifying_pdf(16)
+    where = await h.scene(db_session)
+    media = await h.attachment(
+        db_session, where, mime_type="application/pdf", kind=MessageKind.DOCUMENT
+    )
+    worker = h.worker(
+        db_session,
+        tmp_path,
+        settings,
+        whatsapp=h.StubWhatsApp(content=pdf, mime_type="application/pdf"),
+    )
+
+    gaps: list[float] = []
+    resident: list[int] = []
+    baseline = _resident_bytes()
+    stop = asyncio.Event()
+
+    async def ticker() -> None:
+        last = time.perf_counter()
+        while not stop.is_set():
+            await asyncio.sleep(0.05)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+            sample = _resident_bytes()
+            if sample is not None:
+                resident.append(sample)
+
+    beating = asyncio.create_task(ticker())
+    started = time.perf_counter()
+    job = await h.run(worker, media)
+    elapsed = time.perf_counter() - started
+    stop.set()
+    await beating
+
+    await db_session.refresh(media)
+    assert media.status is MediaStatus.SKIPPED
+    assert media.last_error in (
+        DocumentBeyondLimitsError.message,
+        "This document could not be read.",
+    )
+    assert job is not None
+    assert len(h.released(worker)) == 1
+    assert elapsed < EXTRACTION_TIMEOUT_SECONDS + 10
+    assert max(gaps) < 1.0
     if baseline is not None and resident:
         assert max(resident) - baseline < 150 * 1024 * 1024
