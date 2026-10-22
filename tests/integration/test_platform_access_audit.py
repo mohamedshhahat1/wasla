@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -201,7 +201,10 @@ async def test_platform_aggregate_route_uses_expected_audit_policy(
     staff = await _account(db_session, role=PlatformRole.PLATFORM_OWNER)
     _act_as(app, staff)
 
-    response = await http.get(f"{PATH}/overview", params={"since": "2026-08-01T00:00:00Z"})
+    # Thirty days back from the real clock (CPM-03): without `until` the window
+    # ends now, and one longer than 366 days is refused.
+    since = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    response = await http.get(f"{PATH}/overview", params={"since": since})
     assert response.status_code == 200
 
     (entry,) = await _access_entries(db_session)

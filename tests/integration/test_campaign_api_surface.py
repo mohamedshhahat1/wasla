@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -160,7 +160,14 @@ async def test_a_scheduled_time_without_an_offset_is_refused(database: Database)
             )
         assert raised.value.error_code == NAIVE_SCHEDULE_CODE
 
-    cairo = datetime.fromisoformat("2026-10-20T10:00:00+03:00")
+    # Built from the real clock (CPM-02): `schedule` keeps a future time as it
+    # was given but moves a past one to now, so a fixed date stopped proving
+    # anything the day it passed. Two days from now, 10:00 at +03:00.
+    plus_three = timezone(timedelta(hours=3))
+    cairo = (datetime.now(plus_three) + timedelta(days=2)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    assert cairo - datetime.now(UTC) > timedelta(days=1), "a future time: a past one moves to now"
     async with database.session_factory() as session:
         campaign = await CampaignService(session=session, tenant_id=workspace.tenant_id).schedule(
             campaign_id=campaign_id, scheduled_at=cairo
