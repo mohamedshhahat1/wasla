@@ -216,7 +216,13 @@ async def test_a_schedule_inside_the_window_is_accepted_and_starts_after_it(
     prepared_database: str,
 ) -> None:
     """TZ-04: scheduled for 23:00 local; the first send is at 09:00, and it stays scheduled."""
-    clock = SimClock(now=cairo(2026, 10, 22, 23))
+    # `schedule` keeps a future time as given and moves a past one to the real
+    # now, so the 23:00 is the next one at least an hour ahead, never a fixed
+    # date (CPM-04); a night whose 23:00 happens twice (October's fold) is passed
+    # over. The window ends at 09:00 the next morning.
+    evening = next_local(23, 0, tz=zone(CAIRO), after=datetime.now(UTC) + timedelta(hours=1))
+    morning = (evening + timedelta(days=1)).replace(hour=9)
+    clock = SimClock(now=evening)
     meta = FakeMeta()
     meta.clock = clock.at
     replica, db = worker(prepared_database, meta, name="quiet-schedule")
@@ -224,10 +230,11 @@ async def test_a_schedule_inside_the_window_is_accepted_and_starts_after_it(
         await quiesce(db)
         workspace = await seed(db, recipients=5)
         campaign_id = await compose(db, workspace, schedule=False)
+        assert evening > datetime.now(UTC), "a future time: a past one moves to the real now"
         async with db.session_factory() as session:
             scheduled = await CampaignService(
                 session=session, tenant_id=workspace.tenant_id
-            ).schedule(campaign_id=campaign_id, scheduled_at=cairo(2026, 10, 22, 23))
+            ).schedule(campaign_id=campaign_id, scheduled_at=evening)
             assert scheduled.status is CampaignStatus.SCHEDULED
             await session.commit()
 
@@ -237,12 +244,12 @@ async def test_a_schedule_inside_the_window_is_accepted_and_starts_after_it(
         assert row.status is CampaignStatus.SCHEDULED
         assert row.started_at is None
         assert row.waiting_reason == "quiet_hours"
-        assert row.resumes_at == cairo(2026, 10, 23, 9)
+        assert row.resumes_at == morning
 
-        clock.now = cairo(2026, 10, 23, 9, 0, 5)
+        clock.now = morning + timedelta(seconds=5)
         await _drain(clock, replica)
         assert len(meta.requests) == 5
-        assert min(entry["at"] for entry in meta.requests) >= cairo(2026, 10, 23, 9)
+        assert min(entry["at"] for entry in meta.requests) >= morning
         assert (await campaign_row(db, campaign_id)).status is CampaignStatus.COMPLETED
     finally:
         await erase(db)
