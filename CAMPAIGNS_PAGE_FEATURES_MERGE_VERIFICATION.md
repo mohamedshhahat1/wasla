@@ -799,3 +799,40 @@ now passes with the clock months and years ahead (apart from artefacts of shifti
 agreed on `46cf10f` at 15:04 UTC; whether it agrees on the merged tree is the addendum. Two things remain outside a
 test's reach: CI resolving newer dependencies than the lock (CPM-05 was the second such break; section 26) and
 CPM-06's one-second margin.
+
+## Addendum — Push and GitHub Actions Run after Part B (recorded after the push)
+
+| Step | Result |
+| --- | --- |
+| push #3, 21:05 UTC | `git fetch origin --prune`: `origin/worktree-billing-google-auth` = `46cf10f` (unchanged since push #2); `git merge-base --is-ancestor origin/worktree-billing-google-auth HEAD` → true; `git push origin worktree-billing-google-auth` (no force) `46cf10f..06592a4`; `origin` = local = **`06592a4`** (this report's commit on top of the merge `0f767ec`) |
+| run [39854395131](https://github.com/mohamedshhahat1/wasla/actions/runs/39854395131) on `06592a4` | **success, every job** |
+
+| Job | Conclusion | UTC (Cairo) |
+| --- | --- | --- |
+| Lint, format, types | success | 21:05:36 → 21:07:17 (00:05 → 00:07) |
+| Docker build | success | 21:05:36 → 21:07:12 |
+| Alert rules and receivers | success | 21:05:36 → 21:07:13 |
+| Migration-built schema (schema parity, migrated suites, kept-data sweep) | success | 21:05:37 → 21:43:38 (00:05 → 00:43) |
+| Tests and migrations | success | 21:05:37 → 21:57:59 (00:05 → 00:57) |
+
+GitHub ran the merged tree's test jobs after midnight Cairo, inside quiet hours, a day after the date-bound tests'
+original dates: green. The canonical branch's three runs of this stage: 39785483142 (`9d51152`, red, CPM-05),
+39801370475 (`46cf10f`, green), 39854395131 (`06592a4`, green).
+
+**Cleanup done** (after the run was green): the seven `wasla-cpr-*` containers with their volumes and the
+`wasla-cpr:debde5f` image removed; the eight worktrees removed with `git worktree remove`; the branches kept. The
+development stack was never touched. `E:\wasla-cpr-notes` and `E:\wasla-cpm-notes` are removed once this addendum's
+own run is green (section 37, verdict CI GREEN); the reusable verification scripts (`cpm_populate.py`,
+`cpm_upgrade_check.py`, `upgrade_env.sh`, `run_upgrade.sh`, `e2e/`, `audit/run_cpm_mutations.py`,
+`audit/run_cpr_date_mutants.py`, `proof/shift_clock.py`) are first copied to `E:\wasla-verification-scripts`, outside
+every repository, for a later system-wide audit.
+
+### Final verdict
+
+```text
+Part A   DATE-BOUND TESTS FIXED ON CANONICAL, PUSHED, CI GREEN
+Final    CAMPAIGNS PAGE FEATURES MERGED AND PUSHED, CI GREEN
+```
+
+Open: CPM-06 (a one-second test margin; section 16) and the three decisions of section 26 (one clock for tests and
+code, CI from the lock, a nightly or shifted-clock CI job).
