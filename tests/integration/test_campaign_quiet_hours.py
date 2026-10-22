@@ -32,6 +32,7 @@ from app.services.campaign_service import CampaignService
 from app.services.campaign_settings_service import CampaignSettingsService
 from app.services.quiet_hours import QuietHours
 from app.services.workspace_service import WorkspaceService
+from tests.clock_moments import next_local
 from tests.integration.campaign_harness import (
     FakeMeta,
     SimClock,
@@ -387,7 +388,11 @@ async def _owner(db: Database, tenant_id: uuid.UUID) -> User:
 async def test_an_edited_window_recomputes_the_wait_and_switching_off_releases_it(
     prepared_database: str,
 ) -> None:
-    moment = cairo(2026, 10, 21, 6, 30)
+    # Editing the window releases the wait on the real clock (`release_quiet_waits`):
+    # the campaign is due at the real now, so the simulated one must not be behind
+    # it (CPM-01). The next 06:30 in Cairo at least an hour ahead - inside the
+    # window, which ends at 09:00 the same morning.
+    moment = next_local(6, 30, tz=zone(CAIRO), after=datetime.now(UTC) + timedelta(hours=1))
     clock = SimClock(now=moment)
     meta = FakeMeta()
     meta.clock = clock.at
@@ -398,7 +403,7 @@ async def test_an_edited_window_recomputes_the_wait_and_switching_off_releases_i
         campaign_id = await compose(db, workspace)
         await make_due(db, campaign_id, at=moment)
         await _drain(clock, replica)
-        assert (await campaign_row(db, campaign_id)).resumes_at == cairo(2026, 10, 21, 9)
+        assert (await campaign_row(db, campaign_id)).resumes_at == moment.replace(hour=9, minute=0)
         actor = await _owner(db, workspace.tenant_id)
 
         async with db.session_factory() as session:
@@ -412,10 +417,11 @@ async def test_an_edited_window_recomputes_the_wait_and_switching_off_releases_i
                 quiet_hours_end=time(7),
             )
             await session.commit()
+        assert datetime.now(UTC) <= clock.now, "released at the real now: it must not be later"
         await _drain(clock, replica)
         row = await campaign_row(db, campaign_id)
         assert meta.requests == []
-        assert row.resumes_at == cairo(2026, 10, 21, 7)
+        assert row.resumes_at == moment.replace(hour=7, minute=0)
 
         async with db.session_factory() as session:
             tenant = await session.get(Tenant, workspace.tenant_id)
@@ -428,7 +434,8 @@ async def test_an_edited_window_recomputes_the_wait_and_switching_off_releases_i
                 quiet_hours_end=time(7),
             )
             await session.commit()
-        clock.now = cairo(2026, 10, 21, 6, 35)
+        clock.now = moment + timedelta(minutes=5)
+        assert datetime.now(UTC) <= clock.now, "released at the real now: it must not be later"
         await _drain(clock, replica)
         assert len(meta.requests) == 3
         assert (await campaign_row(db, campaign_id)).status is CampaignStatus.COMPLETED
@@ -440,7 +447,10 @@ async def test_an_edited_window_recomputes_the_wait_and_switching_off_releases_i
 async def test_a_new_zone_moves_the_window_and_never_the_scheduled_time(
     prepared_database: str,
 ) -> None:
-    moment = datetime(2026, 10, 20, 5, 30, tzinfo=UTC)
+    # A new zone releases the wait on the real clock, as an edited window does
+    # (CPM-01). The next 05:30 UTC at least an hour ahead: 07:30 or 08:30 in
+    # Cairo (quiet, either side of daylight saving), 09:30 in Dubai (not).
+    moment = next_local(5, 30, tz=UTC, after=datetime.now(UTC) + timedelta(hours=1))
     clock = SimClock(now=moment)
     meta = FakeMeta()
     meta.clock = clock.at
@@ -467,6 +477,7 @@ async def test_a_new_zone_moves_the_window_and_never_the_scheduled_time(
             await session.commit()
         assert (await campaign_row(db, campaign_id)).scheduled_at == scheduled_at
 
+        assert datetime.now(UTC) <= clock.now, "released at the real now: it must not be later"
         await _drain(clock, replica)
         assert len(meta.requests) == 2
         assert (await campaign_row(db, campaign_id)).status is CampaignStatus.COMPLETED
