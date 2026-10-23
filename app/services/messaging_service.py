@@ -139,6 +139,7 @@ from app.services.business_initiated_ledger import (
 )
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
+from app.services.follow_up_sequences import SequenceService
 from app.services.media_service import content_hash as media_content_hash
 from app.services.opt_out import record_opt_out
 from app.services.provider_feedback import SEND_WRITEBACK, withdraw_template
@@ -180,6 +181,10 @@ class TemplateRefusedError(ValidationError):
 
     error_code = "template_refused"
 
+
+#: Who anchors a run of automatic follow-ups (FUS-02): never a follow-up, a
+#: campaign or a test send.
+SEQUENCE_ANCHORS: Final = frozenset({MessageOrigin.AGENT, MessageOrigin.HUMAN})
 
 #: The notice a person's template carries when it was sent while nobody had
 #: read the number's messaging limit (FLIM-02).
@@ -1118,6 +1123,13 @@ class MessagingService:
             self._ledger.record(reservation, message_id=message.id)
         if link is not None:
             link(message)
+        if origin in SEQUENCE_ANCHORS and kind is not MessageKind.TEMPLATE:
+            # An AI reply, or a person's on an AI-owned conversation, is the
+            # anchor of the workspace's reminders (FUS-02): in this same
+            # transaction, so the run exists exactly when the reply does.
+            await SequenceService(
+                self._session, tenant_id=self._tenant_id, channels=self._channels
+            ).on_outbound_reply(conversation, at=at or datetime.now(UTC))
 
         async with (
             self._pool() as http,

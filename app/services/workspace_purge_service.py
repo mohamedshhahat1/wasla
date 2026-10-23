@@ -129,6 +129,9 @@ PURGED_TABLES: tuple[str, ...] = (
     "campaign_test_sends",
     "campaign_recipients",
     "follow_ups",
+    # Runs of the automatic reminders (FUS-02): after the steps that name
+    # them, before `conversations`, which each one names.
+    "follow_up_sequence_runs",
     "messages",
     "conversations",
     # The drafts an Idempotency-Key made (PG-08). Before `campaigns`, which

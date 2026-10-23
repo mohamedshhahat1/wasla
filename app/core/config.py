@@ -622,6 +622,15 @@ class Settings(BaseSettings):
     campaign_contact_marketing_interval_seconds: int = Field(
         default=86_400, ge=3600, le=30 * 86_400
     )
+    # Automatic follow-ups (FUS-05, ADR-151): a step is sent only while the
+    # customer's window has at least this long left - the platform's own clock
+    # for "24 hours" is not documented, and a sweep can be late.
+    follow_up_window_margin_seconds: int = Field(default=1800, ge=60, le=6 * 3600)
+    # The most reminders a workspace may set; never more than five (FUS-01).
+    follow_up_sequence_max_steps: int = Field(default=5, ge=1, le=5)
+    # Test-only (Phase 5 of the follow-ups stage): the fixed text a sequence
+    # step sends before the AI writes it. Never set in a deployment.
+    follow_up_sequence_placeholder_text: str | None = None
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

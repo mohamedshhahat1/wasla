@@ -97,6 +97,7 @@ from .follow_up import (
     FollowUp,
     FollowUpStatus,
 )
+from .follow_up_sequence import FollowUpSequenceRun
 from .follow_up_settings import FollowUpSettings
 from .identity import (
     MAX_PROVIDER_SUBJECT_LENGTH,
@@ -280,6 +281,7 @@ __all__ = [
     "EmailVerificationChallenge",
     "FederatedIdentity",
     "FollowUp",
+    "FollowUpSequenceRun",
     "FollowUpSettings",
     "FollowUpStatus",
     "GenerationState",

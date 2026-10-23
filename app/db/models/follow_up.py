@@ -35,6 +35,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import _enum_type
+from app.db.models.follow_up_sequence import FollowUpOrigin, SequenceSkipReason
 from app.db.models.lead import ACTOR_KIND_TYPE, ActorKind
 
 # A nudge that has been retried this often is not going to succeed. Kept low:
@@ -92,6 +93,9 @@ class FollowUpDeferReason(StrEnum):
     #: workspace's quiet hours; it waits for the morning.
     QUIET_HOURS = "quiet_hours"
 
+
+#: The closed vocabulary of `skip_reason`, as SQL.
+SKIP_REASONS_SQL: Final = ", ".join(f"'{reason.value}'" for reason in SequenceSkipReason)
 
 #: How many waits a follow-up's `deferrals` keeps, oldest dropped first.
 MAX_DEFERRALS: Final = 20
@@ -168,6 +172,29 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "deferred_reason IS NULL OR deferred_reason IN ('portfolio_limit', 'quiet_hours')",
             name="deferred_reason_known",
         ),
+        # A run's step names its run, its place and its anchor (FUS-02); a
+        # one-off names none of them.
+        CheckConstraint("origin IN ('one_off', 'sequence')", name="origin_known"),
+        CheckConstraint(
+            "(origin = 'sequence') = (sequence_run_id IS NOT NULL"
+            " AND step_index IS NOT NULL AND anchor_at IS NOT NULL)",
+            name="sequence_step_complete",
+        ),
+        CheckConstraint(
+            f"skip_reason IS NULL OR skip_reason IN ({SKIP_REASONS_SQL})",
+            name="skip_reason_known",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "sequence_run_id"],
+            ["follow_up_sequence_runs.tenant_id", "follow_up_sequence_runs.id"],
+            name="fk_follow_ups_tenant_sequence_run",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_follow_ups_sequence_run_id",
+            "sequence_run_id",
+            postgresql_where=text("sequence_run_id IS NOT NULL"),
+        ),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -190,6 +217,22 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # order, `[{reason, until, at}]`, at most `MAX_DEFERRALS`.
     deferred_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     deferrals: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    # `one_off` - a person's or the agent's - or `sequence`: a step of a run of
+    # the workspace's reminders (FUS-02), written by the system at dispatch.
+    origin: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=FollowUpOrigin.ONE_OFF.value,
+        server_default=text("'one_off'"),
+    )
+    sequence_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # 1 for the first reminder.
+    step_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The run's anchor: the outbound reply its timer counts from.
+    anchor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Why a run's step that came due was not sent (`SequenceSkipReason`); the
+    # wording a colleague reads stays in `last_error`.
+    skip_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[FollowUpStatus] = mapped_column(
         FOLLOW_UP_STATUS_TYPE,
         nullable=False,
@@ -266,6 +309,10 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     def has_template(self) -> bool:
         """Whether this can be sent outside the service window at all."""
         return bool(self.template_name and self.template_language)
+
+    @property
+    def is_sequence_step(self) -> bool:
+        return self.origin == FollowUpOrigin.SEQUENCE.value
 
     @property
     def is_exhausted(self) -> bool:

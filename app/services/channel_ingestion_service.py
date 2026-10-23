@@ -58,6 +58,7 @@ from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import ChannelConnection
 from app.db.models.channel_event import ChannelEvent, ChannelEventKind
 from app.db.models.conversation import Contact, Conversation, Message, MessageKind
+from app.db.models.follow_up_sequence import SequenceEndReason
 from app.repositories.channel_event_repository import ChannelEventRepository
 from app.repositories.channel_repository import (
     UNKNOWN_CONNECTION,
@@ -77,6 +78,7 @@ from app.services.conversation_service import (
     EchoKind,
     ProjectionOutcome,
 )
+from app.services.follow_up_sequences import SequenceService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.media_outcomes import MediaReason, status_for, text_for
@@ -472,7 +474,17 @@ class ChannelIngestionService:
         )
         # The customer has spoken, so a nudge waiting on this conversation has
         # lost its reason - cancelled here, on the inbound path, before the
-        # follow-up worker can talk over them.
+        # follow-up worker can talk over them. A run of the workspace's
+        # reminders ends with it (FUS-06, customer_replied); the AI's next
+        # reply starts a new one.
+        await SequenceService(self._session, tenant_id=connection.tenant_id).stop_conversation(
+            message.conversation_id,
+            (
+                SequenceEndReason.OPTED_OUT
+                if opt_out_tap or is_stop_request(event.text)
+                else SequenceEndReason.CUSTOMER_REPLIED
+            ),
+        )
         step.cancelled += await FollowUpService(
             session=self._session, tenant_id=connection.tenant_id
         ).cancel_for_conversation(conversation_id=message.conversation_id)

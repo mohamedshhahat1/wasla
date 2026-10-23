@@ -46,6 +46,7 @@ from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.db.models.conversation import Conversation, ConversationMode
+from app.db.models.follow_up_sequence import SequenceEndReason
 from app.db.models.lead import (
     AGENT_WRITABLE_FIELDS,
     MAX_SCORE,
@@ -70,6 +71,7 @@ from app.repositories.lead_repository import (
     LeadStatistics,
 )
 from app.repositories.membership_repository import MembershipRepository
+from app.services.follow_up_sequences import CLOSED_LEAD_STATUSES, SequenceService
 from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
@@ -437,6 +439,12 @@ class LeadService:
         lead.status = status
         now = datetime.now(UTC)
         lead.last_activity_at = now
+        if status in CLOSED_LEAD_STATUSES and lead.contact_id is not None:
+            # Won or lost: asking "are you still interested?" is no longer
+            # sensible (FUS-06, lead_closed).
+            await SequenceService(self._session, tenant_id=self._tenant_id).stop_contact(
+                lead.contact_id, SequenceEndReason.LEAD_CLOSED
+            )
 
         if status is LeadStatus.QUALIFIED and lead.qualified_at is None:
             lead.qualified_at = now

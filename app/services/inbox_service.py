@@ -51,6 +51,7 @@ from app.db.models.conversation import (
     ConversationStatus,
     Message,
 )
+from app.db.models.follow_up_sequence import SequenceEndReason
 from app.db.models.sentiment import ConversationPriority
 from app.db.models.user import User
 from app.repositories.channel_repository import ContactIdentityRepository
@@ -58,6 +59,7 @@ from app.repositories.conversation_repository import ConversationRepository, Mes
 from app.repositories.membership_repository import MembershipRepository
 from app.services.analytics_service import AnalyticsRecorder
 from app.services.audit_service import AuditTrail
+from app.services.follow_up_sequences import SequenceService
 from app.services.follow_up_service import FollowUpService
 
 logger = get_logger(__name__)
@@ -108,6 +110,7 @@ class InboxService:
         # Constructed without settings, like the ingestion path's copy: nothing
         # here sends, and only `dispatch` needs somewhere to send from.
         self._follow_ups = FollowUpService(session=session, tenant_id=tenant_id)
+        self._sequences = SequenceService(session, tenant_id=tenant_id)
 
     async def list_conversations(
         self,
@@ -308,6 +311,8 @@ class InboxService:
             conversation_id=conversation_id,
             reason="A colleague took the conversation over.",
         )
+        # The workspace's automatic reminders stop with the AI (FUS-06).
+        await self._sequences.stop_conversation(conversation_id, SequenceEndReason.HUMAN_TOOK_OVER)
         if cancelled:
             logger.info(
                 "follow_up.cancelled_on_handoff",
@@ -431,6 +436,11 @@ class InboxService:
             return conversation
 
         conversation.assigned_to_id = assigned_to_id
+        if assigned_to_id is not None:
+            # A person now owns it: the automatic reminders stop (FUS-06).
+            await self._sequences.stop_conversation(
+                conversation_id, SequenceEndReason.HUMAN_TOOK_OVER
+            )
         if assigned_to_id is None:
             action = AuditAction.CONVERSATION_UNASSIGNED
         elif current is None:
@@ -502,6 +512,11 @@ class InboxService:
             return conversation
         previous = conversation.status
         conversation.status = status
+        if status is ConversationStatus.CLOSED:
+            # A finished conversation is followed up no more (FUS-06).
+            await self._sequences.stop_conversation(
+                conversation_id, SequenceEndReason.CONVERSATION_CLOSED
+            )
         self._record(
             action,
             conversation,

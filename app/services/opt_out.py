@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import Channel
+from app.db.models.follow_up_sequence import SequenceEndReason
 from app.repositories.consent_repository import ContactConsentRepository
 from app.services.campaign_results import attribute_opt_out
 
@@ -162,6 +163,13 @@ async def record_opt_out(
     consent.marketing_opt_out_at = at
     consent.opt_out_source = source
     consent.opt_out_via = via
+    # The automatic reminders on that channel stop with it (FUS-06), in this
+    # transaction. Imported here: the sequence service reads consent.
+    from app.services.follow_up_sequences import SequenceService
+
+    await SequenceService(session, tenant_id=tenant_id).stop_contact(
+        contact_id, SequenceEndReason.OPTED_OUT, channel=channel.value
+    )
     if source is OptOutSource.CUSTOMER:
         # The customer's own refusal soon after a campaign reached them
         # (PG-10); a colleague's note is not the campaign's result.

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.registry import ChannelRegistry, default_registry
+from app.core.config import get_settings
 from app.core.exceptions import ConflictError, ValidationError
 from app.db.models.audit import AuditAction
 from app.db.models.channel import Channel
@@ -195,6 +196,12 @@ class FollowUpSettingsService:
         await self._session.flush()
         await self._session.refresh(row)
         after = _settings_of(row)
+
+        # What the change does to steps already waiting (FUS-06), in this
+        # transaction. Imported here: the sequence service reads these settings.
+        from app.services.follow_up_sequences import SequenceService
+
+        await SequenceService(self._session, tenant_id=self._tenant_id).apply_settings(after)
         AuditTrail(self._session, tenant_id=self._tenant_id).record(
             AuditAction.FOLLOW_UP_SETTINGS_UPDATED,
             actor=actor,
@@ -216,8 +223,9 @@ class FollowUpSettingsService:
                 error_code=CHANNEL_UNAVAILABLE_CODE,
                 details={"channel_types": unavailable, "available": list(available)},
             )
-        if len(steps) > MAX_STEPS:
-            raise ValidationError(f"At most {MAX_STEPS} reminders.", error_code=TOO_MANY_STEPS_CODE)
+        most = min(MAX_STEPS, get_settings().follow_up_sequence_max_steps)
+        if len(steps) > most:
+            raise ValidationError(f"At most {most} reminders.", error_code=TOO_MANY_STEPS_CODE)
         for step in steps:
             if not MIN_STEP_DELAY_MINUTES <= step.delay_minutes <= MAX_STEP_DELAY_MINUTES:
                 raise ValidationError(

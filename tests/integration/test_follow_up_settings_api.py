@@ -129,8 +129,9 @@ async def test_a_member_reads_an_admin_changes_with_a_trail(
         ).scalars()
     )
     assert len(trail) == 1
-    assert trail[0].meta["previous"] == CARD
-    assert trail[0].meta["current"] == wanted
+    meta = trail[0].meta or {}
+    assert meta["previous"] == CARD
+    assert meta["current"] == wanted
 
 
 async def test_the_toggle_off_keeps_the_reminders(

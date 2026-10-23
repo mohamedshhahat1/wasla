@@ -14,8 +14,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 1 | RT-08 (CPM-06), TZ-05, TZ-06, TZ-07, TZ-09 | committed | a058bb1 | timezone, quiet hours (pg + Cairo pg3), campaign API, invariants, docs truth, workspaces, unit |
 | 2 | TZ-08 local-time resolution | committed | a058bb1 | as above |
 | 3 | FLIM-01..03, FQH-01..04 | committed | 8113a5f | new file 10/10; send-path sweep (campaign*, follow_up*, crm*, agent*, tool*, messaging*, manual*, ai_*, timezone); migration-built parity/downgrade; alembic head->0120->head |
-| 4 | FUS-01 settings | committed | (this commit) | settings API 17/17; workspace, purge, auth, audit, docs truth, route auth; migration-built parity + downgrade; alembic head->0120->head |
-| 5 | FUS-02/03/05/06 runs, stop rules, window | not started | | |
+| 4 | FUS-01 settings | committed | 705bd34 | settings API 17/17; workspace, purge, auth, audit, docs truth, route auth; migration-built parity + downgrade; alembic head->0120->head |
+| 5 | FUS-02/03/05/06 runs, stop rules, window | committed | (this commit) | sequences 18/18 (+ reply/silent 5x); settings + limit files; send-path sweep (see below); migration-built parity + downgrade; alembic head->0120->head |
 | 6 | FUS-04/07 AI-written step, charging | not started | | |
 | 7 | FUS-09 what a person sees | not started | | |
 | 8 | HMT-01..03 template header library | not started | | |
@@ -175,3 +175,59 @@ channel, not a platform rule).
   bounded to 500. Audited `follow_up_settings_updated`, `{previous, current}`.
 - `follow_up_settings` joins `PURGED_TABLES` (the classification test requires every
   tenant table in one list).
+
+## Phase 5 — FUS-02, FUS-03, FUS-05, FUS-06 (runs, stop rules, window)
+
+Facts verified first: a conversation's owner is `conversations.mode` (AI / HUMAN) plus
+`assigned_to_id`; a takeover is `InboxService.set_mode` (mode HUMAN, the agent's
+follow-ups cancelled, a colleague's kept - PD-CRM-1) and a person may send on an
+AI-owned conversation without taking it over (`POST /messages`, origin `human`). The lead
+vocabulary is NEW, CONTACTED, QUALIFIED, PROPOSAL, WON, LOST (`app/db/models/lead.py:49-62`),
+changed only by `LeadService.change_status`. **Wasla records no purchase or order**
+anywhere (no order tool, no Shopify event): `purchased` is the AI's skip reason and
+`lead_closed` (won / lost) the recorded stop. A conversation is closed only by
+`InboxService.close`; an opt-out only by `opt_out.record_opt_out`.
+
+- **0123**: `follow_up_sequence_runs` (anchor, state, closed `end_reason`, `steps_sent`;
+  tenant-composite key to its conversation; partial unique index: one active run per
+  conversation) and on `follow_ups` `origin` (`one_off` / `sequence`), `sequence_run_id`
+  (tenant-composite key), `step_index` (1-based), `anchor_at`, `skip_reason` (closed),
+  with CHECKs that a step names all three. **No steps snapshot on the run**: FUS-06 says a
+  step's delay is read when that step is scheduled, so a snapshot would only be a second,
+  stale copy of the settings.
+- **Start** (`SequenceService.on_outbound_reply`), in the send-intent transaction of an
+  AGENT or HUMAN non-template message (`MessagingService`, right after the message is
+  staged): settings cover the channel; mode AI; open; the customer wrote since the last
+  run's anchor (by Wasla's stored `created_at` of an inbound message - **not**
+  `last_inbound_at`, which is the platform's whole-second timestamp: a reply in the same
+  second as the anchor read as older and blocked the next run; found by a flaky test and
+  fixed before commit); no colleague one-off waiting; no stop rule. An active run is
+  restarted (`sequence_restarted`); an agent one-off is replaced (`replaced_by_sequence`).
+- **Steps** are `follow_ups` rows (origin `sequence`, `created_by_kind` SYSTEM); step n+1 is
+  scheduled in the transaction that settles step n as SENT, from its `sent_at`.
+- **Window** (FUS-05): `window_end = last_inbound_at + policy.window - margin`
+  (`FOLLOW_UP_WINDOW_MARGIN_SECONDS`, 1800), read from the channel policy's `window`; a
+  step due later is never scheduled (`window_closing`); at dispatch a step past it is
+  skipped `window_closed`. A step is only ever sent with `send_text` (free-form); there is
+  no template or tag path for it.
+- **Stop rules** (FUS-06) in the causing transaction: inbound (`customer_replied`, or
+  `opted_out` for a STOP), `set_mode` HUMAN and an assignment to a person
+  (`human_took_over`), `close` (`conversation_closed`), `record_opt_out` (`opted_out`, that
+  channel), `change_status` to WON/LOST (`lead_closed`), the settings PUT
+  (`settings_changed`: off, platform removed, or the waiting step's reminder deleted).
+  The stop paths never flush: a stop runs inside somebody else's write, and an early
+  flush expired the lead's server-side `updated_at` before the route serialised it
+  (`test_crm_integrity` caught it). Dispatch re-checks every rule plus serving, plan and
+  channel.
+- **FUS-03**: the orchestrator does not describe `schedule_follow_up` while sequences cover
+  the conversation; `FollowUpService.schedule` refuses an agent's call with
+  `SEQUENCES_AUTOMATIC`; a person's one-off cancels the waiting step
+  (`replaced_by_person`) and ends the run.
+- Phase 5's step text is `FOLLOW_UP_SEQUENCE_PLACEHOLDER_TEXT` (test-only); Phase 6
+  replaces it with the AI's.
+
+Send-path sweep after Phase 5 (113 suites: campaign*, follow_up*, crm*, agent*, tool*, messaging*,
+manual*, ai_*, lead*, inbox*, conversation*, opt_out*, channel*, whatsapp*, omnichannel*, timezone,
+workspace*): one failure, `test_workspace_purge::test_the_classification_covers_every_tenant_scoped_table`
+- the new `follow_up_sequence_runs` table was not classified. Added to `PURGED_TABLES`; both purge
+files re-run green. No earlier expectation changed.
