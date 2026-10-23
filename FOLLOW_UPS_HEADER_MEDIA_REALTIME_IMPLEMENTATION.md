@@ -23,8 +23,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 10 | RT-03 publish points, RT-04 incremental reads | committed | a100716 | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
 | 11 | RT-01/02/05 stream, RT-07 polling budget | committed | 98919e9 | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
 | 12 | RT-06 nginx, shutdown, capacity | committed | f13b8d3 | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
-| 13 | Invariants, observability, docs, ADRs, contracts | committed | 31e40c0, a3b3add, b4cb7fb, (this commit) | injection tests 15/15; invariant suites and oracles 191 passed; promtool / amtool; documentation truth 27 |
-| 14 | Mutation | not started | | |
+| 13 | Invariants, observability, docs, ADRs, contracts | committed | 31e40c0, a3b3add, b4cb7fb, 946aa15 | injection tests 15/15; invariant suites and oracles 191 passed; promtool / amtool; documentation truth 27 |
+| 14 | Mutation | committed | f9f2f69 (test fixes), (this commit) | M-S: 39/39 constructible killed, M-S10 classified structural; regression lane 18/18 killed; every file restored (sha256) |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
 
@@ -504,3 +504,83 @@ to show in English and Egyptian Arabic, and what the pages must never claim.
 `docs/CAMPAIGNS_PAGE_CONTRACT.md`: the polling budget with a stream (a 304 costs nothing in
 C), live updates, local-time resolution and `scheduled_at_local`, header files per person.
 ADR-149 amended (its "six of thirty" polling cost no longer holds).
+
+## Phase 14 — mutation matrix
+
+Runner `audit/run_fur_mutations.py` (untracked): the strict protocol of `run_cpm_mutations.py`
+(every anchor exactly once or INVALID; one change; the named killer run with `-x`; KILLED only
+when the first failure is the named killer; every file restored byte for byte, SHA-256
+verified). Killers are pytest node ids, so each verdict names one test. Detached worktree
+`E:\wasla-fur-mut` (at 946aa15, then f9f2f69 for the re-runs), database `wasla_fur_mut` on
+wasla-fur-pg, Redis wasla-fur-redis3 and wasla-fur-redis2 db 5. Control: 50 passed (then 11 for
+the re-run set). `git status` of `app/` and `scripts/` clean after every run.
+
+```text
+M-S01 KILLED  step n from the anchor               test_two_reminders_at_their_times_at_any_hour
+M-S02 KILLED  reply does not cancel                test_a_reply_cancels_the_next_step_and_...
+M-S03 KILLED  cancel moved to the worker           test_a_reply_cancels_the_next_step_and_...
+M-S04 KILLED  text sent after the claim cleared    test_a_reply_while_the_model_writes_discards_the_text
+M-S05 KILLED  takeover does not cancel             test_a_takeover_cancels_the_waiting_step
+M-S06 KILLED  lead_closed not checked              test_a_won_lead_and_a_closed_conversation_stop_...
+M-S07 KILLED  the AI's skip does not end the run   test_the_ai_s_skip_ends_the_run[purchased]
+M-S08 KILLED  window without the margin            test_a_step_inside_the_window_but_past_the_margin_... (new; see below)
+M-S09 KILLED  dispatch window check removed        test_a_step_found_past_the_margin_at_dispatch_is_skipped
+M-S10 not constructible as one change (below)
+M-S11 KILLED  delay bound 1380 -> 1440             test_the_card_is_validated[1381] (runner named the wrong test first)
+M-S12 KILLED  max steps 5 -> 6                     test_the_card_is_validated[6 steps]
+M-S13 KILLED  tool kept while sequences are on     test_sequences_on_hide_the_tool
+M-S14 KILLED  disabling cancels nothing            test_switching_off_and_deleting_a_reminder_cancel_what_waits
+M-S15 KILLED  silent customer restarts a run       test_a_business_message_to_a_silent_customer_starts_nothing
+M-S16 KILLED  model called in a transaction        test_no_lock_or_transaction_is_held_while_the_model_writes
+M-S17 KILLED  cancelled step charged               test_a_step_cancelled_before_the_call_costs_nothing
+M-S18 KILLED  DEFER_AT_LIMIT at 80 %               test_a_template_follow_up_at_the_whole_limit_waits_...
+M-S19 KILLED  DEFER_AT_LIMIT fails closed          test_a_template_follow_up_with_the_limit_unknown_...
+M-S20 KILLED  defer spends an attempt              test_a_template_follow_up_at_the_whole_limit_waits_...
+M-S21 KILLED  manual template sent at 100 %        test_a_manual_template_at_the_whole_limit_is_refused_with_when
+M-S22 KILLED  quiet hours bind free-form           test_a_template_follow_up_waits_out_quiet_hours_and_...
+M-S23 KILLED  quiet hours miss templates           test_a_template_follow_up_waits_out_quiet_hours_and_...
+M-S24 KILLED  defer overwrites requested_at        test_a_template_follow_up_at_the_whole_limit_waits_...
+M-S25 KILLED  rules ignored                        test_ten_ten_ten_with_three_uploads_and_nobody_twice[1]
+M-S26 KILLED  one upload per campaign              test_ten_ten_ten_with_three_uploads_and_nobody_twice[1]
+M-S27 KILLED  file not frozen                      test_the_frozen_file_is_sent_after_the_lead_changes
+M-S28 KILLED  retention ignores recipients         test_a_file_named_only_by_a_running_campaign_s_recipient_is_kept
+M-S29 KILLED  raw media parameters accepted        test_raw_or_missing_header_media_is_refused
+M-S30 KILLED  another workspace's file accepted    test_a_wrong_kind_and_another_workspace_s_file_are_refused
+M-S31 KILLED  published before commit              test_a_rolled_back_write_publishes_nothing
+M-S32 KILLED  text in message.created              test_an_inbound_message_and_the_reply_are_hinted_without_their_words
+M-S33 KILLED  stream crosses workspaces (re-targeted)  test_a_stream_carries_only_its_own_workspace
+M-S34 KILLED  ticket reusable                      test_a_ticket_opens_one_stream_once (after the hang fix)
+M-S35 KILLED  revoke does not close                test_revoking_the_membership_closes_the_stream
+M-S36 KILLED  304 charges the campaign bucket      test_unchanged_answers_cost_no_campaign_token
+M-S37 KILLED  updated_since > instead of >=        test_updated_since_is_inclusive_and_conditional
+M-S38 KILLED  session TimeZone not pinned          test_the_application_session_runs_in_utc_on_a_cairo_zoned_server
+M-S39 KILLED  fold resolved to the second instant  test_a_wall_time_is_resolved_by_the_server_across_both_changes
+M-S40 KILLED  CR-16 / FU-01 / RT-I01 vacuous       test_fu01_a_step_sent_after_the_customer_replied
+```
+
+- **M-S08 survived the first run: a test gap.** The window test put step 2 far past 24 hours,
+  refused with or without the margin. New test
+  `test_a_step_inside_the_window_but_past_the_margin_is_never_scheduled`: the customer wrote
+  23 h 12 min ago, reminders [5, 20]; step 2 would land at 23 h 32 min - inside 24 hours, inside
+  the margin - and is never scheduled. Re-run: KILLED.
+- **M-S34 hung its killer for 69 minutes** (stopped by hand; recorded `ERROR`). A refusal was
+  checked with a plain GET, and with the mutant the reused ticket opens a stream that never ends.
+  Every refusal check in `test_events_stream.py` now goes through `attempt()`, which opens the
+  stream and never reads a 200's body. Re-run: KILLED in 17 s. (A real regression would have hung
+  CI rather than failed it; fixed in f9f2f69.)
+- **M-S10 is not constructible as one textual change.** A step row carries no template and the
+  step path has only `send_text`; a "template fallback" would have to invent template data and a
+  send path. The behaviour is guarded structurally and detected by FU-04 (injection-tested) and by
+  the transport assertion `kinds(sent) == {"text"}` in the sequences suite. Classified, not
+  "survived but harmless".
+- **M-S33 re-targeted**: every member reads every conversation of the workspace (the route
+  table), so `may_read` has no narrower rule to break; the boundary a stream can cross is the
+  workspace, and the mutant collapses every workspace into one stream.
+
+**Regression lane** (the earlier runners, unchanged; every anchor still found once): control 125
+passed; M-C01+M08, M-C09, M-C21, M-F02, M-F13, M-F31, M-H01, M-H11 KILLED; M-F01 KILLED-OTHER on
+the suite (the 600-people test fails first) and KILLED by its named killer
+`test_two_numbers_of_one_portfolio_share_the_200` alone; M-D01..M-D08 and M-C35 KILLED (controls
+green). M-F13 and M-F31 are still killed by the CPM-06 test after its 12 s margin (RT-08).
+
+Meaningful survivors: 0.
