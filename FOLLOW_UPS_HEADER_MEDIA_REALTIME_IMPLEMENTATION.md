@@ -11,10 +11,10 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | Phase | Scope | State | Commit | Suites run |
 | --- | --- | --- | --- | --- |
 | 0 | Baseline, facts, infrastructure | committed (with 1-2) | see 1-2 | follow-up ×4 suites green at base |
-| 1 | RT-08 (CPM-06), TZ-05, TZ-06, TZ-07, TZ-09 | committed | (this commit) | timezone, quiet hours (pg + Cairo pg3), campaign API, invariants, docs truth, workspaces, unit |
-| 2 | TZ-08 local-time resolution | committed | (this commit) | as above |
-| 3 | FLIM-01..03, FQH-01..04 | committed | (this commit) | new file 10/10; send-path sweep (campaign*, follow_up*, crm*, agent*, tool*, messaging*, manual*, ai_*, timezone); migration-built parity/downgrade; alembic head->0120->head |
-| 4 | FUS-01 settings | not started | | |
+| 1 | RT-08 (CPM-06), TZ-05, TZ-06, TZ-07, TZ-09 | committed | a058bb1 | timezone, quiet hours (pg + Cairo pg3), campaign API, invariants, docs truth, workspaces, unit |
+| 2 | TZ-08 local-time resolution | committed | a058bb1 | as above |
+| 3 | FLIM-01..03, FQH-01..04 | committed | 8113a5f | new file 10/10; send-path sweep (campaign*, follow_up*, crm*, agent*, tool*, messaging*, manual*, ai_*, timezone); migration-built parity/downgrade; alembic head->0120->head |
+| 4 | FUS-01 settings | committed | (this commit) | settings API 17/17; workspace, purge, auth, audit, docs truth, route auth; migration-built parity + downgrade; alembic head->0120->head |
 | 5 | FUS-02/03/05/06 runs, stop rules, window | not started | | |
 | 6 | FUS-04/07 AI-written step, charging | not started | | |
 | 7 | FUS-09 what a person sees | not started | | |
@@ -152,3 +152,26 @@ answering 503 `dependency_unavailable` - an **infrastructure** failure: the `was
 been made with `mkdir` in MinIO's data directory, which MinIO does not register as a bucket. Fixed
 with `mc mb`; every swept suite that uses the object store re-run green. No test expectation of
 an earlier stage changed in Phase 3.
+
+## Phase 4 — FUS-01 follow-up settings
+
+Facts verified first: only WhatsApp has an adapter (`app/channels/registry.py:116-124`,
+`Channel` docstring, ADR-117); Messenger and Instagram are vocabulary only. So
+`available_channel_types = ["whatsapp"]` and a PUT naming messenger or instagram is
+`422 channel_type_unavailable`. The Messenger and Instagram parts of Part 1 are therefore
+not built: no adapter exists to send on (section 34 is not triggered - this is absence of a
+channel, not a platform rule).
+
+- **Storage: a table, not tenant columns** (`follow_up_settings`, 0122) - unlike 0109's
+  quiet hours - because the reminders are a list with a version and an editor, and the
+  `If-Match` edit counter belongs to the settings, not to the workspace row.
+- **Default ON** for every workspace that existed (0122 writes the row) and for every
+  workspace created through `AuthService` registration and `WorkspaceService` creation
+  (`default_settings_row`, in the creating transaction). **A workspace with no row is "not
+  configured" and runs nothing** (`enabled: false, version: 0`): that is a workspace written
+  directly - as test fixtures do - and it keeps every existing suite on today's behaviour
+  without editing it (FUS-03's "while sequences are disabled, everything stays as today").
+- Validation and codes as FUS-01; guidance normalised with PER-05's `normalise`, then
+  bounded to 500. Audited `follow_up_settings_updated`, `{previous, current}`.
+- `follow_up_settings` joins `PURGED_TABLES` (the classification test requires every
+  tenant table in one list).

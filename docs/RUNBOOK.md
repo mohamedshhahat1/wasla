@@ -2108,6 +2108,7 @@ Additive migrations of FOLLOW_UPS_HEADER_MEDIA_REALTIME_IMPLEMENTATION.md
 | Revision | Adds |
 | --- | --- |
 | 0121 | `follow_ups.requested_at` (backfilled from `scheduled_at` in batches of 5,000, NOT NULL through a validated CHECK), `deferred_reason` (`portfolio_limit`, `quiet_hours`), `deferrals` |
+| 0122 | `follow_up_settings` (one row per workspace, the default - on, WhatsApp, one 5-minute reminder - written for every existing workspace); audit actions `follow_up_settings_updated`, `follow_up_stopped_by_person` |
 
 Every downgrade refuses (nothing changed) while its new columns or rows hold
 data, and leaves the stamp; 0121 refuses while any follow-up waited

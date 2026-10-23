@@ -469,6 +469,10 @@ class AuditAction(StrEnum):
     # (COST-01). Platform actions: no workspace. 0119.
     RATE_CARD_UPLOADED = "rate_card_uploaded"
     RATE_CARD_ACTIVATED = "rate_card_activated"
+    # A workspace's automatic follow-up settings changed, old and new
+    # (FUS-01); a person stopped a conversation's follow-ups (FUS-09). 0122.
+    FOLLOW_UP_SETTINGS_UPDATED = "follow_up_settings_updated"
+    FOLLOW_UP_STOPPED_BY_PERSON = "follow_up_stopped_by_person"
 
     # What the agents are allowed to say (RAG-17, docs/RAG.md).
     #
@@ -692,6 +696,9 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     # 0119
     "rate_card_uploaded",
     "rate_card_activated",
+    # 0122
+    "follow_up_settings_updated",
+    "follow_up_stopped_by_person",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

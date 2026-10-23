@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **238 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **240 operations**, of which
 18 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -175,6 +175,30 @@ Tripoli, Beirut, London, Istanbul. Sorted by current offset, then name;
 `?q=` (at most 64 characters) filters by id or label. `Cache-Control: public,
 max-age=3600` and an `ETag` that changes with the tzdata release or any zone's
 offset (304 on `If-None-Match`).
+
+## Workspace follow-up settings (FUS-01)
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/workspace/follow-up-settings` | Any workspace member |
+| PUT | `/api/v1/workspace/follow-up-settings` | Owner or admin; `If-Match` the version read; audited `follow_up_settings_updated` |
+
+The owner's card: `{enabled, channel_types, available_channel_types, steps:
+[{delay_minutes, guidance}], summary: {enabled, steps_count}, version,
+updated_at, updated_by}`, with the version as `ETag`. A workspace created
+through the API starts on: `["whatsapp"]`, one reminder after 5 minutes.
+`PUT` takes every field every time: reminders of 5-1380 minutes (`422
+follow_up_delay_out_of_range`; the card's hours are sent as minutes), at most 5
+(`follow_up_too_many_steps`); `enabled` with none is
+`follow_up_steps_required`, with no platform `follow_up_channels_required`; a
+platform without an adapter in this deployment is `channel_type_unavailable`
+(`available_channel_types` lists the ones that may be chosen - WhatsApp
+today); `guidance` (an instruction to the AI, never sent as it is) is at most
+500 characters after it is made one line without control characters
+(`follow_up_guidance_too_long`). A stale `If-Match` is `409
+follow_up_settings_changed`; none is `422 follow_up_settings_version_required`.
+A workspace with no settings row (never configured) reads `enabled: false,
+version: 0`.
 
 ## Workspace local time (TZ-08)
 

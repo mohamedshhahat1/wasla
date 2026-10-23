@@ -162,6 +162,9 @@ PURGED_TABLES: tuple[str, ...] = (
     "knowledge_bases",
     "agent_tools",
     "agents",
+    # The workspace's automatic follow-up reminders (FUS-01): a reminder's
+    # instruction to the AI is the business's own wording, erased with it.
+    "follow_up_settings",
     "whatsapp_events",
     "whatsapp_templates",
     "whatsapp_accounts",

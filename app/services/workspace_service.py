@@ -79,6 +79,7 @@ from app.services.audit_service import AuditTrail
 from app.services.campaign_service import CampaignService
 from app.services.campaign_settings_service import release_quiet_waits
 from app.services.follow_up_service import FollowUpService, release_follow_up_quiet_waits
+from app.services.follow_up_settings_service import default_settings_row
 from app.services.subscription_service import (
     SubscriptionService,
     bootstrap_default_subscription,
@@ -207,6 +208,9 @@ class WorkspaceService:
         tenant = await self._tenants.create(name=name, slug=slug, timezone=timezone)
         # Identifiers are assigned on flush, and the membership needs both.
         await self._session.flush()
+        # The owner's follow-up card opens on, WhatsApp, one reminder after
+        # five minutes (FUS-01).
+        self._session.add(default_settings_row(tenant.id))
 
         memberships = MembershipRepository(self._session, tenant_id=tenant.id)
         membership = await memberships.add_member(user_id=owner.id, role=TenantRole.TENANT_OWNER)
