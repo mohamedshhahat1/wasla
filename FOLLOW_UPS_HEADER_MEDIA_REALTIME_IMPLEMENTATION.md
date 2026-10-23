@@ -25,7 +25,7 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 12 | RT-06 nginx, shutdown, capacity | committed | f13b8d3 | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
 | 13 | Invariants, observability, docs, ADRs, contracts | committed | 31e40c0, a3b3add, b4cb7fb, 946aa15 | injection tests 15/15; invariant suites and oracles 191 passed; promtool / amtool; documentation truth 27 |
 | 14 | Mutation | committed | f9f2f69, 8eb21f6 | M-S: 39/39 constructible killed, M-S10 classified structural; regression lane 18/18 killed; every file restored (sha256) |
-| 15 | Full lanes, CI jobs, after-probes | in progress: first lanes red at 8eb21f6, fixes (this commit) | | see Phase 15 |
+| 15 | Full lanes, CI jobs, after-probes | in progress: lanes green at a57535b | a57535b | see Phase 15 |
 | 16 | Final report | not started | | |
 
 ## Starting repository state (recorded 2026-10-23)
@@ -621,3 +621,14 @@ Every failure classified; none is a defect of the follow-up, header or realtime 
 
 The targeted re-run of every affected file (501 tests) passed; both full lanes are re-run on the
 new head below.
+
+### Full lanes at a57535b (13:13-14:11 UTC, in parallel, fresh databases)
+
+```text
+MODEL-BUILT (real clock)       collected 7,436 / passed 7,418 / failed 0 / skipped 18 / xfailed 0 / xpassed 0
+MIGRATION-BUILT (real clock)   collected 7,436 / passed 7,422 / failed 0 / skipped 14 / xfailed 0 / xpassed 0
+baseline (debde5f)             7,298 / 7,280 / 0 / 18   and   7,298 / 7,284 / 0 / 14
+```
+
+Skips equal the known set: OpenAI x11, schema parity x4 (model-built only), tmpfs x1, kept-data
+only x2. Collected +138: the tests this stage added.
