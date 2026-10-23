@@ -21,7 +21,9 @@ import tracemalloc
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
+from app.services.realtime_streams import open_streams
 from tests.integration.sequence_harness import conversations
 from tests.integration.test_events_stream import (
     Reader,
@@ -42,7 +44,9 @@ STREAM = "/api/v1/events/stream"
 
 async def test_two_hundred_streams_on_one_process(prepared_database: str) -> None:
     async with running(prepared_database, rt_streams_per_workspace=STREAMS) as live:
-        people = [(await member(live.mine, live))[1] for _ in range(STREAMS // PER_PERSON)]
+        members = [await member(live.mine, live) for _ in range(STREAMS // PER_PERSON)]
+        people_ids = [user_id for user_id, _ in members]
+        people = [headers for _, headers in members]
         conversation = (await conversations(live.mine))[0]
         limits = httpx.Limits(max_connections=STREAMS + 10, max_keepalive_connections=20)
         async with httpx.AsyncClient(
@@ -81,6 +85,26 @@ async def test_two_hundred_streams_on_one_process(prepared_database: str) -> Non
             finally:
                 for response in responses:
                     await response.aclose()
+
+        # FSR-02: two hundred clients gone, and the process holds none of them.
+        # A stream whose client left mid-send used to stay subscribed - counted
+        # against its person - until garbage collection.
+        app = live.server.config.app
+        assert isinstance(app, FastAPI)
+        hub = app.state.event_hub
+        for _ in range(75):  # up to 15 s
+            if not hub.open_streams:
+                break
+            await asyncio.sleep(0.2)
+        assert hub.open_streams == 0
+        assert (
+            await open_streams(
+                live.redis,
+                user_id=people_ids[0],
+                keepalive_seconds=live.settings.rt_keepalive_seconds,
+            )
+            == 0
+        )
 
     assert len(latencies) == STREAMS * MESSAGES, "every stream received every message"
     latencies.sort()

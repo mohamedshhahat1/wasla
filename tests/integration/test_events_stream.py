@@ -42,7 +42,7 @@ from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.main import create_app
-from app.services.realtime import issue_ticket
+from app.services.realtime import close_every_stream, issue_ticket
 from tests.integration.campaign_harness import (
     PLATFORM_TOKEN,
     USER_DOMAIN,
@@ -113,7 +113,13 @@ async def running(prepared_database: str, **overrides: Any) -> AsyncIterator[Liv
     port = _free_port()
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(configured), host="127.0.0.1", port=port, log_level="warning", lifespan="on"
+            create_app(configured),
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            lifespan="on",
+            # As the entrypoint runs it (FSR-03).
+            timeout_graceful_shutdown=25,
         )
     )
     serving = asyncio.create_task(server.serve())
@@ -126,8 +132,12 @@ async def running(prepared_database: str, **overrides: Any) -> AsyncIterator[Liv
     try:
         yield state
     finally:
+        # As the exit signal does (`install_stream_shutdown`): every open stream
+        # is told to end first, then uvicorn stops - rather than waiting for
+        # each stream to notice its client has gone.
+        close_every_stream("server_restart")
         server.should_exit = True
-        await asyncio.wait_for(serving, timeout=30)
+        await asyncio.wait_for(serving, timeout=90)
         for world in (mine, theirs):
             await redis.delete(events.stream_key(world.workspace.tenant_id))
         await redis.aclose()

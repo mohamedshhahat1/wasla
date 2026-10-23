@@ -159,6 +159,8 @@ What ships is the structure around it. The HTTP listener on port 80 serves the A
 
 **Restart and drain.** On SIGTERM (or SIGINT) each API process first tells every open stream to send `event: closed` with reason `server_restart` and end, then Uvicorn's usual graceful shutdown proceeds - without this it would wait on streams that never end until its grace period ran out. Browsers reconnect, to another replica if one is up, with `Last-Event-ID`; nothing is lost within `RT_STREAM_RETENTION_SECONDS` (900). To drain one replica, take it out of the upstream, then stop it.
 
+The entrypoint bounds that graceful shutdown with `--timeout-graceful-shutdown` (`UVICORN_GRACEFUL_SHUTDOWN_SECONDS`, default 25): a connection the runtime never finishes closing must not keep the application's own shutdown - publishing the last realtime hints, closing Redis and the database - from running before the container's `stop_grace_period` (30 s) ends in a kill. Keep the bound below the grace period if either changes. A stream whose client leaves is unsubscribed and uncounted at once, however the response ends (FSR-02), so a closed tab never holds one of a person's five places.
+
 ### Issuing the first certificate
 
 The ordering matters, and getting it wrong produces a deadlock that looks like a broken proxy: a redirect to HTTPS cannot be verified while the certificate that would serve HTTPS does not exist. That is why the ACME location is matched with `^~` — it is served *before* the redirect.

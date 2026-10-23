@@ -632,3 +632,39 @@ baseline (debde5f)             7,298 / 7,280 / 0 / 18   and   7,298 / 7,284 / 0 
 
 Skips equal the known set: OpenAI x11, schema parity x4 (model-built only), tmpfs x1, kept-data
 only x2. Collected +138: the tests this stage added.
+
+### Kept-data, races, alembic (at a57535b) - and FSR-02, FSR-03
+
+- **Kept-data sweep** (ci.yml's selection: the 29 `ai_harness` suites and both invariant files,
+  `WASLA_TEST_KEEP_AI_DATA=1`, migration-built, a fresh database each run): 3 / 3 runs 304
+  passed, 0 skipped. The follow-up step suites use `sequence_harness`, not `ai_harness`, so by
+  ci.yml's rule they are not in the selection (recorded; unchanged).
+- **Alembic** (wasla-fur-pg3, fresh): one head 0126; empty -> head -> base -> head; preflight
+  verify ok (0 NOT VALID, 0 invalid indexes, 0 disabled triggers); `alembic check` no drift;
+  head -> 0120 -> head; preflight ok.
+- **Races** (two-worker, reservation, top-up concurrency, header media 2/4 worker incl.
+  per-recipient, messaging limit, contact cap, quiet hours, sequences incl. two workers, the
+  stream and capacity suites, Google concurrency): run 1 green; runs 2 and 3 failed one test,
+  the 200-stream capacity test, in its teardown. Investigated:
+  - **FSR-02 (a product defect, Phase 11)**: a client that left while Starlette was sending left
+    the stream's generator suspended at a `yield`, so its `finally` - unsubscribe from the hub,
+    uncount the stream in Redis - waited for garbage collection; the hub's watcher meanwhile
+    kept counting the gone stream alive. Each such tab held one of the person's five places for
+    the life of the process (after five: `429 stream_limit`), kept the hub's reader and watcher
+    running, and inflated `wasla_events_streams_open`. And under anyio's cancellation every
+    `await` in that `finally` is cancelled again, so even a run `finally` could not uncount.
+    Fixed: `EventStreamResponse` closes the generator however the response ends, the uncount
+    runs in a shielded cancel scope, and the lifespan cancels the hubs' tasks before closing
+    Redis. Tests: `tests/unit/test_event_stream_response.py` (both ASGI paths; fails on plain
+    `StreamingResponse`), and the capacity test now asserts the hub and the person's Redis count
+    are back to 0 after its 200 clients leave (it failed `4 == 0` before the shield).
+  - **FSR-03 (deployment)**: with that fixed, about 1 run in 10 still hung at shutdown, and the
+    task dump showed why: uvicorn had 0 connections and 0 tasks and waited in asyncio's
+    `Server.wait_closed()` for a transport that, after a client reset on Windows' Proactor loop
+    (Python 3.12.7), never detaches - unbounded, because the entrypoint set no
+    `--timeout-graceful-shutdown`. In production Docker kills the API 30 s after SIGTERM, before
+    the lifespan's shutdown (the event drain, closing Redis and the database) had run. The
+    entrypoint now passes `--timeout-graceful-shutdown ${UVICORN_GRACEFUL_SHUTDOWN_SECONDS:-25}`
+    (DEPLOYMENT.md); the test server the same. 10 / 10 capacity runs green after it.
+  - A false positive found on the way: the publish test scanned events for the digits `4411`,
+    which a timestamp's microseconds contained; its markers are letters now.

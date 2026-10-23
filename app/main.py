@@ -33,7 +33,7 @@ from app.core.tracing import API_SERVICE_NAME, configure_tracing, shutdown_traci
 from app.db.session import Database
 from app.integrations.email import require_delivery_verification
 from app.integrations.whatsapp.versions import api_version_warning
-from app.services.realtime import close_every_stream
+from app.services.realtime import close_every_stream, stop_every_hub
 
 logger = get_logger(__name__)
 
@@ -108,6 +108,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         set_counter_sink(None)
         await drain_events()
         set_event_sink(None)
+        # No hub reader may outlive the Redis client below (FSR-02).
+        await stop_every_hub()
         await app.state.redis.close()
         await app.state.database.dispose()
         # Last, so spans covering the teardown above still have somewhere to go.

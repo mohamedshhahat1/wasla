@@ -28,7 +28,13 @@ case "${command}" in
     # request.client before `client_identity` can verify the immediate peer
     # against TRUSTED_PROXY_IPS; two trust systems with different allowlists
     # turn a forged X-Forwarded-For value into a socket address.
-    exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --no-proxy-headers
+    # A bounded graceful shutdown (FSR-03): open event streams are told to
+    # end on SIGTERM, but a connection the runtime never finishes closing
+    # must not hold the lifespan's shutdown - the event drain, closing Redis
+    # and the database - past Docker's 30 s stop_grace_period, after which
+    # the process is killed without it.
+    exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --no-proxy-headers \
+      --timeout-graceful-shutdown "${UVICORN_GRACEFUL_SHUTDOWN_SECONDS:-25}"
     ;;
   worker)
     # Never runs migrations, whatever RUN_MIGRATIONS says. Workers scale to

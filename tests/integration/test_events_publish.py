@@ -79,8 +79,8 @@ async def test_an_inbound_message_and_the_reply_are_hinted_without_their_words(
     world = await build(database, prepared_database, meta, steps=[5])
     try:
         conversation = (await conversations(world))[0]
-        await customer_writes(world, conversation, "Secret words about my order 4411")
-        await ai_reply(world, conversation, "A private answer 9933")
+        await customer_writes(world, conversation, "Secret words about my order QX-ZEBRA")
+        await ai_reply(world, conversation, "A private answer ZJ-OTTER")
 
         found = await hints(redis, world.workspace.tenant_id)
         created = [hint for hint in found if hint["type"] == "message.created"]
@@ -91,7 +91,7 @@ async def test_an_inbound_message_and_the_reply_are_hinted_without_their_words(
         assert {hint["conversation_id"] for hint in created} == {str(conversation.id)}
         assert {hint["channel_type"] for hint in created} == {"whatsapp"}
         assert any(hint["type"] == "follow_up.updated" for hint in found), "the run's step"
-        scan_for_content(found, ["Secret words", "4411", "private answer", "9933"])
+        scan_for_content(found, ["Secret words", "QX-ZEBRA", "private answer", "ZJ-OTTER"])
     finally:
         await erase(database)
         await database.dispose()

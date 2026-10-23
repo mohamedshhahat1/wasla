@@ -23,6 +23,7 @@ from app.core.exceptions import AuthenticationError, RateLimitedError
 from app.schemas.events import EventTicketRead
 from app.services import realtime_streams
 from app.services.realtime import (
+    EventStreamResponse,
     StreamHub,
     StreamSession,
     issue_ticket,
@@ -130,7 +131,7 @@ async def open_stream(
             "Too many event streams are open. Close one and try again.",
             error_code=STREAM_LIMIT_CODE,
         )
-    return StreamingResponse(
+    return EventStreamResponse(
         session.frames(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},

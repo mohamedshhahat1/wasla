@@ -33,13 +33,16 @@ import json
 import secrets
 import uuid
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+import anyio
 from redis.asyncio import Redis
 from sqlalchemy import select
+from starlette.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from app.core.events import CLOSED, RESYNC, stream_key
 from app.core.logging import get_logger
@@ -196,6 +199,14 @@ class StreamHub:
                         except asyncio.QueueFull:
                             subscriber.overflowed = True
 
+    async def stop(self) -> None:
+        """Cancel every reader and watcher of this hub, and wait for them (shutdown)."""
+        tasks = [task for pair in self._tasks.values() for task in pair]
+        self._tasks.clear()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _watch(self, tenant_id: uuid.UUID) -> None:
         """Once per keep-alive: count every stream alive, and close those that must (RT-05)."""
         while self._subscribers.get(tenant_id):
@@ -283,6 +294,27 @@ async def closing_reasons(
     return reasons
 
 
+class EventStreamResponse(StreamingResponse):
+    """`text/event-stream` whose generator is always closed when the response ends (FSR-02).
+
+    A client that leaves while Starlette is awaiting `send` cancels the
+    response with the stream's generator suspended at a `yield`: its
+    `finally` - unsubscribing from the hub and uncounting the stream - would
+    then wait for garbage collection, and in the meantime the hub's watcher
+    keeps counting the gone stream alive. After five such tabs a person was
+    refused `stream_limit` until the process restarted. Closing the generator
+    here runs its `finally` however the response ended.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            iterator = self.body_iterator
+            if isinstance(iterator, AsyncGenerator):
+                await asyncio.shield(iterator.aclose())
+
+
 def close_every_stream(reason: str = "server_restart") -> None:
     """Close every open stream of this process; safe to call from a signal handler.
 
@@ -294,6 +326,16 @@ def close_every_stream(reason: str = "server_restart") -> None:
         loop = hub._loop
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(hub.close_all, reason)
+
+
+async def stop_every_hub() -> None:
+    """Cancel this process's hub readers and watchers (the lifespan's shutdown).
+
+    By then every stream has ended; a reader blocked in `XREAD` must not
+    outlive the Redis client it reads with.
+    """
+    for hub in list(_HUBS):
+        await hub.stop()
 
 
 def _text(value: Any) -> str:
@@ -392,7 +434,11 @@ class StreamSession:
                     yield frame(data=payload, event=kind, event_id=entry_id)
         finally:
             self.hub.unsubscribe(self.ticket.tenant_id, subscriber)
-            with contextlib.suppress(Exception):
+            # Shielded (FSR-02): a stream ends by being cancelled when its
+            # client leaves, and anyio cancels every await inside a cancelled
+            # scope - an unshielded uncount would never run, and the person's
+            # place would stay taken until three keep-alives were missed.
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
                 await realtime_streams.unregister(
                     self.redis,
                     stream_id=self.stream_id,
@@ -473,6 +519,7 @@ def new_stream_id() -> str:
 
 __all__ = [
     "RETRY_MILLISECONDS",
+    "EventStreamResponse",
     "StreamHub",
     "StreamSession",
     "Ticket",
@@ -482,5 +529,6 @@ __all__ = [
     "may_read",
     "new_stream_id",
     "redeem_ticket",
+    "stop_every_hub",
     "valid_event_id",
 ]
