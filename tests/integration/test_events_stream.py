@@ -242,6 +242,18 @@ async def stream(
         yield reader
 
 
+async def attempt(client: httpx.AsyncClient, token: str) -> tuple[int, dict[str, Any] | None]:
+    """Open the stream with `token` and close it at once: the status, and a refusal's body.
+
+    A `200`'s body is never read: an open stream does not end, so a ticket that
+    wrongly opens one fails the caller's assertion instead of hanging the test.
+    """
+    async with client.stream("GET", STREAM, params={"ticket": token}) as response:
+        if response.status_code == 200:
+            return 200, None
+        return response.status_code, json.loads(await response.aread())
+
+
 def client_for(live: Live) -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=live.base_url, timeout=httpx.Timeout(30.0, read=None))
 
@@ -255,10 +267,10 @@ async def test_a_ticket_opens_one_stream_once(live: Live) -> None:
         token = await ticket(client, headers)
         async with stream(client, token):
             pass
-        assert (await client.get(STREAM, params={"ticket": token})).status_code == 401, "reused"
-        unknown = await client.get(STREAM, params={"ticket": "not-a-ticket"})
-        assert unknown.status_code == 401
-        assert unknown.json()["error"]["code"]
+        assert (await attempt(client, token))[0] == 401, "reused"
+        status, body = await attempt(client, "not-a-ticket")
+        assert status == 401
+        assert body is not None and body["error"]["code"]
 
         expired, _ = await issue_ticket(
             live.redis,
@@ -268,7 +280,7 @@ async def test_a_ticket_opens_one_stream_once(live: Live) -> None:
             ttl=1,
         )
         await asyncio.sleep(1.5)
-        assert (await client.get(STREAM, params={"ticket": expired})).status_code == 401
+        assert (await attempt(client, expired))[0] == 401
 
         stale = await ticket(client, headers)
         async with live.mine.database.session_factory() as session:
@@ -276,7 +288,7 @@ async def test_a_ticket_opens_one_stream_once(live: Live) -> None:
                 update(User).where(User.id == user_id).values(token_version=User.token_version + 1)
             )
             await session.commit()
-        assert (await client.get(STREAM, params={"ticket": stale})).status_code == 401, "logout"
+        assert (await attempt(client, stale))[0] == 401, "logout"
 
         _, other_headers = await member(live.mine, live)
         revoked_ticket = await ticket(client, other_headers)
@@ -288,7 +300,7 @@ async def test_a_ticket_opens_one_stream_once(live: Live) -> None:
                 .values(status=MembershipStatus.REVOKED)
             )
             await session.commit()
-        assert (await client.get(STREAM, params={"ticket": revoked_ticket})).status_code == 401
+        assert (await attempt(client, revoked_ticket))[0] == 401
         assert (await client.post(TICKET)).status_code == 401, "no ticket without a session"
 
 
@@ -300,7 +312,7 @@ async def test_the_ticket_is_never_in_a_log_line(
         token = await ticket(client, headers)
         async with stream(client, token):
             pass
-        await client.get(STREAM, params={"ticket": token})
+        await attempt(client, token)
     assert token not in caplog.text
 
 
@@ -477,9 +489,9 @@ async def test_a_sixth_stream_for_one_person_is_refused(live: Live) -> None:
         opened = [stream(client, await ticket(client, headers)) for _ in range(5)]
         readers = [await context.__aenter__() for context in opened]
         try:
-            sixth = await client.get(STREAM, params={"ticket": await ticket(client, headers)})
-            assert sixth.status_code == 429
-            assert sixth.json()["error"]["code"] == "stream_limit"
+            status, body = await attempt(client, await ticket(client, headers))
+            assert status == 429
+            assert body is not None and body["error"]["code"] == "stream_limit"
         finally:
             for context in reversed(opened):
                 await context.__aexit__(None, None, None)

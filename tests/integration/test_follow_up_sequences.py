@@ -297,6 +297,36 @@ async def test_a_step_past_the_window_is_never_scheduled(prepared_database: str)
         await world.database.dispose()
 
 
+async def test_a_step_inside_the_window_but_past_the_margin_is_never_scheduled(
+    prepared_database: str,
+) -> None:
+    """[5 min, 20 min], the customer wrote 23 h 12 min ago: step 2 would land at 23 h 32 min.
+
+    Inside WhatsApp's 24 hours, but inside their last 30 minutes - the margin
+    (FUS-05) - so it is never scheduled. Without the margin it would be.
+    """
+    world = await _world(
+        prepared_database,
+        "seq-margin",
+        steps=[5, 20],
+        last_inbound_ago=timedelta(hours=23, minutes=12),
+    )
+    try:
+        conversation = (await conversations(world))[0]
+        number = await wa_id(world, conversation)
+        await ai_reply(world, conversation)
+        await make_due(world, conversation)
+        await sweeper(world).run_once()
+
+        assert len(step_sends(world, number)) == 1, "step 1 is inside the window less the margin"
+        assert await pending(world, conversation) is None
+        (run,) = await runs_of(world, conversation)
+        assert (run.end_reason, run.steps_sent) == ("window_closing", 1)
+    finally:
+        await erase(world.database)
+        await world.database.dispose()
+
+
 async def test_a_step_found_past_the_margin_at_dispatch_is_skipped(prepared_database: str) -> None:
     world = await _world(prepared_database, "seq-closed", steps=[5])
     try:
