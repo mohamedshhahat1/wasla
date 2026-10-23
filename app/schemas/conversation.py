@@ -38,6 +38,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
+from app.schemas.follow_up import FollowUpStateRead
 from app.schemas.text import StorableText
 
 # The largest text any supported channel accepts, before the conversation's
@@ -301,6 +302,9 @@ class ConversationRead(BaseModel):
     service_window_open: bool
     reply_policy: ReplyPolicyRead
     created_at: datetime
+    # The conversation's follow-ups (FUS-09): on `GET /conversations/{id}` only;
+    # null in a list.
+    follow_up: FollowUpStateRead | None = None
 
     @classmethod
     def from_model(

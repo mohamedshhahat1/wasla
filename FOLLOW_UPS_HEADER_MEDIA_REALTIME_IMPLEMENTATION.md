@@ -16,8 +16,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 3 | FLIM-01..03, FQH-01..04 | committed | 8113a5f | new file 10/10; send-path sweep (campaign*, follow_up*, crm*, agent*, tool*, messaging*, manual*, ai_*, timezone); migration-built parity/downgrade; alembic head->0120->head |
 | 4 | FUS-01 settings | committed | 705bd34 | settings API 17/17; workspace, purge, auth, audit, docs truth, route auth; migration-built parity + downgrade; alembic head->0120->head |
 | 5 | FUS-02/03/05/06 runs, stop rules, window | committed | fb7124b | sequences 18/18 (+ reply/silent 5x); settings + limit files; send-path sweep (see below); migration-built parity + downgrade; alembic head->0120->head |
-| 6 | FUS-04/07 AI-written step, charging | committed | (this commit) | ai steps 16/16, tool offer 3/3, sequences 18/18, AI invariants; send-path sweep |
-| 7 | FUS-09 what a person sees | not started | | |
+| 6 | FUS-04/07 AI-written step, charging | committed | 980868a | ai steps 16/16, tool offer 3/3, sequences 18/18, AI invariants; send-path sweep |
+| 7 | FUS-09 what a person sees | committed | (this commit) | visibility 3/3; conversation/inbox/follow-up/CRM/schema suites 255 passed; docs truth, route auth |
 | 8 | HMT-01..03 template header library | not started | | |
 | 9 | HMR-01..03 per-recipient header media | not started | | |
 | 10 | RT-03 publish points, RT-04 incremental reads | not started | | |
@@ -262,3 +262,19 @@ existing "secret" or "other customer's data" guard on agent replies.
 
 Send-path sweep after Phase 6: 132 suites (Phase 5's set plus metric*, rag*, entitlement*,
 usage*): 0 failed.
+
+## Phase 7 — FUS-09 (what a person sees)
+
+- `GET /conversations/{id}` gains `follow_up` (`none` / `scheduled` / `ended`, step of total,
+  due time with its local twin, end reason and time); the list leaves it null (no per-row
+  query on the inbox list).
+- `GET /conversations/{id}/follow-ups`: the conversation's history through the existing
+  cursor-paged follow-up list (latest due first): origin, step, status, requested and due
+  times, closed skip / cancel / defer reasons, and the text of a **sent** one only - the
+  model's text for a skipped step is never stored, so it cannot be shown.
+- `DELETE /conversations/{id}/follow-up` (any member, as replying): ends the run
+  `stopped_by_person`, audited `follow_up_stopped_by_person`, returns the state.
+- **The "activity / timeline"**: Wasla has no conversation timeline endpoint (the campaign
+  activity feed is campaigns-only), so the history route *is* the follow-up timeline; the
+  contract says so.
+- 242 operations.

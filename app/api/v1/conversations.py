@@ -18,6 +18,7 @@ from fastapi import APIRouter, File, Form, Header, Query, Response, UploadFile, 
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
+    FollowUpServiceDep,
     InboxServiceDep,
     MediaServiceDep,
     MediaStorageDep,
@@ -27,6 +28,7 @@ from app.api.dependencies import (
 from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
 from app.channels.policy import REQUEST_CAPTION_CEILING
+from app.core.dependencies import SessionDep
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
@@ -45,7 +47,9 @@ from app.schemas.conversation import (
     SendTextRequest,
     TemplateSentRead,
 )
+from app.schemas.follow_up import FollowUpHistoryRead, FollowUpStateRead
 from app.schemas.text import StorableText
+from app.services.follow_up_sequences import SequenceService
 from app.services.inbox_service import InboxService
 from app.services.media_retention_service import purge_reason
 from app.services.messaging_service import MessagingService
@@ -149,11 +153,71 @@ async def list_conversations(
 @router.get("/{conversation_id}", response_model=ConversationRead)
 async def get_conversation(
     conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
+    session: SessionDep,
 ) -> ConversationRead:
+    """One conversation, with its follow-ups' state (FUS-09)."""
     conversation = await inbox.get_conversation(conversation_id)
-    return await _present(conversation, inbox=inbox, messaging=messaging)
+    read = await _present(conversation, inbox=inbox, messaging=messaging)
+    state = await SequenceService(session, tenant_id=workspace.tenant.id).state(conversation.id)
+    read.follow_up = FollowUpStateRead.from_state(state, timezone=workspace.tenant.timezone)
+    return read
+
+
+@router.get(
+    "/{conversation_id}/follow-ups",
+    response_model=CursorPage[FollowUpHistoryRead],
+    summary="A conversation's follow-up history",
+)
+async def list_conversation_follow_ups(
+    conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    inbox: InboxServiceDep,
+    follow_ups: FollowUpServiceDep,
+    limit: LimitQuery = 50,
+    cursor: CursorQuery = None,
+) -> CursorPage[FollowUpHistoryRead]:
+    """Every follow-up of the conversation, latest due first: steps, one-offs, outcomes, reasons.
+
+    The text is shown for a sent one only; what the model wrote for a step it
+    skipped is never kept or shown (FUS-09).
+    """
+    await inbox.get_conversation(conversation_id)
+    page = await follow_ups.list_follow_ups(
+        conversation_id=conversation_id, limit=limit, cursor=cursor
+    )
+    return CursorPage[FollowUpHistoryRead](
+        items=[
+            FollowUpHistoryRead.from_model(row, timezone=workspace.tenant.timezone)
+            for row in page.items
+        ],
+        next_cursor=page.next_cursor,
+    )
+
+
+@router.delete(
+    "/{conversation_id}/follow-up",
+    response_model=FollowUpStateRead,
+    summary="Stop this conversation's automatic follow-ups",
+)
+async def stop_conversation_follow_ups(
+    conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    inbox: InboxServiceDep,
+    session: SessionDep,
+) -> FollowUpStateRead:
+    """Any member who may reply here: the run ends `stopped_by_person`, audited (FUS-09).
+
+    Nothing waiting is not an error: the current state is returned. A
+    reminder whose send has already been committed is not recalled.
+    """
+    await inbox.get_conversation(conversation_id)
+    sequences = SequenceService(session, tenant_id=workspace.tenant.id)
+    await sequences.stop_by_person(conversation_id, actor=workspace.user)
+    state = await sequences.state(conversation_id)
+    return FollowUpStateRead.from_state(state, timezone=workspace.tenant.timezone)
 
 
 @router.get("/{conversation_id}/messages", response_model=CursorPage[MessageRead])

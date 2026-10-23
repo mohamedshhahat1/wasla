@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import (
     AwareDatetime,
@@ -32,6 +32,7 @@ from app.db.models.follow_up import (
 from app.db.models.lead import ActorKind
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
 from app.schemas.text import StorableText
+from app.services.follow_up_sequences import FollowUpState
 from app.services.follow_up_service import MAX_DELAY, MIN_DELAY
 
 MIN_DELAY_MINUTES = int(MIN_DELAY.total_seconds() // 60)
@@ -165,10 +166,86 @@ class FollowUpRead(BaseModel):
         )
 
 
+class FollowUpStateRead(BaseModel):
+    """A conversation's follow-ups as the inbox shows them (FUS-09).
+
+    `scheduled`: one waits, due `due_at` (a reminder of a run has `step_index`
+    of `steps_total`; a person's one-off has neither). `ended`: the last run
+    ended, why and when. `none`: nothing was ever scheduled, or a one-off went.
+    """
+
+    state: Literal["none", "scheduled", "ended"]
+    step_index: int | None
+    steps_total: int | None
+    due_at: datetime | None
+    due_at_local: datetime | None
+    ended_reason: str | None
+    ended_at: datetime | None
+
+    @classmethod
+    def from_state(cls, state: FollowUpState, *, timezone: str) -> Self:
+        return cls(
+            state=state.state,
+            step_index=state.step_index,
+            steps_total=state.steps_total,
+            due_at=state.due_at,
+            due_at_local=local(state.due_at, timezone) if state.due_at else None,
+            ended_reason=state.ended_reason,
+            ended_at=state.ended_at,
+        )
+
+
+class FollowUpHistoryRead(BaseModel):
+    """One follow-up of a conversation, as its history lists it (FUS-09).
+
+    `text` is what was sent - only for a sent one; a skipped step never shows
+    what the model wrote. `skip_reason` and `cancelled_reason` are closed codes.
+    """
+
+    id: uuid.UUID
+    origin: str
+    step_index: int | None
+    status: FollowUpStatus
+    requested_at: datetime | None
+    scheduled_at: datetime
+    scheduled_at_local: datetime
+    sent_at: datetime | None
+    cancelled_at: datetime | None
+    cancelled_reason: str | None
+    skip_reason: str | None
+    deferred_reason: str | None
+    text: str | None
+    message_id: uuid.UUID | None
+    created_by_kind: ActorKind
+
+    @classmethod
+    def from_model(cls, follow_up: FollowUp, *, timezone: str) -> Self:
+        sent = follow_up.status is FollowUpStatus.SENT
+        return cls(
+            id=follow_up.id,
+            origin=follow_up.origin,
+            step_index=follow_up.step_index,
+            status=follow_up.status,
+            requested_at=follow_up.requested_at,
+            scheduled_at=follow_up.scheduled_at,
+            scheduled_at_local=local(follow_up.scheduled_at, timezone),
+            sent_at=follow_up.sent_at,
+            cancelled_at=follow_up.cancelled_at,
+            cancelled_reason=follow_up.cancelled_reason,
+            skip_reason=follow_up.skip_reason,
+            deferred_reason=follow_up.deferred_reason,
+            text=(follow_up.body if sent else None),
+            message_id=follow_up.message_id,
+            created_by_kind=follow_up.created_by_kind,
+        )
+
+
 __all__ = [
     "MAX_DELAY_MINUTES",
     "MIN_DELAY_MINUTES",
     "FollowUpCancelRequest",
     "FollowUpCreateRequest",
+    "FollowUpHistoryRead",
     "FollowUpRead",
+    "FollowUpStateRead",
 ]

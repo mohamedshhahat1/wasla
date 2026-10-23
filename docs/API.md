@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **240 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **242 operations**, of which
 18 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -452,8 +452,12 @@ All conversation routes are available to any member of the workspace. Restrictin
 | POST | `/api/v1/conversations/{conversation_id}/mode` | Take over (you become the owner) or release to the AI |
 | POST | `/api/v1/conversations/{conversation_id}/priority` | Set priority by hand |
 | POST | `/api/v1/conversations/{conversation_id}/assignment` | Assign or clear; requires `expected_assigned_to_id` (`409 stale_assignment` if stale) |
+| GET | `/api/v1/conversations/{conversation_id}/follow-ups` | The conversation's follow-up history (FUS-09) |
+| DELETE | `/api/v1/conversations/{conversation_id}/follow-up` | Stop its automatic follow-ups; audited `follow_up_stopped_by_person` |
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
+
+**Follow-ups on a conversation** (FUS-09). `GET /conversations/{id}` carries `follow_up: {state: none | scheduled | ended, step_index, steps_total, due_at, due_at_local, ended_reason, ended_at}` (null in the list). `GET /conversations/{id}/follow-ups` is its history, latest due first: `{id, origin: one_off | sequence, step_index, status, requested_at, scheduled_at, scheduled_at_local, sent_at, cancelled_at, cancelled_reason, skip_reason, deferred_reason, text, message_id, created_by_kind}` - `text` only for a sent one; what the AI wrote for a step it skipped is never kept or shown. `DELETE /conversations/{id}/follow-up` (any member) ends the run `stopped_by_person`, audited, and returns the state; with nothing waiting it changes nothing.
 
 Four behaviours worth knowing before integrating:
 

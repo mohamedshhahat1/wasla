@@ -28,8 +28,9 @@ A step whose send intent has committed is never cancelled: it ends `sent`.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Final, Literal
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,7 @@ from app.channels.registry import ChannelRegistry, ChannelUnavailableError, defa
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.telemetry import record_follow_up_step
+from app.db.models.audit import AuditAction
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -53,7 +55,9 @@ from app.db.models.follow_up_sequence import (
     SequenceRunState,
 )
 from app.db.models.lead import ActorKind, Lead, LeadStatus
+from app.db.models.user import User
 from app.repositories.consent_repository import ContactConsentRepository
+from app.services.audit_service import AuditTrail
 from app.services.follow_up_settings_service import SequenceSettings, read_settings
 
 logger = get_logger(__name__)
@@ -65,6 +69,18 @@ DEFAULT_WINDOW_MARGIN: Final = timedelta(minutes=30)
 
 #: The lead statuses that end a run: the sale is won or lost (FUS-06).
 CLOSED_LEAD_STATUSES: Final = frozenset({LeadStatus.WON, LeadStatus.LOST})
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUpState:
+    """A conversation's reminders as a person sees them: none, one scheduled, or ended."""
+
+    state: Literal["none", "scheduled", "ended"]
+    step_index: int | None
+    steps_total: int | None
+    due_at: datetime | None
+    ended_reason: str | None
+    ended_at: datetime | None
 
 
 class SequenceService:
@@ -115,6 +131,59 @@ class SequenceService:
             .limit(1)
         )
         return run
+
+    async def state(self, conversation_id: uuid.UUID) -> FollowUpState:
+        """What a person sees about this conversation's reminders (FUS-09)."""
+        steps_total = len((await self.settings()).steps)
+        step = await self._session.scalar(
+            select(FollowUp).where(
+                FollowUp.tenant_id == self._tenant_id,
+                FollowUp.conversation_id == conversation_id,
+                FollowUp.status == FollowUpStatus.PENDING,
+            )
+        )
+        if step is not None:
+            return FollowUpState(
+                state="scheduled",
+                step_index=step.step_index,
+                steps_total=steps_total if step.is_sequence_step else None,
+                due_at=step.scheduled_at,
+                ended_reason=None,
+                ended_at=None,
+            )
+        run = await self.latest_run(conversation_id)
+        if run is not None and not run.is_active:
+            return FollowUpState(
+                state="ended",
+                step_index=run.steps_sent or None,
+                steps_total=steps_total,
+                due_at=None,
+                ended_reason=run.end_reason,
+                ended_at=run.ended_at,
+            )
+        return FollowUpState(
+            state="none",
+            step_index=None,
+            steps_total=None,
+            due_at=None,
+            ended_reason=None,
+            ended_at=None,
+        )
+
+    async def stop_by_person(self, conversation_id: uuid.UUID, *, actor: User) -> bool:
+        """A colleague pressed "stop follow-ups" (FUS-09): the run ends, audited."""
+        stopped = await self.stop_conversation(conversation_id, SequenceEndReason.STOPPED_BY_PERSON)
+        # Its own request, nobody else's write: flushed so the state read next
+        # sees the step cancelled.
+        await self._session.flush()
+        if stopped:
+            AuditTrail(self._session, tenant_id=self._tenant_id).record(
+                AuditAction.FOLLOW_UP_STOPPED_BY_PERSON,
+                actor=actor,
+                target_type="conversation",
+                target_id=conversation_id,
+            )
+        return stopped
 
     async def covers(self, conversation: Conversation) -> bool:
         """Whether the workspace's reminders run on this conversation's platform now (FUS-03)."""
@@ -486,5 +555,6 @@ def _close(run: FollowUpSequenceRun, reason: SequenceEndReason) -> None:
 __all__ = [
     "CLOSED_LEAD_STATUSES",
     "DEFAULT_WINDOW_MARGIN",
+    "FollowUpState",
     "SequenceService",
 ]
