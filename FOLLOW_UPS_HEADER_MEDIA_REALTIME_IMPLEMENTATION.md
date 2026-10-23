@@ -23,7 +23,7 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 10 | RT-03 publish points, RT-04 incremental reads | committed | a100716 | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
 | 11 | RT-01/02/05 stream, RT-07 polling budget | committed | 98919e9 | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
 | 12 | RT-06 nginx, shutdown, capacity | committed | f13b8d3 | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
-| 13 | Invariants, observability, docs, ADRs, contracts | in progress: invariants committed (this commit) | | injection tests 15/15; invariant suites and oracles 191 passed |
+| 13 | Invariants, observability, docs, ADRs, contracts | in progress: invariants 31e40c0, alerts (this commit) | | injection tests 15/15; invariant suites and oracles 191 passed |
 | 14 | Mutation | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
@@ -466,3 +466,17 @@ hours in force now. FU-08 needs no history: a wait moves only `scheduled_at` and
 Each has an injection test (`test_follow_up_invariants.py`, 15 tests: one violation each, the
 named check and only it counts one more); `test_omnichannel_oracles.py` now expects the
 follow-up checks in `verify` and its write-path oracle holds them at zero.
+
+## Phase 13b — alerts
+
+`deploy/monitoring/alerts.yml`: group `wasla-follow-ups` (`FollowUpAiFailing`:
+`sum(rate(wasla_follow_up_ai_failures_total[5m])) > 0.2` for 10m) and group `wasla-realtime`
+(`EventsPublishFailing`: any increase of `wasla_events_publish_failed_total` over 5m, for 5m;
+`EventsStreamsNearLimit`: `max(wasla_events_streams_open) > 160` for 10m). The streams alert is
+**per process** (decision recorded): capacity is per process - one process measured at 200
+streams - and the per-workspace limit is already enforced with a 429. Six promtool cases (each
+alert fires, clears, and stays silent on ordinary traffic). **Phase 3 finding fixed here**: the
+`PortfolioLimitReached` description was rewritten for FLIM-01/02 in Phase 3 without its promtool
+expectation, so `promtool test rules` failed on 8113a5f..f13b8d3 (the CI monitoring job would
+have been red); the expectation now carries the new text. `promtool check config`,
+`check rules` (81 rules), `test rules` and `amtool check-config` pass.

@@ -255,12 +255,28 @@ every source counted. The gauge counts portfolios per bucket; it never names one
 | `CampaignsPausedProviderUnreachable` | A campaign paused `provider_unreachable` in the last hour | warning |
 | `CampaignsPausedRepeatedBatchFailure` | A campaign paused `repeated_batch_failure` in the last hour | warning |
 | `CampaignHeaderMediaRefused` | A campaign failed `header_media_refused` in the last hour - Meta refused its header file (ADR-144) | warning |
-| `PortfolioLimitReached` | `wasla_portfolio_limit_utilisation{bucket=">=100"} > 0` for 5m - a portfolio reached Meta's whole limit (ADR-146) | warning |
+| `PortfolioLimitReached` | `wasla_portfolio_limit_utilisation{bucket=">=100"} > 0` for 5m - a portfolio reached Meta's whole limit (ADR-146); template follow-ups wait and manual templates are refused 409 from here (ADR-152) | warning |
 | `CampaignMetaQualityReview` | A campaign paused `meta_quality_review` in the last hour - Meta dropped a held message (135000) | warning |
 | `MessagingLimitUnknown` | Any limit Meta answered outside the known tiers in the last hour - treated as 250 | warning |
 
 Each was proved with `promtool test rules` to fire, clear, and stay silent on
 ordinary traffic (an admin's pause, a lease takeover alone).
+
+### Follow-ups and the inbox event stream
+
+Added by FOLLOW_UPS_HEADER_MEDIA_REALTIME_IMPLEMENTATION.md (ADR-151, ADR-155).
+Both fail quietly by design - a step whose model fails is skipped, an inbox whose
+stream fails polls - so these are warnings that say what is not happening.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `FollowUpAiFailing` | `rate(wasla_follow_up_ai_failures_total[5m]) > 0.2` for 10m - steps are being skipped `ai_unavailable` (FUS-04) | warning |
+| `EventsPublishFailing` | Any `wasla_events_publish_failed_total` increase for 5m - inboxes fall back to polling (RT-03) | warning |
+| `EventsStreamsNearLimit` | `max(wasla_events_streams_open) > 160` for 10m - one API process past 80 % of the 200 streams it was measured to serve (RT-06). Per process, because capacity is per process; the per-workspace limit is a 429, not an alert | warning |
+
+Each was proved with `promtool test rules` to fire, clear, and stay silent on
+ordinary traffic (an occasional model failure, steady publishing, streams
+spread over two processes).
 
 ### Media
 
