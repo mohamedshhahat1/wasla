@@ -223,6 +223,9 @@ authoritative answer is always the dependency tree.
 | `POST` | `/api/v1/platform/users/{user_id}/disable` | **PLATFORM_STAFF** | no | none | - |
 | `POST` | `/api/v1/platform/users/{user_id}/enable` | **PLATFORM_STAFF** | no | none | - |
 | `GET` | `/api/v1/templates` | **MEMBER** | yes | workspace | - |
+| `POST` | `/api/v1/template-header-media` | **ADMIN** | yes | workspace | storage |
+| `GET` | `/api/v1/template-header-media` | **MEMBER** | yes | workspace | - |
+| `DELETE` | `/api/v1/template-header-media/{asset_id}` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/timezones` | **ANON** | no | none | - |
 | `POST` | `/api/v1/templates/sync` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/templates/{template_id}` | **MEMBER** | yes | workspace | - |

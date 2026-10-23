@@ -59,6 +59,8 @@ class FollowUpCreateRequest(BaseModel):
     # Forwarded to Meta when the follow-up fires, so it is bounded on the way
     # in rather than on the way out - see `app.schemas.bounds`.
     template_components: list[dict[str, Any]] | None = None
+    # The template header's file, from the workspace's library (HMT-03).
+    header_media_id: uuid.UUID | None = None
 
     @field_validator("template_components")
     @classmethod

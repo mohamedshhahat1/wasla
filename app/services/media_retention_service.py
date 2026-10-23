@@ -121,15 +121,23 @@ class MediaRetentionService:
         reconciliation, and `due_for_purge` is where that line is drawn
         (ADR-087).
         """
-        if retention_days <= 0:
-            return []
-
         moment = now or datetime.now(UTC)
-        cutoff = moment - timedelta(days=retention_days)
-
+        # A file deleted from the template header library goes whatever the
+        # retention, which only decides how long kept files are kept (HMT-01).
         rows: list[MessageMedia | CampaignHeaderMedia] = list(
-            await self._media.due_for_purge(cutoff=cutoff, limit=limit)
+            await self._header_files.deleted_for_purge(limit=limit)
         )
+        if retention_days <= 0:
+            for media in rows:
+                if media.purge_started_at is None:
+                    media.purge_started_at = moment
+                    media.storage_state = MediaStorageState.PURGING
+            if rows:
+                await self._session.commit()
+            return rows
+
+        cutoff = moment - timedelta(days=retention_days)
+        rows.extend(await self._media.due_for_purge(cutoff=cutoff, limit=limit - len(rows)))
         if len(rows) < limit:
             # A campaign's header files, by the same age - **never one a
             # draft, scheduled, running or paused campaign names** (HM-07):

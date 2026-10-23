@@ -2109,6 +2109,8 @@ Additive migrations of FOLLOW_UPS_HEADER_MEDIA_REALTIME_IMPLEMENTATION.md
 | --- | --- |
 | 0121 | `follow_ups.requested_at` (backfilled from `scheduled_at` in batches of 5,000, NOT NULL through a validated CHECK), `deferred_reason` (`portfolio_limit`, `quiet_hours`), `deferrals` |
 | 0122 | `follow_up_settings` (one row per workspace, the default - on, WhatsApp, one 5-minute reminder - written for every existing workspace); audit actions `follow_up_settings_updated`, `follow_up_stopped_by_person` |
+| 0123 | `follow_up_sequence_runs` (one active per conversation); `follow_ups.origin`, `sequence_run_id`, `step_index`, `anchor_at`, `skip_reason`; index `CONCURRENTLY` |
+| 0124 | `campaign_header_media.deleted_at`; `template_header_uploads` (Meta's id per file and connection, or per campaign, file and connection); `follow_ups.header_media_id` and its index (`CONCURRENTLY`) |
 
 Every downgrade refuses (nothing changed) while its new columns or rows hold
 data, and leaves the stamp; 0121 refuses while any follow-up waited

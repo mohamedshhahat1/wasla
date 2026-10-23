@@ -95,6 +95,7 @@ async def schedule_follow_up(
         template_name=payload.template_name,
         template_language=payload.template_language,
         template_components=payload.template_components,
+        header_media_id=payload.header_media_id,
         reason=payload.reason,
         lead_id=payload.lead_id,
         created_by_id=workspace.user.id,

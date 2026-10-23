@@ -33,6 +33,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -139,14 +140,79 @@ class CampaignHeaderMedia(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, Timestam
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Deleted from the workspace's template header library (HMT-01): no longer
+    # listed or usable; the retention sweep purges it. Refused while anything
+    # live names it.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     @property
     def is_stored(self) -> bool:
         return self.storage_state is MediaStorageState.STORED
+
+    @property
+    def is_usable(self) -> bool:
+        return self.is_stored and self.deleted_at is None
+
+
+class TemplateHeaderUpload(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
+    """Meta's id for one header file through one connection (HMR-02, HMT-02).
+
+    A person's and a follow-up's template share one upload per (file,
+    connection), `campaign_id` null; a campaign keeps its own per (campaign,
+    file, connection), uploaded under its lease. Reused while it is fresher
+    than `CAMPAIGN_HEADER_MEDIA_REFRESH_SECONDS`. The provider's id never
+    leaves the server (HM-08).
+    """
+
+    __tablename__ = "template_header_uploads"
+    __table_args__ = (
+        Index("ix_template_header_uploads_tenant_id", "tenant_id"),
+        Index(
+            "uq_template_header_uploads_file_connection",
+            "tenant_id",
+            "header_media_id",
+            "account_id",
+            unique=True,
+            postgresql_where=text("campaign_id IS NULL"),
+        ),
+        Index(
+            "uq_template_header_uploads_campaign_file",
+            "campaign_id",
+            "header_media_id",
+            "account_id",
+            unique=True,
+            postgresql_where=text("campaign_id IS NOT NULL"),
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "header_media_id"],
+            ["campaign_header_media.tenant_id", "campaign_header_media.id"],
+            name="fk_template_header_uploads_tenant_header_media",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "account_id"],
+            ["whatsapp_accounts.tenant_id", "whatsapp_accounts.id"],
+            name="fk_template_header_uploads_tenant_account",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "campaign_id"],
+            ["campaigns.tenant_id", "campaigns.id"],
+            name="fk_template_header_uploads_tenant_campaign",
+            ondelete="CASCADE",
+        ),
+    )
+
+    header_media_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    provider_media_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 __all__ = [
     "MAX_HEADER_MEDIA_KIND_LENGTH",
     "CampaignHeaderMedia",
     "HeaderMediaKind",
+    "TemplateHeaderUpload",
 ]

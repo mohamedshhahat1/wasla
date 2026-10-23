@@ -64,6 +64,10 @@ class SendTemplateRequest(BaseModel):
     # so an oversized structure is refused here rather than after a database
     # write and a Graph API round trip - see `app.schemas.bounds`.
     components: list[dict[str, Any]] | None = None
+    # A file of the workspace's template header library (HMT-02): required for
+    # a template whose header is an image, a video or a document. A raw media
+    # header in `components` is refused.
+    header_media_id: uuid.UUID | None = None
 
     @field_validator("components")
     @classmethod

@@ -143,6 +143,7 @@ from app.services.follow_up_sequences import SequenceService
 from app.services.media_service import content_hash as media_content_hash
 from app.services.opt_out import record_opt_out
 from app.services.provider_feedback import SEND_WRITEBACK, withdraw_template
+from app.services.template_header_media import TemplateHeaderMediaService
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -443,6 +444,8 @@ class MessagingService:
         sent_by_id: uuid.UUID,
         sender_role: TenantRole,
         idempotency_key: str | None = None,
+        header_media_id: uuid.UUID | None = None,
+        storage: MediaStorage | None = None,
     ) -> tuple[Message, list[str]]:
         """A person's template from the inbox, and the notices its answer carries.
 
@@ -452,7 +455,34 @@ class MessagingService:
         there to decide whether to wait or use another number. While nobody has
         read the limit it is sent, and the answer says so with the notice
         `messaging_limit_unknown`.
+
+        **A media header comes from the workspace's library** (HMT-02): raw
+        media parameters are refused `header_media_must_be_uploaded`; the named
+        file is checked against the template's header, uploaded to Meta once per
+        (file, connection) and reused while fresh, and the header component is
+        built here.
         """
+        headers = TemplateHeaderMediaService(
+            self._session,
+            tenant_id=self._tenant_id,
+            refresh=timedelta(seconds=self._settings.campaign_header_media_refresh_seconds),
+            storage=storage,
+        )
+        asset = await headers.resolve(
+            template_name=name,
+            language=language,
+            components=components,
+            header_media_id=header_media_id,
+        )
+        if asset is not None:
+            conversation = await self._conversations.require_by_id(conversation_id)
+            provider_media_id = await headers.provider_media_id(
+                asset,
+                connection_id=conversation.account_id,
+                upload=self.upload_header_file,
+                origin="manual",
+            )
+            components = headers.components_with_header(components, asset, provider_media_id)
         try:
             message = await self.send_template(
                 conversation_id=conversation_id,

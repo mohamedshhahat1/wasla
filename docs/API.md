@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **242 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **245 operations**, of which
 18 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -175,6 +175,28 @@ Tripoli, Beirut, London, Istanbul. Sorted by current offset, then name;
 `?q=` (at most 64 characters) filters by id or label. `Cache-Control: public,
 max-age=3600` and an `ETag` that changes with the tzdata release or any zone's
 offset (304 on `If-None-Match`).
+
+## Template header library (HMT-01)
+
+| Method | Path | Role |
+| --- | --- | --- |
+| POST | `/api/v1/template-header-media` | Owner or admin; multipart `file` (`201`) |
+| GET | `/api/v1/template-header-media?kind=&cursor=&limit=` | Any workspace member |
+| DELETE | `/api/v1/template-header-media/{asset_id}` | Owner or admin (`204`); `409 header_media_in_use` while a live campaign or a waiting follow-up names it |
+
+The files a template's IMAGE, VIDEO or DOCUMENT header is sent with - by a
+campaign, a person's template (`header_media_id` on `POST
+/conversations/{id}/messages/template`) or a follow-up template
+(`header_media_id` on `POST /follow-ups`). The file's bytes decide its kind
+(JPEG/PNG image, MP4/3GPP video, PDF document; GIF refused). Wasla uploads a
+file to Meta once per (file, number) and reuses the id while it is fresh; Meta's
+id is never returned. A template request whose `components` carry a media
+header itself (`image.id`, `image.link`, ...) is `422
+header_media_must_be_uploaded` - **an API change**: raw media header
+parameters from a client are no longer accepted (no client existed). A media
+header with no `header_media_id` is `422 header_media_required`; a file of
+another kind is `422 header_media_kind_mismatch`; another workspace's file is
+`404`.
 
 ## Workspace follow-up settings (FUS-01)
 

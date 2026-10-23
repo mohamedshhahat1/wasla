@@ -280,7 +280,13 @@ async def send_text(
                 "portfolio_limit_reached: Meta's messaging limit is used at 100 %; "
                 "details {available_at, available_at_local}."
             )
-        }
+        },
+        422: {
+            "description": (
+                "header_media_must_be_uploaded, header_media_required, "
+                "header_media_kind_mismatch (HMT-02)."
+            )
+        },
     },
 )
 async def send_template(
@@ -288,6 +294,7 @@ async def send_template(
     payload: SendTemplateRequest,
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
+    storage: MediaStorageDep,
     idempotency_key: IdempotencyKeyHeader = None,
 ) -> TemplateSentRead:
     """Send an approved template, which is valid outside the service window.
@@ -310,6 +317,8 @@ async def send_template(
         idempotency_key=idempotency_key,
         # A marketing template is admin-only and opt-out-checked (CMQ-02).
         sender_role=workspace.role,
+        header_media_id=payload.header_media_id,
+        storage=storage,
     )
     return TemplateSentRead(**MessageRead.from_model(message).model_dump(), notices=notices)
 

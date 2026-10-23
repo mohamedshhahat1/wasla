@@ -190,6 +190,19 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             name="fk_follow_ups_tenant_sequence_run",
             ondelete="CASCADE",
         ),
+        # The file a follow-up template is sent with (HMT-03): this
+        # workspace's, and kept while the follow-up names it.
+        ForeignKeyConstraint(
+            ["tenant_id", "header_media_id"],
+            ["campaign_header_media.tenant_id", "campaign_header_media.id"],
+            name="fk_follow_ups_tenant_header_media",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_follow_ups_header_media_id",
+            "header_media_id",
+            postgresql_where=text("header_media_id IS NOT NULL"),
+        ),
         Index(
             "ix_follow_ups_sequence_run_id",
             "sequence_run_id",
@@ -249,6 +262,8 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         JSONB,
         nullable=True,
     )
+    # The template's header file (HMT-03), uploaded to Meta at dispatch.
+    header_media_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     # Why this was scheduled — "the customer said they would think about it".
     # Written for a colleague reading the conversation later, not for the model.

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.campaign import Campaign, CampaignStatus
 from app.db.models.campaign_media import CampaignHeaderMedia
+from app.db.models.follow_up import FollowUp, FollowUpStatus
 from app.db.models.media import MediaStorageState
 from app.repositories.base import TenantScopedRepository
 
@@ -40,6 +41,15 @@ def _named_by_live_campaign() -> ColumnElement[bool]:
         Campaign.tenant_id == CampaignHeaderMedia.tenant_id,
         Campaign.header_media_id == CampaignHeaderMedia.id,
         Campaign.status.in_(LIVE_CAMPAIGN_STATUSES),
+    )
+
+
+def _named_by_pending_follow_up() -> ColumnElement[bool]:
+    # A follow-up template waiting to be sent with the file (HMT-03).
+    return exists().where(
+        FollowUp.tenant_id == CampaignHeaderMedia.tenant_id,
+        FollowUp.header_media_id == CampaignHeaderMedia.id,
+        FollowUp.status == FollowUpStatus.PENDING,
     )
 
 
@@ -140,8 +150,30 @@ class PlatformCampaignMediaRepository:
                 CampaignHeaderMedia.storage_state == MediaStorageState.STORED,
                 CampaignHeaderMedia.created_at < cutoff,
                 ~_named_by_live_campaign(),
+                ~_named_by_pending_follow_up(),
             )
             .order_by(CampaignHeaderMedia.created_at, CampaignHeaderMedia.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        return list((await self._session.execute(statement)).scalars())
+
+    async def deleted_for_purge(self, *, limit: int) -> list[CampaignHeaderMedia]:
+        """Stored files deleted from the template header library (HMT-01), whatever their age.
+
+        Deleting is refused while anything live names a file; the same test is
+        repeated here, in the statement that locks, for a file named after it
+        was deleted by a writer that skipped that check.
+        """
+        statement = (
+            select(CampaignHeaderMedia)
+            .where(
+                CampaignHeaderMedia.storage_state == MediaStorageState.STORED,
+                CampaignHeaderMedia.deleted_at.is_not(None),
+                ~_named_by_live_campaign(),
+                ~_named_by_pending_follow_up(),
+            )
+            .order_by(CampaignHeaderMedia.deleted_at, CampaignHeaderMedia.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

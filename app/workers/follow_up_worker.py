@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.outcomes import ProviderConnectionRefusedError
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import record_follow_up_ai_failure
 from app.db.session import Database
 from app.integrations.openai.client import ResponsesClient
@@ -99,6 +100,7 @@ class FollowUpWorker:
         messaging_factory: MessagingFactory | None = None,
         lease_seconds: float = CLAIM_LEASE_SECONDS,
         writer_factory: WriterFactory | None = None,
+        storage: MediaStorage | None = None,
     ) -> None:
         self._database = database
         self._settings = settings
@@ -107,6 +109,8 @@ class FollowUpWorker:
         self._lease = timedelta(seconds=lease_seconds)
         self._messaging_factory = messaging_factory
         self._writer_factory = writer_factory or (lambda: _model_writer(settings))
+        # A follow-up template's header file is read from here (HMT-03).
+        self._storage = storage if storage is not None else build_media_storage(settings)
         self._running = False
         # Set when stop() is called, so a sleeping worker wakes at once instead
         # of finishing its interval. Without it, shutdown waits a full poll.
@@ -226,6 +230,7 @@ class FollowUpWorker:
                 session=session,
                 tenant_id=tenant_id,
                 settings=self._settings,
+                storage=self._storage,
                 messaging=(
                     self._messaging_factory(session, tenant_id)
                     if self._messaging_factory is not None
@@ -267,6 +272,7 @@ class FollowUpWorker:
             session=session,
             tenant_id=tenant_id,
             settings=self._settings,
+            storage=self._storage,
             messaging=(
                 self._messaging_factory(session, tenant_id)
                 if self._messaging_factory is not None

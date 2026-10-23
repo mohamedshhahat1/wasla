@@ -75,7 +75,7 @@ from app.channels.registry import (
     default_registry,
 )
 from app.channels.throughput import ConnectionThrottledError
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     ConflictError,
     ExternalServiceError,
@@ -85,6 +85,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import record_follow_up_defer, record_follow_up_step
 from app.db.models.conversation import (
     Conversation,
@@ -132,6 +133,7 @@ from app.services.follow_up_sequences import SequenceService
 from app.services.follow_up_writer import StepAnswer, StepRequest, step_instructions
 from app.services.messaging_service import MessagingService
 from app.services.quiet_hours import QuietHours
+from app.services.template_header_media import TemplateHeaderMediaService
 from app.services.template_service import refusal_reason_for
 from app.services.usage_service import UsageRecorder
 
@@ -183,6 +185,7 @@ class _Intention:
     reason: str | None
     created_by_id: uuid.UUID | None
     created_by_kind: ActorKind
+    header_media_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +216,7 @@ class FollowUpService:
         settings: Settings | None = None,
         messaging: MessagingService | None = None,
         channels: ChannelRegistry | None = None,
+        storage: MediaStorage | None = None,
     ) -> None:
         """`settings` is needed only to send; `messaging` overrides how.
 
@@ -226,6 +230,8 @@ class FollowUpService:
         self._tenant_id = tenant_id
         self._settings = settings
         self._messaging = messaging
+        # Where a follow-up template's header file is read from (HMT-03).
+        self._storage = storage
         # What a due follow-up may do is its conversation's channel's rule
         # (OMNI-008), not a WhatsApp window written into this service.
         self._channels = channels or default_registry()
@@ -280,6 +286,7 @@ class FollowUpService:
         lead_id: uuid.UUID | None = None,
         created_by_id: uuid.UUID | None = None,
         created_by_kind: ActorKind = ActorKind.USER,
+        header_media_id: uuid.UUID | None = None,
     ) -> FollowUp:
         """Schedule a nudge, or reschedule the one already waiting.
 
@@ -343,6 +350,15 @@ class FollowUpService:
                 # a person is present to fix it; the send happens hours later
                 # against nobody.
                 raise ValidationError(refusal)
+            # Its header file, checked now while a person is present (HMT-03).
+            await self._headers().resolve(
+                template_name=name,
+                language=str(language),
+                components=template_components,
+                header_media_id=header_media_id,
+            )
+        elif header_media_id is not None:
+            raise ValidationError("A header file goes with a template.")
 
         intention = _Intention(
             scheduled_at=when,
@@ -350,6 +366,7 @@ class FollowUpService:
             template_name=name,
             template_language=language,
             template_components=template_components,
+            header_media_id=header_media_id,
             reason=_trimmed(reason),
             created_by_id=created_by_id,
             created_by_kind=created_by_kind,
@@ -439,6 +456,7 @@ class FollowUpService:
         follow_up.template_name = intention.template_name
         follow_up.template_language = intention.template_language
         follow_up.template_components = intention.template_components
+        follow_up.header_media_id = intention.header_media_id
         follow_up.reason = intention.reason
         follow_up.created_by_id = intention.created_by_id
         follow_up.created_by_kind = intention.created_by_kind
@@ -482,6 +500,7 @@ class FollowUpService:
                     template_name=intention.template_name,
                     template_language=intention.template_language,
                     template_components=intention.template_components,
+                    header_media_id=intention.header_media_id,
                     reason=intention.reason,
                     lead_id=lead_id,
                     created_by_id=intention.created_by_id,
@@ -946,13 +965,35 @@ class FollowUpService:
                         detail="Quiet hours.",
                         reason=FollowUpDeferReason.QUIET_HOURS,
                     )
+            components = follow_up.template_components
+            if follow_up.header_media_id is not None:
+                # Its header file, uploaded to Meta once per (file, connection)
+                # and reused while fresh (HMT-03). Deleting the file is refused
+                # while this follow-up waits, so it is here.
+                headers = self._headers()
+                asset = await headers.resolve(
+                    template_name=str(follow_up.template_name),
+                    language=str(follow_up.template_language),
+                    components=components,
+                    header_media_id=follow_up.header_media_id,
+                )
+                if asset is not None:
+                    provider_media_id = await headers.provider_media_id(
+                        asset,
+                        connection_id=conversation.account_id,
+                        upload=messaging.upload_header_file,
+                        origin="follow_up",
+                    )
+                    components = headers.components_with_header(
+                        components, asset, provider_media_id
+                    )
             # Valid in or out of the window. Preferred outside it because it is
             # the only thing Meta will accept there.
             send = messaging.send_template(
                 conversation_id=conversation.id,
                 name=str(follow_up.template_name),
                 language=str(follow_up.template_language),
-                components=follow_up.template_components,
+                components=components,
                 link=link,
                 origin=MessageOrigin.FOLLOW_UP,
             )
@@ -1328,6 +1369,23 @@ class FollowUpService:
             },
         )
         return DispatchOutcome(follow_up, FollowUpStatus.SENT)
+
+    def _headers(self) -> TemplateHeaderMediaService:
+        refresh = (
+            self._settings.campaign_header_media_refresh_seconds
+            if self._settings is not None
+            else get_settings().campaign_header_media_refresh_seconds
+        )
+        return TemplateHeaderMediaService(
+            self._session,
+            tenant_id=self._tenant_id,
+            refresh=timedelta(seconds=refresh),
+            storage=(
+                self._storage
+                if self._storage is not None
+                else build_media_storage(self._settings or get_settings())
+            ),
+        )
 
     async def _quiet_hours(self) -> QuietHours:
         """The workspace's quiet hours as its row holds them now, in its zone."""

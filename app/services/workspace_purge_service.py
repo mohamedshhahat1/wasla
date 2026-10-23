@@ -134,6 +134,9 @@ PURGED_TABLES: tuple[str, ...] = (
     "follow_up_sequence_runs",
     "messages",
     "conversations",
+    # Meta's ids for template header files (HMR-02, HMT-02): they name a
+    # campaign, a file and a connection, so before all three.
+    "template_header_uploads",
     # The drafts an Idempotency-Key made (PG-08). Before `campaigns`, which
     # each one names.
     "campaign_create_keys",

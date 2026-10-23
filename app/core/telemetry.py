@@ -550,6 +550,12 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
     ),
     # A step's model call that failed (FUS-04): each failure, so the one retry
     # shows as two.
+    # A template header file uploaded to Meta (HMR-02, HMT-02): for a
+    # campaign, a person's template or a follow-up template.
+    "wasla_template_header_uploads_total": (
+        "Template header files uploaded to Meta, by what they were for.",
+        ("origin",),
+    ),
     "wasla_follow_up_ai_failures_total": (
         "Follow-up steps whose model call failed or answered outside the shape.",
         (),
@@ -1482,6 +1488,7 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
         {"held", "charged", "released", "hold_expired", "late_charge"}
     ),
     "wasla_follow_up_defers_total": frozenset({"portfolio_limit", "quiet_hours"}),
+    "wasla_template_header_uploads_total": frozenset({"campaign", "manual", "follow_up"}),
     "wasla_channel_capacity_reduction_disables_total": frozenset({"owner", "system"}),
 }
 
@@ -1712,6 +1719,12 @@ async def record_follow_up_defer(reason: str) -> None:
     """A due follow-up waited for Meta's limit or quiet hours (FLIM-01, FQH-01)."""
     metric = "wasla_follow_up_defers_total"
     await _tolerate(_increment(metric, {"reason": _closed(metric, reason)}))
+
+
+async def record_template_header_upload(origin: str) -> None:
+    """A template header file went to Meta (HMR-02, HMT-02)."""
+    metric = "wasla_template_header_uploads_total"
+    await _tolerate(_increment(metric, {"origin": _closed(metric, origin)}))
 
 
 async def record_follow_up_ai_failure() -> None:

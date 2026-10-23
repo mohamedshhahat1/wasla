@@ -51,6 +51,7 @@ from app.api.v1 import (
     platform_commercial,
     platform_entitlements,
     platform_rate_cards,
+    template_header_media,
     templates,
     timezones,
     usage,
@@ -78,6 +79,8 @@ WORKSPACE_ROUTERS = (
     knowledge.router,
     leads.router,
     members.router,
+    # The template header library (HMT-01).
+    template_header_media.router,
     usage.router,
     whatsapp.router,
 )

@@ -17,8 +17,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 4 | FUS-01 settings | committed | 705bd34 | settings API 17/17; workspace, purge, auth, audit, docs truth, route auth; migration-built parity + downgrade; alembic head->0120->head |
 | 5 | FUS-02/03/05/06 runs, stop rules, window | committed | fb7124b | sequences 18/18 (+ reply/silent 5x); settings + limit files; send-path sweep (see below); migration-built parity + downgrade; alembic head->0120->head |
 | 6 | FUS-04/07 AI-written step, charging | committed | 980868a | ai steps 16/16, tool offer 3/3, sequences 18/18, AI invariants; send-path sweep |
-| 7 | FUS-09 what a person sees | committed | (this commit) | visibility 3/3; conversation/inbox/follow-up/CRM/schema suites 255 passed; docs truth, route auth |
-| 8 | HMT-01..03 template header library | not started | | |
+| 7 | FUS-09 what a person sees | committed | 888f2c7 | visibility 3/3; conversation/inbox/follow-up/CRM/schema suites 255 passed; docs truth, route auth |
+| 8 | HMT-01..03 template header library | committed | (this commit) | template header media 8/8; sweep 162 suites 0 failed; migration-built parity + downgrade; alembic head->0120->head |
 | 9 | HMR-01..03 per-recipient header media | not started | | |
 | 10 | RT-03 publish points, RT-04 incremental reads | not started | | |
 | 11 | RT-01/02/05 stream, RT-07 polling budget | not started | | |
@@ -278,3 +278,28 @@ usage*): 0 failed.
   activity feed is campaigns-only), so the history route *is* the follow-up timeline; the
   contract says so.
 - 242 operations.
+
+## Phase 8 — HMT-01..03 (template header library; manual and follow-up headers)
+
+Facts verified first: follow-ups and the manual template route passed raw `components` to Meta
+(`conversations.py` send_template; `follow_up_service.py` TEMPLATE branch); Wasla never
+uploaded or checked a header for them. Header retention defaults to 0 (never purged).
+
+- **HMT-01: nothing renamed.** `campaign_header_media` holds every template header file; the
+  library is `/template-header-media` (POST admin, GET member, DELETE admin; the campaign
+  upload route stays). Deleting sets `deleted_at` (0124): unlisted, unusable, and purged by the
+  next sweep **whatever the retention** (`deleted_for_purge`); refused `409 header_media_in_use`
+  while a live campaign or a waiting follow-up names it. Retention also never claims a file a
+  waiting follow-up names.
+- **HMR-02 / HMT-02 key**: `template_header_uploads` - a person's and a follow-up's template
+  share one Meta id per (workspace, file, connection) (`campaign_id` null, partial unique index);
+  a campaign's own uploads are keyed (campaign, file, connection) for Phase 9.
+- **HMT-02**: `TemplateHeaderMediaService.resolve` refuses raw media header parameters
+  (`header_media_must_be_uploaded`), a missing file for a media header (`header_media_required`),
+  a wrong kind (`header_media_kind_mismatch`), another workspace's file (404). The header
+  component comes from the one builder, `template_parameters.header_file_component`, now shared
+  by `send_components`. Uploads go through `MessagingService.upload_header_file`.
+- **HMT-03**: `follow_ups.header_media_id` (tenant-composite key, ON DELETE RESTRICT), checked
+  at scheduling and uploaded at dispatch; the worker and the service take the media store by
+  injection (`storage=`).
+- Counter `wasla_template_header_uploads_total{origin}`. 245 operations.
