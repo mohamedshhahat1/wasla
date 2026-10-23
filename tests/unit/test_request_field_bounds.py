@@ -65,6 +65,11 @@ EXEMPT: Final[dict[tuple[str, str], str]] = {
         "the body is read, by Meta's limit for its kind, and by the workspace's storage "
         "entitlement before the object is written."
     ),
+    ("Body_upload_template_header_media_api_v1_template_header_media_post", "file"): (
+        "A template header file for the library, multipart (HMT-01). Bounded as the "
+        "campaign header upload is: MAX_UPLOAD_BYTES while read, Meta's limit for "
+        "its kind, the storage entitlement."
+    ),
 }
 
 

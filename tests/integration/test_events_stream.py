@@ -8,8 +8,8 @@ stream has none.
 
 Keep-alives are one second here (`RT_KEEPALIVE_SECONDS`), so every check a
 stream makes "at least every keep-alive" is observed within seconds; the
-request timeout is two seconds, so a stream held for five proves the stream
-route is exempt from it.
+request timeout is five seconds in the test that holds a stream for fifteen,
+which proves the stream route is exempt from it.
 """
 
 from __future__ import annotations
@@ -43,7 +43,13 @@ from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.main import create_app
 from app.services.realtime import issue_ticket
-from tests.integration.campaign_harness import PLATFORM_TOKEN, FakeMeta, erase, worker
+from tests.integration.campaign_harness import (
+    PLATFORM_TOKEN,
+    USER_DOMAIN,
+    FakeMeta,
+    erase,
+    worker,
+)
 from tests.integration.sequence_harness import World, ai_reply, build, conversations
 from tests.integration.sequence_harness import customer_writes as _customer_writes
 
@@ -99,7 +105,6 @@ async def running(prepared_database: str, **overrides: Any) -> AsyncIterator[Liv
         database_url=prepared_database,
         redis_url=url,
         meta_access_token=PLATFORM_TOKEN,
-        request_timeout_seconds=2.0,
         rt_keepalive_seconds=KEEPALIVE,
         **overrides,
     )
@@ -153,7 +158,7 @@ async def customer_writes(live: Live, world: World, conversation: Any, text: str
 async def member(world: World, live: Live) -> tuple[uuid.UUID, dict[str, str]]:
     async with world.database.session_factory() as session:
         user = User(
-            email=f"rt-{uuid.uuid4().hex[:8]}@wasla.test",
+            email=f"rt-{uuid.uuid4().hex[:8]}{USER_DOMAIN}",
             hashed_password="x",
             is_active=True,
             email_verified_at=datetime.now(UTC),
@@ -500,13 +505,21 @@ async def test_a_sixth_stream_for_one_person_is_refused(live: Live) -> None:
             pass  # a closed stream frees its place at once
 
 
-async def test_a_stream_outlives_the_request_timeout_and_keeps_alive(live: Live) -> None:
+async def test_a_stream_outlives_the_request_timeout_and_keeps_alive(
+    prepared_database: str,
+) -> None:
+    # Every other request is cut at 5 s here; the stream is held three times that.
+    async with running(prepared_database, request_timeout_seconds=5.0) as live:
+        await _outlives(live)
+
+
+async def _outlives(live: Live) -> None:
     _, headers = await member(live.mine, live)
     conversation = (await conversations(live.mine))[0]
     async with client_for(live) as client, stream(client, await ticket(client, headers)) as reader:
         started = time.monotonic()
         comments = 0
-        while time.monotonic() - started < live.settings.request_timeout_seconds * 2.5:
+        while time.monotonic() - started < live.settings.request_timeout_seconds * 3:
             event = await reader.next(within=KEEPALIVE * 3)
             comments += event.get("comment") == "keep-alive"
         assert comments >= 3

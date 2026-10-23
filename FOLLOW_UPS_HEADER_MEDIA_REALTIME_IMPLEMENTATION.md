@@ -24,8 +24,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 11 | RT-01/02/05 stream, RT-07 polling budget | committed | 98919e9 | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
 | 12 | RT-06 nginx, shutdown, capacity | committed | f13b8d3 | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
 | 13 | Invariants, observability, docs, ADRs, contracts | committed | 31e40c0, a3b3add, b4cb7fb, 946aa15 | injection tests 15/15; invariant suites and oracles 191 passed; promtool / amtool; documentation truth 27 |
-| 14 | Mutation | committed | f9f2f69 (test fixes), (this commit) | M-S: 39/39 constructible killed, M-S10 classified structural; regression lane 18/18 killed; every file restored (sha256) |
-| 15 | Full lanes, CI jobs, after-probes | not started | | |
+| 14 | Mutation | committed | f9f2f69, 8eb21f6 | M-S: 39/39 constructible killed, M-S10 classified structural; regression lane 18/18 killed; every file restored (sha256) |
+| 15 | Full lanes, CI jobs, after-probes | in progress: first lanes red at 8eb21f6, fixes (this commit) | | see Phase 15 |
 | 16 | Final report | not started | | |
 
 ## Starting repository state (recorded 2026-10-23)
@@ -584,3 +584,40 @@ the suite (the 600-people test fails first) and KILLED by its named killer
 green). M-F13 and M-F31 are still killed by the CPM-06 test after its 12 s margin (RT-08).
 
 Meaningful survivors: 0.
+
+## Phase 15 — full lanes (first run at 8eb21f6: red) and FSR-01
+
+Both lanes in parallel, each from its own worktree at 8eb21f6 (`E:\wasla-fur-lane` on
+wasla-fur-pg `wasla_fur_models`; `E:\wasla-fur-lane2` on wasla-fur-pg2, an empty
+`wasla_fur_migrations` and `WASLA_TEST_SCHEMA=migrations`), 11:55-13:06 UTC.
+
+```text
+MODEL-BUILT (real clock)       7,434 run: 7,406 passed / 10 failed / 18 skipped (the known 18)
+MIGRATION-BUILT (real clock)   7,434 run: 7,409 passed / 11 failed / 14 skipped (the known 14)
+```
+
+Every failure classified; none is a defect of the follow-up, header or realtime behaviour itself:
+
+- **FSR-01 (a product defect, Phase 8)**: `POST /template-header-media` had no upload allowance
+  (`app/core/limits.py UPLOAD_ALLOWANCES`), so the 1 MB authenticated body cap refused any
+  library file over 1 MB with 413 before the handler - most real photos, every video and most
+  PDFs. Phase 8's tests used small files. Fixed (the campaign header upload's allowance and
+  reader); `test_a_library_file_over_a_megabyte_is_accepted` uploads 2 MB and fails 413 without
+  the fix. `test_every_multipart_route_has_an_explicit_allowance` and
+  `test_every_free_form_request_field_is_bounded` (an EXEMPT entry like the campaign upload's)
+  were the guards that caught it.
+- **`.env.example`** lacked `FOLLOW_UP_AI_RETRY_SECONDS` (Phase 6); documented.
+- **`test_every_table_with_a_tenant_column_indexes_it`**: `follow_up_settings` (Phase 4) is
+  found by its unique constraint on `tenant_id`, which PostgreSQL enforces with a unique index;
+  the guard now counts a unique constraint leading with `tenant_id` (an earlier stage's test
+  changed on purpose: a second, plain index would only cost writes).
+- **Five Google sign-in tests (both lanes)**: caused by this stage's stream tests, whose members
+  had `@wasla.test` addresses the harness teardown does not erase - 55 / 56 leaked users broke
+  the Google tests' "one account" counts. Members now use the harness `USER_DOMAIN`.
+- **Stream tests under two parallel lanes**: the stream fixture cut every request at 2 s to
+  prove the stream's exemption, so `POST /events/ticket` answered 504 under load. The 5 s cut
+  is now in the one test that holds a stream for 15 s; the capacity test records its p95 rather
+  than gating on it beside arbitrary load (a single stream's p95 < 1 s stays asserted).
+
+The targeted re-run of every affected file (501 tests) passed; both full lanes are re-run on the
+new head below.

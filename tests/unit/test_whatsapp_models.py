@@ -59,10 +59,17 @@ def _leads_with_tenant(table: Table) -> bool:
     a predicate on its first column, so `(tenant_id, occurred_at)` serves a
     tenant-scoped read exactly as a bare `(tenant_id)` would - and adding the
     bare one alongside it would cost every write for nothing.
+
+    A unique constraint counts: PostgreSQL enforces it with a unique index of
+    the same columns, which serves the read the same way. A one-row-per-workspace
+    table (`follow_up_settings`) needs nothing more.
     """
+    tenant = table.columns["tenant_id"]
     return any(
-        index.columns is not None and list(index.columns)[:1] == [table.columns["tenant_id"]]
-        for index in table.indexes
+        index.columns is not None and list(index.columns)[:1] == [tenant] for index in table.indexes
+    ) or any(
+        isinstance(constraint, UniqueConstraint) and list(constraint.columns)[:1] == [tenant]
+        for constraint in table.constraints
     )
 
 

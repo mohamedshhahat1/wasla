@@ -264,6 +264,29 @@ async def test_the_library_lists_uploads_and_refuses_a_member(
     assert (await client.get("/api/v1/template-header-media", headers=member)).json()["items"] == []
 
 
+async def test_a_library_file_over_a_megabyte_is_accepted(
+    inbox: tuple[FakeMeta, Database, AsyncClient, Settings, MediaStorage],
+) -> None:
+    """FSR-01: the upload has the upload allowance, not the 1 MB cap of other requests.
+
+    A 2 MB photograph - well inside Meta's 5 MB for an image - was refused 413
+    by the body limit before the handler ever read it.
+    """
+    _, database, client, settings, _ = inbox
+    workspace = await seed(database, recipients=1)
+    admin = await _person(database, settings, workspace, TenantRole.TENANT_ADMIN)
+    photo = b"\x89PNG\r\n\x1a\n" + b"\x00" * (2 * 1024 * 1024)
+
+    uploaded = await client.post(
+        "/api/v1/template-header-media",
+        files={"file": ("shop.png", photo, "image/png")},
+        headers=admin,
+    )
+
+    assert uploaded.status_code == 201, uploaded.text
+    assert uploaded.json()["size_bytes"] == len(photo)
+
+
 async def test_a_follow_up_template_sends_its_file_and_the_file_cannot_be_deleted_meanwhile(
     inbox: tuple[FakeMeta, Database, AsyncClient, Settings, MediaStorage],
     prepared_database: str,
