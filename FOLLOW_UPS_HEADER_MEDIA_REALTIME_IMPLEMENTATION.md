@@ -1,34 +1,469 @@
-# Follow-ups, Header Media & Realtime — Implementation (DRAFT)
+# Follow-ups, Header Media & Realtime — Implementation
 
-Stage branch `followups-header-media-realtime-20261023`, worktree `E:\wasla-followups-realtime`,
-based on `worktree-billing-google-auth` at `8752324`. Nothing pushed, merged or deployed.
+Stage branch `followups-header-media-realtime-20261023` (worktree `E:\wasla-followups-realtime`),
+built on `worktree-billing-google-auth` at `8752324` (= origin). **Nothing was pushed, merged or
+deployed; `main` was not touched; no real provider was contacted; the 14 untracked paths in
+`E:\wasla` were not touched.** Final code head: `6d630c3`; this report is the commit after it.
 
-This is the running draft (section 9 of the stage prompt). A resumed session reads the
-**Phase status** table and `git log`, then continues from the first phase that is not committed.
+## 1. Executive Summary
 
-## Phase status
+Every decision of the stage is implemented and proven at the final head:
 
-| Phase | Scope | State | Commit | Suites run |
-| --- | --- | --- | --- | --- |
-| 0 | Baseline, facts, infrastructure | committed (with 1-2) | see 1-2 | follow-up ×4 suites green at base |
-| 1 | RT-08 (CPM-06), TZ-05, TZ-06, TZ-07, TZ-09 | committed | a058bb1 | timezone, quiet hours (pg + Cairo pg3), campaign API, invariants, docs truth, workspaces, unit |
-| 2 | TZ-08 local-time resolution | committed | a058bb1 | as above |
-| 3 | FLIM-01..03, FQH-01..04 | committed | 8113a5f | new file 10/10; send-path sweep (campaign*, follow_up*, crm*, agent*, tool*, messaging*, manual*, ai_*, timezone); migration-built parity/downgrade; alembic head->0120->head |
-| 4 | FUS-01 settings | committed | 705bd34 | settings API 17/17; workspace, purge, auth, audit, docs truth, route auth; migration-built parity + downgrade; alembic head->0120->head |
-| 5 | FUS-02/03/05/06 runs, stop rules, window | committed | fb7124b | sequences 18/18 (+ reply/silent 5x); settings + limit files; send-path sweep (see below); migration-built parity + downgrade; alembic head->0120->head |
-| 6 | FUS-04/07 AI-written step, charging | committed | 980868a | ai steps 16/16, tool offer 3/3, sequences 18/18, AI invariants; send-path sweep |
-| 7 | FUS-09 what a person sees | committed | 888f2c7 | visibility 3/3; conversation/inbox/follow-up/CRM/schema suites 255 passed; docs truth, route auth |
-| 8 | HMT-01..03 template header library | committed | 4ffbad0 | template header media 8/8; sweep 162 suites 0 failed; migration-built parity + downgrade; alembic head->0120->head |
-| 9 | HMR-01..03 per-recipient header media | committed | 324d435 | per-recipient 7/7 (1/2/4 workers); sweep 163 suites: 7 failures in 2 files fixed (below), re-run green; migration-built parity + downgrade; alembic round trip |
-| 10 | RT-03 publish points, RT-04 incremental reads | committed | a100716 | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
-| 11 | RT-01/02/05 stream, RT-07 polling budget | committed | 98919e9 | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
-| 12 | RT-06 nginx, shutdown, capacity | committed | f13b8d3 | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
-| 13 | Invariants, observability, docs, ADRs, contracts | committed | 31e40c0, a3b3add, b4cb7fb, 946aa15 | injection tests 15/15; invariant suites and oracles 191 passed; promtool / amtool; documentation truth 27 |
-| 14 | Mutation | committed | f9f2f69, 8eb21f6 | M-S: 39/39 constructible killed, M-S10 classified structural; regression lane 18/18 killed; every file restored (sha256) |
-| 15 | Full lanes, CI jobs, after-probes | in progress: lanes green at a57535b | a57535b | see Phase 15 |
-| 16 | Final report | not started | | |
+- **Automatic follow-up sequences** (FUS-01..09, ADR-151): the owner's card (on by default: WhatsApp,
+  one reminder after 5 minutes; up to five reminders of 5 min..23 h), runs anchored on the AI's or a
+  person's reply, step n timed from step n-1's send, written by the model at dispatch with no lock
+  held and discarded if the customer replies meanwhile, stopped by a reply, a takeover, a closed
+  conversation, an opt-out, a won/lost lead or the AI's own skip, and never sent after the
+  customer's window less 30 minutes, never as a template. Any hour.
+- **Follow-ups and manual templates at Meta's limit; quiet hours** (FLIM-01..03, FQH-01..04,
+  ADR-152/153): a template follow-up waits at 100 % and inside quiet hours (no attempt spent, the
+  requested time kept); a person's template is refused 409 with when; free-form never touches the
+  ledger.
+- **Timezone** (TZ-05..09, ADR-156): `_local` twins, UTC database sessions, server-side wall-time
+  resolution across the fold and the gap.
+- **Header media** (HMR-01..03, HMT-01..03, ADR-154): a workspace library; per-recipient files
+  frozen at materialisation, one upload per file and connection; manual and follow-up templates
+  with media headers from the library.
+- **Realtime** (RT-01..08, ADR-155): a ticketed SSE stream of ids-only hints published after commit,
+  incremental inbox reads, a polling budget where a 304 costs nothing; nginx location, bounded
+  graceful shutdown, 200 streams on one process.
+- **The frontend contract**: `docs/FOLLOW_UPS_AND_REALTIME_CONTRACT.md`, plus the campaigns page
+  contract updated.
 
-## Starting repository state (recorded 2026-10-23)
+Found and fixed on the way (section 3 of FSR): **FSR-01** library uploads over 1 MB refused 413;
+**FSR-02** a closed browser tab held one of its person's five stream places for the life of the
+process; **FSR-03** an unbounded graceful shutdown; plus four slips of earlier phases caught by the
+full lanes and the promtool job. Both full lanes are green at the final code head; every
+constructible mutant (39 of 40) is killed and M-S10 is classified; every invariant is at 0.
+
+## 2. Starting Repository State
+
+```text
+canonical          worktree-billing-google-auth at 8752324 = origin (0 ahead / 0 behind)
+git diff --stat 0f767ec 8752324   CAMPAIGNS_PAGE_FEATURES_MERGE_VERIFICATION.md only (838 +)
+BASE_HEAD          8752324          BASE_MIGRATION_HEAD 0120 (single head)     last ADR  ADR-150
+python             3.12.7 (venv E:\wasla-cpr-notes\venv); docker 29.8.0; compose v5.5.1
+PostgreSQL         16.15 (pgvector/pgvector:pg16): wasla-fur-pg / pg2 Etc/UTC, pg3 Africa/Cairo
+Redis              7.4.11 (XADD MAXLEN ~ and XREAD BLOCK available)
+tzdata             2026e: Cairo repeats 23:00-24:00 on 2026-10-29 and skips 00:00-01:00 on 2027-04-30
+app.__file__       asserted per worktree by audit/env_fur.sh
+channels           WhatsApp is the only working adapter (app/channels/registry.py:116-124);
+                   Messenger and Instagram are vocabulary only - refused by the settings (422)
+ownership          conversations.mode (AI / HUMAN) + assigned_to_id; takeover InboxService.set_mode;
+                   a person may send on an AI-owned conversation without taking it over
+leads              NEW, CONTACTED, QUALIFIED, PROPOSAL, WON, LOST; no purchase or order is recorded
+AI charge          a hold under the workspace lock, settled as one ai_turn usage event (ADR-131)
+guardrails         channel length (prepare_channel_reply) and the disclosure (ai_worker)
+```
+
+Preamble facts verified at BASE_HEAD, one line each (file:line at 8752324):
+
+```text
+schedule_follow_up(delay_minutes, message), text only           app/agents/registry.py:745-766       true
+FOLLOW_UP and HUMAN RECORD_ONLY by omission                     app/services/messaging_service.py:178-188 true
+dispatch does not catch PortfolioLimitReachedError              app/services/follow_up_service.py:885-916 true
+follow-up sweep 30 s, no time-of-day check                      app/workers/follow_up_worker.py:48,136-141 true
+one header file per campaign; _personal takes the campaign's    app/services/campaign_service.py:3295-3305 true
+no WebSocket / SSE / pub-sub; nginx read timeout 75 s           nginx/nginx.conf, app/                  true
+GET /conversations: no ETag, no updated_since                   app/api/v1/conversations.py             true
+progress 304s charged in the campaign bucket                    app/api/v1/campaigns.py, rate_limits.py true
+usage day buckets under an unpinned session zone                usage_repository.py:155, db/session.py:93-98 true
+scheduled_at without a _local twin                              app/schemas/campaign.py:472             true
+stale "no workspace time zone"                                  campaign_service.py:1645, usage_repository.py:149-152, docs/CRM.md:166 true
+```
+
+Measured "before" at BASE_HEAD (`audit/fur_before_probes.py`, `E:\wasla-fur-base`, a Cairo-zoned
+server, fake Meta), section 22 below.
+
+## 3. The Platforms' Documentation
+
+Read before the code each governs (cited in the fixtures and ADRs):
+
+```text
+WhatsApp pricing / customer service windows   developers.facebook.com/documentation/business-messaging/whatsapp/pricing
+    free-form only within 24 h of the customer's last message; templates otherwise
+WhatsApp messaging limits                      .../whatsapp/messaging-limits   (portfolio, business-initiated, moving 24 h)
+WhatsApp template components                   .../whatsapp/templates/components (HEADER IMAGE / VIDEO / DOCUMENT, media id)
+WhatsApp media                                 the Cloud API media reference (upload, id lifetime, types and sizes)
+Messenger send API                             developers.facebook.com/docs/messenger-platform/send-messages
+    RESPONSE within 24 h; HUMAN_AGENT tag for a human only
+Instagram messaging                            developers.facebook.com/docs/instagram-platform/   (24 h; human agent tag)
+Server-sent events                             html.spec.whatwg.org/multipage/server-sent-events.html
+    id / event / data / retry fields; Last-Event-ID on reconnect; EventSource cannot set headers
+Redis streams                                  redis.io/docs/latest/develop/data-types/streams/  (XADD MAXLEN ~, XREAD BLOCK)
+```
+
+Differences from section 2 of the prompt: none in the values used. **Not documented**, handled
+conservatively and recorded: whether many automated messages inside the window affect quality (at
+most 5 steps, every stop rule); the exact clock of "24 hours" (a 30-minute margin); any charge or
+limit for free-form follow-ups in the window (none known; steps never touch the ledger). No
+platform page restricts automated messages inside the window on a channel this stage builds;
+Messenger and Instagram are not built because no adapter exists (not a section-34 stop).
+
+## 4. Decisions Applied
+
+FUS-01..09, FLIM-01..03, FQH-01..04, TZ-05..09, HMR-01..03, HMT-01..03 and RT-01..08 are applied as
+written, with these recorded choices:
+
+```text
+FUS-01  settings in a table (follow_up_settings), not tenant columns: a versioned list with an editor
+        a workspace with no settings row runs nothing (fixtures); every real workspace has one
+FUS-02  "the customer wrote since" by Wasla's stored created_at, not the platform's second-precision timestamp
+FUS-03  a person's one-off replaces the waiting step; a colleague's waiting one-off keeps runs away
+FUS-04  steps never shortened; credential shapes and phone numbers refused (guardrail); no disclosure
+        on a step (the anchoring AI reply already carried it when due)
+FUS-06  Wasla records no purchase: "purchased" is the AI's skip; lead_closed is the recorded stop
+FUS-07  the step's ai_turn names follow_up_id; AI invariant B7 amended (ADR-131 amended)
+FQH-01  the campaigns' minute of lead (closed_to_sends / reopens_after)
+HMT-01  nothing renamed: campaign_header_media is the library; template_header_uploads per file
+RT-03   ORM collectors + after_commit, one Redis stream per workspace
+RT-05   every member reads every conversation (the route table): may_read is the seam; a stream can
+        cross only the workspace boundary (M-S33 re-targeted there)
+RT-06   per-process streams alert at 160 (80 % of the measured 200); --timeout-graceful-shutdown 25
+RT-07   a route charges selected buckets only for an answer that changed (CHARGED_AFTER_ETAG)
+```
+
+Not decided here, as the prompt says: contact import / CMQ-07; template sequences outside the
+window; message tags for automated messages (never); per-recipient URL / COPY_CODE; WebSocket; push;
+CI from requirements.lock, a nightly job, one injectable clock; the frontend itself.
+
+## 5. Migrations 0121..0126
+
+```text
+0121  follow_ups.requested_at (backfilled = scheduled_at, in batches), deferred_reason, deferrals
+0122  follow_up_settings (one row per workspace; the default ON row for every existing workspace);
+      audit actions follow_up_settings_updated, follow_up_stopped_by_person
+0123  follow_up_sequence_runs (one active per conversation, partial unique index CONCURRENTLY);
+      follow_ups.origin, sequence_run_id, step_index, anchor_at, skip_reason
+0124  campaign_header_media.deleted_at; template_header_uploads; follow_ups.header_media_id
+0125  campaigns.header_media_mode / header_media_rules / header_media_refusals;
+      campaign_recipients.header_media_id; reason header_media_refused
+0126  ix_conversations_tenant_id_updated_at (CONCURRENTLY); updated_at stays the application's onupdate
+```
+
+Additive and online (NOT VALID -> VALIDATE, CONCURRENTLY with an INVALID leftover dropped first, no
+rewrite); tenant-composite keys; every downgrade refuses while new data exists and leaves the stamp;
+README range updated with each. Proven: fresh 0001 -> head; head -> base -> head; head -> 0120 ->
+head; `alembic check` clean; `db_preflight verify` ok (0 NOT VALID, 0 invalid indexes, 0 disabled
+triggers); `test_migration_downgrade_atomicity` and `test_schema_parity` green in the migration lane.
+Populated upgrade: section 18.
+
+## 6. Follow-up Sequences
+
+Phases 4-7 of Appendix A. The owner's 3 a.m. scenario is `test_two_reminders_at_their_times_at_any_hour`
+(steps [5, 30], quiet hours on and containing the moment): step 1 at anchor + 5 min, step 2 at step 1's
+send + 30 min, two free-form sends at the transport, each written by the model for that
+conversation. End to end (section 19, V-2..V-5) the same through the real app: inbound -> the AI's
+price -> step 1 -> step 2 -> ended `completed`; a reply, a takeover and the AI's `purchased` skip each
+stop the run; a step that would land inside the last 30 minutes of the window is never scheduled.
+
+## 7. Follow-ups and Manual Templates at the Limit; Quiet Hours
+
+Phase 3 of Appendix A. At BASE both a template follow-up and a manual template went out at 250 of
+250, and a template follow-up went out inside quiet hours (section 22). Now: the follow-up waits
+(`portfolio_limit` / `quiet_hours`, 0 attempts, `requested_at` kept, `deferrals` in order), the manual
+template is 409 `portfolio_limit_reached` with `available_at_local`, free-form is sent and never
+counted.
+
+## 8. Timezone Fixes
+
+Phases 1-2 of Appendix A. At BASE a Cairo-zoned server put 2026-10-30T22:30Z in the 31 October
+bucket; now every connection runs in UTC (`test_the_application_session_runs_in_utc_on_a_cairo_zoned_server`,
+M-S38 killed). Local twins, wall-time resolution (M-S39 killed), DST-day tests.
+
+## 9. Header Media per Recipient
+
+Phase 9 of Appendix A. At BASE the per-recipient fields were refused (section 22). Now 10 / 10 / 10
+recipients receive files A / B / C with exactly 3 uploads, 0 twice, with 1, 2 and 4 workers; end to
+end (V-7) the same with 2 workers through the real API.
+
+## 10. Header Media for Manual and Follow-up Templates
+
+Phase 8 of Appendix A, and FSR-01 (section 17). At BASE a raw image header link was passed to Meta as
+given, nothing uploaded. Now the library file is uploaded once per (file, connection) and reused;
+raw media parameters are refused 422.
+
+## 11. Realtime
+
+Phases 10-12 of Appendix A, FSR-02 and FSR-03. Delivery: p95 0.047 s with one stream, 0.266 s with
+200 streams on one process (every hint delivered); about 280 KiB of Python heap per open stream (an
+upper bound: client and server in one process). Through the built image and the stage's nginx a
+stream was held 300.3 s with 20 keep-alives; nginx logged `$uri` only; the ticket appears in 0 log
+lines. End to end (V-2) an inbound message reached the stream 0.14 s; (V-7) 60 conditional
+progress polls all answered 304 with the campaign bucket at 30 a minute.
+
+## 12. Invariants
+
+CR-16, CR-17, FU-01..FU-08 and RT-I01 (Phase 13a): each has an injection test counting exactly one
+violation; M-S40 makes three of them vacuous and is killed. All at 0 after the oracles' real write
+paths, after every lane, after the populated upgrade (day and night) and after APP-E2E.
+
+## 13. Observability
+
+`wasla_follow_up_sequence_steps_total{outcome}`, `wasla_follow_up_defers_total{reason}`,
+`wasla_follow_up_ai_failures_total`, `wasla_template_header_uploads_total{origin}`,
+`wasla_events_published_total{type}`, `wasla_events_publish_failed_total`,
+`wasla_events_streams_open` (gauge, per process), `wasla_events_stream_closed_total{reason}`; alerts
+`FollowUpAiFailing`, `EventsPublishFailing`, `EventsStreamsNearLimit` with promtool cases (fire,
+clear, silent). Labels are closed vocabularies. `promtool check config / check rules (81) / test
+rules` and `amtool check-config` pass.
+
+## 14. Mutation Matrix
+
+Appendix A, Phase 14: M-S01..M-S40 - 39 KILLED by named tests, M-S10 not constructible as one
+change (classified structural); the regression lane (M-C01+M08, M-C09, M-C21, M-F01, M-F02, M-F13,
+M-F31, M-H01, M-H11, M-D01..M-D08, M-C35) all KILLED. Meaningful survivors: 0. Every file restored
+(SHA-256), the mutation worktree clean after every run.
+
+## 15. Model-Built Test Results
+
+```text
+MODEL-BUILT (real clock)   at 6d630c3
+collected 7,438 / passed 7,420 / failed 0 / skipped 18 / xfailed 0 / xpassed 0
+```
+
+## 16. Migration-Built Test Results
+
+```text
+MIGRATION-BUILT (WASLA_TEST_SCHEMA=migrations, fresh alembic upgrade head)   at 6d630c3
+collected 7,438 / passed 7,424 / failed 0 / skipped 14 / xfailed 0 / xpassed 0
+```
+
+Baseline 7,298 / 7,280 / 0 / 18 and 7,298 / 7,284 / 0 / 14 (debde5f); +140 tests added by this stage
+(Appendix B). Skips are the known set: OpenAI x11, schema parity x4 (model-built), tmpfs x1,
+kept-data-only x2. The lanes ran three times: red at 8eb21f6 (section 17), green at a57535b, green at
+6d630c3 (the final code head) - both at the same time on two servers.
+
+## 17. Kept-Data, Races, Clock Runs, Shifted Lane, Alembic, Docker, nginx, CI Jobs
+
+```text
+kept-data sweep        3 / 3 runs at 6d630c3 (and 3 / 3 earlier at a57535b): 304 passed, 0 skipped,
+                       migration-built, a fresh database each run; the AI and tool invariants over the
+                       kept data at 0. The follow-up step suites use sequence_harness, not ai_harness:
+                       by ci.yml's rule they are not in the selection (recorded, unchanged)
+races                  3 / 3 runs at 6d630c3: 127 passed, 0 failed (two-worker, reservation, top-up,
+                       header media incl. per-recipient, limit, cap, quiet hours, sequences, streams,
+                       capacity, Google concurrency, the FSR-02 unit test)
+clock-sensitive        day (21:17 Cairo) 83 / 83; TZ=UTC0 83 / 83; night (22:01 Cairo, inside quiet hours: 83 / 83)
+shifted +100 days      the 16 new test files: 123 passed, 8 failed, all classified - process clock vs
+                       Redis clock (5: the stream trim uses this process's clock, Redis ids its own) and
+                       process clock vs database clock (3); 0 unclassified
+alembic                section 5
+docker                 runtime image built at 6d630c3; /health/live 200, /health/ready postgresql and
+                       redis up; uvicorn runs with --timeout-graceful-shutdown 25
+nginx                  nginx -t on the pinned production image; a stream held 300.3 s through it
+CI jobs locally        quality (ruff, black, mypy app tests, mypy scripts) clean; tests = the
+                       model-built lane; migration-parity = the migration lane + kept-data; monitoring
+                       = promtool / amtool; docker = the build and health probe above
+```
+
+Failures found by the lanes and the checks, all fixed before the final lanes:
+
+- **FSR-01** (product, Phase 8): `POST /template-header-media` had no upload allowance; files over
+  1 MB were refused 413. Test: a 2 MB upload (413 without the fix).
+- **FSR-02** (product, Phase 11): a stream whose client left mid-send kept its subscription and its
+  place in the person's count until garbage collection; anyio cancelled the uncount. Fixed with
+  `EventStreamResponse` and a shielded uncount; tests on both ASGI paths and the capacity drain.
+- **FSR-03** (deployment): uvicorn's graceful shutdown could wait without bound on a transport the
+  runtime never closed (seen on Windows' Proactor loop); `--timeout-graceful-shutdown 25`.
+- Slips of earlier phases: 0124 not black-formatted; the `PortfolioLimitReached` promtool expectation
+  left on the old text (the monitoring job would have been red); `FOLLOW_UP_AI_RETRY_SECONDS` not in
+  `.env.example`; the tenant-index guard not counting `follow_up_settings`' unique constraint.
+- Test faults of this stage fixed: stream members leaking past teardown (broke Google tests), a
+  2-second request cut answering 504 under load, a hang on a reused ticket (M-S34), a digit marker
+  matching a timestamp, the M-S08 margin gap.
+
+## 18. Populated Upgrade
+
+`audit/fur_populate.py` at BASE (`E:\wasla-fur-base`, 8752324, 0120) on wasla-fur-pg2: two Cairo
+workspaces with owners / admins / members, sealed tokens, inbound history through ingestion,
+AI-owned and person-owned conversations, leads in all six statuses, eight follow-ups (pending agent
+x2, pending colleague, pending template to a closed window, sent, skipped, failed, cancelled),
+campaigns draft / completed / running and paused with an IMAGE header file, a manual template -
+65 tables, 251 rows. Then `alembic upgrade head` from 6d630c3 (6 steps, 6 s) and
+`audit/fur_upgrade_check.py`:
+
+```text
+                                                        day (20:46 Cairo)     night (22:04 Cairo)
+pre-existing columns of 65 tables unchanged             PASS                  PASS
+old follow-ups: requested_at = scheduled_at, no wait,   PASS (8, 8, 8, 8)     PASS (8, 8, 8, 8)
+  origin one_off
+every workspace: on, [whatsapp], one 5-min reminder     PASS                  PASS
+campaigns header_media_mode campaign; no recipient file PASS                  PASS
+old agent follow-up + new AI reply -> replaced_by_sequence, one run   PASS    PASS
+old colleague follow-up kept, no run starts             PASS                  PASS
+old due agent follow-up sent once by the new worker     PASS                  PASS
+template follow-up to a closed window                   day: sent             night: waits to 09:00 Cairo, 0 attempts
+every invariant at 0 (CR-01..17, FU-01..08, RT-I01)     PASS                  PASS
+catalogue NOT VALID | invalid | disabled                0 | 0 | 0             0 | 0 | 0
+dump: key / tokens / password occurrences               0 / 0 / 0             0 / 0 / 0
+```
+
+## 19. APP-E2E V-1..V-10
+
+`audit/e2e/run_fur.py` on `fur_harness.py` (the CPM harness pointed at 6d630c3, TIER_250, rate
+limiting on): the real app under uvicorn, registration, login, the signed webhook, the AgentWorker
+and the FollowUpWorker; Meta and OpenAI faked at the socket; an SSE client. Run at 22:06 Cairo on 2026-10-23, inside quiet hours, at 6d630c3:
+
+```text
+V-1   register (Cairo), plan, connect (limit TIER_250), template sync, an active default agent,
+      the card read (default: on, [5]) and saved [5, 30], quiet hours 22:00-09:00, a stream opened   PASS
+V-2   "how much is product X?" at 22:06 Cairo -> the AI answers the price; message.created
+      (inbound) 0.14 s after the webhook was posted; (outbound) 0.78 s after the agent was run        PASS
+V-3   step 1 = anchor + 5 min, sent; step 2 = step 1's send + 30 min, sent; both written about
+      product X by the model; follow_up.updated and message.created on the stream; the
+      conversation's state "ended / completed" and a history of two                                   PASS
+V-4   B replies after step 1 -> customer_replied; C taken over -> human_took_over; D "I'll come to
+      the store tomorrow" -> skipped purchased; step sends B 1, C 1, D 0; no step 2 sent             PASS
+V-5   the customer wrote 40 min ago, reminders [5 min, 23 h] -> step 2 never scheduled
+      (window_closing); reply + step 1 only at the transport                                          PASS
+V-6   night: a template follow-up to a closed window waits to 09:00 Cairo (quiet_hours, 0 attempts);
+      a manual IMAGE-header template with a library file: 1 upload, sent; at 250 / 250 a manual
+      template is 409 portfolio_limit_reached with available_at_local; the follow-up waits
+      portfolio_limit                                                                                 PASS
+V-7   per-recipient campaign, 3 files, 30 people (10 X, 10 Y, 10 none), 2 workers: 30 sends,
+      10 / 10 / 10 per file id, 3 uploads, 0 twice; 60 conditional progress polls all 304 with the
+      campaign bucket at 30 a minute                                                                  PASS
+V-8   a member: PUT settings 403, library upload 403, GET settings 200, stream 200; the member's
+      stream carries their workspace's hint and never another workspace's                             PASS
+V-9   the member's membership revoked -> event closed (membership_revoked) within a keep-alive        PASS
+V-10  omnichannel_invariants verify ok (Redis included); no ticket, token, message text, customer
+      name or provider media id in any event, audit row or log line (57 terms, 491 log lines, 0
+      hits; the terms file deleted after the scan)                                                    PASS
+```
+
+Earlier runs of the same day, by day (21:11-21:17 Cairo), fixed faults of the runner itself, never
+of the application: the agent must be activated and made default; a follow-up must be at least a
+minute ahead (now + 1 minute arrived a few milliseconds short); V-4's checks must not count the AI's
+answer to B's reply (it rightly starts a fresh run) or B's cancelled step 2; a template inside an
+open window is not business-initiated, so V-6's limit fixture closes G's window first; leads are
+inserted through the model; and the aged windows set `sent_at` from the conversation's own value
+(two `now()` calls left it milliseconds later, which an invariant rightly counted).
+
+## 20. Ruff / Black / MyPy
+
+`ruff check app tests scripts alembic` clean; `black --check` unchanged; `mypy app tests` 0 errors
+in 898 files; `mypy scripts` 0 errors. Narrow `type: ignore`s this stage added (four, each with
+its code): `app/main.py` - assigning `uvicorn.Server.handle_exit` (`method-assign`) and marking the
+wrapper (`attr-defined`); `app/core/events.py` - `install._done` (`attr-defined`);
+`app/services/follow_up_service.py:1586` - `result.rowcount` (`attr-defined`), the repository's
+existing idiom for a Core `UPDATE`'s row count (eight earlier occurrences). No broad ignore.
+
+## 21. Documentation Changes
+
+ADR-151..ADR-156; dated amendments to ADR-022, ADR-131, ADR-144, ADR-145, ADR-149 and PD-CRM-1.
+`docs/CRM.md` "Follow-ups" (sequences, stops, window, the one-off table), `docs/AI_AGENTS.md` (the
+step turn), `docs/CAMPAIGNS.md` (per-recipient files, FLIM), `docs/MEDIA.md` (the library,
+retention by recipients and waiting follow-ups), `docs/API.md` (every route, field, event and
+code; 247 operations, 19 unauthenticated), `docs/AUTHORIZATION.md` (routes, the stream's ticket),
+`docs/DEPLOYMENT.md` (the stream behind nginx, capacity, drain, the shutdown bound),
+`docs/RUNBOOK.md` ("Follow-ups are not sending", "The inbox does not update"),
+`docs/OBSERVABILITY.md`, `docs/SAAS.md`, `README.md` (0001-0126), `.env.example`;
+`docs/FOLLOW_UPS_AND_REALTIME_CONTRACT.md` (new) and `docs/CAMPAIGNS_PAGE_CONTRACT.md`.
+`test_documentation_truth` green at every commit.
+
+## 22. Before / After
+
+```text
+probe   BASE_HEAD 8752324 (measured)                                     final head
+P-FU1   AI replies, customer silent: 0 follow-ups                        reminders at +5 min and +30 min (V-3)
+P-FU2   at 250 / 250: template follow-up sent 1, manual template sent 1   follow-up waits portfolio_limit; manual 409 with when (V-6)
+P-FU3   template follow-up sent inside quiet hours (21:32, 20:00-23:00)  waits to 09:00 Cairo (night run, sec. 18 / 19)
+P-HM1   per-recipient header fields refused (ValidationError)            10 / 10 / 10 with 3 uploads (V-7)
+P-HM2   raw image link passed to Meta as given, 0 uploads                raw refused 422; library file uploaded once (V-6)
+P-RT1   no event route; list has no updated_since; 304s charged          stream within 0.14 s; updated_since + ETag; 304s free (V-7)
+P-TZ1   Cairo-zoned server: 2026-10-30T22:30Z -> "2026-10-31 00:00+02"    UTC session: the 30th
+```
+
+## 23. Required Numbers
+
+```text
+steps sent after a reply / takeover / lead close / opt-out      0 (transport; FU-01, FU-02 = 0)
+steps sent outside window_end - margin                          0 (FU-03 = 0)
+steps sent as a template or with a tag                          0 (FU-04 = 0; transport kinds {"text"})
+steps sent twice, 2 workers, 200 conversations                  0
+model calls per step                                            1, or 2 with the one retry
+charges per cancelled step                                      0
+ledger rows for free-form messages                              0 (FU-06 = 0)
+template follow-ups sent inside quiet hours                     0 (FU-07 = 0)
+attempts spent by follow-up defers                              0
+uploads per distinct header file per connection                 1 inside the refresh (3 for 3 files)
+payloads carrying another recipient's header file               0 (CR-16 = 0)
+events carrying content; cross-workspace events                 0; 0 (RT-I01 = 0; content scans)
+p95 event delivery: 1 stream / 200 streams                      0.047 s / 0.266 s
+memory per stream                                               <= ~280 KiB Python heap (upper bound)
+campaign-bucket tokens used by 304 progress answers             0
+collected before / after                                        7,298 -> 7,438 (Appendix B)
+mutants killed / classified                                     39 + 18 regression / 1 (M-S10)
+```
+
+## 24. Remaining External Actions
+
+Not performed; for the operator:
+
+- A real-provider lane, only when authorised: a WhatsApp conversation with [5 min, 30 min]
+  reminders to a number the owner names; confirm no quality warning. Messenger / Instagram when
+  their adapters exist.
+- The deploy (the RUNBOOK rule: stop the old processes before `alembic upgrade`), the nginx stream
+  location on the real proxy, stream limits sized to real traffic.
+- The frontend's settings card, inbox stream client and header library, against the contract.
+- The decisions recorded in the merge re-run's section 26 (CI from requirements.lock, a nightly
+  job, one clock for tests and code). Subscribing `business_capability_update`, `account_alerts`,
+  `message_template_status_update` (CMQ-05). CMQ-07 legal review; CMQ-08 retention (now also
+  per-recipient header files and follow-up texts).
+- The merge verification of this branch into `worktree-billing-google-auth`, then the push.
+- Removing this stage's infrastructure after review: `wasla-fur-*` containers and the
+  `wasla-fur-net` network, the worktrees `E:\wasla-followups-realtime`, `E:\wasla-fur-lane`,
+  `E:\wasla-fur-lane2`, `E:\wasla-fur-mut`, `E:\wasla-fur-base`, and the image `wasla-fur:6d630c3`.
+
+## 25. Open Product Decisions
+
+- CMQ-07 (contact import) stays open; ADR-025 stands.
+- Messenger and Instagram reminders wait for their adapters.
+- Recommended, not done (no lane re-run was spent on it): trim a workspace's event stream relative
+  to the id Redis returned rather than this process's clock, so an app host more than 15 minutes
+  out of step with Redis cannot empty the stream (seen only with the clock shifted 100 days).
+
+## 26. Final Verdict
+
+**FOLLOW-UPS, HEADER MEDIA & REALTIME IMPLEMENTED WITH EXTERNAL VERIFICATION REMAINING**
+
+Every condition of section 36 holds at the final code head 6d630c3: reminders of 5 minutes to
+23 hours, up to five, at any hour, each written for its conversation; no step after a reply, a
+takeover, a closed conversation, a closed lead, an opt-out or the AI's skip, none past the window
+less the margin and none as a template (FU-01..FU-04 = 0, at the transport); 0 steps twice with two
+workers; 0 charges for cancelled steps; template follow-ups wait at 100 % and in quiet hours, a
+manual template at 100 % is refused with when, free-form never touches the ledger; per-recipient
+files with one upload per file and connection; library headers for manual and follow-up templates,
+raw media refused; an inbox client learns of a new message in 0.14 s through the stream, with ids
+only, its own workspace's only, closed on revoke / logout / suspend; 304s cost no campaign token;
+`scheduled_at_local`, UTC sessions, the fold and the gap; CPM-06 has 12 s of margin and still kills
+M-F13 / M-F31; every meaningful mutant killed and the regression lane killed; both full lanes 0
+failed, kept-data 3 / 3, races 3 / 3, the night run green, every CI job green locally; every
+invariant at 0; the populated upgrade lost no row, by day and at night; nothing pushed, merged or
+deployed; no real provider contacted; `main` and the untracked files untouched.
+
+"Per platform" is WhatsApp: Messenger and Instagram have no adapter in Wasla, so the card offers
+only WhatsApp and refuses the others (422 `channel_type_unavailable`) until they exist. What remains
+is external (section 24): the real-provider lane, the deploy and the proxy, the frontend.
+
+**The final question.** Yes. A customer who asks the price of product X at 3 a.m. on WhatsApp gets
+the AI's answer; with reminders [5 min, 30 min] Wasla writes to them 5 minutes after that answer and
+30 minutes after the first reminder was sent, each text written by the model from that conversation,
+quiet hours or not. The run stops in the same transaction when the customer writes, when a colleague
+takes the conversation, when the lead is won or lost or the conversation closed; when the AI judges
+"I'll buy it in the store" it skips (`purchased`) and the run ends. Nothing is sent within 30 minutes
+of the 24-hour window's end. A follow-up never pushes the portfolio past Meta's limit (a template one
+waits; free-form ones do not count), and a template follow-up to a closed window waits out the
+night. Each campaign recipient gets their own header file. The person at the inbox learns of each
+message within a fraction of a second through the event stream, and reads it through the routes
+that authorise it.
+
+---
+
+# Appendix A — Phase log
+
+### Starting repository state (recorded 2026-10-23)
 
 ```text
 canonical          worktree-billing-google-auth at 8752324 = origin (0 ahead / 0 behind)
@@ -55,7 +490,7 @@ wasla-fur-redis   127.0.0.1:56981   wasla-fur-redis2 127.0.0.1:56982 (TEST_REDIS
 wasla-fur-minio   127.0.0.1:59981   bucket wasla-media
 ```
 
-### Preamble facts verified at BASE_HEAD
+#### Preamble facts verified at BASE_HEAD
 
 ```text
 schedule_follow_up(delay_minutes, message) text only          app/agents/registry.py:745-766            true
@@ -73,7 +508,7 @@ The remaining facts (channels, ownership, lead vocabulary, AI charging, guardrai
 media, realtime, rate buckets) are verified at the start of the phase that changes them and
 recorded here as each phase lands.
 
-## Phase 1 — RT-08, TZ-05, TZ-06, TZ-07, TZ-09
+### Phase 1 — RT-08, TZ-05, TZ-06, TZ-07, TZ-09
 
 - **RT-08 (CPM-06).** `test_a_batch_reaching_the_window_stops_at_the_next_person_and_resumes_in_the_morning`
   now starts at 21:58:48 with Meta answering in 1.0 s: 12 s of real-time margin before the 21:59:00
@@ -95,7 +530,7 @@ recorded here as each phase lands.
   +03:00 keeps its instant (06:00 UTC = 08:00 local): waits to 09:00 with quiet hours on, starts at
   08:00 local with them off.
 
-## Phase 2 — TZ-08
+### Phase 2 — TZ-08
 
 `GET /api/v1/workspace/local-time?at=YYYY-MM-DDTHH:MM` (any member, workspace bucket) resolves a wall
 time with the pinned tzdata: the October fold is `ambiguous` with both instants and `at_local` the
@@ -103,7 +538,7 @@ first (fold 0); the April gap is `nonexistent` with `at_local` the first instant
 seconds or any other shape is `422 local_time_invalid`. `docs/API.md` (238 operations),
 `docs/AUTHORIZATION.md`.
 
-## Phase 3 — FLIM-01..03, FQH-01..04
+### Phase 3 — FLIM-01..03, FQH-01..04
 
 Facts verified first: `LEDGER_ENFORCEMENT` held only CAMPAIGN and CAMPAIGN_TEST
 (messaging_service.py:178-188), so FOLLOW_UP and HUMAN were RECORD_ONLY by omission;
@@ -153,7 +588,7 @@ been made with `mkdir` in MinIO's data directory, which MinIO does not register 
 with `mc mb`; every swept suite that uses the object store re-run green. No test expectation of
 an earlier stage changed in Phase 3.
 
-## Phase 4 — FUS-01 follow-up settings
+### Phase 4 — FUS-01 follow-up settings
 
 Facts verified first: only WhatsApp has an adapter (`app/channels/registry.py:116-124`,
 `Channel` docstring, ADR-117); Messenger and Instagram are vocabulary only. So
@@ -176,7 +611,7 @@ channel, not a platform rule).
 - `follow_up_settings` joins `PURGED_TABLES` (the classification test requires every
   tenant table in one list).
 
-## Phase 5 — FUS-02, FUS-03, FUS-05, FUS-06 (runs, stop rules, window)
+### Phase 5 — FUS-02, FUS-03, FUS-05, FUS-06 (runs, stop rules, window)
 
 Facts verified first: a conversation's owner is `conversations.mode` (AI / HUMAN) plus
 `assigned_to_id`; a takeover is `InboxService.set_mode` (mode HUMAN, the agent's
@@ -232,7 +667,7 @@ workspace*): one failure, `test_workspace_purge::test_the_classification_covers_
 - the new `follow_up_sequence_runs` table was not classified. Added to `PURGED_TABLES`; both purge
 files re-run green. No earlier expectation changed.
 
-## Phase 6 — FUS-04, FUS-07 (the AI-written step, the skip, charging)
+### Phase 6 — FUS-04, FUS-07 (the AI-written step, the skip, charging)
 
 Facts verified first: an agent turn's charge is a hold taken in the engaging transaction
 under the workspace's advisory lock (`EntitlementService.hold_ai_turn`) and settled by
@@ -263,7 +698,7 @@ existing "secret" or "other customer's data" guard on agent replies.
 Send-path sweep after Phase 6: 132 suites (Phase 5's set plus metric*, rag*, entitlement*,
 usage*): 0 failed.
 
-## Phase 7 — FUS-09 (what a person sees)
+### Phase 7 — FUS-09 (what a person sees)
 
 - `GET /conversations/{id}` gains `follow_up` (`none` / `scheduled` / `ended`, step of total,
   due time with its local twin, end reason and time); the list leaves it null (no per-row
@@ -279,7 +714,7 @@ usage*): 0 failed.
   contract says so.
 - 242 operations.
 
-## Phase 8 — HMT-01..03 (template header library; manual and follow-up headers)
+### Phase 8 — HMT-01..03 (template header library; manual and follow-up headers)
 
 Facts verified first: follow-ups and the manual template route passed raw `components` to Meta
 (`conversations.py` send_template; `follow_up_service.py` TEMPLATE branch); Wasla never
@@ -304,7 +739,7 @@ uploaded or checked a header for them. Header retention defaults to 0 (never pur
   injection (`storage=`).
 - Counter `wasla_template_header_uploads_total{origin}`. 245 operations.
 
-## Phase 9 — HMR-01..03 (per-recipient header media)
+### Phase 9 — HMR-01..03 (per-recipient header media)
 
 Facts verified first: one file per campaign (`campaigns.header_media_id`), uploaded once per
 campaign (`_header_file` under the lease), and `_personal()` / `send_components` always took
@@ -335,7 +770,7 @@ the campaign's file.
 
 - **Style fix** (1a3b262): 0124 had been committed without `black`; formatting only.
 
-## Phase 10 — RT-03 publish points, RT-04 incremental reads
+### Phase 10 — RT-03 publish points, RT-04 incremental reads
 
 - **Publish points** (`app/core/events.py`): ORM collectors on `Message` (insert:
   `message.created` with `conversation_id`, `message_id`, `direction`, `channel_type`,
@@ -368,7 +803,7 @@ the campaign's file.
 - **The list's response** gained `poll_after_seconds` (additive; the one test asserting the
   exact key list was updated on purpose).
 
-## Phase 11 — RT-01, RT-02, RT-05 (the stream), RT-07 (the polling budget)
+### Phase 11 — RT-01, RT-02, RT-05 (the stream), RT-07 (the polling budget)
 
 - **Routes**: `POST /events/ticket` (any member, workspace bucket) and
   `GET /events/stream?ticket=` (`app/api/v1/events.py`). The stream resolves no session -
@@ -425,7 +860,7 @@ the campaign's file.
   budget; operation count 247, 19 unauthenticated), `docs/AUTHORIZATION.md` (route rows and
   the open-route rationale), `.env.example` (`RT_*`).
 
-## Phase 12 — RT-06 (nginx, shutdown, capacity)
+### Phase 12 — RT-06 (nginx, shutdown, capacity)
 
 - **nginx** (`nginx/nginx.conf`): `location = /api/v1/events/stream` with
   `proxy_read_timeout 1h`, `proxy_send_timeout 1h`, `proxy_buffering off`, `proxy_cache off`,
@@ -452,7 +887,7 @@ the campaign's file.
 - **Docs**: `docs/DEPLOYMENT.md` "The inbox event stream" (location, capacity, restart and
   drain), `docs/RUNBOOK.md` "The inbox does not update", `docs/OBSERVABILITY.md` (gauge).
 
-## Phase 13a — invariants CR-16, CR-17, FU-01..FU-08, RT-I01
+### Phase 13a — invariants CR-16, CR-17, FU-01..FU-08, RT-I01
 
 `scripts/omnichannel_invariants.py`; `verify` runs them all (RT-I01 when a Redis URL is set).
 The moment a step was sent is its outbound message's staged time (written in the send
@@ -463,11 +898,11 @@ no `conversation_released_to_ai` before the send). FU-03 uses the window of
 counts from the workspace's follow-up settings row onwards (nothing bound follow-ups to quiet
 hours before it; a populated upgrade's old night sends are not violations) against the quiet
 hours in force now. FU-08 needs no history: a wait moves only `scheduled_at` and always later.
-Each has an injection test (`test_follow_up_invariants.py`, 15 tests: one violation each, the
+Each has an injection test (`test_follow_up_invariants.py`, 14 tests: one violation each, the
 named check and only it counts one more); `test_omnichannel_oracles.py` now expects the
 follow-up checks in `verify` and its write-path oracle holds them at zero.
 
-## Phase 13b — alerts
+### Phase 13b — alerts
 
 `deploy/monitoring/alerts.yml`: group `wasla-follow-ups` (`FollowUpAiFailing`:
 `sum(rate(wasla_follow_up_ai_failures_total[5m])) > 0.2` for 10m) and group `wasla-realtime`
@@ -481,7 +916,7 @@ expectation, so `promtool test rules` failed on 8113a5f..f13b8d3 (the CI monitor
 have been red); the expectation now carries the new text. `promtool check config`,
 `check rules` (81 rules), `test rules` and `amtool check-config` pass.
 
-## Phase 13c — ADRs and documentation
+### Phase 13c — ADRs and documentation
 
 `DECISIONS.md`: ADR-151 (sequences), ADR-152 (100 % of Meta's limit for follow-ups and manual
 templates; closes ADR-146 section 4's open part, already amended in Phase 3), ADR-153 (quiet
@@ -494,7 +929,7 @@ removed in Phase 1), `docs/MEDIA.md` (retention by recipients' and rules' files)
 `docs/SAAS.md` (follow-up defaults, stream limits), `docs/RUNBOOK.md` ("Follow-ups are not
 sending"). `docs/AI_AGENTS.md` and `docs/CAMPAIGNS.md` were written with Phases 3-9.
 
-## Phase 13d — the contracts
+### Phase 13d — the contracts
 
 `docs/FOLLOW_UPS_AND_REALTIME_CONTRACT.md` (new): the settings card, a conversation's
 follow-ups and stop, the inbox stream (ticket, EventSource, reconnect, `resync`, `closed`,
@@ -505,7 +940,7 @@ to show in English and Egyptian Arabic, and what the pages must never claim.
 C), live updates, local-time resolution and `scheduled_at_local`, header files per person.
 ADR-149 amended (its "six of thirty" polling cost no longer holds).
 
-## Phase 14 — mutation matrix
+### Phase 14 — mutation matrix
 
 Runner `audit/run_fur_mutations.py` (untracked): the strict protocol of `run_cpm_mutations.py`
 (every anchor exactly once or INVALID; one change; the named killer run with `-x`; KILLED only
@@ -585,7 +1020,7 @@ green). M-F13 and M-F31 are still killed by the CPM-06 test after its 12 s margi
 
 Meaningful survivors: 0.
 
-## Phase 15 — full lanes (first run at 8eb21f6: red) and FSR-01
+### Phase 15 — full lanes (first run at 8eb21f6: red) and FSR-01
 
 Both lanes in parallel, each from its own worktree at 8eb21f6 (`E:\wasla-fur-lane` on
 wasla-fur-pg `wasla_fur_models`; `E:\wasla-fur-lane2` on wasla-fur-pg2, an empty
@@ -622,7 +1057,7 @@ Every failure classified; none is a defect of the follow-up, header or realtime 
 The targeted re-run of every affected file (501 tests) passed; both full lanes are re-run on the
 new head below.
 
-### Full lanes at a57535b (13:13-14:11 UTC, in parallel, fresh databases)
+#### Full lanes at a57535b (13:13-14:11 UTC, in parallel, fresh databases)
 
 ```text
 MODEL-BUILT (real clock)       collected 7,436 / passed 7,418 / failed 0 / skipped 18 / xfailed 0 / xpassed 0
@@ -633,7 +1068,7 @@ baseline (debde5f)             7,298 / 7,280 / 0 / 18   and   7,298 / 7,284 / 0 
 Skips equal the known set: OpenAI x11, schema parity x4 (model-built only), tmpfs x1, kept-data
 only x2. Collected +138: the tests this stage added.
 
-### Kept-data, races, alembic (at a57535b) - and FSR-02, FSR-03
+#### Kept-data, races, alembic (at a57535b) - and FSR-02, FSR-03
 
 - **Kept-data sweep** (ci.yml's selection: the 29 `ai_harness` suites and both invariant files,
   `WASLA_TEST_KEEP_AI_DATA=1`, migration-built, a fresh database each run): 3 / 3 runs 304
@@ -668,3 +1103,29 @@ only x2. Collected +138: the tests this stage added.
     (DEPLOYMENT.md); the test server the same. 10 / 10 capacity runs green after it.
   - A false positive found on the way: the publish test scanned events for the digits `4411`,
     which a timestamp's microseconds contained; its markers are letters now.
+
+
+# Appendix B — Tests added (collected at BASE_HEAD 8752324 -> at 6d630c3)
+
+```text
+tests/integration/test_campaign_header_media_per_recipient.py     0 ->    7  (+7)
+tests/integration/test_campaign_progress_budget.py                0 ->    3  (+3)
+tests/integration/test_events_capacity.py                         0 ->    1  (+1)
+tests/integration/test_events_publish.py                          0 ->    5  (+5)
+tests/integration/test_events_stream.py                           0 ->   14  (+14)
+tests/integration/test_follow_up_ai_steps.py                      0 ->   16  (+16)
+tests/integration/test_follow_up_invariants.py                    0 ->   14  (+14)
+tests/integration/test_follow_up_limit_and_quiet_hours.py         0 ->   10  (+10)
+tests/integration/test_follow_up_sequences.py                     0 ->   19  (+19)
+tests/integration/test_follow_up_settings_api.py                  0 ->   17  (+17)
+tests/integration/test_follow_up_tool_offer.py                    0 ->    3  (+3)
+tests/integration/test_follow_up_visibility.py                    0 ->    3  (+3)
+tests/integration/test_inbox_incremental.py                       0 ->    2  (+2)
+tests/integration/test_template_header_media.py                   0 ->    9  (+9)
+tests/integration/test_timezone_fixes.py                          0 ->    6  (+6)
+tests/unit/test_body_allowances.py                              114 ->  117  (+3)
+tests/unit/test_event_stream_response.py                          0 ->    2  (+2)
+tests/unit/test_request_field_bounds.py                         194 ->  199  (+5)
+tests/unit/test_request_text_storability.py                     158 ->  159  (+1)
+total                                                          7,298 -> 7,438  (+140)
+```

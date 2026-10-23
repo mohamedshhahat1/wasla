@@ -54,6 +54,7 @@ instead (5 a person, 100 a workspace, `429 stream_limit`).
 | 6. `resync` | the stream could not replay everything since your id: re-read with `GET /conversations?updated_since=<when you last were complete>` and replace what you hold |
 | 7. `closed` | `{reason}` then the response ends. `token_changed` → sign in again; `membership_revoked` / `workspace_unavailable` → leave the workspace's views; `workspace_switched` → the person opened another workspace: stop this one's inbox; `server_restart` → reconnect after a short random delay |
 | Fallback | without a stream (or while reconnecting), poll `GET /conversations?updated_since=` with `If-None-Match`, every `poll_after_seconds` (30; 60 while a stream is open) |
+| `updated_since` | the newest `updated_at` you already hold, exactly as the server sent it - **never the device's clock**: `updated_at` is the server's time, and a phone a few minutes fast would skip every change made in those minutes. Inclusive, so the boundary row comes back again; deduplicate by id |
 
 | Event | Data | Fetch |
 | --- | --- | --- |
