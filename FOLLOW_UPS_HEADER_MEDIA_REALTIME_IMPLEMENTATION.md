@@ -15,8 +15,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 2 | TZ-08 local-time resolution | committed | a058bb1 | as above |
 | 3 | FLIM-01..03, FQH-01..04 | committed | 8113a5f | new file 10/10; send-path sweep (campaign*, follow_up*, crm*, agent*, tool*, messaging*, manual*, ai_*, timezone); migration-built parity/downgrade; alembic head->0120->head |
 | 4 | FUS-01 settings | committed | 705bd34 | settings API 17/17; workspace, purge, auth, audit, docs truth, route auth; migration-built parity + downgrade; alembic head->0120->head |
-| 5 | FUS-02/03/05/06 runs, stop rules, window | committed | (this commit) | sequences 18/18 (+ reply/silent 5x); settings + limit files; send-path sweep (see below); migration-built parity + downgrade; alembic head->0120->head |
-| 6 | FUS-04/07 AI-written step, charging | not started | | |
+| 5 | FUS-02/03/05/06 runs, stop rules, window | committed | fb7124b | sequences 18/18 (+ reply/silent 5x); settings + limit files; send-path sweep (see below); migration-built parity + downgrade; alembic head->0120->head |
+| 6 | FUS-04/07 AI-written step, charging | committed | (this commit) | ai steps 16/16, tool offer 3/3, sequences 18/18, AI invariants; send-path sweep |
 | 7 | FUS-09 what a person sees | not started | | |
 | 8 | HMT-01..03 template header library | not started | | |
 | 9 | HMR-01..03 per-recipient header media | not started | | |
@@ -231,3 +231,34 @@ manual*, ai_*, lead*, inbox*, conversation*, opt_out*, channel*, whatsapp*, omni
 workspace*): one failure, `test_workspace_purge::test_the_classification_covers_every_tenant_scoped_table`
 - the new `follow_up_sequence_runs` table was not classified. Added to `PURGED_TABLES`; both purge
 files re-run green. No earlier expectation changed.
+
+## Phase 6 — FUS-04, FUS-07 (the AI-written step, the skip, charging)
+
+Facts verified first: an agent turn's charge is a hold taken in the engaging transaction
+under the workspace's advisory lock (`EntitlementService.hold_ai_turn`) and settled by
+`AITurnCharge` into one `ai_turn` usage event naming the agent turn (ADR-131); the
+orchestrator's guardrails are the channel's length (`prepare_channel_reply`, which
+*shortens*) and the automation disclosure (`ai_worker._with_disclosure`). There is no
+existing "secret" or "other customer's data" guard on agent replies.
+
+- **Three parts in the worker** (`FollowUpWorker._dispatch_step`): `prepare_step`
+  (decide, charge, read the request) commits; `StepWriter.write` runs with no session;
+  `finish_step` re-takes the row with `claim_by_id(id, claim_token)` - a row the customer,
+  a colleague or a restart touched meanwhile is not found and the text is dropped
+  (`follow_up.step_discarded`). One-off follow-ups keep the old single-transaction path.
+- **The writer** (`app/services/follow_up_writer.py`): Responses API, strict JSON schema,
+  no tools, operation `respond_follow_up`, a `ResponsesClient` with `max_attempts=1`; the
+  one retry is the worker's after `FOLLOW_UP_AI_RETRY_SECONDS`.
+- **Guardrails for a step**: never shortened (a shortened nudge is a different message) -
+  over the channel limit is skipped `guardrail`; a credential shape or any phone number is
+  skipped `guardrail`. **Disclosure is not composed onto a step**: a run starts only after an
+  AI reply, which already carried the disclosure when due (OMNI-041); recorded.
+- **Charging without an agent turn**: the step's `ai_turn` event names
+  `metadata.follow_up_id`. AI invariant B7 ("every ai_turn names an agent turn") is amended
+  to accept a charge naming a sequence step of its own workspace - an expectation of an
+  earlier stage changed on purpose (ADR-131 amended by ADR-151).
+- The Phase 5 placeholder setting is removed; the harness fakes OpenAI at its transport
+  (`ScriptedModel`).
+
+Send-path sweep after Phase 6: 132 suites (Phase 5's set plus metric*, rag*, entitlement*,
+usage*): 0 failed.

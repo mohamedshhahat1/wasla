@@ -536,6 +536,24 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "AI turn holds, and whether each was charged, released or expired.",
         ("outcome",),
     ),
+    # Automatic follow-up steps (FUS-04 .. FUS-06): `sent`, `skipped` or
+    # `cancelled` with the closed reason, and `not_scheduled` (reason
+    # `window_closing`) for a step the window left no room for.
+    "wasla_follow_up_sequence_steps_total": (
+        "Automatic follow-up steps, by outcome and closed reason.",
+        ("outcome", "reason"),
+    ),
+    # A due follow-up that waited instead of being sent (FLIM-01, FQH-01).
+    "wasla_follow_up_defers_total": (
+        "Follow-ups that waited for Meta's limit or the workspace's quiet hours.",
+        ("reason",),
+    ),
+    # A step's model call that failed (FUS-04): each failure, so the one retry
+    # shows as two.
+    "wasla_follow_up_ai_failures_total": (
+        "Follow-up steps whose model call failed or answered outside the shape.",
+        (),
+    ),
     # Capacity reductions (ENT-14, ENT-15): `opened` at a boundary, then how
     # each ended - an owner's choice, the automatic fallback, or capacity back.
     "wasla_channel_capacity_reductions_total": (
@@ -1463,6 +1481,7 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
     "wasla_ai_turn_charge_total": frozenset(
         {"held", "charged", "released", "hold_expired", "late_charge"}
     ),
+    "wasla_follow_up_defers_total": frozenset({"portfolio_limit", "quiet_hours"}),
     "wasla_channel_capacity_reduction_disables_total": frozenset({"owner", "system"}),
 }
 
@@ -1646,6 +1665,58 @@ async def record_ai_turn_charge(outcome: str, *, amount: int = 1) -> None:
     metric = "wasla_ai_turn_charge_total"
     if amount > 0:
         await _tolerate(_increment_by(metric, {"outcome": _closed(metric, outcome)}, amount))
+
+
+#: The closed domains of `wasla_follow_up_sequence_steps_total`.
+STEP_OUTCOMES: Final[frozenset[str]] = frozenset({"sent", "skipped", "cancelled", "not_scheduled"})
+STEP_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "none",
+        "concluded",
+        "purchased",
+        "declined",
+        "waiting_on_business",
+        "inappropriate",
+        "other",
+        "guardrail",
+        "window_closed",
+        "window_closing",
+        "ai_unavailable",
+        "allowance_exhausted",
+        "not_served",
+        "human_took_over",
+        "conversation_closed",
+        "opted_out",
+        "lead_closed",
+        "channel_unavailable",
+        "customer_replied",
+        "settings_changed",
+        "sequence_restarted",
+        "replaced_by_person",
+        "stopped_by_person",
+    }
+)
+
+
+async def record_follow_up_step(outcome: str, reason: str | None = None) -> None:
+    """A step was sent, skipped, cancelled, or never scheduled (FUS-04 .. FUS-06)."""
+    metric = "wasla_follow_up_sequence_steps_total"
+    labels = {
+        "outcome": outcome if outcome in STEP_OUTCOMES else "other",
+        "reason": (reason or "none") if (reason or "none") in STEP_REASONS else "other",
+    }
+    await _tolerate(_increment(metric, labels))
+
+
+async def record_follow_up_defer(reason: str) -> None:
+    """A due follow-up waited for Meta's limit or quiet hours (FLIM-01, FQH-01)."""
+    metric = "wasla_follow_up_defers_total"
+    await _tolerate(_increment(metric, {"reason": _closed(metric, reason)}))
+
+
+async def record_follow_up_ai_failure() -> None:
+    """A step's model call failed (FUS-04)."""
+    await _tolerate(_increment("wasla_follow_up_ai_failures_total", {}))
 
 
 async def record_capacity_reduction(cause: str, resolution: str) -> None:

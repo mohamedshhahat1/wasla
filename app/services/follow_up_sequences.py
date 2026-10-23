@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.registry import ChannelRegistry, ChannelUnavailableError, default_registry
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.telemetry import record_follow_up_step
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -216,6 +217,7 @@ class SequenceService:
         if window_end is None or due > window_end:
             # Never scheduled: nothing is recorded as skipped for it (FUS-05).
             await self._end(run, SequenceEndReason.WINDOW_CLOSING)
+            await record_follow_up_step("not_scheduled", "window_closing")
             return None
         step = FollowUp(
             tenant_id=self._tenant_id,
@@ -427,6 +429,7 @@ class SequenceService:
             )
             for step in rows.scalars():
                 _cancel(step, cancel)
+                await record_follow_up_step("cancelled", cancel)
         # Not flushed here: a stop rule runs inside somebody else's write - a
         # lead's status, a takeover - and flushing it would expire the row the
         # caller is about to serialise. Their commit writes this too.

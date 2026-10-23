@@ -628,9 +628,9 @@ class Settings(BaseSettings):
     follow_up_window_margin_seconds: int = Field(default=1800, ge=60, le=6 * 3600)
     # The most reminders a workspace may set; never more than five (FUS-01).
     follow_up_sequence_max_steps: int = Field(default=5, ge=1, le=5)
-    # Test-only (Phase 5 of the follow-ups stage): the fixed text a sequence
-    # step sends before the AI writes it. Never set in a deployment.
-    follow_up_sequence_placeholder_text: str | None = None
+    # A follow-up step whose model call fails is tried once more after this
+    # long, then skipped `ai_unavailable` (FUS-04) - never a retry storm.
+    follow_up_ai_retry_seconds: float = Field(default=60.0, ge=0, le=600)
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

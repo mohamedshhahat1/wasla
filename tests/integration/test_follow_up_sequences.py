@@ -30,7 +30,7 @@ from app.services.inbox_service import InboxService
 from app.services.lead_service import LeadService
 from tests.integration.campaign_harness import USER_DOMAIN, FakeMeta, erase, worker
 from tests.integration.sequence_harness import (
-    PLACEHOLDER,
+    STEP_PREFIX,
     World,
     ai_reply,
     build,
@@ -119,7 +119,8 @@ async def test_two_reminders_at_their_times_at_any_hour(prepared_database: str) 
         await sweeper(world).run_once()
 
         sent = step_sends(world, number)
-        assert [entry["payload"]["text"]["body"] for entry in sent] == [PLACEHOLDER, PLACEHOLDER]
+        assert len(sent) == 2
+        assert all(entry["payload"]["text"]["body"].startswith(STEP_PREFIX) for entry in sent)
         assert kinds(sent) == {"text"}
         assert await pending(world, conversation) is None
         (run,) = await runs_of(world, conversation)
@@ -577,7 +578,7 @@ async def test_two_workers_send_every_step_once(prepared_database: str) -> None:
         counted: dict[str, int] = {}
         for entry in world.meta.requests:
             text = entry["payload"].get("text", {}).get("body")
-            if text == PLACEHOLDER:
+            if (text or "").startswith(STEP_PREFIX):
                 counted[str(entry["to"])] = counted.get(str(entry["to"]), 0) + 1
         assert len(counted) == 200
         assert set(counted.values()) == {2}

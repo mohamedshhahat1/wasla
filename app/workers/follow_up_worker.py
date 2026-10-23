@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
@@ -36,9 +37,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.channels.outcomes import ProviderConnectionRefusedError
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.telemetry import record_follow_up_ai_failure
 from app.db.session import Database
+from app.integrations.openai.client import ResponsesClient
+from app.integrations.whatsapp.client import build_http_client
 from app.repositories.follow_up_repository import DEFAULT_CLAIM_LIMIT, DueFollowUpClaim
 from app.services.follow_up_service import FollowUpService
+from app.services.follow_up_writer import ModelStepWriter, StepAnswer, StepRequest, StepWriter
 from app.services.messaging_service import MessagingService
 
 logger = get_logger(__name__)
@@ -59,6 +64,21 @@ CLAIM_LEASE_SECONDS = 300.0
 # AgentWorker takes its tool registry.
 MessagingFactory = Callable[[AsyncSession, uuid.UUID], MessagingService]
 
+# How a step's text is written: the model, with no transaction open (FUS-04).
+# Injected so a test fakes the provider at its transport.
+WriterFactory = Callable[[], AbstractAsyncContextManager[StepWriter]]
+
+
+@asynccontextmanager
+async def _model_writer(settings: Settings) -> AsyncIterator[StepWriter]:
+    async with build_http_client() as http:
+        # One attempt per call: the step's one retry is the worker's, after a
+        # pause, so a failing provider sees two calls - never a storm (FUS-04).
+        yield ModelStepWriter(
+            ResponsesClient(http=http, api_key=settings.openai_api_key or "", max_attempts=1)
+        )
+
+
 # What `_dispatch_one` returns when Meta refused the workspace's credential.
 # A sentinel rather than a third boolean, because the caller has to tell it
 # apart from "this row did nothing" - one means skip the rest of this
@@ -78,6 +98,7 @@ class FollowUpWorker:
         claim_limit: int = DEFAULT_CLAIM_LIMIT,
         messaging_factory: MessagingFactory | None = None,
         lease_seconds: float = CLAIM_LEASE_SECONDS,
+        writer_factory: WriterFactory | None = None,
     ) -> None:
         self._database = database
         self._settings = settings
@@ -85,6 +106,7 @@ class FollowUpWorker:
         self._claim_limit = claim_limit
         self._lease = timedelta(seconds=lease_seconds)
         self._messaging_factory = messaging_factory
+        self._writer_factory = writer_factory or (lambda: _model_writer(settings))
         self._running = False
         # Set when stop() is called, so a sleeping worker wakes at once instead
         # of finishing its interval. Without it, shutdown waits a full poll.
@@ -142,6 +164,7 @@ class FollowUpWorker:
                 lease_until=moment + self._lease,
             )
             identifiers = [(row.id, row.tenant_id, row.claim_token) for row in claimed]
+            steps = {row.id for row in claimed if row.is_sequence_step}
 
         if not identifiers:
             return 0
@@ -157,7 +180,11 @@ class FollowUpWorker:
         for follow_up_id, tenant_id, claim_token in identifiers:
             if tenant_id in refused:
                 continue
-            outcome = await self._dispatch_one(follow_up_id, tenant_id, claim_token)
+            outcome = (
+                await self._dispatch_step(follow_up_id, tenant_id, claim_token)
+                if follow_up_id in steps
+                else await self._dispatch_one(follow_up_id, tenant_id, claim_token)
+            )
             if outcome is _CREDENTIAL_REFUSED:
                 refused.add(tenant_id)
                 continue
@@ -234,3 +261,83 @@ class FollowUpWorker:
             extra={"follow_up_id": str(follow_up_id), "outcome": outcome.status.value},
         )
         return True
+
+    def _service(self, session: AsyncSession, tenant_id: uuid.UUID) -> FollowUpService:
+        return FollowUpService(
+            session=session,
+            tenant_id=tenant_id,
+            settings=self._settings,
+            messaging=(
+                self._messaging_factory(session, tenant_id)
+                if self._messaging_factory is not None
+                else None
+            ),
+        )
+
+    async def _dispatch_step(
+        self,
+        follow_up_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        claim_token: uuid.UUID | None,
+    ) -> bool | object:
+        """One step of a run, in three parts: prepare, write, finish (FUS-04).
+
+        The first part decides, charges and reads the request, and commits. The
+        model call holds no lock and no connection. The row is taken again only
+        if it still carries this sweep's claim token: a reply, a takeover or a
+        restart in between cleared it, and the text is discarded - never sent.
+        """
+        async with self._database.session() as session:
+            follow_up = await DueFollowUpClaim(session).claim_by_id(follow_up_id, claim_token)
+            if follow_up is None:
+                return False
+            try:
+                preparation = await self._service(session, tenant_id).prepare_step(follow_up)
+            except Exception:
+                logger.exception(
+                    "follow_up.dispatch_failed", extra={"follow_up_id": str(follow_up_id)}
+                )
+                return False
+        if preparation.request is None:
+            return True
+        answer = await self._write(preparation.request)
+        async with self._database.session() as session:
+            follow_up = await DueFollowUpClaim(session).claim_by_id(follow_up_id, claim_token)
+            if follow_up is None:
+                logger.info(
+                    "follow_up.step_discarded",
+                    extra={"event": "follow_up.step_discarded", "follow_up_id": str(follow_up_id)},
+                )
+                return True
+            service = self._service(session, tenant_id)
+            messaging = (
+                self._messaging_factory(session, tenant_id)
+                if self._messaging_factory is not None
+                else MessagingService(session=session, settings=self._settings, tenant_id=tenant_id)
+            )
+            try:
+                await service.finish_step(follow_up, claim_token, answer, messaging)
+            except ProviderConnectionRefusedError:
+                return _CREDENTIAL_REFUSED
+            except Exception:
+                logger.exception(
+                    "follow_up.dispatch_failed", extra={"follow_up_id": str(follow_up_id)}
+                )
+                return False
+        return True
+
+    async def _write(self, request: StepRequest) -> StepAnswer | None:
+        """The model's answer, tried twice at most; None when both failed (FUS-04)."""
+        for attempt in range(2):
+            try:
+                async with self._writer_factory() as writer:
+                    return await writer.write(request)
+            except Exception:
+                await record_follow_up_ai_failure()
+                logger.warning(
+                    "follow_up.step_write_failed",
+                    extra={"event": "follow_up.step_write_failed", "attempt": attempt + 1},
+                )
+                if attempt == 0:
+                    await asyncio.sleep(self._settings.follow_up_ai_retry_seconds)
+        return None

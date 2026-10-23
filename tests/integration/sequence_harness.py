@@ -5,6 +5,10 @@ through it, so the run starts exactly where it does in production), the real
 inbound ingestion and the real channel policy; Meta is replaced at the HTTP
 transport, and "sent" and "not sent" are counted there.
 
+The model is faked at the OpenAI transport (`ScriptedModel`): it reads what
+the step's request carried - the conversation - and answers the structured
+shape a test chooses, slowly, wrongly or not at all.
+
 Time: the dispatch reads the real clock. A test reads the due time the code
 computed - and asserts it against the anchor or the previous step's sending -
 then makes the step due now and sweeps. Nothing waits five real minutes, and
@@ -13,16 +17,21 @@ no fixed date is used.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timezones import zone
+from app.db.models.agent import Agent, AgentStatus
 from app.db.models.conversation import Contact, Conversation, MessageOrigin
 from app.db.models.follow_up import FollowUp, FollowUpStatus
 from app.db.models.follow_up_sequence import FollowUpSequenceRun
@@ -30,12 +39,63 @@ from app.db.models.follow_up_settings import FollowUpSettings
 from app.db.models.tenant import Tenant
 from app.db.models.whatsapp import WhatsAppAccount
 from app.db.session import Database
+from app.integrations.openai.client import ResponsesClient
+from app.services.follow_up_writer import ModelStepWriter, StepWriter
 from app.services.messaging_service import MessagingService
 from app.services.whatsapp_service import WhatsAppIngestionService
 from app.workers.follow_up_worker import FollowUpWorker
+from tests.integration.ai_harness import text_response
 from tests.integration.campaign_harness import FakeMeta, Workspace, harness_settings, seed
 
-PLACEHOLDER = "Just checking in - any questions?"
+#: What the scripted model writes, after the customer's last words.
+STEP_PREFIX = "About your question:"
+
+
+class ScriptedModel:
+    """The Responses API at the transport, answering a follow-up step's structured shape.
+
+    `answer(payload)` decides each answer; by default the step's text quotes
+    the last thing the customer said, which proves the conversation reached it.
+    `fail` failures (500) come first; `delay` seconds pass before answering,
+    and `on_call` runs as the call arrives (to race a reply against it).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.fail = 0
+        self.delay = 0.0
+        self.on_call: Callable[[], Awaitable[None]] | None = None
+        self.answer: Callable[[dict[str, Any]], dict[str, Any]] = self._quote
+
+    @staticmethod
+    def last_customer_words(payload: dict[str, Any]) -> str:
+        users = [item for item in payload.get("input", []) if item.get("role") == "user"]
+        content = users[-1]["content"] if users else ""
+        return content if isinstance(content, str) else str(content)
+
+    def _quote(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action": "send",
+            "reason": None,
+            "text": f"{STEP_PREFIX} {self.last_customer_words(payload)}",
+        }
+
+    async def handle(self, request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content or b"{}")
+        self.calls.append(payload)
+        if self.on_call is not None:
+            await self.on_call()
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail > 0:
+            self.fail -= 1
+            return httpx.Response(500, json={"error": {"message": "boom"}})
+        return httpx.Response(200, json=text_response(json.dumps(self.answer(payload))))
+
+    @asynccontextmanager
+    async def writer(self) -> AsyncIterator[StepWriter]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(self.handle)) as http:
+            yield ModelStepWriter(ResponsesClient(http=http, api_key="sk-test", max_attempts=1))
 
 
 @dataclass
@@ -45,6 +105,7 @@ class World:
     workspace: Workspace
     database_url: str
     phone_number_id: str
+    model: ScriptedModel = field(default_factory=ScriptedModel)
 
     def messaging(self, session: AsyncSession, name: str = "ai") -> MessagingService:
         return MessagingService(
@@ -56,7 +117,7 @@ class World:
 
 
 def sweeper(world: World, *, name: str = "follow-ups", **overrides: Any) -> FollowUpWorker:
-    values: dict[str, Any] = {"follow_up_sequence_placeholder_text": PLACEHOLDER}
+    values: dict[str, Any] = {"follow_up_ai_retry_seconds": 0.05}
     values.update(overrides)
     settings = harness_settings(world.database_url, **values)
     http = world.meta.client(name)
@@ -64,7 +125,12 @@ def sweeper(world: World, *, name: str = "follow-ups", **overrides: Any) -> Foll
     def messaging(session: AsyncSession, tenant_id: uuid.UUID) -> MessagingService:
         return MessagingService(session=session, settings=settings, tenant_id=tenant_id, http=http)
 
-    return FollowUpWorker(database=world.database, settings=settings, messaging_factory=messaging)
+    return FollowUpWorker(
+        database=world.database,
+        settings=settings,
+        messaging_factory=messaging,
+        writer_factory=world.model.writer,
+    )
 
 
 async def build(
@@ -77,6 +143,7 @@ async def build(
     enabled: bool = True,
     quiet_hours_now: bool = True,
     last_inbound_ago: timedelta = timedelta(minutes=1),
+    limits: dict[str, int] | None = None,
 ) -> World:
     """A workspace whose customers just wrote, with reminders `steps` (minutes) on WhatsApp.
 
@@ -87,6 +154,7 @@ async def build(
         database,
         recipients=recipients,
         last_inbound_at=datetime.now(UTC) - last_inbound_ago,
+        limits=limits,
     )
     async with database.session_factory() as session:
         session.add(
@@ -105,6 +173,16 @@ async def build(
             tenant.campaign_quiet_hours_enabled = True
             tenant.campaign_quiet_hours_start = _minute(now_local - timedelta(hours=2))
             tenant.campaign_quiet_hours_end = _minute(now_local + timedelta(hours=9))
+        session.add(
+            Agent(
+                tenant_id=workspace.tenant_id,
+                name="Sales",
+                is_default=True,
+                status=AgentStatus.ACTIVE,
+                model="gpt-4o-mini",
+                system_prompt="You sell kitchen fittings. Answer briefly, in Egyptian Arabic.",
+            )
+        )
         account = await session.get(WhatsAppAccount, workspace.account_id)
         assert account is not None
         await session.commit()
@@ -238,7 +316,7 @@ def step_sends(world: World, number: str) -> list[dict[str, Any]]:
     return [
         entry
         for entry in sends_to(world, number)
-        if _text_of(entry["payload"]) not in (None, "It costs 100.", "Anything else?")
+        if (_text_of(entry["payload"]) or "").startswith(STEP_PREFIX)
     ]
 
 

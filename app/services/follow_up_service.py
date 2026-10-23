@@ -47,6 +47,7 @@ conversation has gone quiet. See `docs/CAMPAIGNS.md`.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -57,12 +58,14 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.memory import build_window
 from app.channels.outcomes import ProviderConnectionRefusedError
 from app.channels.policy import (
     FollowUpAction,
     OutOfWindow,
     PolicyRefusalError,
     require_sendable_text,
+    text_length,
 )
 from app.channels.registry import (
     PAUSED_RECHECK,
@@ -82,6 +85,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.core.telemetry import record_follow_up_defer, record_follow_up_step
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -106,10 +110,13 @@ from app.db.models.follow_up_sequence import (
 )
 from app.db.models.lead import ActorKind
 from app.db.models.tenant import Tenant
+from app.db.models.usage import UsageEventType
+from app.repositories.agent_repository import AgentRepository
 from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
+    MessageRepository,
 )
 from app.repositories.follow_up_repository import FollowUpRepository
 from app.repositories.lead_repository import LeadRepository
@@ -122,9 +129,11 @@ from app.services.entitlement_service import (
     EntitlementService,
 )
 from app.services.follow_up_sequences import SequenceService
+from app.services.follow_up_writer import StepAnswer, StepRequest, step_instructions
 from app.services.messaging_service import MessagingService
 from app.services.quiet_hours import QuietHours
 from app.services.template_service import refusal_reason_for
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -174,6 +183,14 @@ class _Intention:
     reason: str | None
     created_by_id: uuid.UUID | None
     created_by_kind: ActorKind
+
+
+@dataclass(frozen=True, slots=True)
+class StepPreparation:
+    """A step's first part: finished already (`outcome`), or a model call to make."""
+
+    outcome: DispatchOutcome | None = None
+    request: StepRequest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -768,7 +785,9 @@ class FollowUpService:
             )
 
         if follow_up.is_sequence_step:
-            return await self._dispatch_step(follow_up, claim, messaging)
+            # A step is written by the AI between two transactions, so it is
+            # the worker's to dispatch in three parts (FUS-04).
+            raise RuntimeError("A sequence step is dispatched with prepare_step / finish_step.")
 
         if not await self._workspace_is_served():
             # **No automated message leaves a workspace that is not being
@@ -920,6 +939,7 @@ class FollowUpService:
                 # wait, not a failure: no attempt is spent (FQH-04).
                 quiet = await self._quiet_hours()
                 if quiet.closed_to_sends(now):
+                    await record_follow_up_defer(FollowUpDeferReason.QUIET_HOURS.value)
                     return self._defer(
                         follow_up,
                         quiet.reopens_after(now),
@@ -950,6 +970,7 @@ class FollowUpService:
             # waits for the moment somebody leaves the moving 24 hours. No
             # attempt is spent and the time asked for is kept.
             resumes_at = error.resumes_at
+            await record_follow_up_defer(FollowUpDeferReason.PORTFOLIO_LIMIT.value)
             return await self._settle(
                 follow_up,
                 claim,
@@ -991,38 +1012,33 @@ class FollowUpService:
             ),
         )
 
-    async def _dispatch_step(
-        self,
-        step: FollowUp,
-        claim: uuid.UUID | None,
-        messaging: MessagingService,
-    ) -> DispatchOutcome:
-        """Send one due step of a run, or record why not and end the run (FUS-04 .. FUS-06).
+    async def prepare_step(self, step: FollowUp) -> StepPreparation:
+        """The first of a step's three parts: decide, charge and read - then commit (FUS-04).
 
-        Every stop rule is asked again here - hours can pass between scheduling
-        and dispatch - and the window once more: a step is sent only while the
-        customer's window has the margin left, and only as free-form text. It
-        never falls back to a template and never uses a message tag.
+        Every stop rule, the serving, the plan, the channel and the window are
+        asked again; a step that fails one ends here, skipped or cancelled, and
+        costs nothing. One that passes takes one AI turn from the workspace's
+        allowance - refused at the allowance: skipped `allowance_exhausted`, no
+        model call - and is charged it now, because the model is called next
+        whatever it answers (FUS-07). Everything the call needs is read here, so
+        the caller can commit and call the model with no transaction open.
         """
         sequences = SequenceService(
             self._session, tenant_id=self._tenant_id, channels=self._channels
         )
         if not await self._workspace_is_served():
-            return await self._skip_step(
-                step,
-                sequences,
-                SequenceSkipReason.NOT_SERVED,
-                "The workspace was not being served when the follow-up came due.",
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.NOT_SERVED,
+                    "The workspace was not being served when the follow-up came due.",
+                )
             )
         conversation = await self._conversations.lock_by_id(step.conversation_id, share=True)
-        stopped = await sequences.stopped(conversation)
-        if stopped is not None:
-            return await self._skip_step(
-                step, sequences, SequenceSkipReason(stopped.value), "A stop rule holds."
-            )
-        if not (await sequences.settings()).covers(conversation.channel):
-            await sequences.cancel_step(step, SequenceEndReason.SETTINGS_CHANGED)
-            return DispatchOutcome(step, FollowUpStatus.CANCELLED, "settings_changed")
+        early = await self._step_refusal(step, sequences, conversation)
+        if early is not None:
+            return StepPreparation(outcome=early)
         if not await EntitlementService(
             self._session,
             tenant_id=self._tenant_id,
@@ -1030,46 +1046,142 @@ class FollowUpService:
                 self._settings.default_plan_code if self._settings is not None else None
             ),
         ).channel_in_plan(conversation.channel):
-            return await self._skip_step(
-                step, sequences, SequenceSkipReason.CHANNEL_UNAVAILABLE, CHANNEL_NOT_IN_PLAN_DETAIL
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.CHANNEL_UNAVAILABLE,
+                    CHANNEL_NOT_IN_PLAN_DETAIL,
+                )
             )
         try:
-            channel_policy = self._channels.policy_for(conversation.channel)
+            self._channels.policy_for(conversation.channel)
         except ChannelPausedError:
-            return self._defer(
-                step, datetime.now(UTC) + PAUSED_RECHECK, detail="The channel is paused."
+            return StepPreparation(
+                outcome=self._defer(
+                    step, datetime.now(UTC) + PAUSED_RECHECK, detail="The channel is paused."
+                )
             )
         except ChannelUnavailableError:
-            return await self._skip_step(
-                step,
-                sequences,
-                SequenceSkipReason.CHANNEL_UNAVAILABLE,
-                "Wasla cannot operate this conversation's channel.",
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.CHANNEL_UNAVAILABLE,
+                    "Wasla cannot operate this conversation's channel.",
+                )
             )
-        now = datetime.now(UTC)
-        window_end = sequences.window_end(conversation)
-        decision = channel_policy.follow_up(
-            conversation, has_text=True, has_template=False, now=now
+        agent = await AgentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).get_answering_default()
+        if agent is None:
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.AI_UNAVAILABLE,
+                    "No agent is answering in this workspace.",
+                )
+            )
+        entitlements = EntitlementService(
+            self._session,
+            tenant_id=self._tenant_id,
+            default_plan_code=(
+                self._settings.default_plan_code if self._settings is not None else None
+            ),
         )
-        if (
-            window_end is None
-            or now > window_end
-            or decision.action is not FollowUpAction.FREE_TEXT
-        ):
-            return await self._skip_step(
-                step,
-                sequences,
-                SequenceSkipReason.WINDOW_CLOSED,
-                "The customer's window was about to close.",
+        if not (await entitlements.hold_ai_turn()).allowed:
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.ALLOWANCE_EXHAUSTED,
+                    "The workspace's AI allowance is used up.",
+                )
             )
+        # One AI turn, charged as the model is about to be called (FUS-07):
+        # under the allowance lock `hold_ai_turn` took, so the next decision
+        # counts it. Named by the step, not an agent turn - a follow-up step is
+        # not an answer to a customer message (ADR-131 as amended by ADR-151).
+        UsageRecorder(self._session, tenant_id=self._tenant_id).record(
+            UsageEventType.AI_TURN,
+            meta={
+                "follow_up_id": str(step.id),
+                "conversation_id": str(conversation.id),
+            },
+            channel=conversation.channel,
+            connection_id=conversation.account_id,
+        )
+        settings = await sequences.settings()
+        index = int(step.step_index or 1)
+        guidance = settings.steps[index - 1].guidance if index <= len(settings.steps) else None
+        history = await MessageRepository(
+            self._session, tenant_id=self._tenant_id
+        ).list_for_conversation(
+            conversation_id=conversation.id,
+            limit=agent.memory_message_limit * 3,
+        )
+        window = build_window(
+            history,
+            message_limit=agent.memory_message_limit,
+            token_budget=agent.memory_token_budget,
+        )
+        since = datetime.now(UTC) - (conversation.last_inbound_at or datetime.now(UTC))
+        request = StepRequest(
+            model=agent.model,
+            instructions=step_instructions(
+                persona=agent.system_prompt,
+                step_index=index,
+                steps_total=len(settings.steps),
+                guidance=guidance,
+                since_customer=since,
+                channel=conversation.channel.value,
+            ),
+            turns=tuple(window.turns),
+        )
+        return StepPreparation(request=request)
 
-        text = self._placeholder_text()
-        if text is None:
+    async def finish_step(
+        self,
+        step: FollowUp,
+        claim: uuid.UUID | None,
+        answer: StepAnswer | None,
+        messaging: MessagingService,
+    ) -> DispatchOutcome:
+        """The third part: the model's answer, sent or not - if the row is still this claim's.
+
+        The caller re-took the row by its claim token, so a reply, a takeover or
+        a restart during the call has already discarded the text. The stop rules
+        and the window are asked once more: minutes passed. `answer` None is a
+        model that failed twice: skipped `ai_unavailable`. A skip ends the run.
+        The text must pass the channel's guardrails as an agent reply does.
+        """
+        sequences = SequenceService(
+            self._session, tenant_id=self._tenant_id, channels=self._channels
+        )
+        conversation = await self._conversations.lock_by_id(step.conversation_id, share=True)
+        refusal = await self._step_refusal(step, sequences, conversation)
+        if refusal is not None:
+            return refusal
+        if answer is None:
             return await self._skip_step(
                 step,
                 sequences,
                 SequenceSkipReason.AI_UNAVAILABLE,
-                "No text could be written for this follow-up.",
+                "The AI could not write this follow-up.",
+            )
+        if answer.action == "skip":
+            reason = answer.reason or SequenceSkipReason.OTHER
+            return await self._skip_step(
+                step, sequences, reason, f"The AI decided not to follow up ({reason.value})."
+            )
+        text = guarded_step_text(answer.text, conversation=conversation, channels=self._channels)
+        if text is None:
+            return await self._skip_step(
+                step,
+                sequences,
+                SequenceSkipReason.GUARDRAIL,
+                "The AI's text did not pass the reply guardrails.",
             )
         step.body = text
 
@@ -1089,12 +1201,8 @@ class FollowUpService:
             retry_at = error.retry_at
             return await self._settle(step, claim, lambda row: self._defer(row, retry_at))
         except PolicyRefusalError as error:
-            refusal = str(error)
-            return await self._settle(
-                step,
-                claim,
-                lambda row: self._skip(row, refusal),
-            )
+            refusal_text = str(error)
+            return await self._settle(step, claim, lambda row: self._skip(row, refusal_text))
         except (ExternalServiceError, RateLimitedError, ValidationError) as error:
             detail = str(error)
             return await self._settle(step, claim, lambda row: self._fail(row, detail))
@@ -1103,6 +1211,7 @@ class FollowUpService:
             step, claim, lambda row: self._record_sent(row, message, used_template=False)
         )
         if outcome.status is FollowUpStatus.SENT:
+            await record_follow_up_step("sent")
             await sequences.after_step_sent(
                 outcome.follow_up, sent_at=outcome.follow_up.sent_at or datetime.now(UTC)
             )
@@ -1110,9 +1219,30 @@ class FollowUpService:
             await sequences.end_run(outcome.follow_up, SequenceEndReason.FAILED)
         return outcome
 
-    def _placeholder_text(self) -> str | None:
-        """The fixed text Phase 5 sends behind its test-only flag; replaced by the AI's."""
-        return self._settings.follow_up_sequence_placeholder_text if self._settings else None
+    async def _step_refusal(
+        self,
+        step: FollowUp,
+        sequences: SequenceService,
+        conversation: Conversation,
+    ) -> DispatchOutcome | None:
+        """The stop rules, the settings and the window, asked of a due step (FUS-05, FUS-06)."""
+        stopped = await sequences.stopped(conversation)
+        if stopped is not None:
+            return await self._skip_step(
+                step, sequences, SequenceSkipReason(stopped.value), "A stop rule holds."
+            )
+        if not (await sequences.settings()).covers(conversation.channel):
+            await sequences.cancel_step(step, SequenceEndReason.SETTINGS_CHANGED)
+            return DispatchOutcome(step, FollowUpStatus.CANCELLED, "settings_changed")
+        window_end = sequences.window_end(conversation)
+        if window_end is None or datetime.now(UTC) > window_end:
+            return await self._skip_step(
+                step,
+                sequences,
+                SequenceSkipReason.WINDOW_CLOSED,
+                "The customer's window was about to close.",
+            )
+        return None
 
     async def _skip_step(
         self,
@@ -1125,6 +1255,7 @@ class FollowUpService:
         outcome = self._skip(step, detail)
         step.skip_reason = reason.value
         await sequences.end_run(step, end_reason_for(reason))
+        await record_follow_up_step("skipped", reason.value)
         return outcome
 
     async def _settle(
@@ -1395,6 +1526,36 @@ async def release_follow_up_quiet_waits(
         .execution_options(synchronize_session=False)
     )
     return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+
+#: Something that looks like a credential: never in a message to a customer.
+_SECRET = re.compile(r"(sk-[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._-]{8,}|EAA[A-Za-z0-9]{20,})")
+#: A run of digits long enough to be somebody's phone number.
+_PHONE = re.compile(r"\+?\d[\d\s-]{8,}\d")
+
+
+def guarded_step_text(
+    text: str, *, conversation: Conversation, channels: ChannelRegistry
+) -> str | None:
+    """The step's text if it passes the reply guardrails; None if it does not (FUS-04).
+
+    Empty, over the channel's text limit (in its own unit - a step is never
+    shortened, it is skipped), carrying something shaped like a credential,
+    or carrying a phone number: none of them is sent. The guard does not
+    translate.
+    """
+    body = text.strip()
+    if not body:
+        return None
+    try:
+        capabilities = channels.policy_for(conversation.channel).capabilities
+    except ChannelUnavailableError:
+        return None
+    if text_length(body, capabilities.text_unit) > capabilities.text_limit:
+        return None
+    if _SECRET.search(body) or _PHONE.search(body):
+        return None
+    return body
 
 
 def _release_claim(follow_up: FollowUp) -> None:
