@@ -10,11 +10,14 @@ staff an inbox from using it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Header, Query, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
@@ -28,7 +31,7 @@ from app.api.dependencies import (
 from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
 from app.channels.policy import REQUEST_CAPTION_CEILING
-from app.core.dependencies import SessionDep
+from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
@@ -38,6 +41,7 @@ from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
     AssignmentRequest,
+    ConversationListPage,
     ConversationRead,
     CursorPage,
     MessageRead,
@@ -53,6 +57,7 @@ from app.services.follow_up_sequences import SequenceService
 from app.services.inbox_service import InboxService
 from app.services.media_retention_service import purge_reason
 from app.services.messaging_service import MessagingService
+from app.services.realtime_streams import open_streams
 
 # The header a caller sends to say "this is the same request as before", so a
 # double-clicked button or a retried mobile request produces one message rather
@@ -82,6 +87,11 @@ LimitQuery = Annotated[int, Query(ge=1, le=100)]
 # meant to be constructed by hand. Bounded so a long query string is rejected
 # before any decoding is attempted.
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
+
+# How long the inbox waits before polling again (RT-04, RT-07): with a stream
+# open the poll is only the safety net behind it.
+POLL_WITHOUT_STREAM_SECONDS = 30
+POLL_WITH_STREAM_SECONDS = 60
 
 # The largest caption any supported channel accepts (OMNI-044); each channel's
 # own limit is applied by the send.
@@ -116,16 +126,25 @@ async def _present(
     return (await _present_all([conversation], inbox=inbox, messaging=messaging))[0]
 
 
-@router.get("", response_model=CursorPage[ConversationRead])
+@router.get(
+    "",
+    response_model=ConversationListPage,
+    responses={304: {"description": "Nothing changed since the ETag sent (first page)."}},
+)
 async def list_conversations(
+    request: Request,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
+    redis: RedisDep,
+    settings: SettingsDep,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
     priority: ConversationPriority | None = None,
     channel: Channel | None = None,
     connection_id: uuid.UUID | None = None,
-) -> CursorPage[ConversationRead]:
+    updated_since: datetime | None = None,
+) -> Response:
     """Open conversations, most recently active first.
 
     Paged by cursor rather than offset: the inbox is written to while it is
@@ -136,18 +155,58 @@ async def list_conversations(
     be worked deliberately while the default view stays as it was. `channel`
     and `connection_id` narrow it the same way, to one channel or one
     connection.
+
+    **Catching up** (RT-04): `updated_since` (with its offset) lists every
+    conversation changed at or after it - closed ones too - oldest change
+    first. The first page carries an `ETag`: send it back as `If-None-Match`
+    and an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30
+    with no event stream open, 60 with one.
     """
-    page = await inbox.list_conversations(
-        limit=limit,
-        cursor=cursor,
-        priority=priority,
-        channel=channel,
-        connection_id=connection_id,
-    )
-    return CursorPage[ConversationRead](
+    if updated_since is not None:
+        if updated_since.utcoffset() is None:
+            raise ValidationError(
+                "updated_since needs a UTC offset, for example 2026-10-30T09:00:00+02:00.",
+                error_code="updated_since_needs_offset",
+            )
+        page = await inbox.list_changed_since(since=updated_since, limit=limit, cursor=cursor)
+    else:
+        page = await inbox.list_conversations(
+            limit=limit,
+            cursor=cursor,
+            priority=priority,
+            channel=channel,
+            connection_id=connection_id,
+        )
+    try:
+        streaming = await open_streams(
+            redis.client,
+            user_id=workspace.user.id,
+            keepalive_seconds=settings.rt_keepalive_seconds,
+        )
+    except Exception:
+        streaming = 0
+    body = ConversationListPage(
         items=await _present_all(page.items, inbox=inbox, messaging=messaging),
         next_cursor=page.next_cursor,
+        poll_after_seconds=POLL_WITH_STREAM_SECONDS if streaming else POLL_WITHOUT_STREAM_SECONDS,
     )
+    headers = {"Cache-Control": "no-cache"}
+    if cursor is None:
+        stable = [
+            [str(item.id), item.updated_at.isoformat() if item.updated_at else None]
+            for item in body.items
+        ]
+        tag = (
+            '"'
+            + hashlib.sha256(
+                json.dumps([stable, body.next_cursor, body.poll_after_seconds]).encode()
+            ).hexdigest()[:32]
+            + '"'
+        )
+        if request.headers.get("If-None-Match") == tag:
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": tag})
+        headers["ETag"] = tag
+    return Response(content=body.model_dump_json(), media_type="application/json", headers=headers)
 
 
 @router.get("/{conversation_id}", response_model=ConversationRead)
@@ -226,8 +285,17 @@ async def list_messages(
     inbox: InboxServiceDep,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
+    after: uuid.UUID | None = None,
 ) -> CursorPage[MessageRead]:
-    """Most recent messages first."""
+    """Most recent messages first - or, with `after` (a message id), the messages after it,
+    oldest first, for a client catching up after a stream event (RT-04)."""
+    if after is not None:
+        newer = await inbox.list_messages_after(
+            conversation_id=conversation_id, message_id=after, limit=limit
+        )
+        return CursorPage[MessageRead](
+            items=[MessageRead.from_model(message) for message in newer], next_cursor=None
+        )
     page = await inbox.list_messages(
         conversation_id=conversation_id,
         limit=limit,

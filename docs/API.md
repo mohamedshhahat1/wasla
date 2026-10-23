@@ -479,6 +479,8 @@ All conversation routes are available to any member of the workspace. Restrictin
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
 
+**Catching up** (RT-04). `GET /conversations` answers `{items, next_cursor, poll_after_seconds}`; `poll_after_seconds` is 30 with no event stream open for you, 60 with one (then the poll is only a safety net). `?updated_since=<time with offset>` lists every conversation changed at or after it - closed ones too - oldest change first, keyed by `updated_at` (now on every conversation read); a time without an offset is `422 updated_since_needs_offset`. The first page carries an `ETag`; send it as `If-None-Match` and an unchanged inbox answers `304`. `GET /conversations/{id}/messages?after=<message id>` lists the messages after that one, oldest first (a message of another conversation names no position and lists nothing).
+
 **Follow-ups on a conversation** (FUS-09). `GET /conversations/{id}` carries `follow_up: {state: none | scheduled | ended, step_index, steps_total, due_at, due_at_local, ended_reason, ended_at}` (null in the list). `GET /conversations/{id}/follow-ups` is its history, latest due first: `{id, origin: one_off | sequence, step_index, status, requested_at, scheduled_at, scheduled_at_local, sent_at, cancelled_at, cancelled_reason, skip_reason, deferred_reason, text, message_id, created_by_kind}` - `text` only for a sent one; what the AI wrote for a step it skipped is never kept or shown. `DELETE /conversations/{id}/follow-up` (any member) ends the run `stopped_by_person`, audited, and returns the state; with nothing waiting it changes nothing.
 
 Four behaviours worth knowing before integrating:

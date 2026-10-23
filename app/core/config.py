@@ -626,6 +626,16 @@ class Settings(BaseSettings):
     # campaign may send, and the most of them one connection uploads a minute.
     campaign_header_media_max_files: int = Field(default=20, ge=1, le=100)
     campaign_header_uploads_per_minute: int = Field(default=20, ge=1, le=600)
+    # Realtime hints (ADR-155): a workspace's Redis stream keeps this many
+    # entries (approximately) for this long; a person holds at most this many
+    # open streams, a workspace at most this many; a ticket lives this long; an
+    # idle stream says it is alive this often.
+    rt_stream_maxlen: int = Field(default=5000, ge=100, le=1_000_000)
+    rt_stream_retention_seconds: int = Field(default=900, ge=60, le=86_400)
+    rt_streams_per_user: int = Field(default=5, ge=1, le=100)
+    rt_streams_per_workspace: int = Field(default=100, ge=1, le=10_000)
+    rt_ticket_ttl_seconds: int = Field(default=60, ge=5, le=600)
+    rt_keepalive_seconds: float = Field(default=15.0, gt=0, le=300)
     # Automatic follow-ups (FUS-05, ADR-151): a step is sent only while the
     # customer's window has at least this long left - the platform's own clock
     # for "24 hours" is not documented, and a sweep can be late.

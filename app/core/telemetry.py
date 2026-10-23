@@ -556,6 +556,20 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Template header files uploaded to Meta, by what they were for.",
         ("origin",),
     ),
+    # Realtime hints (RT-03, RT-05): published by type; publishes that failed
+    # (the business write committed anyway); streams closed, by why.
+    "wasla_events_published_total": (
+        "Realtime hints published to a workspace's stream, by type.",
+        ("type",),
+    ),
+    "wasla_events_publish_failed_total": (
+        "Realtime hints that could not be published; their writes committed.",
+        (),
+    ),
+    "wasla_events_stream_closed_total": (
+        "Open event streams closed by the server, by reason.",
+        ("reason",),
+    ),
     "wasla_follow_up_ai_failures_total": (
         "Follow-up steps whose model call failed or answered outside the shape.",
         (),
@@ -1489,6 +1503,24 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
     ),
     "wasla_follow_up_defers_total": frozenset({"portfolio_limit", "quiet_hours"}),
     "wasla_template_header_uploads_total": frozenset({"campaign", "manual", "follow_up"}),
+    "wasla_events_published_total": frozenset(
+        {
+            "message.created",
+            "message.status",
+            "conversation.updated",
+            "follow_up.updated",
+            "campaign.changed",
+        }
+    ),
+    "wasla_events_stream_closed_total": frozenset(
+        {
+            "token_changed",
+            "membership_revoked",
+            "workspace_switched",
+            "workspace_unavailable",
+            "server_restart",
+        }
+    ),
     "wasla_channel_capacity_reduction_disables_total": frozenset({"owner", "system"}),
 }
 
@@ -1725,6 +1757,20 @@ async def record_template_header_upload(origin: str) -> None:
     """A template header file went to Meta (HMR-02, HMT-02)."""
     metric = "wasla_template_header_uploads_total"
     await _tolerate(_increment(metric, {"origin": _closed(metric, origin)}))
+
+
+async def record_events_published(event_type: str) -> None:
+    metric = "wasla_events_published_total"
+    await _tolerate(_increment(metric, {"type": _closed(metric, event_type)}))
+
+
+async def record_events_publish_failed() -> None:
+    await _tolerate(_increment("wasla_events_publish_failed_total", {}))
+
+
+async def record_events_stream_closed(reason: str) -> None:
+    metric = "wasla_events_stream_closed_total"
+    await _tolerate(_increment(metric, {"reason": _closed(metric, reason)}))
 
 
 async def record_follow_up_ai_failure() -> None:

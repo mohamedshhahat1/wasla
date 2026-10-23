@@ -16,6 +16,9 @@ from app import __version__
 from app.api import health, metrics
 from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
+from app.core.events import drain as drain_events
+from app.core.events import install as install_events
+from app.core.events import set_event_sink
 from app.core.exceptions import register_exception_handlers
 from app.core.limits import BodySizeLimitMiddleware, RequestTimeoutMiddleware
 from app.core.logging import configure_logging, get_logger
@@ -46,6 +49,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # here rather than passed through every provider client, which would make
     # each of them take an argument it uses for nothing but counting.
     set_counter_sink(app.state.redis.client if settings.metrics_enabled else None)
+    # Realtime hints go to the same Redis, after each commit (ADR-155).
+    set_event_sink(
+        app.state.redis.client,
+        maxlen=settings.rt_stream_maxlen,
+        retention_seconds=settings.rt_stream_retention_seconds,
+    )
     logger.info(
         "app.startup",
         extra={
@@ -73,6 +82,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Cleared before the client closes, so nothing counts into a pool that
         # is going away.
         set_counter_sink(None)
+        await drain_events()
+        set_event_sink(None)
         await app.state.redis.close()
         await app.state.database.dispose()
         # Last, so spans covering the teardown above still have somewhere to go.
@@ -84,6 +95,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build a configured application instance."""
     resolved = settings or get_settings()
     configure_logging(resolved)
+    # The realtime collectors, once per process: they only stage hints on a
+    # session, and publish nothing until a sink is set (ADR-155).
+    install_events()
     # The API half of the email configuration, checked in the process that
     # needs it rather than in `Settings` - which every process builds, and
     # which would therefore force the webhook secret into the worker container

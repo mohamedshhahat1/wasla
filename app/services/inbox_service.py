@@ -160,6 +160,25 @@ class InboxService:
             {conversation.participant_identity_id for conversation in conversations}
         )
 
+    async def list_changed_since(
+        self, *, since: datetime, limit: int = 50, cursor: str | None = None
+    ) -> Page[Conversation]:
+        """Conversations changed at or after `since` (RT-04), for a client catching up."""
+        after = Cursor.decode(cursor) if cursor else None
+        rows = await self._conversations.list_changed_since(since=since, limit=limit, after=after)
+        return paginate(
+            rows, limit=limit, key=lambda row: Cursor(sort_value=row.updated_at, id=row.id)
+        )
+
+    async def list_messages_after(
+        self, *, conversation_id: uuid.UUID, message_id: uuid.UUID, limit: int = 50
+    ) -> list[Message]:
+        """The messages after one the client holds, oldest first (RT-04)."""
+        await self._conversations.require_by_id(conversation_id)
+        return await self._messages.list_after(
+            conversation_id=conversation_id, message_id=message_id, limit=limit
+        )
+
     async def list_messages(
         self,
         *,

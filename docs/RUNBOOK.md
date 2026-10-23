@@ -2112,6 +2112,7 @@ Additive migrations of FOLLOW_UPS_HEADER_MEDIA_REALTIME_IMPLEMENTATION.md
 | 0123 | `follow_up_sequence_runs` (one active per conversation); `follow_ups.origin`, `sequence_run_id`, `step_index`, `anchor_at`, `skip_reason`; index `CONCURRENTLY` |
 | 0124 | `campaign_header_media.deleted_at`; `template_header_uploads` (Meta's id per file and connection, or per campaign, file and connection); `follow_ups.header_media_id` and its index (`CONCURRENTLY`) |
 | 0125 | `campaigns.header_media_mode` (constant default `campaign`), `header_media_rules`, `header_media_refusals`; `campaign_recipients.header_media_id` and its index (`CONCURRENTLY`); reason code `header_media_refused` |
+| 0126 | `ix_conversations_tenant_id_updated_at` (`CONCURRENTLY`), for `GET /conversations?updated_since=`; `updated_at` is maintained by the application's `onupdate` on every ORM flush and Core `UPDATE` of `conversations` |
 
 Every downgrade refuses (nothing changed) while its new columns or rows hold
 data, and leaves the stamp; 0121 refuses while any follow-up waited

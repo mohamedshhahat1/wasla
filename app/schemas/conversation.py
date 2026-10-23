@@ -15,6 +15,8 @@ from datetime import datetime
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import inspect
+from sqlalchemy.orm.base import NO_VALUE
 
 from app.channels.policy import (
     REQUEST_TEXT_CEILING,
@@ -306,6 +308,9 @@ class ConversationRead(BaseModel):
     service_window_open: bool
     reply_policy: ReplyPolicyRead
     created_at: datetime
+    # When anything the list shows last changed (RT-04): what `updated_since`
+    # reads. Null only on a row read before its first flush.
+    updated_at: datetime | None = None
     # The conversation's follow-ups (FUS-09): on `GET /conversations/{id}` only;
     # null in a list.
     follow_up: FollowUpStateRead | None = None
@@ -340,4 +345,24 @@ class ConversationRead(BaseModel):
             service_window_open=service_window_open,
             reply_policy=ReplyPolicyRead.from_policy(reply_policy),
             created_at=conversation.created_at,
+            updated_at=_loaded_updated_at(conversation),
         )
+
+
+class ConversationListPage(BaseModel):
+    """A page of the inbox, and how long to wait before polling again (RT-04).
+
+    `poll_after_seconds` is 30 while this person has no event stream open, 60
+    while they do - then polling is only the safety net behind the stream.
+    """
+
+    items: list[ConversationRead]
+    next_cursor: str | None
+    poll_after_seconds: int
+
+
+def _loaded_updated_at(conversation: Conversation) -> datetime | None:
+    """`updated_at` if it is loaded: a write just flushed expires it (its `onupdate` is
+    the database's clock), and reading it then would be I/O inside serialisation."""
+    value = inspect(conversation).attrs.updated_at.loaded_value
+    return None if value is NO_VALUE else value

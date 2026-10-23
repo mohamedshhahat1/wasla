@@ -19,8 +19,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 6 | FUS-04/07 AI-written step, charging | committed | 980868a | ai steps 16/16, tool offer 3/3, sequences 18/18, AI invariants; send-path sweep |
 | 7 | FUS-09 what a person sees | committed | 888f2c7 | visibility 3/3; conversation/inbox/follow-up/CRM/schema suites 255 passed; docs truth, route auth |
 | 8 | HMT-01..03 template header library | committed | 4ffbad0 | template header media 8/8; sweep 162 suites 0 failed; migration-built parity + downgrade; alembic head->0120->head |
-| 9 | HMR-01..03 per-recipient header media | committed | (this commit) | per-recipient 7/7 (1/2/4 workers); sweep 163 suites: 7 failures in 2 files fixed (below), re-run green; migration-built parity + downgrade; alembic round trip |
-| 10 | RT-03 publish points, RT-04 incremental reads | not started | | |
+| 9 | HMR-01..03 per-recipient header media | committed | 324d435 | per-recipient 7/7 (1/2/4 workers); sweep 163 suites: 7 failures in 2 files fixed (below), re-run green; migration-built parity + downgrade; alembic round trip |
+| 10 | RT-03 publish points, RT-04 incremental reads | committed | (this commit) | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
 | 11 | RT-01/02/05 stream, RT-07 polling budget | not started | | |
 | 12 | RT-06 nginx, shutdown, capacity | not started | | |
 | 13 | Invariants, observability, docs, ADRs, contracts | not started | | |
@@ -332,3 +332,38 @@ the campaign's file.
 - **Sweep findings** (fixed before commit): `CampaignRead.header_media_mode` rejected an
   unflushed `Campaign` (attribute None before the column default applies) - 6 cases of
   `test_campaign_endpoints.py` and the TZ-05 unit test; now defaulted like `version`.
+
+- **Style fix** (1a3b262): 0124 had been committed without `black`; formatting only.
+
+## Phase 10 — RT-03 publish points, RT-04 incremental reads
+
+- **Publish points** (`app/core/events.py`): ORM collectors on `Message` (insert:
+  `message.created` with `conversation_id`, `message_id`, `direction`, `channel_type`,
+  `created_at`; status change: `message.status`), `Conversation` (status / owner / assignee /
+  priority: `conversation.updated` with the field names), `FollowUp` (insert, status or time
+  change: `follow_up.updated`) and `Campaign` (status or waiting reason: `campaign.changed`,
+  per transition, never per recipient). Hints wait on `session.info` and are written by
+  `after_commit`; `after_rollback` drops them. One stream per workspace,
+  `wasla:rt:events:{tenant_id}`, `XADD MAXLEN ~ RT_STREAM_MAXLEN`, `XTRIM MINID` to
+  `RT_STREAM_RETENTION_SECONDS`, expiring when idle. Collecting at the ORM covers every path
+  that writes these rows (inbound webhook, send path, status webhook, takeover, follow-up and
+  campaign workers) without each remembering to; a Core bulk `UPDATE` publishes nothing and
+  clients converge through `resync` and `updated_since`. A failed publish is logged with its
+  type only and counted (`wasla_events_publish_failed_total`); the write already committed.
+  The API lifespan and the worker runner set the sink and drain it on shutdown.
+- **`channel_type`**: a message has no channel column; the collector reads its
+  conversation's from the session's identity map, or with one select on the flush's own
+  connection.
+- **Incremental reads** (RT-04): `GET /conversations?updated_since=` (offset required, 422
+  `updated_since_needs_offset`), inclusive, oldest change first, cursor-keyed by
+  `(updated_at, id)`, closed conversations included; the first page carries an `ETag` and an
+  unchanged inbox answers 304; `poll_after_seconds` is 30 without a stream and 60 with one
+  (open streams counted in Redis per person). `GET /conversations/{id}/messages?after=` lists
+  the later messages, oldest first; an anchor of another conversation or workspace names no
+  position.
+- **0126**: `ix_conversations_tenant_id_updated_at (tenant_id, updated_at, id)`,
+  `CONCURRENTLY`. `updated_at` is maintained by the application's `onupdate`, not a trigger:
+  every writer of the table is the application, and a trigger would be a second definition of
+  "changed" for the two schema modes to agree on.
+- **The list's response** gained `poll_after_seconds` (additive; the one test asserting the
+  exact key list was updated on purpose).
