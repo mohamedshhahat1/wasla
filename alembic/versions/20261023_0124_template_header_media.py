@@ -61,10 +61,16 @@ def upgrade() -> None:
         sa.Column("provider_media_id", sa.String(255), nullable=False),
         sa.Column("uploaded_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
         ),
         sa.ForeignKeyConstraint(
             ["tenant_id"],
@@ -135,11 +141,15 @@ def downgrade() -> None:
     bind = op.get_bind()
     found = []
     for label, sql in (
-        ("deleted template header files", "SELECT count(*) FROM campaign_header_media"
-         " WHERE deleted_at IS NOT NULL"),
+        (
+            "deleted template header files",
+            "SELECT count(*) FROM campaign_header_media WHERE deleted_at IS NOT NULL",
+        ),
         ("recorded template header uploads", "SELECT count(*) FROM template_header_uploads"),
-        ("follow-ups naming a header file", "SELECT count(*) FROM follow_ups"
-         " WHERE header_media_id IS NOT NULL"),
+        (
+            "follow-ups naming a header file",
+            "SELECT count(*) FROM follow_ups WHERE header_media_id IS NOT NULL",
+        ),
     ):
         count = bind.exec_driver_sql(sql).scalar_one()
         if count:
