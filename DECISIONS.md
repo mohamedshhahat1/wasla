@@ -7503,3 +7503,10 @@ runs in UTC (ADR-156).
 A takeover cancels an agent's follow-up and ends a sequence run
 (`human_took_over`); a colleague's own one-off still survives it, and no run
 starts on a conversation while one waits (ADR-151).
+
+## ADR-149 (amended 2026-10-23) — Progress Polls Are Cheap, And A Stream Says When To Poll
+
+A `304` from `GET /campaigns/progress` costs no campaign-bucket token (RT-07);
+the inbox event stream (ADR-155) carries `campaign.changed` per transition, and
+a page holding it polls after that hint or every 60 s. Counts still come from
+the poll.

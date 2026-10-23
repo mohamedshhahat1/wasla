@@ -6,7 +6,7 @@ campaigns page is built against: for every element of the page design
 2026-10-16), the route that serves it, what to send, what comes back, who may
 use it, which rate bucket it costs, its states, and what the page must not
 claim. Behaviour in depth: [CAMPAIGNS.md](CAMPAIGNS.md); every field and code:
-[API.md](API.md); decisions: ADR-145..ADR-150 in [DECISIONS.md](../DECISIONS.md).
+[API.md](API.md); decisions: ADR-145..ADR-150, ADR-154..ADR-156 in [DECISIONS.md](../DECISIONS.md).
 The OpenAPI document (`/openapi.json` where docs are enabled) has every request
 and response model, for generating a client.
 
@@ -42,14 +42,18 @@ every person - shared with templates. The page's plan:
 
 | What | When | Cost |
 | --- | --- | --- |
-| `GET /campaigns/progress?ids=` (the visible rows, up to 20) | every `poll_after_seconds` (10 while any is live, 60 otherwise), with `If-None-Match` | 6 a minute at most |
+| `GET /campaigns/progress?ids=` (the visible rows, up to 20) | with the inbox event stream open: after a `campaign.changed` event, and every 60 s as a safety net; without it: every `poll_after_seconds` (10 while any is live, 60 otherwise). Always with `If-None-Match` | a `304` costs **nothing** in C (RT-07); an answer that changed costs one |
 | `GET /campaigns/summary` | on page load and when the tab regains focus | rare |
 | `GET /campaigns`, a campaign, its statistics, recipients, activity | on navigation | rare |
 | everything else | on a person's action | rare |
 
 Poll only while the page is visible; stop when hidden. On `429`, back off to
-`Retry-After` and resume at `poll_after_seconds`. A `304` costs a request too.
-There is no WebSocket or Server-Sent Events stream (ADR-149).
+`Retry-After` and resume at `poll_after_seconds`. A `304` still counts in the
+workspace bucket W, never in C. The event stream (`GET /events/stream`,
+ADR-155) carries `campaign.changed {campaign_id}` once per transition - a
+status or a waiting reason - never per recipient: counts between transitions
+come from the poll. How to open it:
+[FOLLOW_UPS_AND_REALTIME_CONTRACT.md](FOLLOW_UPS_AND_REALTIME_CONTRACT.md) section 3.
 
 ## Element by element
 
@@ -172,7 +176,7 @@ There is no WebSocket or Server-Sent Events stream (ADR-149).
 | Response | `{items: [{id, status, waiting_reason, resumes_at, resumes_at_local, counts: {sent, delivered, read, failed, skipped, pending, replied}, eta, updated_at}], poll_after_seconds}`; `304` when nothing changed |
 | Who / bucket | member / C (see the polling budget) |
 | States | `422` for more than 20 ids; `404` if one is not this workspace's - drop it and ask again |
-| Must not claim | "real time": the design's "Updates live" is a poll every 10 seconds |
+| Must not claim | that counts are live to the second: a `campaign.changed` event says the state moved, the poll brings the numbers |
 
 ### 13. Replied count (PG-10)
 
@@ -234,6 +238,22 @@ There is no WebSocket or Server-Sent Events stream (ADR-149).
 3. `GET /campaigns/{id}/delivery-plan` and `GET /campaigns/{id}/cost-estimate`;
    `POST .../preview-messages` and `POST .../test-send` as the person wishes.
 4. `POST /campaigns/{id}/schedule` `{scheduled_at?, send_until?}` - with offsets.
+   Turn the person's chosen wall time into one with
+   `GET /workspace/local-time?at=YYYY-MM-DDTHH:MM` and send its `at_local`
+   (TZ-08): on a day the clocks change, `ambiguous` offers both instants and
+   `nonexistent` moves to the first valid one. Never compute the offset in the
+   browser - an offset from before the change keeps its instant (ADR-145) and
+   the campaign starts an hour off. Every campaign time shown has a `_local`
+   twin, `scheduled_at_local` included.
+
+**Header files per person** (HMR-01). With an IMAGE, VIDEO or DOCUMENT header,
+`header_media_mode: per_recipient` adds `header_media_rules: [{when: {field,
+key?, equals}, header_media_id}]` (first match wins, `header_media_id` the
+default for everybody else; files from the workspace's library, at most 20,
+of the header's kind). `preview-messages` shows each person's
+`header_media_id`. Full rows:
+[FOLLOW_UPS_AND_REALTIME_CONTRACT.md](FOLLOW_UPS_AND_REALTIME_CONTRACT.md)
+sections 4 and 6.
 
 A draft whose audience step failed stays a draft with `audience_ready: false`;
 list it with "Continue" and "Delete". Steps 2-4 are admin, bucket C.
@@ -327,4 +347,4 @@ day), and `unrecorded`.
   Opt-outs, the cap and the deadline still apply at send time.
 - **A first name** for `contact.display_name`.
 - **A per-campaign quiet-hours switch.** Quiet hours are the workspace's.
-- **Live updates.** The page polls.
+- **Live counts.** Events say a campaign changed state; the numbers come from the poll.

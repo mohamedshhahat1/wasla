@@ -23,7 +23,7 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 10 | RT-03 publish points, RT-04 incremental reads | committed | a100716 | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
 | 11 | RT-01/02/05 stream, RT-07 polling budget | committed | 98919e9 | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
 | 12 | RT-06 nginx, shutdown, capacity | committed | f13b8d3 | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
-| 13 | Invariants, observability, docs, ADRs, contracts | in progress: invariants 31e40c0, alerts a3b3add, ADRs and docs (this commit) | | injection tests 15/15; invariant suites and oracles 191 passed |
+| 13 | Invariants, observability, docs, ADRs, contracts | committed | 31e40c0, a3b3add, b4cb7fb, (this commit) | injection tests 15/15; invariant suites and oracles 191 passed; promtool / amtool; documentation truth 27 |
 | 14 | Mutation | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
@@ -493,3 +493,14 @@ table with quiet hours, the limit and header files; the stale "no workspace time
 removed in Phase 1), `docs/MEDIA.md` (retention by recipients' and rules' files),
 `docs/SAAS.md` (follow-up defaults, stream limits), `docs/RUNBOOK.md` ("Follow-ups are not
 sending"). `docs/AI_AGENTS.md` and `docs/CAMPAIGNS.md` were written with Phases 3-9.
+
+## Phase 13d — the contracts
+
+`docs/FOLLOW_UPS_AND_REALTIME_CONTRACT.md` (new): the settings card, a conversation's
+follow-ups and stop, the inbox stream (ticket, EventSource, reconnect, `resync`, `closed`,
+fallback polling), the header library, a person's template with a media header, the
+per-recipient campaign files, the date-time picker, every state and reason with the sentence
+to show in English and Egyptian Arabic, and what the pages must never claim.
+`docs/CAMPAIGNS_PAGE_CONTRACT.md`: the polling budget with a stream (a 304 costs nothing in
+C), live updates, local-time resolution and `scheduled_at_local`, header files per person.
+ADR-149 amended (its "six of thirty" polling cost no longer holds).
