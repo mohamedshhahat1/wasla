@@ -22,8 +22,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 9 | HMR-01..03 per-recipient header media | committed | 324d435 | per-recipient 7/7 (1/2/4 workers); sweep 163 suites: 7 failures in 2 files fixed (below), re-run green; migration-built parity + downgrade; alembic round trip |
 | 10 | RT-03 publish points, RT-04 incremental reads | committed | a100716 | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
 | 11 | RT-01/02/05 stream, RT-07 polling budget | committed | 98919e9 | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
-| 12 | RT-06 nginx, shutdown, capacity | committed | (this commit) | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
-| 13 | Invariants, observability, docs, ADRs, contracts | not started | | |
+| 12 | RT-06 nginx, shutdown, capacity | committed | f13b8d3 | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
+| 13 | Invariants, observability, docs, ADRs, contracts | in progress: invariants committed (this commit) | | injection tests 15/15; invariant suites and oracles 191 passed |
 | 14 | Mutation | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
 | 16 | Final report | not started | | |
@@ -451,3 +451,18 @@ the campaign's file.
 - **Gauge** `wasla_events_streams_open` (in-process, like the HTTP gauges).
 - **Docs**: `docs/DEPLOYMENT.md` "The inbox event stream" (location, capacity, restart and
   drain), `docs/RUNBOOK.md` "The inbox does not update", `docs/OBSERVABILITY.md` (gauge).
+
+## Phase 13a — invariants CR-16, CR-17, FU-01..FU-08, RT-I01
+
+`scripts/omnichannel_invariants.py`; `verify` runs them all (RT-I01 when a Redis URL is set).
+The moment a step was sent is its outbound message's staged time (written in the send
+intent's transaction before the provider call), so a reply racing the call is not counted.
+FU-02 reads ownership from the audit trail (a `conversation_taken_over` after the anchor with
+no `conversation_released_to_ai` before the send). FU-03 uses the window of
+`app.integrations.whatsapp.policy.SERVICE_WINDOW` and `FOLLOW_UP_WINDOW_MARGIN_SECONDS`. FU-07
+counts from the workspace's follow-up settings row onwards (nothing bound follow-ups to quiet
+hours before it; a populated upgrade's old night sends are not violations) against the quiet
+hours in force now. FU-08 needs no history: a wait moves only `scheduled_at` and always later.
+Each has an injection test (`test_follow_up_invariants.py`, 15 tests: one violation each, the
+named check and only it counts one more); `test_omnichannel_oracles.py` now expects the
+follow-up checks in `verify` and its write-path oracle holds them at zero.

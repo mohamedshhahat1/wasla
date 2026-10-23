@@ -69,6 +69,7 @@ from scripts.omnichannel_invariants import (
     CAMPAIGN_INVARIANTS,
     CENSUS,
     ENTITLEMENT_INVARIANTS,
+    FOLLOW_UP_INVARIANTS,
     INVARIANTS,
     census,
     violations,
@@ -393,7 +394,11 @@ async def test_no_write_path_breaks_an_invariant(
     after, census_after = await _sweep(db_session)
 
     assert set(after) == {
-        check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS + CAMPAIGN_INVARIANTS
+        check.name
+        for check in INVARIANTS
+        + ENTITLEMENT_INVARIANTS
+        + CAMPAIGN_INVARIANTS
+        + FOLLOW_UP_INVARIANTS
     }
     added = {name: after[name] - before[name] for name in after if after[name] != before[name]}
     assert added == {}, f"the population broke invariants: {added}"
@@ -527,7 +532,11 @@ async def test_the_operator_checks_run_on_a_read_only_replica(prepared_database:
                     await connection.execute(text("CREATE TEMPORARY TABLE oracle_probe (x int)"))
         assert "read-only" in str(refused.value).lower()
         assert set(found) == {
-            check.name for check in INVARIANTS + ENTITLEMENT_INVARIANTS + CAMPAIGN_INVARIANTS
+            check.name
+            for check in INVARIANTS
+            + ENTITLEMENT_INVARIANTS
+            + CAMPAIGN_INVARIANTS
+            + FOLLOW_UP_INVARIANTS
         }
         assert set(counted) == {check.name for check in CENSUS}
     finally:
