@@ -31,7 +31,7 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.pagination import Cursor, Page, paginate
 from app.core.storage import MediaStorage
 from app.core.telemetry import record_template_header_upload
-from app.db.models.campaign import Campaign
+from app.db.models.campaign import Campaign, CampaignRecipient
 from app.db.models.campaign_media import (
     CampaignHeaderMedia,
     HeaderMediaKind,
@@ -276,12 +276,19 @@ class TemplateHeaderMediaService:
             Campaign.header_media_id == asset_id,
             Campaign.status.in_(LIVE_CAMPAIGN_STATUSES),
         )
+        recipient = exists().where(
+            CampaignRecipient.tenant_id == self._tenant_id,
+            CampaignRecipient.header_media_id == asset_id,
+            Campaign.tenant_id == CampaignRecipient.tenant_id,
+            Campaign.id == CampaignRecipient.campaign_id,
+            Campaign.status.in_(LIVE_CAMPAIGN_STATUSES),
+        )
         follow_up = exists().where(
             FollowUp.tenant_id == self._tenant_id,
             FollowUp.header_media_id == asset_id,
             FollowUp.status == FollowUpStatus.PENDING,
         )
-        used = await self._session.scalar(select(or_(campaign, follow_up)))
+        used = await self._session.scalar(select(or_(campaign, recipient, follow_up)))
         return bool(used)
 
 

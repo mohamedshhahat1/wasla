@@ -622,6 +622,10 @@ class Settings(BaseSettings):
     campaign_contact_marketing_interval_seconds: int = Field(
         default=86_400, ge=3600, le=30 * 86_400
     )
+    # Per-recipient header media (HMR-01, HMR-02): the most distinct files one
+    # campaign may send, and the most of them one connection uploads a minute.
+    campaign_header_media_max_files: int = Field(default=20, ge=1, le=100)
+    campaign_header_uploads_per_minute: int = Field(default=20, ge=1, le=600)
     # Automatic follow-ups (FUS-05, ADR-151): a step is sent only while the
     # customer's window has at least this long left - the platform's own clock
     # for "24 hours" is not documented, and a sweep can be late.

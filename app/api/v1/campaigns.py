@@ -236,6 +236,12 @@ async def create_campaign(
         header_variables=list(payload.header_variables),
         button_parameters={entry.index: entry.value for entry in payload.button_parameters},
         header_media_id=payload.header_media_id,
+        header_media_mode=payload.header_media_mode.value,
+        header_media_rules=(
+            [rule.model_dump(mode="json") for rule in payload.header_media_rules]
+            if payload.header_media_rules
+            else None
+        ),
         actor=workspace.user,
         body_mappings=(
             [entry.to_mapping() for entry in payload.body_parameters]
@@ -656,6 +662,7 @@ async def preview_messages(
                     "body": list(preview.body_fallbacks),
                     "header": list(preview.header_fallbacks),
                 },
+                header_media_id=preview.header_media_id,
             )
             for preview in previews
         ]

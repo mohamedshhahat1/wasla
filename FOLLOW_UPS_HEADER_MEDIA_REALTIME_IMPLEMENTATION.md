@@ -18,8 +18,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 5 | FUS-02/03/05/06 runs, stop rules, window | committed | fb7124b | sequences 18/18 (+ reply/silent 5x); settings + limit files; send-path sweep (see below); migration-built parity + downgrade; alembic head->0120->head |
 | 6 | FUS-04/07 AI-written step, charging | committed | 980868a | ai steps 16/16, tool offer 3/3, sequences 18/18, AI invariants; send-path sweep |
 | 7 | FUS-09 what a person sees | committed | 888f2c7 | visibility 3/3; conversation/inbox/follow-up/CRM/schema suites 255 passed; docs truth, route auth |
-| 8 | HMT-01..03 template header library | committed | (this commit) | template header media 8/8; sweep 162 suites 0 failed; migration-built parity + downgrade; alembic head->0120->head |
-| 9 | HMR-01..03 per-recipient header media | not started | | |
+| 8 | HMT-01..03 template header library | committed | 4ffbad0 | template header media 8/8; sweep 162 suites 0 failed; migration-built parity + downgrade; alembic head->0120->head |
+| 9 | HMR-01..03 per-recipient header media | committed | (this commit) | per-recipient 7/7 (1/2/4 workers); sweep 163 suites: 7 failures in 2 files fixed (below), re-run green; migration-built parity + downgrade; alembic round trip |
 | 10 | RT-03 publish points, RT-04 incremental reads | not started | | |
 | 11 | RT-01/02/05 stream, RT-07 polling budget | not started | | |
 | 12 | RT-06 nginx, shutdown, capacity | not started | | |
@@ -303,3 +303,32 @@ uploaded or checked a header for them. Header retention defaults to 0 (never pur
   at scheduling and uploaded at dispatch; the worker and the service take the media store by
   injection (`storage=`).
 - Counter `wasla_template_header_uploads_total{origin}`. 245 operations.
+
+## Phase 9 — HMR-01..03 (per-recipient header media)
+
+Facts verified first: one file per campaign (`campaigns.header_media_id`), uploaded once per
+campaign (`_header_file` under the lease), and `_personal()` / `send_components` always took
+the campaign's file.
+
+- **0125**: `campaigns.header_media_mode` (`campaign` default / `per_recipient`),
+  `header_media_rules`, `header_media_refusals`; `campaign_recipients.header_media_id`
+  (tenant-composite, RESTRICT); reason `header_media_refused`.
+- **Composition**: rules `{when: {field, key?, equals}, header_media_id}` on a PER-01 field;
+  checked by the one composition validator (create and draft edit): workspace (404), stored,
+  the default file's kind (`header_media_kind_mismatch`), at most
+  `CAMPAIGN_HEADER_MEDIA_MAX_FILES` distinct files (`header_media_too_many_files`); rules
+  without the mode are refused, the mode without a default file too.
+- **Materialisation**: `header_file_for(campaign, facts)` - first matching rule, compared as
+  PER-05 normalises, ignoring case - frozen on the recipient. Preview shows each person's file.
+- **Worker** (`_deliver_personal_header`): per batch a cache of each file's parameter; a file
+  not yet fresh is uploaded under the lease (`template_header_uploads` keyed by campaign, file
+  and connection, written under the lease in its own transaction), at most
+  `CAMPAIGN_HEADER_UPLOADS_PER_MINUTE` uploads per batch; a refused upload or a 131053 on send
+  counts a refusal for that file (`header_media_refusals`) and defers the person (no attempt);
+  three refusals skip that file's people. Meta unreachable or a credential stops/waits the
+  campaign as in campaign mode. The campaign-mode path is unchanged.
+- **HMR-03**: retention and the library delete treat a file named by any recipient of a live
+  campaign as in use.
+- **Sweep findings** (fixed before commit): `CampaignRead.header_media_mode` rejected an
+  unflushed `Campaign` (attribute None before the column default applies) - 6 cases of
+  `test_campaign_endpoints.py` and the TZ-05 unit test; now defaulted like `version`.

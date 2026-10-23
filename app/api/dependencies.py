@@ -375,6 +375,7 @@ def get_campaign_service(
         # (LIM-01).
         limits=MessagingLimitService(session, settings=settings),
         parameter_max_chars=settings.campaign_parameter_max_chars,
+        header_media_max_files=settings.campaign_header_media_max_files,
     )
 
 

@@ -410,6 +410,19 @@ class CampaignRecipientRepository(TenantScopedRepository[CampaignRecipient]):
     def _tenant_filter(self) -> ColumnElement[bool]:
         return CampaignRecipient.tenant_id == self.tenant_id
 
+    async def header_files_for(
+        self, campaign_id: uuid.UUID, contact_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, uuid.UUID | None]:
+        """Each of these recipients' frozen header file (HMR-01)."""
+        rows = await self.session.execute(
+            select(CampaignRecipient.contact_id, CampaignRecipient.header_media_id).where(
+                CampaignRecipient.tenant_id == self.tenant_id,
+                CampaignRecipient.campaign_id == campaign_id,
+                CampaignRecipient.contact_id.in_(list(contact_ids)),
+            )
+        )
+        return {row[0]: row[1] for row in rows.all()}
+
     async def list_for_campaign(
         self,
         campaign_id: uuid.UUID,

@@ -31,6 +31,7 @@ from app.db.models.campaign import (
     CampaignStatus,
     CampaignStopReason,
     CampaignWaitReason,
+    HeaderMediaMode,
     OptOutSource,
     OptOutVia,
     RecipientReason,
@@ -108,6 +109,22 @@ class ParameterSourceRequest(_Payload):
         return Mapping(source=self.source, value=self.value, key=self.key, fallback=self.fallback)
 
 
+class HeaderRuleWhen(_Payload):
+    """Which people a header rule is for: a PER-01 field that equals a value (HMR-01)."""
+
+    field: ParameterSource
+    # The custom field's key, for `lead.custom_fields`.
+    key: str | None = Field(default=None, max_length=100)
+    equals: StorableText = Field(min_length=1, max_length=200)
+
+
+class HeaderRule(_Payload):
+    """One per-recipient header rule: these people get this library file."""
+
+    when: HeaderRuleWhen
+    header_media_id: uuid.UUID
+
+
 class CampaignCreateRequest(_Payload):
     """A draft. Nothing is sent and no audience exists until both are asked for."""
 
@@ -146,6 +163,11 @@ class CampaignCreateRequest(_Payload):
     # an id from `POST /campaigns/header-media` (HM-02). Required by such a
     # template, refused by any other; fixed once the campaign is composed.
     header_media_id: uuid.UUID | None = None
+    # `per_recipient`: each person gets the file of the first rule that matches
+    # them, everybody else `header_media_id` - frozen when the audience is
+    # written (HMR-01). At most CAMPAIGN_HEADER_MEDIA_MAX_FILES distinct files.
+    header_media_mode: HeaderMediaMode = HeaderMediaMode.CAMPAIGN
+    header_media_rules: list[HeaderRule] | None = Field(default=None, max_length=50)
     # Each person's own values (PER-01), in place of `variables` and
     # `header_variables`: one entry per placeholder, in placeholder order.
     body_parameters: list[ParameterSourceRequest] | None = Field(
@@ -187,6 +209,8 @@ class CampaignUpdateRequest(_Payload):
         default=None, max_length=MAX_TEMPLATE_VARIABLES
     )
     header_media_id: uuid.UUID | None = None
+    header_media_mode: HeaderMediaMode | None = None
+    header_media_rules: list[HeaderRule] | None = Field(default=None, max_length=50)
     messages_per_minute: int | None = Field(
         default=None, ge=MIN_MESSAGES_PER_MINUTE, le=MAX_MESSAGES_PER_MINUTE
     )
@@ -200,6 +224,10 @@ class CampaignUpdateRequest(_Payload):
             value = getattr(self, field)
             if field == "button_parameters":
                 changes[field] = {entry.index: entry.value for entry in value or []}
+            elif field == "header_media_rules":
+                changes[field] = [rule.model_dump(mode="json") for rule in value or []] or None
+            elif field == "header_media_mode":
+                changes[field] = (value or HeaderMediaMode.CAMPAIGN).value
             elif field in ("body_parameters", "header_parameters"):
                 target = "body_mappings" if field == "body_parameters" else "header_mappings"
                 changes[target] = (
@@ -260,6 +288,8 @@ class MessagePreviewRead(BaseModel):
     body: str
     buttons: list[str]
     fallbacks: dict[str, list[int]]
+    # This person's header file (HMR-01): Wasla's id, never Meta's.
+    header_media_id: uuid.UUID | None = None
 
 
 class MessagePreviewResponse(BaseModel):
@@ -514,6 +544,9 @@ class CampaignRead(BaseModel):
     # The plan, on the schedule response only (LIM-05); `GET
     # /campaigns/{id}/delivery-plan` recomputes it at any time.
     delivery_plan: DeliveryPlanRead | None = None
+    # One file for everybody, or each person's own by rules (HMR-01).
+    header_media_mode: str = "campaign"
+    header_media_rules: list[dict[str, Any]] | None = None
     # A draft's edit counter (PG-03): send it back as If-Match (or `version`)
     # with an edit. Also the response's ETag.
     version: int = 1
@@ -541,6 +574,12 @@ class CampaignRead(BaseModel):
         # The column's default is applied at insert: a row read before its
         # first flush is version 1.
         return 1 if value is None else value
+
+    @field_validator("header_media_mode", mode="before")
+    @classmethod
+    def _unflushed_mode(cls, value: object) -> object:
+        # Likewise: a row read before its first flush has one file for everybody.
+        return "campaign" if value is None else value
 
     @classmethod
     def from_model(
