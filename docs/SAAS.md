@@ -65,6 +65,17 @@ An **AI turn** is one customer message an agent took on, however many provider c
 
 Billing detail is in [BILLING.md](BILLING.md); usage metering is in [ANALYTICS.md](ANALYTICS.md).
 
+### Follow-up settings and the inbox stream
+
+Every workspace has follow-up settings (ADR-151) - **on, WhatsApp, one reminder after 5 minutes** from its creation (and for every workspace that existed when migration 0122 ran). An owner or admin changes them; any member reads them. Sequences run on every plan with an AI allowance; each step that asks the model is one AI turn. Deployment bounds:
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `FOLLOW_UP_SEQUENCE_MAX_STEPS` | 5 | Reminders a workspace may set (never more than 5) |
+| `FOLLOW_UP_WINDOW_MARGIN_SECONDS` | 1800 | How much of the customer's 24-hour window must remain for a step to go |
+| `RT_STREAMS_PER_USER` | 5 | Open inbox event streams one person may hold, across every API container |
+| `RT_STREAMS_PER_WORKSPACE` | 100 | Open event streams one workspace may hold (ADR-155) |
+
 ### Campaign platform settings
 
 Set by the deployment, never by a workspace ([CAMPAIGNS.md](CAMPAIGNS.md)):

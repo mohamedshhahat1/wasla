@@ -7301,3 +7301,205 @@ and the count check runs on the fallbacks.
 A test send reuses the campaign's Meta media id only while it is fresh and
 through the campaign's number; otherwise it uploads the file for the test,
 before any lock, and never writes the id onto the campaign (PG-09).
+
+## ADR-151 — The Owner's Reminders Are Automatic Follow-up Sequences, Written By The AI Per Conversation (FUS-01 .. FUS-09)
+
+**Context.** One pending follow-up per conversation existed, scheduled only by
+the agent's `schedule_follow_up` during a turn - and the agent runs only on an
+inbound message, so nothing ever followed a silent customer up twice. The owner
+decided on 2026-10-23 to set reminders once, per platform, in minutes and hours.
+
+**Decision.**
+
+1. **Settings** (`follow_up_settings`, one row per workspace, 0122): `enabled`,
+   `channel_types`, `steps: [{delay_minutes, guidance}]` (5 .. 1,380 minutes, at
+   most `FOLLOW_UP_SEQUENCE_MAX_STEPS` = 5, guidance at most 500 characters and
+   never sent as is), `version` for `If-Match`. A table, not tenant columns: a
+   list with a version and an editor. **Default ON** - `[whatsapp]`, one step of
+   5 minutes - for every workspace that existed (0122) and every workspace
+   created since. A workspace with no row runs nothing. Only channel types with a
+   working adapter may be chosen: WhatsApp today (`422 channel_type_unavailable`
+   for Messenger and Instagram, which are vocabulary only).
+2. **A run** (`follow_up_sequence_runs`, 0123; one active per conversation)
+   starts in the transaction that stages an AI's or a person's free-form reply
+   on an AI-owned, open conversation whose channel is covered, when the customer
+   has written since the previous run's anchor and no colleague's one-off is
+   waiting. The anchor is that reply. Step 1 is due anchor + steps[0]; step n is
+   due step n-1's `sent_at` + steps[n-1], read when step n is scheduled. A new
+   reply restarts the run (`sequence_restarted`). A step is a `follow_ups` row
+   (`origin = sequence`) through the one dispatch, claim and policy.
+3. **The window** (FUS-05): a step is scheduled and sent only while
+   `now <= last inbound + the channel policy's window - FOLLOW_UP_WINDOW_MARGIN_SECONDS`
+   (1,800). Past it a step is never scheduled (`window_closing`) or is skipped at
+   dispatch (`window_closed`). A step is always free-form: no template, no
+   message tag (HUMAN_AGENT is for a human).
+4. **Stop rules** (FUS-06), each in the transaction that causes it: a customer's
+   message, a takeover or assignment to a person, closing, an opt-out on that
+   channel, the lead WON or LOST, settings off / platform removed / the waiting
+   reminder deleted; at dispatch also a workspace not served and an exhausted
+   allowance. **Wasla records no purchase**: `purchased` is the AI's skip reason.
+5. **The AI writes each step at dispatch** (FUS-04) from the conversation, the
+   step number, the guidance, the time since the customer's last message and
+   the channel, as `{action: send | skip, reason, text}` with no tools. The model
+   call holds no transaction and no lock: the claim token protects the row, and
+   a row a reply, a takeover or a restart touched meanwhile is not found again,
+   so the text is discarded. A step is never shortened: over the channel's
+   length, a credential shape or a phone number is `guardrail`. One retry after
+   60 s, then `ai_unavailable` ends the run. A skip ends the run.
+6. **The agent's tool** (FUS-03): `schedule_follow_up` is not offered while the
+   conversation's channel is covered, and is refused with readable text if
+   called. A person's one-off replaces the waiting step (`replaced_by_person`).
+7. **Charging** (FUS-07): a step that called the model is one AI turn
+   (ADR-131), sent or skipped; a step cancelled before it costs nothing.
+8. **Any hour** (FUS-08): steps are not bound by quiet hours - the customer
+   started the conversation inside the window.
+9. **What a person sees** (FUS-09): the conversation's `follow_up` state, its
+   history (`GET /conversations/{id}/follow-ups`, the text of sent steps only)
+   and `DELETE /conversations/{id}/follow-up` (`stopped_by_person`, audited).
+
+**Not documented by the platforms** (recorded): whether many automated messages
+inside the window affect quality (bounded by 5 steps and every stop rule); the
+exact clock of "24 hours" (the margin); any charge or limit for free-form
+messages in the window (none known; steps never touch the ledger).
+
+**Consequences.** Invariants FU-01..FU-05. Template sequences outside the
+window are not supported. Messenger and Instagram are refused until an adapter
+exists. Migrations 0122, 0123.
+
+## ADR-152 — Follow-ups And A Person's Templates Respect 100 % Of Meta's Limit (FLIM-01 .. FLIM-03)
+
+**Decision.** `Enforcement.DEFER_AT_LIMIT` for `FOLLOW_UP` and `HUMAN`: counted
+against the whole portfolio limit (not the campaigns' 80 %). At or over it a
+template follow-up waits until the ledger's `resumes_at` (`deferred_reason =
+portfolio_limit`, no attempt, `requested_at` kept); a person's manual template
+is refused `409 portfolio_limit_reached` with `available_at` and
+`available_at_local`. With the limit unknown both are sent - not fail-closed -
+the row records `limit_at_send` null, and the manual answer carries the notice
+`messaging_limit_unknown`. Free-form messages never write a ledger row (FU-06).
+
+**Consequences.** Closes ADR-146 section 4's open part (LIM-04).
+
+## ADR-153 — Quiet Hours Bind Template Follow-ups, Not Free-form Ones (FQH-01 .. FQH-04)
+
+**Decision.** A template follow-up (the customer's window is closed: the
+business is starting the contact again) waits out the workspace's quiet hours,
+with the campaigns' minute of lead (`deferred_reason = quiet_hours`, no
+attempt). A free-form follow-up - a step or a person's one-off inside the
+window - is sent at its time. Editing or disabling quiet hours, or changing the
+workspace's zone, releases waiting follow-ups at the next sweep
+(`release_follow_up_quiet_waits`, follow-ups only). `requested_at` (0121) is set
+when a follow-up is asked for and never moved by a wait or a retry;
+`deferrals` keeps every wait in order (at most 20).
+
+**Consequences.** Invariants FU-07, FU-08. Migration 0121.
+
+## ADR-154 — Template Header Files Are A Workspace Library: Per Recipient, Manual And Follow-up (HMT-01 .. HMT-03, HMR-01 .. HMR-03)
+
+**Decision.**
+
+1. **One library, nothing renamed**: `campaign_header_media` holds every
+   template header file of a workspace; `/template-header-media` uploads (admin),
+   lists (member) and deletes (admin, refused `409 header_media_in_use` while a
+   live campaign, a recipient or a waiting follow-up names it). A deleted file
+   is purged by the next sweep whatever the retention.
+2. **Meta's id per file and connection** (`template_header_uploads`, 0124): a
+   person's and a follow-up's templates share one id per (workspace, file,
+   connection) while fresh (the 25-day refresh); a campaign's are keyed by
+   campaign too. The provider id never leaves the server.
+3. **Manual and follow-up templates** take `header_media_id`: raw media header
+   parameters are refused `422 header_media_must_be_uploaded` (an API change; no
+   client existed), a media header without a file `header_media_required`, the
+   wrong kind `header_media_kind_mismatch`, another workspace's file 404.
+4. **Per recipient** (0125): `campaigns.header_media_mode = per_recipient` with
+   ordered rules `{when: {field, equals}, header_media_id}` on a PER-01 field,
+   first match wins, the campaign's file the default; at most
+   `CAMPAIGN_HEADER_MEDIA_MAX_FILES` (20) distinct files, all of the workspace and
+   the template header's kind. The chosen file is frozen on the recipient at
+   materialisation. Uploads happen under the campaign lease, once per (campaign,
+   file, connection), at most `CAMPAIGN_HEADER_UPLOADS_PER_MINUTE` per batch; a
+   refused file holds its recipients and three refusals skip them
+   (`header_media_refused`) while the campaign continues.
+5. **Retention** never purges a file a live campaign, any of its recipients or a
+   waiting follow-up names.
+
+**Consequences.** Invariants CR-16, CR-17. Migrations 0124, 0125. Mode
+`campaign` is unchanged byte for byte.
+
+## ADR-155 — The Inbox Learns Of Changes Through A Server-sent Event Stream Of Hints (RT-01 .. RT-08)
+
+**Decision.**
+
+1. **SSE, not WebSocket**: the inbox needs one-way hints; SSE is plain HTTP
+   through the existing proxy, and the browser reconnects with `Last-Event-ID`
+   by itself (WHATWG HTML, server-sent events).
+2. **A ticket is the credential**, because `EventSource` cannot send a header:
+   `POST /events/ticket` (a member, workspace bucket) issues a random, 60-second,
+   single-use ticket bound to (person, workspace, token version), stored hashed
+   and redeemed with `GETDEL`; never logged (nginx logs the stream's `$uri` only).
+3. **Hints, never content**: `message.created` (with `channel_type`),
+   `message.status`, `conversation.updated`, `follow_up.updated`,
+   `campaign.changed` (per transition) carry ids; the client reads content
+   through the REST routes, which authorize as before.
+4. **After commit**: ORM collectors stage hints on the session; `after_commit`
+   writes them to one Redis stream per workspace (`XADD MAXLEN ~`
+   `RT_STREAM_MAXLEN`, trimmed to `RT_STREAM_RETENTION_SECONDS`); a rollback
+   publishes nothing; a failed publish never fails the committed write and is
+   counted.
+5. **One reader and one checker per workspace per process**: one `XREAD BLOCK`
+   fans out; one batched check per keep-alive re-validates every stream of the
+   workspace (token version, membership, serving, active workspace) and closes
+   those that must go with a reason. An open records the newest id before
+   subscribing and catches up from it; `Last-Event-ID` replays or answers
+   `resync`; a full queue answers `resync`.
+6. **Limits and lifetime**: 5 streams a person, 100 a workspace, counted across
+   processes in Redis (`429 stream_limit`); exempt from the request timeout and
+   per-request buckets; nginx holds the stream an hour unbuffered; the exit
+   signal closes every stream (`server_restart`) before uvicorn drains.
+7. **Incremental reads and the polling budget**: `GET /conversations?updated_since=`
+   with an ETag and `poll_after_seconds`; `messages?after=`; a 304 from
+   `/campaigns/progress` costs no campaign-bucket token.
+
+**Consequences.** Invariant RT-I01. Migration 0126 (an index; `updated_at` is
+the application's `onupdate`, not a trigger). One process carried 200 streams,
+p95 delivery 0.27 s.
+
+## ADR-156 — Times Are Shown In The Workspace's Zone, Stored In UTC, And Wall Times Resolved By The Server (TZ-05 .. TZ-09)
+
+**Decision.** Every campaign-facing time has a `_local` twin, and so do a
+follow-up's `due_at` and `requested_at`. Every database connection the
+application, its workers, Alembic and its scripts open runs with `TimeZone =
+'UTC'` (asyncpg `server_settings`, so no statement runs before it): the usage
+day buckets no longer depend on the server's zone. `GET
+/workspace/local-time?at=` resolves a wall time with the pinned tzdata (the fold
+`ambiguous` with both instants and the first chosen, the gap `nonexistent` with
+the first valid instant); the frontend sends the returned `at_local` to the
+routes that need an aware time, which are unchanged.
+
+## ADR-022 (amended 2026-10-23) — Follow-up Steps Are Polled Too
+
+A sequence step is a `follow_ups` row and is polled, claimed and dispatched
+like any follow-up; its model call runs between two transactions, protected by
+the claim token (ADR-151).
+
+## ADR-131 (amended 2026-10-23) — A Follow-up Step Is An AI Turn Without An Agent Turn
+
+A step that called the model is charged one AI turn whose usage event names
+`metadata.follow_up_id` instead of an agent turn; the AI invariant that every
+charge names an agent turn accepts a step of its own workspace (ADR-151).
+
+## ADR-144 (amended 2026-10-23) — Once Per File
+
+The campaign header upload rule is once per (campaign, file, connection) under
+the lease; with one file it is ADR-144 unchanged (ADR-154).
+
+## ADR-145 (amended 2026-10-23) — Quiet Hours Also Bind Template Follow-ups
+
+Quiet hours stay per workspace and bind template follow-ups as well as
+campaigns; free-form follow-ups are not bound (ADR-153). Every database session
+runs in UTC (ADR-156).
+
+## PD-CRM-1 (amended 2026-10-23) — A Colleague's One-off Still Survives
+
+A takeover cancels an agent's follow-up and ends a sequence run
+(`human_took_over`); a colleague's own one-off still survives it, and no run
+starts on a conversation while one waits (ADR-151).

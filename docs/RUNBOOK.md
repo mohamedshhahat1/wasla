@@ -646,6 +646,16 @@ SELECT round_number, call_ordinal, tool_name, state, reason_code, argument_field
  ORDER BY round_number, call_ordinal;
 ```
 
+### Follow-ups are not sending
+
+Two kinds behave differently (ADR-151..ADR-153): **sequence steps** (the owner's reminders, free text inside the customer's window, any hour) and **one-off** follow-ups (a person's or the agent's; a template outside the window). Read the conversation's history first: `GET /api/v1/conversations/{id}/follow-ups` names each step's status and closed reason.
+
+1. **Are reminders on for that platform?** `GET /api/v1/workspace/follow-up-settings`. A workspace with `version: 0` has no settings row and runs nothing (one written directly into the database). A platform other than WhatsApp cannot be chosen yet.
+2. **Did a run start?** Only after an AI's or a person's free-form reply on an AI-owned, open conversation whose customer wrote since the last run began; never while a colleague's one-off waits.
+3. **How did it end?** `follow_up_sequence_runs.end_reason`: `customer_replied`, `human_took_over`, `conversation_closed`, `opted_out`, `lead_closed`, `settings_changed`, `stopped_by_person`, `replaced_by_person` and `sequence_restarted` are the rules working. `window_closing` - the next reminder would land within `FOLLOW_UP_WINDOW_MARGIN_SECONDS` of the window's end, so it was never scheduled: shorten the reminders. `ai_skipped` / `purchased` - the model judged the conversation finished. `guardrail` - the model's text was too long for the channel or carried a phone number or credential shape. `ai_unavailable` - the model failed twice (`FollowUpAiFailing`; `grep follow_up.step_write_failed`). `allowance_exhausted`, `not_served` - the workspace's plan or state.
+4. **A one-off template is waiting?** `deferred_reason`: `quiet_hours` (sent when they end; editing them or the zone releases it at the next sweep) or `portfolio_limit` (sent when Meta's 24-hour window frees, `PortfolioLimitReached`). Neither spends an attempt; `requested_at` keeps the time asked for, `deferrals` every wait.
+5. **Is the worker sweeping?** As for any follow-up: `wasla_follow_up_*` counters and the follow-up worker's heartbeat; `wasla_follow_up_sequence_steps_total{outcome}` and `wasla_follow_up_defers_total{reason}` say what it decided.
+
 ### Campaigns are not sending
 
 ```sql
