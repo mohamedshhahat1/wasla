@@ -21,8 +21,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 8 | HMT-01..03 template header library | committed | 4ffbad0 | template header media 8/8; sweep 162 suites 0 failed; migration-built parity + downgrade; alembic head->0120->head |
 | 9 | HMR-01..03 per-recipient header media | committed | 324d435 | per-recipient 7/7 (1/2/4 workers); sweep 163 suites: 7 failures in 2 files fixed (below), re-run green; migration-built parity + downgrade; alembic round trip |
 | 10 | RT-03 publish points, RT-04 incremental reads | committed | a100716 | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
-| 11 | RT-01/02/05 stream, RT-07 polling budget | committed | (this commit) | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
-| 12 | RT-06 nginx, shutdown, capacity | not started | | |
+| 11 | RT-01/02/05 stream, RT-07 polling budget | committed | 98919e9 | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
+| 12 | RT-06 nginx, shutdown, capacity | committed | (this commit) | nginx -t (pinned nginx:1.27-alpine); capacity 1/1; stream 14/14 x5 runs; documentation truth; metric and telemetry suites (127 passed); one unidentified failure in one combined run, not reproduced in five further runs - left to Phase 15's three-run gate |
 | 13 | Invariants, observability, docs, ADRs, contracts | not started | | |
 | 14 | Mutation | not started | | |
 | 15 | Full lanes, CI jobs, after-probes | not started | | |
@@ -424,3 +424,30 @@ the campaign's file.
 - **Docs**: `docs/API.md` (the two routes, the event table, reconnects, the polling
   budget; operation count 247, 19 unauthenticated), `docs/AUTHORIZATION.md` (route rows and
   the open-route rationale), `.env.example` (`RT_*`).
+
+## Phase 12 — RT-06 (nginx, shutdown, capacity)
+
+- **nginx** (`nginx/nginx.conf`): `location = /api/v1/events/stream` with
+  `proxy_read_timeout 1h`, `proxy_send_timeout 1h`, `proxy_buffering off`, `proxy_cache off`,
+  `chunked_transfer_encoding on`, an upstream keepalive connection (`Connection ""`), and an
+  access log format `wasla_stream` that records `$uri`, never `$request` - the ticket is in
+  the query string. No `add_header` in the location (it would drop the server's security
+  headers; the application sends `X-Accel-Buffering: no` itself). Every other location is
+  unchanged; the WebSocket comment now says the realtime path is SSE. `nginx -t` passes on
+  the production compose's pinned `nginx:1.27-alpine` image.
+- **Shutdown**: built in Phase 11 (`install_stream_shutdown`).
+- **Capacity defect found and fixed**: with one RT-05 check per stream per keep-alive (about
+  three queries each), 200 streams starved the 15-connection pool and the capacity test timed
+  out. The checks moved into the hub: one watcher per workspace per process re-validates
+  every subscriber in one batch (`closing_reasons`: one Redis `MGET`, one token-version
+  read, one membership read, one serving check) and counts them alive in one pipeline
+  (`realtime_streams.refresh_many`); the per-stream `refresh` was removed. A stream's own
+  loop now only writes the keep-alive comment.
+- **Capacity** (`test_events_capacity.py`): one process, 200 streams of one workspace (40
+  members x 5, `RT_STREAMS_PER_WORKSPACE=200`), 20 inbound messages: 4,000 of 4,000
+  deliveries; p95 0.266 s measured from before the ingestion call (one stream: 0.047 s);
+  Python heap 283,729 bytes per open stream (tracemalloc, client and server in one process:
+  an upper bound).
+- **Gauge** `wasla_events_streams_open` (in-process, like the HTTP gauges).
+- **Docs**: `docs/DEPLOYMENT.md` "The inbox event stream" (location, capacity, restart and
+  drain), `docs/RUNBOOK.md` "The inbox does not update", `docs/OBSERVABILITY.md` (gauge).

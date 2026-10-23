@@ -51,6 +51,17 @@ previous schema intact; do not copy card tokens into logs or manually rewrite
 payment-method rows. See [DEPLOYMENT.md](DEPLOYMENT.md) for role provisioning,
 key rotation, and rollback constraints.
 
+### The inbox does not update
+
+The inbox learns of a new message through its event stream and falls back to polling `GET /conversations?updated_since=` every `poll_after_seconds` (ADR-155). So a page that is slow to update but never wrong is the stream failing; a page that is wrong is not this section.
+
+1. **Is the stream open?** `wasla_events_streams_open` per API process. Zero while people work: the stream route is failing or the proxy is cutting it - check that the proxy has the `/api/v1/events/stream` location (`proxy_buffering off`, `proxy_read_timeout 1h`); a proxy that buffers delivers every hint late, in a burst.
+2. **Why did it close?** `wasla_events_stream_closed_total{reason}` and `grep events.stream_closed`: `token_changed` (logout, password change), `membership_revoked`, `workspace_switched` (the person opened another workspace), `workspace_unavailable` (suspended or deleted) are correct closes; a run of `server_restart` is a deploy. `429 stream_limit` at open means the person has five streams (tabs) or the workspace `RT_STREAMS_PER_WORKSPACE`.
+3. **Are hints being published?** `wasla_events_published_total{type}` should rise with traffic. `wasla_events_publish_failed_total` rising is Redis refusing writes: the business writes committed anyway (a publish never fails one), clients converge by polling and `resync`; fix Redis.
+4. **Is the reader alive?** `grep events.reader_failed` / `events.watch_failed`: the per-workspace reader or the checker could not reach Redis or PostgreSQL and is retrying each second.
+
+Nothing in an event is content - ids and hints only - so no log line or metric of this path names a customer, a message or a ticket.
+
 ### Customers' messages are not arriving
 
 The webhook is the one path that must never be refused. Work backwards:

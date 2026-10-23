@@ -60,6 +60,7 @@ customers.
 | `wasla_events_published_total` | counter | `type` | Realtime hints published to a workspace's Redis stream after their commit (ADR-155): `message.created`, `message.status`, `conversation.updated`, `follow_up.updated`, `campaign.changed`. |
 | `wasla_events_publish_failed_total` | counter | - | Hints that could not be written to Redis. The write that caused them committed anyway; clients converge through `resync` and the incremental reads. |
 | `wasla_events_stream_closed_total` | counter | `reason` | Open event streams the server closed: `token_changed`, `membership_revoked`, `workspace_switched`, `workspace_unavailable`, `server_restart`. |
+| `wasla_events_streams_open` | gauge | - | Event streams open on **this API process** now (in-process, like the HTTP gauges; sum across instances for the deployment). One process carried 200 with p95 delivery 0.27 s (`test_events_capacity.py`). |
 | `wasla_ai_turn_holds_open` | gauge | — | Turns holding a unit of their workspace's allowance right now - generating. |
 | `wasla_ai_turn_holds_past_ttl` | gauge | — | **A state invariant**: holds older than `AI_TURN_HOLD_TTL_SECONDS` the sweep has not released. Should be zero. |
 | `wasla_entitlement_refusals_total` | counter | `key`, `reason` | What the entitlements refused: `channel_connections`/`capacity_exceeded`, `allowed_channel_types`/`type_not_allowed` (the capacity guard, pre-check and authoritative check each counted), `period_ai_turns`/`quota_exhausted`. |

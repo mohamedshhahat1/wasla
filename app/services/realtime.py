@@ -33,7 +33,7 @@ import json
 import secrets
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -43,7 +43,7 @@ from sqlalchemy import select
 
 from app.core.events import CLOSED, RESYNC, stream_key
 from app.core.logging import get_logger
-from app.core.telemetry import record_events_stream_closed
+from app.core.telemetry import EVENT_STREAMS_OPEN, record_events_stream_closed
 from app.db.models.enums import MembershipStatus
 from app.db.models.membership import Membership
 from app.db.models.user import User
@@ -104,6 +104,8 @@ async def redeem_ticket(redis: Redis, ticket: str) -> Ticket | None:
 
 @dataclass(eq=False)  # one subscriber is one stream: identity, so it can live in a set
 class _Subscriber:
+    ticket: Ticket
+    stream_id: str
     queue: asyncio.Queue[tuple[str, str, str] | None] = field(
         default_factory=lambda: asyncio.Queue(maxsize=1000)
     )
@@ -118,12 +120,20 @@ _HUBS: Final[weakref.WeakSet[StreamHub]] = weakref.WeakSet()
 
 
 class StreamHub:
-    """This process's readers - one per workspace with a subscriber - and their queues."""
+    """This process's readers and watchers - one each per workspace with a subscriber.
 
-    def __init__(self, redis: Redis) -> None:
+    The reader fans hints out; the watcher re-checks every subscriber of the
+    workspace once per keep-alive, in one batch (`closing_reasons`): the cost
+    of the RT-05 checks grows with the number of workspaces a process serves,
+    not with the number of open streams.
+    """
+
+    def __init__(self, redis: Redis, database: Database, *, keepalive_seconds: float) -> None:
         self._redis = redis
+        self._database = database
+        self._keepalive_seconds = keepalive_seconds
         self._subscribers: dict[uuid.UUID, set[_Subscriber]] = {}
-        self._readers: dict[uuid.UUID, asyncio.Task[None]] = {}
+        self._tasks: dict[uuid.UUID, tuple[asyncio.Task[None], asyncio.Task[None]]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         _HUBS.add(self)
 
@@ -131,28 +141,37 @@ class StreamHub:
     def open_streams(self) -> int:
         return sum(len(group) for group in self._subscribers.values())
 
-    def subscribe(self, tenant_id: uuid.UUID, *, start: str) -> _Subscriber:
+    def subscribe(
+        self, tenant_id: uuid.UUID, *, start: str, ticket: Ticket, stream_id: str
+    ) -> _Subscriber:
         """Join the workspace's reader; a new reader reads from `start`, never from `$`.
 
         `$` would mean "whatever arrives after my first XREAD", and a hint
         committed between this call and that read would reach nobody.
         """
         self._loop = asyncio.get_running_loop()
-        subscriber = _Subscriber()
+        subscriber = _Subscriber(ticket=ticket, stream_id=stream_id)
         self._subscribers.setdefault(tenant_id, set()).add(subscriber)
-        if tenant_id not in self._readers or self._readers[tenant_id].done():
-            self._readers[tenant_id] = asyncio.create_task(self._read(tenant_id, start))
+        EVENT_STREAMS_OPEN.add(1)
+        running = self._tasks.get(tenant_id)
+        if running is None or any(task.done() for task in running):
+            for task in running or ():
+                task.cancel()
+            self._tasks[tenant_id] = (
+                asyncio.create_task(self._read(tenant_id, start)),
+                asyncio.create_task(self._watch(tenant_id)),
+            )
         return subscriber
 
     def unsubscribe(self, tenant_id: uuid.UUID, subscriber: _Subscriber) -> None:
         group = self._subscribers.get(tenant_id)
-        if group is not None:
+        if group is not None and subscriber in group:
             group.discard(subscriber)
+            EVENT_STREAMS_OPEN.add(-1)
             if not group:
                 self._subscribers.pop(tenant_id, None)
-                reader = self._readers.pop(tenant_id, None)
-                if reader is not None:
-                    reader.cancel()
+                for task in self._tasks.pop(tenant_id, ()):
+                    task.cancel()
 
     async def _read(self, tenant_id: uuid.UUID, start: str) -> None:
         key = stream_key(tenant_id)
@@ -177,18 +196,91 @@ class StreamHub:
                         except asyncio.QueueFull:
                             subscriber.overflowed = True
 
+    async def _watch(self, tenant_id: uuid.UUID) -> None:
+        """Once per keep-alive: count every stream alive, and close those that must (RT-05)."""
+        while self._subscribers.get(tenant_id):
+            await asyncio.sleep(self._keepalive_seconds)
+            group = [sub for sub in self._subscribers.get(tenant_id, ()) if sub.closing is None]
+            if not group:
+                continue
+            try:
+                await realtime_streams.refresh_many(
+                    self._redis,
+                    tenant_id=tenant_id,
+                    streams=[(sub.stream_id, sub.ticket.user_id) for sub in group],
+                    keepalive_seconds=self._keepalive_seconds,
+                )
+                reasons = await closing_reasons(
+                    self._database, self._redis, tenant_id, [sub.ticket for sub in group]
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("events.watch_failed", extra={"event": "events.watch_failed"})
+                continue
+            for subscriber, reason in zip(group, reasons, strict=True):
+                if reason is not None:
+                    _close(subscriber, reason)
+
     def close_all(self, reason: str) -> None:
         """Every open stream of this process says `closed` and ends (graceful shutdown)."""
         for group in list(self._subscribers.values()):
             for subscriber in list(group):
-                subscriber.closing = reason
-                # The queue may be full: make room, the stream is ending anyway.
-                while True:
-                    try:
-                        subscriber.queue.put_nowait(None)
-                        break
-                    except asyncio.QueueFull:
-                        subscriber.queue.get_nowait()
+                _close(subscriber, reason)
+
+
+def _close(subscriber: _Subscriber, reason: str) -> None:
+    """Tell one stream to say `closed` with `reason` and end."""
+    subscriber.closing = reason
+    # The queue may be full: make room, the stream is ending anyway.
+    while True:
+        try:
+            subscriber.queue.put_nowait(None)
+            return
+        except asyncio.QueueFull:
+            subscriber.queue.get_nowait()
+
+
+async def closing_reasons(
+    database: Database, redis: Redis, tenant_id: uuid.UUID, tickets: list[Ticket]
+) -> list[str | None]:
+    """Why each of a workspace's streams must close now, or None - in one batch (RT-05).
+
+    One Redis MGET of the people's active workspaces, one read of their token
+    versions, one of their active memberships, one serving check.
+    """
+    people = sorted({ticket.user_id for ticket in tickets})
+    keys = [f"{_ACTIVE_WORKSPACE}{person}" for person in people]
+    active = dict(zip(people, await redis.mget(keys), strict=True))
+    async with database.session() as session:
+        rows = await session.execute(select(User.id, User.token_version).where(User.id.in_(people)))
+        versions = {user_id: int(version) for user_id, version in rows.tuples()}
+        members = set(
+            (
+                await session.execute(
+                    select(Membership.user_id).where(
+                        Membership.tenant_id == tenant_id,
+                        Membership.user_id.in_(people),
+                        Membership.status == MembershipStatus.ACTIVE,
+                    )
+                )
+            ).scalars()
+        )
+        served = await workspace_is_served(session, tenant_id)
+    reasons: list[str | None] = []
+    for ticket in tickets:
+        switched = active.get(ticket.user_id)
+        if switched is not None and _text(switched) != str(tenant_id):
+            reasons.append("workspace_switched")
+        elif versions.get(ticket.user_id) != ticket.token_version:
+            reasons.append("token_changed")
+        elif ticket.user_id not in members:
+            reasons.append("membership_revoked")
+        elif not served:
+            reasons.append("workspace_unavailable")
+        else:
+            reasons.append(None)
+    return reasons
 
 
 def close_every_stream(reason: str = "server_restart") -> None:
@@ -231,9 +323,6 @@ def may_read(_ticket: Ticket, _data: dict[str, Any]) -> bool:
     return True
 
 
-Clock = Callable[[], Awaitable[None]]
-
-
 @dataclass
 class StreamSession:
     """One open stream: what it was opened as, and how it is checked."""
@@ -247,28 +336,11 @@ class StreamSession:
     last_event_id: str | None = None
 
     async def closing_reason(self) -> str | None:
-        """Why this stream must close now, or None (RT-05)."""
-        active = await self.redis.get(f"{_ACTIVE_WORKSPACE}{self.ticket.user_id}")
-        if active is not None and _text(active) != str(self.ticket.tenant_id):
-            return "workspace_switched"
-        async with self.database.session() as session:
-            version = await session.scalar(
-                select(User.token_version).where(User.id == self.ticket.user_id)
-            )
-            if version is None or int(version) != self.ticket.token_version:
-                return "token_changed"
-            member = await session.scalar(
-                select(Membership.id).where(
-                    Membership.user_id == self.ticket.user_id,
-                    Membership.tenant_id == self.ticket.tenant_id,
-                    Membership.status == MembershipStatus.ACTIVE,
-                )
-            )
-            if member is None:
-                return "membership_revoked"
-            if not await workspace_is_served(session, self.ticket.tenant_id):
-                return "workspace_unavailable"
-        return None
+        """Why this stream must not open, or None (RT-05): the watcher's check, for one."""
+        found = await closing_reasons(
+            self.database, self.redis, self.ticket.tenant_id, [self.ticket]
+        )
+        return found[0]
 
     async def frames(self) -> AsyncIterator[str]:
         """The stream: retry, the catch-up since Last-Event-ID (or resync), then live hints."""
@@ -280,7 +352,9 @@ class StreamSession:
         # The newest hint before subscribing: everything after it reaches this
         # stream, either from the catch-up read below or from the reader.
         floor = self.last_event_id or await self._newest()
-        subscriber = self.hub.subscribe(self.ticket.tenant_id, start=floor)
+        subscriber = self.hub.subscribe(
+            self.ticket.tenant_id, start=floor, ticket=self.ticket, stream_id=self.stream_id
+        )
         loop = asyncio.get_running_loop()
         try:
             yield f"retry: {RETRY_MILLISECONDS}\n\n"
@@ -297,21 +371,10 @@ class StreamSession:
                 except TimeoutError:
                     item, idle = None, True
                 if loop.time() >= check_at:
-                    # On a schedule, not only when idle: a busy workspace's
-                    # streams are re-checked as often as a quiet one's (RT-05).
+                    # On a schedule, not only when idle. The checks themselves
+                    # are the hub's watcher, for every stream of the workspace.
                     check_at = loop.time() + self.keepalive_seconds
                     yield ": keep-alive\n\n"
-                    await realtime_streams.refresh(
-                        self.redis,
-                        stream_id=self.stream_id,
-                        user_id=self.ticket.user_id,
-                        tenant_id=self.ticket.tenant_id,
-                        keepalive_seconds=self.keepalive_seconds,
-                    )
-                    reason = await self.closing_reason()
-                    if reason is not None:
-                        yield await self._closed(reason)
-                        return
                 if idle:
                     continue
                 if item is None:

@@ -60,21 +60,24 @@ async def register(
     return True
 
 
-async def refresh(
+async def refresh_many(
     redis: Redis,
     *,
-    stream_id: str,
-    user_id: uuid.UUID,
     tenant_id: uuid.UUID,
+    streams: list[tuple[str, uuid.UUID]],
     keepalive_seconds: float,
 ) -> None:
-    user_key, workspace_key = _keys(user_id, tenant_id)
+    """Count a workspace's open streams alive, in one round trip: (stream id, person)."""
     now = time.time()
-    await redis.zadd(user_key, {stream_id: now})
-    await redis.zadd(workspace_key, {stream_id: now})
     ttl = int(_MISSED * keepalive_seconds) + 60
-    await redis.expire(user_key, ttl)
-    await redis.expire(workspace_key, ttl)
+    workspace_key = f"{_WORKSPACE}{tenant_id}"
+    async with redis.pipeline(transaction=False) as pipe:
+        pipe.zadd(workspace_key, {stream_id: now for stream_id, _ in streams})
+        pipe.expire(workspace_key, ttl)
+        for stream_id, user_id in streams:
+            pipe.zadd(f"{_USER}{user_id}", {stream_id: now})
+            pipe.expire(f"{_USER}{user_id}", ttl)
+        await pipe.execute()
 
 
 async def unregister(
@@ -85,4 +88,4 @@ async def unregister(
     await redis.zrem(workspace_key, stream_id)
 
 
-__all__ = ["open_streams", "refresh", "register", "unregister"]
+__all__ = ["open_streams", "refresh_many", "register", "unregister"]

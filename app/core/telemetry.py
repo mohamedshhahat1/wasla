@@ -122,6 +122,11 @@ HTTP_IN_FLIGHT = REGISTRY.gauge(
     "Requests currently being handled by this process.",
 )
 
+EVENT_STREAMS_OPEN = REGISTRY.gauge(
+    "wasla_events_streams_open",
+    "Inbox event streams currently open on this process (ADR-155).",
+)
+
 DEPENDENCY_UP = REGISTRY.gauge(
     "wasla_dependency_up",
     "Whether a readiness dependency answered its last probe (1) or did not (0).",
@@ -1930,6 +1935,7 @@ __all__ = [
     "COUNTER_PREFIX",
     "DEPENDENCY_FAILURES",
     "DEPENDENCY_UP",
+    "EVENT_STREAMS_OPEN",
     "HISTOGRAM_PREFIX",
     "HTTP_IN_FLIGHT",
     "HTTP_LATENCY",

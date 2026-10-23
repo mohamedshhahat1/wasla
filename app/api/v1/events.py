@@ -36,11 +36,15 @@ router = APIRouter(route_class=CommittingRoute, prefix="/events", tags=["Events"
 STREAM_LIMIT_CODE = "stream_limit"
 
 
-def hub_of(request: Request) -> StreamHub:
+def hub_of(request: Request, settings: SettingsDep) -> StreamHub:
     """This process's hub, made on first use."""
     hub = getattr(request.app.state, "event_hub", None)
     if hub is None:
-        hub = StreamHub(request.app.state.redis.client)
+        hub = StreamHub(
+            request.app.state.redis.client,
+            request.app.state.database,
+            keepalive_seconds=settings.rt_keepalive_seconds,
+        )
         request.app.state.event_hub = hub
     return hub
 
@@ -107,7 +111,7 @@ async def open_stream(
         stream_id=new_stream_id(),
         database=request.app.state.database,
         redis=redis.client,
-        hub=hub_of(request),
+        hub=hub_of(request, settings),
         keepalive_seconds=settings.rt_keepalive_seconds,
         last_event_id=valid_event_id(last_event_id or last_event_id_query),
     )

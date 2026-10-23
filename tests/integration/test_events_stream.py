@@ -77,6 +77,13 @@ class Live:
 
 @pytest_asyncio.fixture
 async def live(prepared_database: str) -> AsyncIterator[Live]:
+    async with running(prepared_database) as state:
+        yield state
+
+
+@asynccontextmanager
+async def running(prepared_database: str, **overrides: Any) -> AsyncIterator[Live]:
+    """Two workspaces and a real server on a free port; `overrides` adjust its settings."""
     url = os.environ.get("WASLA_TEST_REDIS_URL")
     if not url:
         pytest.skip("No test Redis: set WASLA_TEST_REDIS_URL.")
@@ -94,6 +101,7 @@ async def live(prepared_database: str) -> AsyncIterator[Live]:
         meta_access_token=PLATFORM_TOKEN,
         request_timeout_seconds=2.0,
         rt_keepalive_seconds=KEEPALIVE,
+        **overrides,
     )
     mine = await build(database, prepared_database, meta, steps=[5], recipients=2, enabled=False)
     theirs = await build(database, prepared_database, meta, steps=[5], recipients=1, enabled=False)
