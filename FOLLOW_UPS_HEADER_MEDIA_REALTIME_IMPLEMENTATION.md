@@ -13,7 +13,7 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 0 | Baseline, facts, infrastructure | committed (with 1-2) | see 1-2 | follow-up ×4 suites green at base |
 | 1 | RT-08 (CPM-06), TZ-05, TZ-06, TZ-07, TZ-09 | committed | (this commit) | timezone, quiet hours (pg + Cairo pg3), campaign API, invariants, docs truth, workspaces, unit |
 | 2 | TZ-08 local-time resolution | committed | (this commit) | as above |
-| 3 | FLIM-01..03, FQH-01..04 | not started | | |
+| 3 | FLIM-01..03, FQH-01..04 | committed | (this commit) | new file 10/10; send-path sweep (campaign*, follow_up*, crm*, agent*, tool*, messaging*, manual*, ai_*, timezone); migration-built parity/downgrade; alembic head->0120->head |
 | 4 | FUS-01 settings | not started | | |
 | 5 | FUS-02/03/05/06 runs, stop rules, window | not started | | |
 | 6 | FUS-04/07 AI-written step, charging | not started | | |
@@ -102,3 +102,53 @@ time with the pinned tzdata: the October fold is `ambiguous` with both instants 
 first (fold 0); the April gap is `nonexistent` with `at_local` the first instant after it; an offset,
 seconds or any other shape is `422 local_time_invalid`. `docs/API.md` (238 operations),
 `docs/AUTHORIZATION.md`.
+
+## Phase 3 — FLIM-01..03, FQH-01..04
+
+Facts verified first: `LEDGER_ENFORCEMENT` held only CAMPAIGN and CAMPAIGN_TEST
+(messaging_service.py:178-188), so FOLLOW_UP and HUMAN were RECORD_ONLY by omission;
+`dispatch` caught no `PortfolioLimitReachedError` (follow_up_service.py:885-916);
+`_defer` overwrote `scheduled_at`; nothing in the follow-up path read quiet hours.
+
+- **FLIM-01/02.** New `Enforcement.DEFER_AT_LIMIT`: the whole limit, but not
+  fail-closed - with the limit unknown the send proceeds and the row records
+  `limit_at_send` null. `LEDGER_ENFORCEMENT[FOLLOW_UP] = LEDGER_ENFORCEMENT[HUMAN] =
+  DEFER_AT_LIMIT`. `FollowUpService.dispatch` catches `PortfolioLimitReachedError` and
+  defers to `resumes_at` (`deferred_reason = portfolio_limit`, no attempt).
+  `MessagingService.send_manual_template` turns it into `409 portfolio_limit_reached`
+  with `available_at` / `available_at_local`, and answers a send made with the limit
+  unknown with `notices: ["messaging_limit_unknown"]` (`TemplateSentRead`, additive).
+- **FLIM-03.** Unchanged code path - the ledger is reserved only for
+  `kind is TEMPLATE` on WhatsApp - now asserted: a free-form follow-up at 100 % is sent
+  and writes no ledger row. The ledger docstring, the `PortfolioLimitReached` alert,
+  `docs/CAMPAIGNS.md` and ADR-146 section 4 now state the decision.
+- **FQH-01/02.** A template follow-up to a closed window is bound by the workspace's
+  quiet hours, with the campaigns' minute of lead (`closed_to_sends`, deferred to
+  `reopens_after`; the prompt says `ends_after` - identical inside the window, and the
+  lead keeps a send decided at 21:59:59 out of it). A free-form follow-up is not bound.
+- **FQH-03.** `release_follow_up_quiet_waits` (follow-ups only; the campaign function
+  is untouched) runs in the quiet-hours PUT and in a zone change.
+- **FQH-04.** 0121: `requested_at` (set at scheduling and at a reschedule - a new
+  intention - never by a wait or a retry), `deferred_reason`, and `deferrals`
+  (every wait in order, at most 20). An ORM default fills `requested_at` from
+  `scheduled_at` for inserts that do not name it, so existing tests and Core inserts
+  are unchanged.
+- The follow-up read gains `requested_at`, `deferred_reason`, `due_at_local`,
+  `requested_at_local` (TZ-05).
+
+Tests (`test_follow_up_limit_and_quiet_hours.py`, 10): the 251st person's template
+follow-up waits, spends nothing and is sent when the window frees; unknown limit sent
+and recorded null; free-form at 100 % sent with no ledger row; manual template 409 with
+when (HTTP and service, nothing staged); unknown-limit notice; a template follow-up
+waits out quiet hours while a free-form one is sent; switching quiet hours off and a
+new zone both release it; night then limit recorded in order. The file is marked
+`quiet_hours` (the conftest switch that otherwise keeps every window shut); its windows
+are built around the real now with hours of margin.
+
+Send-path sweep after Phase 3 (70 suites: every `test_campaign*`, `test_follow_up*`, `test_crm*`,
+`test_agent*`, `test_tool*`, `test_messaging*`, `test_manual*`, `test_ai_*`, the timezone and
+invariant files): first run 15 failures, all `[s3]` cases of `test_campaign_header_media_api.py`
+answering 503 `dependency_unavailable` - an **infrastructure** failure: the `wasla-media` bucket had
+been made with `mkdir` in MinIO's data directory, which MinIO does not register as a bucket. Fixed
+with `mc mb`; every swept suite that uses the object store re-run green. No test expectation of
+an earlier stage changed in Phase 3.

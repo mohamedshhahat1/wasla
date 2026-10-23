@@ -437,6 +437,8 @@ Four behaviours worth knowing before integrating:
 - **Free text is only accepted inside the 24-hour service window.** Outside it, Meta accepts approved templates only, so the free-text route answers `422` and the template route still works. Every conversation read includes `service_window_open`, so a client can disable its composer instead of discovering the rule by failing a send.
 - **A rejected send answers `201`, with the message in `failed` state.** The message row is written before Meta is called, and a rejection is recorded on that row. Raising instead would roll the request back and destroy the only evidence the attempt was made. A missing platform credential does raise `503`, because nothing was attempted. Callers should read `status` rather than relying on the response code.
 
+- **A person's template stops at Meta's whole limit** (FLIM-02). At 100 % of the portfolio's messaging limit the template route answers `409 portfolio_limit_reached` with `details: {available_at, available_at_local}`; nothing is sent or recorded. While nobody has read the limit it is sent and the `201` carries `notices: ["messaging_limit_unknown"]` (`notices` is empty otherwise).
+
 - **A template message has no `body`.** It carries `template_name` and `template_language` instead, and `kind` is `template`. Meta renders the wording from its own approved copy, so Wasla has no text to return; a client should render the template it identifies rather than expecting the words the customer saw. Both fields are null on every other kind.
 
 - **Priority is raised automatically and lowered only by a person.** Every customer message is classified before an agent answers it; a negative or angry reading raises `priority` and may hand the conversation to a human. Nothing lowers it again, because a conversation quietly demoted out of somebody's queue is one nobody looks at. `POST .../priority` is the way back. The read model carries `sentiment`, `sentiment_score`, `intent` and `intent_confidence` so a client can show why a conversation is flagged. See [SENTIMENT.md](SENTIMENT.md).
@@ -553,6 +555,7 @@ Four behaviours worth knowing:
 - **Supply a `body`, a template, or both.** A template needs both `template_name` and `template_language`; half a template answers `422`.
 - **Scheduling a second follow-up on one conversation replaces the first.** It answers `201` either way, and there is no route that edits one in place.
 - **Cancelling one already sent or cancelled succeeds and changes nothing.** Losing that race is not the caller's mistake.
+- **A follow-up may wait without failing** (FLIM-01, FQH-01). `requested_at` is the time asked for and never moves; `scheduled_at` is when it is due now; `deferred_reason` says why they differ: `portfolio_limit` (a template follow-up at 100 % of Meta's limit) or `quiet_hours` (a template follow-up - the customer's window closed - inside the workspace's quiet hours). No attempt is spent. `due_at_local` and `requested_at_local` are the two times in the workspace's zone. A free-form follow-up inside the customer's window is sent at its time, day or night.
 
 There is no endpoint that sends a follow-up now. Sending is the worker's job, and "send this immediately" is just a message — use `POST /conversations/{id}/messages`.
 

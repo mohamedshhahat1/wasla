@@ -261,6 +261,7 @@ class FollowUpRepository(TenantScopedRepository[FollowUp]):
                 conversation_id=conversation_id,
                 lead_id=lead_id,
                 scheduled_at=scheduled_at,
+                requested_at=scheduled_at,
                 status=FollowUpStatus.PENDING,
                 body=body,
                 template_name=template_name,

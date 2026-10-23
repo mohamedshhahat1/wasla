@@ -43,6 +43,7 @@ from app.schemas.conversation import (
     PriorityUpdateRequest,
     SendTemplateRequest,
     SendTextRequest,
+    TemplateSentRead,
 )
 from app.schemas.text import StorableText
 from app.services.inbox_service import InboxService
@@ -207,8 +208,16 @@ async def send_text(
 
 @router.post(
     "/{conversation_id}/messages/template",
-    response_model=MessageRead,
+    response_model=TemplateSentRead,
     status_code=status.HTTP_201_CREATED,
+    responses={
+        409: {
+            "description": (
+                "portfolio_limit_reached: Meta's messaging limit is used at 100 %; "
+                "details {available_at, available_at_local}."
+            )
+        }
+    },
 )
 async def send_template(
     conversation_id: uuid.UUID,
@@ -216,28 +225,29 @@ async def send_template(
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
     idempotency_key: IdempotencyKeyHeader = None,
-) -> MessageRead:
+) -> TemplateSentRead:
     """Send an approved template, which is valid outside the service window.
 
     Refused with 422 when the local registry records the template as paused,
     rejected or disabled. A template the registry has never heard of is allowed
     through, because a workspace that has not synced cannot be told apart from
-    one whose template does not exist.
+    one whose template does not exist. Refused with 409 at 100 % of Meta's
+    messaging limit, with when it can go (FLIM-02); sent while the limit is
+    unknown, with the notice `messaging_limit_unknown`.
 
     Send `Idempotency-Key` to make a retry safe.
     """
-    message = await messaging.send_template(
+    message, notices = await messaging.send_manual_template(
         conversation_id=conversation_id,
         name=payload.name,
         language=payload.language,
         components=payload.components,
         sent_by_id=workspace.user.id,
         idempotency_key=idempotency_key,
-        origin=MessageOrigin.HUMAN,
         # A marketing template is admin-only and opt-out-checked (CMQ-02).
         sender_role=workspace.role,
     )
-    return MessageRead.from_model(message)
+    return TemplateSentRead(**MessageRead.from_model(message).model_dump(), notices=notices)
 
 
 @router.post(

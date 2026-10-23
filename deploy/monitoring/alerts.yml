@@ -1602,8 +1602,10 @@ groups:
       - alert: PortfolioLimitReached
         # A business portfolio's last 24 hours reached Meta's whole messaging
         # limit, every source counted (LIM-04, LIM-07). Campaigns stop at 80 %
-        # by themselves; what fills the rest is follow-ups and manual templates,
-        # which are recorded and not refused - an open product decision.
+        # by themselves; what fills the rest is template follow-ups and manual
+        # templates, which stop at 100 % (FLIM-01, FLIM-02, ADR-152): a
+        # follow-up waits for the window to free up, a person's template is
+        # refused 409 with when. While the limit is unknown both are sent.
         expr: max(wasla_portfolio_limit_utilisation{bucket=">=100"}) > 0
         for: 5m
         labels:
@@ -1614,8 +1616,10 @@ groups:
           description: >-
             A business portfolio has messaged as many people outside their
             service window in the last 24 hours as Meta's messaging limit
-            allows. Campaigns are already waiting (daily_limit); follow-ups
-            and manual templates past this point are Meta's to refuse. Read
+            allows. Campaigns are already waiting (daily_limit); template
+            follow-ups wait (deferred_reason portfolio_limit) and a person's
+            template is refused 409 portfolio_limit_reached with when it can
+            go. Free-form replies inside a customer's window are unaffected. Read
             GET /api/v1/whatsapp/accounts/{id}/messaging-limit for the
             workspaces on it (docs/RUNBOOK.md, "Campaigns are not sending").
           runbook: docs/RUNBOOK.md

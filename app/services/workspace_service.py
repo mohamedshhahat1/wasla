@@ -78,7 +78,7 @@ from app.repositories.tenant_repository import normalise_slug
 from app.services.audit_service import AuditTrail
 from app.services.campaign_service import CampaignService
 from app.services.campaign_settings_service import release_quiet_waits
-from app.services.follow_up_service import FollowUpService
+from app.services.follow_up_service import FollowUpService, release_follow_up_quiet_waits
 from app.services.subscription_service import (
     SubscriptionService,
     bootstrap_default_subscription,
@@ -390,8 +390,10 @@ class WorkspaceService:
 
         if "timezone" in changed:
             # Quiet hours move with the zone; a campaign waiting for the old
-            # window's end asks the new one at its next batch (TZ-01, TZ-03).
+            # window's end asks the new one at its next batch (TZ-01, TZ-03),
+            # and so does a template follow-up (FQH-03).
             await release_quiet_waits(self._session, tenant.id)
+            await release_follow_up_quiet_waits(self._session, tenant.id)
 
         if changed:
             # The address and the time zone leave a trail. Auditing a rename

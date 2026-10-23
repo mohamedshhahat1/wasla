@@ -7180,7 +7180,8 @@ a send past the limit, so Wasla cannot rely on Meta refusing.
    x limit)` distinct people, every source counted. Refused, the campaign waits
    `daily_limit` until the first counted person leaves the window (+5 minutes)
    and carries on by itself, day after day. Follow-ups and manual templates are
-   recorded and not refused (an open product decision at 100 %).
+   held to the whole limit: decided by ADR-152 (FLIM-01, FLIM-02) - a template
+   follow-up waits at 100 %, a person's template is refused 409 with when.
 5. **The plan** (LIM-05): one pure function replays the worker's rules and
    gives the days, the completion and the notices, for the schedule response,
    `GET /campaigns/{id}/delivery-plan` and the ETA.

@@ -163,7 +163,7 @@ A colleague's own follow-up (`created_by_kind = user`) is a person's reminder, n
 
 The sweep claims a due row by stamping it with a `claim_token` and `claimed_until`; `scheduled_at` is only ever what somebody asked for. A worker may send only while the row still carries its exact token. Rescheduling or cancelling a claimed row clears the token, so a worker holding it sends nothing and the new time and text are what go out. Once the send intent has committed the customer may have the message, so a reschedule or cancel answers **409 `dispatch_in_progress`** and the row ends `SENT` (or `FAILED`) — never `CANCELLED` naming a sent message.
 
-`scheduled_at` must carry a UTC offset (`Z`, `+02:00`, …); a naive time is **422** (PD-CRM-9). It is stored normalised to UTC. The workspace has a time zone (`tenants.timezone`), but the API does not guess an offset for a wall time; `GET /api/v1/workspace/local-time` resolves one (TZ-08).
+`scheduled_at` must carry a UTC offset (`Z`, `+02:00`, …); a naive time is **422** (PD-CRM-9). It is stored normalised to UTC, and kept as `requested_at`: a wait for Meta's limit (`deferred_reason: portfolio_limit`, FLIM-01) or for the workspace's quiet hours (`quiet_hours`, a template follow-up only - FQH-01) moves `scheduled_at` and never `requested_at`, and spends no attempt; editing the quiet hours or the zone re-evaluates a waiting follow-up at the next sweep (FQH-03). The workspace has a time zone (`tenants.timezone`), but the API does not guess an offset for a wall time; `GET /api/v1/workspace/local-time` resolves one (TZ-08).
 
 ### Window and template compliance
 

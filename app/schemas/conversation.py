@@ -203,6 +203,16 @@ class MessageRead(BaseModel):
         )
 
 
+class TemplateSentRead(MessageRead):
+    """A person's template, and what its answer needs to say about it (FLIM-02).
+
+    `notices` holds `messaging_limit_unknown` when it was sent while nobody had
+    read the number's WhatsApp messaging limit; empty otherwise.
+    """
+
+    notices: list[str] = Field(default_factory=list)
+
+
 class ParticipantRead(BaseModel):
     """Who a conversation is with, as its channel addresses them - never the value itself.
 

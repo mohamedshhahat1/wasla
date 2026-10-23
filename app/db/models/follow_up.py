@@ -20,6 +20,7 @@ from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -76,6 +77,29 @@ TERMINAL_FOLLOW_UP_STATUSES: Final[frozenset[FollowUpStatus]] = frozenset(
 )
 
 FOLLOW_UP_STATUS_TYPE = _enum_type(FollowUpStatus, name="follow_up_status")
+
+
+class FollowUpDeferReason(StrEnum):
+    """Why a due follow-up waits instead of being sent (FLIM-01, FQH-01).
+
+    Neither is a failure: no attempt is spent and `requested_at` keeps the time
+    that was asked for (FQH-04).
+    """
+
+    #: Meta's portfolio limit is used for now; it waits for `resumes_at`.
+    PORTFOLIO_LIMIT = "portfolio_limit"
+    #: A template follow-up - the business writing first again - inside the
+    #: workspace's quiet hours; it waits for the morning.
+    QUIET_HOURS = "quiet_hours"
+
+
+#: How many waits a follow-up's `deferrals` keeps, oldest dropped first.
+MAX_DEFERRALS: Final = 20
+
+
+def _requested_default(context: Any) -> Any:
+    """A row inserted without `requested_at` was asked for at its `scheduled_at`."""
+    return context.get_current_parameters()["scheduled_at"]
 
 
 class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
@@ -140,6 +164,10 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             name="fk_follow_ups_tenant_lead",
             ondelete="SET NULL (lead_id)",
         ),
+        CheckConstraint(
+            "deferred_reason IS NULL OR deferred_reason IN ('portfolio_limit', 'quiet_hours')",
+            name="deferred_reason_known",
+        ),
     )
 
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -152,6 +180,16 @@ class FollowUp(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     lead_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The time a person or the AI asked for (FQH-04). Set when the follow-up is
+    # scheduled - or rescheduled, which is a new intention - and never moved
+    # by a wait or a retry, which move `scheduled_at` only.
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_requested_default
+    )
+    # Why it waits now (`FollowUpDeferReason`), or null; and every wait in
+    # order, `[{reason, until, at}]`, at most `MAX_DEFERRALS`.
+    deferred_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    deferrals: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[FollowUpStatus] = mapped_column(
         FOLLOW_UP_STATUS_TYPE,
         nullable=False,

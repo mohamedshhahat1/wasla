@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,11 +93,14 @@ from app.db.models.conversation import (
 from app.db.models.follow_up import (
     MAX_ATTEMPTS,
     MAX_BODY_LENGTH,
+    MAX_DEFERRALS,
     MAX_REASON_LENGTH,
     FollowUp,
+    FollowUpDeferReason,
     FollowUpStatus,
 )
 from app.db.models.lead import ActorKind
+from app.db.models.tenant import Tenant
 from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
@@ -107,11 +111,13 @@ from app.repositories.lead_repository import LeadRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services import workspace_serving as serving
+from app.services.business_initiated_ledger import PortfolioLimitReachedError
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
     EntitlementService,
 )
 from app.services.messaging_service import MessagingService
+from app.services.quiet_hours import QuietHours
 from app.services.template_service import refusal_reason_for
 
 logger = get_logger(__name__)
@@ -376,6 +382,11 @@ class FollowUpService:
             )
         _release_claim(follow_up)
         follow_up.scheduled_at = intention.scheduled_at
+        # A new intention: the time asked for is this one, and no wait of the
+        # old one carries over (FQH-04).
+        follow_up.requested_at = intention.scheduled_at
+        follow_up.deferred_reason = None
+        follow_up.deferrals = None
         follow_up.body = intention.body
         follow_up.template_name = intention.template_name
         follow_up.template_language = intention.template_language
@@ -866,6 +877,21 @@ class FollowUpService:
             )
             if refusal is not None:
                 return self._skip(follow_up, refusal)
+            now = datetime.now(UTC)
+            if not channel_policy.standard_window_open(conversation, now=now):
+                # The business writing first again, to somebody whose window
+                # closed: the workspace's quiet hours bind it as they bind a
+                # campaign (FQH-01), with the same minute of lead so a send
+                # decided at 21:59:59 does not reach Meta inside the window. A
+                # wait, not a failure: no attempt is spent (FQH-04).
+                quiet = await self._quiet_hours()
+                if quiet.closed_to_sends(now):
+                    return self._defer(
+                        follow_up,
+                        quiet.reopens_after(now),
+                        detail="Quiet hours.",
+                        reason=FollowUpDeferReason.QUIET_HOURS,
+                    )
             # Valid in or out of the window. Preferred outside it because it is
             # the only thing Meta will accept there.
             send = messaging.send_template(
@@ -884,6 +910,22 @@ class FollowUpService:
 
         try:
             message = await send
+        except PortfolioLimitReachedError as error:
+            # Meta's portfolio limit is used at 100 % (FLIM-01): refused under
+            # the portfolio's lock before anything was staged, so this nudge
+            # waits for the moment somebody leaves the moving 24 hours. No
+            # attempt is spent and the time asked for is kept.
+            resumes_at = error.resumes_at
+            return await self._settle(
+                follow_up,
+                claim,
+                lambda row: self._defer(
+                    row,
+                    resumes_at,
+                    detail="Meta's messaging limit is reached for now.",
+                    reason=FollowUpDeferReason.PORTFOLIO_LIMIT,
+                ),
+            )
         except ProviderConnectionRefusedError:
             # Let out rather than recorded against this nudge. The number's
             # credential - or the connection itself (OMNI-035) - is refused, so
@@ -985,6 +1027,20 @@ class FollowUpService:
             },
         )
         return DispatchOutcome(follow_up, FollowUpStatus.SENT)
+
+    async def _quiet_hours(self) -> QuietHours:
+        """The workspace's quiet hours as its row holds them now, in its zone."""
+        row = (
+            await self._session.execute(
+                select(
+                    Tenant.campaign_quiet_hours_enabled,
+                    Tenant.campaign_quiet_hours_start,
+                    Tenant.campaign_quiet_hours_end,
+                    Tenant.timezone,
+                ).where(Tenant.id == self._tenant_id)
+            )
+        ).one()
+        return QuietHours(enabled=row[0], start=row[1], end=row[2], timezone=row[3])
 
     async def _workspace_is_served(self) -> bool:
         """Whether this workspace is still one Wasla sends for.
@@ -1110,22 +1166,65 @@ class FollowUpService:
         until: datetime,
         *,
         detail: str = "The number's sending allowance is spent.",
+        reason: FollowUpDeferReason | None = None,
     ) -> DispatchOutcome:
-        """Wait for the allowance (ADR-123) or a paused channel, spending no attempt.
+        """Wait for the allowance (ADR-123), a paused channel, Meta's limit or the morning.
 
-        Nothing reached the customer - the allowance and the pause refuse before
-        a message exists, and a provider throttle is recorded undelivered - so
-        this nudge is exactly as it was, only later, and any message an attempt
-        staged is unlinked as the finished undelivered send it is.
+        Nothing reached the customer - the allowance, the pause and the limit
+        refuse before a message exists, and a provider throttle is recorded
+        undelivered - so this nudge is exactly as it was, only later, and any
+        message an attempt staged is unlinked as the finished undelivered send
+        it is. No attempt is spent, and `requested_at` is never touched: only
+        `scheduled_at` moves (FQH-04). A wait with a reason the API shows
+        (`portfolio_limit`, `quiet_hours`) is recorded, in order.
         """
         _release_claim(follow_up)
         follow_up.message_id = None
         follow_up.scheduled_at = until
+        if reason is not None:
+            follow_up.deferred_reason = reason.value
+            history = list(follow_up.deferrals or [])
+            history.append(
+                {
+                    "reason": reason.value,
+                    "until": until.isoformat(),
+                    "at": datetime.now(UTC).isoformat(),
+                }
+            )
+            follow_up.deferrals = history[-MAX_DEFERRALS:]
         logger.info(
             "follow_up.deferred",
             extra={"follow_up_id": str(follow_up.id), "detail": detail},
         )
         return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
+
+
+async def release_follow_up_quiet_waits(
+    session: AsyncSession, tenant_id: uuid.UUID, *, now: datetime | None = None
+) -> int:
+    """Make every follow-up of this workspace waiting for quiet hours due now (FQH-03).
+
+    Called when the window is edited or switched off and when the workspace's
+    zone changes, in that transaction. The next sweep asks the window again -
+    it waits to the new end, or sends - so nothing here decides whether it is
+    night. A claimed row is left to its worker. The campaign equivalent is
+    `release_quiet_waits`, which touches campaigns only.
+    """
+    moment = now or datetime.now(UTC)
+    result = await session.execute(
+        update(FollowUp)
+        .where(
+            FollowUp.tenant_id == tenant_id,
+            FollowUp.status == FollowUpStatus.PENDING,
+            FollowUp.deferred_reason == FollowUpDeferReason.QUIET_HOURS.value,
+            FollowUp.claim_token.is_(None),
+            FollowUp.message_id.is_(None),
+            FollowUp.scheduled_at > moment,
+        )
+        .values(scheduled_at=moment)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
 def _release_claim(follow_up: FollowUp) -> None:
@@ -1182,4 +1281,5 @@ __all__ = [
     "MIN_DELAY",
     "DispatchOutcome",
     "FollowUpService",
+    "release_follow_up_quiet_waits",
 ]

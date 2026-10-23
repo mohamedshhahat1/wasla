@@ -2100,6 +2100,19 @@ built in autocommit blocks. **The downgrade refuses** (nothing changed) while
 any header file exists, any campaign names one or Meta's id for one, any
 campaign stopped for a header reason, or any audit entry records an upload.
 
+### Follow-ups, header media and realtime (0121-0125)
+
+Additive migrations of FOLLOW_UPS_HEADER_MEDIA_REALTIME_IMPLEMENTATION.md
+(ADR-151..ADR-156), written like 0108-0120. The table grows with each phase:
+
+| Revision | Adds |
+| --- | --- |
+| 0121 | `follow_ups.requested_at` (backfilled from `scheduled_at` in batches of 5,000, NOT NULL through a validated CHECK), `deferred_reason` (`portfolio_limit`, `quiet_hours`), `deferrals` |
+
+Every downgrade refuses (nothing changed) while its new columns or rows hold
+data, and leaves the stamp; 0121 refuses while any follow-up waited
+(`deferred_reason` / `deferrals`) or is due later than the time asked for.
+
 ### Campaign page features (0108-0120)
 
 Thirteen additive migrations (CAMPAIGNS_PAGE_FEATURES_IMPLEMENTATION.md,

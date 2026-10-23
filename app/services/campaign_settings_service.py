@@ -28,6 +28,7 @@ from app.db.models.enums import TenantRole
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.services.audit_service import AuditTrail
+from app.services.follow_up_service import release_follow_up_quiet_waits
 
 logger = get_logger(__name__)
 
@@ -128,12 +129,16 @@ class CampaignSettingsService:
             },
         )
         released = await release_quiet_waits(self._session, tenant.id)
+        # Template follow-ups waiting for the night ask the new window at the
+        # next sweep too (FQH-03).
+        released_follow_ups = await release_follow_up_quiet_waits(self._session, tenant.id)
         logger.info(
             "workspace.campaign_settings_updated",
             extra={
                 "event": "workspace.campaign_settings_updated",
                 "tenant_id": str(tenant.id),
                 "released_waits": released,
+                "released_follow_ups": released_follow_ups,
             },
         )
         return after

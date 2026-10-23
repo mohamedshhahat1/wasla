@@ -21,10 +21,12 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.timezones import local
 from app.db.models.follow_up import (
     MAX_BODY_LENGTH,
     MAX_REASON_LENGTH,
     FollowUp,
+    FollowUpDeferReason,
     FollowUpStatus,
 )
 from app.db.models.lead import ActorKind
@@ -115,9 +117,31 @@ class FollowUpRead(BaseModel):
     message_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    # The time asked for, never moved by a wait (FQH-04); `scheduled_at` is
+    # when it is due now. `deferred_reason` says why the two differ:
+    # `portfolio_limit` (Meta's limit at 100 %, FLIM-01) or `quiet_hours` (a
+    # template follow-up waiting for the morning, FQH-01); null otherwise.
+    requested_at: datetime | None = None
+    deferred_reason: FollowUpDeferReason | None = None
+    # Both in the workspace's own zone, with its offset (TZ-05).
+    due_at_local: datetime | None = None
+    requested_at_local: datetime | None = None
 
     @classmethod
-    def from_model(cls, follow_up: FollowUp) -> Self:
+    def from_model(cls, follow_up: FollowUp, *, timezone: str | None = None) -> Self:
+        read = cls._read(follow_up)
+        read.requested_at = follow_up.requested_at
+        read.deferred_reason = (
+            FollowUpDeferReason(follow_up.deferred_reason) if follow_up.deferred_reason else None
+        )
+        if timezone is not None:
+            read.due_at_local = local(follow_up.scheduled_at, timezone)
+            if follow_up.requested_at is not None:
+                read.requested_at_local = local(follow_up.requested_at, timezone)
+        return read
+
+    @classmethod
+    def _read(cls, follow_up: FollowUp) -> Self:
         return cls(
             id=follow_up.id,
             conversation_id=follow_up.conversation_id,

@@ -41,6 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.adapter import (
@@ -94,6 +95,7 @@ from app.core.media_types import SNIFF_BYTES, MediaClass
 from app.core.media_types import resolve as resolve_media_type
 from app.core.storage import EXTENSIONS, MediaStorage, build_key, write_object
 from app.core.telemetry import record_opt_outs
+from app.core.timezones import local as local_time
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.billing import LimitKey
 from app.db.models.business_initiated import LedgerSource
@@ -109,6 +111,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.enums import TenantRole
 from app.db.models.media import MediaStatus, MediaStorageState
+from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.db.models.whatsapp_template import TemplateCategory
 from app.db.session import released
@@ -128,7 +131,12 @@ from app.repositories.media_repository import MediaRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services import contact_cap
 from app.services.audit_service import AuditTrail
-from app.services.business_initiated_ledger import BusinessInitiatedLedger, Enforcement
+from app.services.business_initiated_ledger import (
+    PORTFOLIO_LIMIT_REACHED_CODE,
+    BusinessInitiatedLedger,
+    Enforcement,
+    PortfolioLimitReachedError,
+)
 from app.services.credential_service import CredentialService
 from app.services.entitlement_service import EntitlementService
 from app.services.media_service import content_hash as media_content_hash
@@ -173,8 +181,14 @@ class TemplateRefusedError(ValidationError):
     error_code = "template_refused"
 
 
+#: The notice a person's template carries when it was sent while nobody had
+#: read the number's messaging limit (FLIM-02).
+MESSAGING_LIMIT_UNKNOWN_NOTICE: Final = "messaging_limit_unknown"
+
 # Which ledger source each sender is (LIM-03), and whose budget it is held to
-# (LIM-04): campaigns to their share, everybody else recorded only.
+# (LIM-04): campaigns to their share, a test to the whole limit, a template
+# follow-up and a person's template to the whole limit but never to an unknown
+# one (FLIM-01, FLIM-02); everybody else recorded only.
 LEDGER_SOURCES: Final[dict[MessageOrigin, LedgerSource]] = {
     MessageOrigin.CAMPAIGN: LedgerSource.CAMPAIGN,
     MessageOrigin.HUMAN: LedgerSource.MANUAL_TEMPLATE,
@@ -185,6 +199,8 @@ LEDGER_ENFORCEMENT: Final[dict[MessageOrigin, Enforcement]] = {
     MessageOrigin.CAMPAIGN: Enforcement.CAMPAIGN,
     # A test is refused only when the portfolio has nothing left at all (PG-09).
     MessageOrigin.CAMPAIGN_TEST: Enforcement.WHOLE_LIMIT,
+    MessageOrigin.FOLLOW_UP: Enforcement.DEFER_AT_LIMIT,
+    MessageOrigin.HUMAN: Enforcement.DEFER_AT_LIMIT,
 }
 
 # Who is held to one marketing message per contact per 24 hours (FREQ-01):
@@ -411,6 +427,59 @@ class MessagingService:
             idempotency_key=idempotency_key,
             origin=origin,
         )
+
+    async def send_manual_template(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        name: str,
+        language: str,
+        components: list[dict[str, Any]] | None,
+        sent_by_id: uuid.UUID,
+        sender_role: TenantRole,
+        idempotency_key: str | None = None,
+    ) -> tuple[Message, list[str]]:
+        """A person's template from the inbox, and the notices its answer carries.
+
+        At 100 % of Meta's portfolio limit it is refused with when it can go
+        (FLIM-02): `409 portfolio_limit_reached`, details `available_at` and
+        `available_at_local` - nothing sent, nothing recorded. The person is
+        there to decide whether to wait or use another number. While nobody has
+        read the limit it is sent, and the answer says so with the notice
+        `messaging_limit_unknown`.
+        """
+        try:
+            message = await self.send_template(
+                conversation_id=conversation_id,
+                name=name,
+                language=language,
+                components=components,
+                sent_by_id=sent_by_id,
+                idempotency_key=idempotency_key,
+                origin=MessageOrigin.HUMAN,
+                sender_role=sender_role,
+            )
+        except PortfolioLimitReachedError as error:
+            zone_name = await self._session.scalar(
+                select(Tenant.timezone).where(Tenant.id == self._tenant_id)
+            )
+            available = error.resumes_at
+            raise ConflictError(
+                "This business has reached its WhatsApp messaging limit for now.",
+                error_code=PORTFOLIO_LIMIT_REACHED_CODE,
+                details={
+                    "available_at": available.isoformat(),
+                    "available_at_local": (
+                        local_time(available, zone_name).isoformat() if zone_name else None
+                    ),
+                },
+            ) from error
+        notices = (
+            [MESSAGING_LIMIT_UNKNOWN_NOTICE]
+            if await self._ledger.recorded_without_limit(message.id)
+            else []
+        )
+        return message, notices
 
     async def send_template(
         self,

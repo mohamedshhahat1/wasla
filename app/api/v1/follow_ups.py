@@ -40,6 +40,7 @@ CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
 
 @router.get("", response_model=CursorPage[FollowUpRead])
 async def list_follow_ups(
+    workspace: ActiveWorkspaceDep,
     follow_ups: FollowUpServiceDep,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
@@ -56,7 +57,10 @@ async def list_follow_ups(
         cursor=cursor,
     )
     return CursorPage[FollowUpRead](
-        items=[FollowUpRead.from_model(follow_up) for follow_up in page.items],
+        items=[
+            FollowUpRead.from_model(follow_up, timezone=workspace.tenant.timezone)
+            for follow_up in page.items
+        ],
         next_cursor=page.next_cursor,
     )
 
@@ -95,21 +99,25 @@ async def schedule_follow_up(
         lead_id=payload.lead_id,
         created_by_id=workspace.user.id,
     )
-    return FollowUpRead.from_model(follow_up)
+    return FollowUpRead.from_model(follow_up, timezone=workspace.tenant.timezone)
 
 
 @router.get("/{follow_up_id}", response_model=FollowUpRead)
 async def get_follow_up(
     follow_up_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
     follow_ups: FollowUpServiceDep,
 ) -> FollowUpRead:
-    return FollowUpRead.from_model(await follow_ups.get(follow_up_id))
+    return FollowUpRead.from_model(
+        await follow_ups.get(follow_up_id), timezone=workspace.tenant.timezone
+    )
 
 
 @router.post("/{follow_up_id}/cancel", response_model=FollowUpRead)
 async def cancel_follow_up(
     follow_up_id: uuid.UUID,
     payload: FollowUpCancelRequest,
+    workspace: ActiveWorkspaceDep,
     follow_ups: FollowUpServiceDep,
 ) -> FollowUpRead:
     """Cancel a scheduled follow-up, if it can still be stopped.
@@ -120,4 +128,4 @@ async def cancel_follow_up(
     status - `sent` says the nudge went out.
     """
     follow_up = await follow_ups.cancel(follow_up_id=follow_up_id, reason=payload.reason)
-    return FollowUpRead.from_model(follow_up)
+    return FollowUpRead.from_model(follow_up, timezone=workspace.tenant.timezone)
