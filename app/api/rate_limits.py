@@ -216,6 +216,7 @@ def _limit_by_workspace(
     """
 
     async def guard(
+        request: Request,
         workspace: ActiveWorkspaceDep,
         settings: SettingsDep,
         limiter: RateLimiterDep,
@@ -227,9 +228,51 @@ def _limit_by_workspace(
             limit=per_minute(settings),
             window_seconds=60,
         )
-        return await limiter.enforce(policy, str(workspace.tenant.id))
+        identity = str(workspace.tenant.id)
+        if name in _charged_after_etag(request):
+            # A conditional poll of a route that charges this bucket only for
+            # an answer that changed (RT-07): the handler decides, after its
+            # ETag check, with `charge_deferred`. A 304 costs nothing here.
+            _deferred(request)[name] = (limiter, policy, identity)
+            return None
+        return await limiter.enforce(policy, identity)
 
     return guard
+
+
+#: The attribute a route's endpoint carries to have these buckets charged only
+#: when its conditional answer is not a 304 (RT-07).
+CHARGED_AFTER_ETAG = "charged_after_etag"
+_DEFERRED = "deferred_rate_limits"
+
+
+def _charged_after_etag(request: Request) -> frozenset[str]:
+    if not request.headers.get("If-None-Match"):
+        return frozenset()
+    endpoint = request.scope.get("endpoint") or getattr(
+        request.scope.get("route"), "endpoint", None
+    )
+    return frozenset(getattr(endpoint, CHARGED_AFTER_ETAG, ()))
+
+
+def _deferred(request: Request) -> dict[str, tuple[RateLimiter, RateLimitPolicy, str]]:
+    found: dict[str, tuple[RateLimiter, RateLimitPolicy, str]] | None = getattr(
+        request.state, _DEFERRED, None
+    )
+    if found is None:
+        found = {}
+        setattr(request.state, _DEFERRED, found)
+    return found
+
+
+async def charge_deferred(request: Request) -> None:
+    """Charge the buckets a conditional poll deferred: its answer changed (RT-07).
+
+    Raises `RateLimitedError` - a 429 with `Retry-After` - like any refusal.
+    """
+    for limiter, policy, identity in _deferred(request).values():
+        await limiter.enforce(policy, identity)
+    _deferred(request).clear()
 
 
 # The guards themselves, named so a router can depend on one directly. A route
@@ -270,6 +313,7 @@ CampaignRateLimit = Annotated[RateLimitDecision | None, Depends(campaign_rate_li
 
 __all__ = [
     "BEFORE_BODY_ATTRIBUTE",
+    "CHARGED_AFTER_ETAG",
     "ActiveWorkspace",
     "AuthRateLimit",
     "CampaignRateLimit",
@@ -279,6 +323,7 @@ __all__ = [
     "WorkspaceRateLimit",
     "auth_rate_limit",
     "campaign_rate_limit",
+    "charge_deferred",
     "client_identity",
     "google_oauth_rate_limit",
     "public_rate_limit",

@@ -20,8 +20,8 @@ This is the running draft (section 9 of the stage prompt). A resumed session rea
 | 7 | FUS-09 what a person sees | committed | 888f2c7 | visibility 3/3; conversation/inbox/follow-up/CRM/schema suites 255 passed; docs truth, route auth |
 | 8 | HMT-01..03 template header library | committed | 4ffbad0 | template header media 8/8; sweep 162 suites 0 failed; migration-built parity + downgrade; alembic head->0120->head |
 | 9 | HMR-01..03 per-recipient header media | committed | 324d435 | per-recipient 7/7 (1/2/4 workers); sweep 163 suites: 7 failures in 2 files fixed (below), re-run green; migration-built parity + downgrade; alembic round trip |
-| 10 | RT-03 publish points, RT-04 incremental reads | committed | (this commit) | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
-| 11 | RT-01/02/05 stream, RT-07 polling budget | not started | | |
+| 10 | RT-03 publish points, RT-04 incremental reads | committed | a100716 | publish 5/5, incremental 2/2, CRM integrity, conversation endpoints; sweep 140 suites 1,569 passed / 2 skipped / 0 failed; ruff, black, mypy app tests scripts clean |
+| 11 | RT-01/02/05 stream, RT-07 polling budget | committed | (this commit) | stream 14/14, progress budget 3/3, route authorization, rate limits; sweep 126 suites 1,543 passed / 1 failed (documented operation count, fixed: 245 -> 247) / 2 skipped; documentation and config suites 205 passed; ruff, black, mypy clean |
 | 12 | RT-06 nginx, shutdown, capacity | not started | | |
 | 13 | Invariants, observability, docs, ADRs, contracts | not started | | |
 | 14 | Mutation | not started | | |
@@ -367,3 +367,60 @@ the campaign's file.
   "changed" for the two schema modes to agree on.
 - **The list's response** gained `poll_after_seconds` (additive; the one test asserting the
   exact key list was updated on purpose).
+
+## Phase 11 — RT-01, RT-02, RT-05 (the stream), RT-07 (the polling budget)
+
+- **Routes**: `POST /events/ticket` (any member, workspace bucket) and
+  `GET /events/stream?ticket=` (`app/api/v1/events.py`). The stream resolves no session -
+  a browser's EventSource cannot send an Authorization header (WHATWG HTML, server-sent
+  events) - so it is on the open-route list (now 19, `test_route_authorization.py`) with the
+  ticket as its authorization. Tickets are `secrets.token_urlsafe(32)`, stored as a SHA-256
+  hash for `RT_TICKET_TTL_SECONDS`, redeemed with `GETDEL`, bound to (person, workspace,
+  token version), never logged (asserted against the captured log). The route is exempt from
+  the request timeout (`TIMEOUT_EXEMPT_PREFIXES`) and from per-request buckets; it is bounded
+  by `RT_STREAMS_PER_USER` / `RT_STREAMS_PER_WORKSPACE`, counted in Redis sorted sets across
+  containers, with members that miss three keep-alives dropped (a dead process never locks a
+  person out). Over the limit: `429 stream_limit`.
+- **One reader per workspace per process** (`StreamHub`): one `XREAD BLOCK` loop per
+  workspace with a subscriber, fanned out to that process's queues; 200 streams of one
+  workspace are one blocking read.
+- **Lifetime** (RT-05): every keep-alive re-checks the token version (`token_changed`), the
+  membership (`membership_revoked`), the workspace being served (`workspace_unavailable`) and
+  the person's active workspace (`workspace_switched`: one active workspace per person, set
+  when a stream opens); each closes with `event: closed` and its reason, then the response
+  ends. `may_read` is the seam for a narrower read rule: today every member reads every
+  conversation of the workspace (the route table), so the stream delivers the workspace's
+  hints, which are ids only.
+- **Defects found and fixed before commit** (in this phase's own uncommitted code, never
+  committed or run before):
+  1. `_Subscriber` was an `eq=True` dataclass, so unhashable: every stream failed on open.
+  2. A new reader started at `$`, so a hint committed between subscribing and its first
+     `XREAD` reached nobody. Now every open records the newest id before subscribing, a new
+     reader starts there, and the stream catches up from that floor (or from Last-Event-ID)
+     after subscribing, deduplicating by id
+     (`test_an_event_right_after_the_stream_opens_is_never_missed`).
+  3. Keep-alives and the RT-05 checks ran only after a full idle interval, so a busy
+     workspace's streams were never re-checked; they now run on a fixed schedule.
+  4. A full subscriber queue dropped hints silently; it now sends `resync`.
+  5. After a `resync`, the stream carries on from the newest hint instead of replaying the
+     whole retained stream.
+- **Graceful shutdown** (RT-06, built here because the stream needs it): uvicorn waits for
+  open connections before the lifespan's shutdown, and a stream never finishes by itself.
+  `app.main.install_stream_shutdown` wraps `uvicorn.Server.handle_exit` once per process so
+  the exit signal first makes every stream say `closed` (`server_restart`) and end.
+- **RT-07**: a route marks buckets it charges only for a changed answer
+  (`CHARGED_AFTER_ETAG`); with `If-None-Match` the guard defers the charge and the handler
+  calls `charge_deferred` after its ETag check, so a 304 costs no campaign token; the
+  workspace bucket still counts it. `GET /campaigns/progress` uses it. Proved with a campaign
+  bucket of 2: 60 conditional 304s then two 200s, the third 429; a stale ETag is charged.
+- **Tests added**: `test_events_stream.py` (14, a real uvicorn in-process and a real Redis;
+  httpx's ASGI transport buffers a response to its end, so it cannot read a stream),
+  `test_campaign_progress_budget.py` (3). The shutdown test drops uvicorn's captured signal,
+  which uvicorn otherwise re-raises after stopping - it ended the pytest session on the
+  first run.
+- **Numbers**: p95 delivery of `message.created` over 100 inbound messages on one stream,
+  measured from before the ingestion call: < 1 s (asserted; recorded by Phase 15's run with
+  `WASLA_RT_NUMBERS_FILE`).
+- **Docs**: `docs/API.md` (the two routes, the event table, reconnects, the polling
+  budget; operation count 247, 19 unauthenticated), `docs/AUTHORIZATION.md` (route rows and
+  the open-route rationale), `.env.example` (`RT_*`).

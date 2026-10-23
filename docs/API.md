@@ -4,8 +4,8 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **245 operations**, of which
-18 are unauthenticated and each is listed with what bounds it in
+The production shape - `DOCS_ENABLED=false` - serves **247 operations**, of which
+19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
 dependency graph and compares it with the figure above, and
@@ -480,6 +480,29 @@ All conversation routes are available to any member of the workspace. Restrictin
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
 
 **Catching up** (RT-04). `GET /conversations` answers `{items, next_cursor, poll_after_seconds}`; `poll_after_seconds` is 30 with no event stream open for you, 60 with one (then the poll is only a safety net). `?updated_since=<time with offset>` lists every conversation changed at or after it - closed ones too - oldest change first, keyed by `updated_at` (now on every conversation read); a time without an offset is `422 updated_since_needs_offset`. The first page carries an `ETag`; send it as `If-None-Match` and an unchanged inbox answers `304`. `GET /conversations/{id}/messages?after=<message id>` lists the messages after that one, oldest first (a message of another conversation names no position and lists nothing).
+
+### The inbox event stream (RT-01, RT-02, RT-05, ADR-155)
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| POST | `/api/v1/events/ticket` | any member | `201 {ticket, expires_at}`: random, single use, valid `RT_TICKET_TTL_SECONDS` (60), bound to you, the active workspace and your token version; workspace rate bucket. Never logged. |
+| GET | `/api/v1/events/stream?ticket=` | the ticket | `text/event-stream`. A browser's `EventSource` cannot send an `Authorization` header, so the ticket is the credential. An unknown, used, expired or no-longer-valid ticket is `401`; a sixth stream for one person (`RT_STREAMS_PER_USER`) or one past `RT_STREAMS_PER_WORKSPACE` is `429 stream_limit`. Exempt from the request timeout and from per-request buckets. Headers `Cache-Control: no-store`, `X-Accel-Buffering: no`. |
+
+The stream opens with `retry: 3000`, sends a `: keep-alive` comment every `RT_KEEPALIVE_SECONDS` (15), and carries **ids and hints, never content** - fetch the content through the routes above, which apply their own authorization:
+
+| `event:` | `data:` |
+|---|---|
+| `message.created` | `{conversation_id, message_id, direction, channel_type, created_at}` |
+| `message.status` | `{conversation_id, message_id, status}` |
+| `conversation.updated` | `{conversation_id, fields}` - `fields` among `status`, `owner`, `assignee`, `priority` |
+| `follow_up.updated` | `{conversation_id, state}` |
+| `campaign.changed` | `{campaign_id}` - once per transition, never per recipient |
+| `resync` | `{}` - re-read with `GET /conversations?updated_since=`: the stream could not give you everything since your `Last-Event-ID`, or you fell behind |
+| `closed` | `{reason}` - `token_changed` (logout, password change), `membership_revoked`, `workspace_switched` (you opened a stream on another workspace), `workspace_unavailable` (suspended or deleted), `server_restart`; the stream then ends |
+
+Every event but `resync` and `closed` has an `id:`. Reconnecting, the browser sends it back as `Last-Event-ID` (or `?lastEventId=`): the events after it are replayed in order while the workspace's stream still holds them (`RT_STREAM_RETENTION_SECONDS`, 900; at most `RT_STREAM_MAXLEN`, 5,000); otherwise the first event is `resync`. A stream re-checks your token version, membership, the workspace and your active workspace at every keep-alive, however busy it is.
+
+**Polling budget** (RT-07). `GET /campaigns/progress` with `If-None-Match` answering `304` costs no campaign-bucket token (it still counts in the workspace bucket); an answer that changed costs one. A page with a stream open polls progress after a `campaign.changed` event, or every 60 s as a safety net.
 
 **Follow-ups on a conversation** (FUS-09). `GET /conversations/{id}` carries `follow_up: {state: none | scheduled | ended, step_index, steps_total, due_at, due_at_local, ended_reason, ended_at}` (null in the list). `GET /conversations/{id}/follow-ups` is its history, latest due first: `{id, origin: one_off | sequence, step_index, status, requested_at, scheduled_at, scheduled_at_local, sent_at, cancelled_at, cancelled_reason, skip_reason, deferred_reason, text, message_id, created_by_kind}` - `text` only for a sent one; what the AI wrote for a step it skipped is never kept or shown. `DELETE /conversations/{id}/follow-up` (any member) ends the run `stopped_by_person`, audited, and returns the state; with nothing waiting it changes nothing.
 

@@ -56,6 +56,12 @@ OPEN_ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/webhooks/whatsapp"): "Meta cannot hold a credential of ours",
     ("POST", "/webhooks/paymob"): "a payment processor cannot hold a credential of ours",
     ("POST", "/webhooks/email"): "Resend cannot hold a credential of ours",
+    # A browser's EventSource cannot send an Authorization header, so the
+    # stream resolves no session: the single-use ticket from POST
+    # /events/ticket (a member's, bound to person, workspace and token version)
+    # is the authorization, and the stream re-checks all three while open
+    # (RT-01, RT-05, ADR-155).
+    ("GET", "/events/stream"): "EventSource cannot send a credential; the ticket is it",
     # Reference data a signup form reads before any account exists (TZ-02):
     # canonical IANA zone names and their offsets, nothing about a customer.
     # Carries `PublicRateLimit`, counted by client address.
@@ -214,7 +220,7 @@ def test_no_documented_open_route_has_quietly_been_closed(
 
 def test_the_documented_count_matches_the_graph(graph: dict[tuple[str, str], set[str]]) -> None:
     """`docs/AUTHORIZATION.md` states a number. This is that number."""
-    assert len(_open(graph)) == 18
+    assert len(_open(graph)) == 19
 
 
 def test_every_other_route_resolves_a_workspace_or_is_an_account_route(

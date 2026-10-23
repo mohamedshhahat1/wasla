@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import FrameType
 
+import uvicorn
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
@@ -31,8 +33,30 @@ from app.core.tracing import API_SERVICE_NAME, configure_tracing, shutdown_traci
 from app.db.session import Database
 from app.integrations.email import require_delivery_verification
 from app.integrations.whatsapp.versions import api_version_warning
+from app.services.realtime import close_every_stream
 
 logger = get_logger(__name__)
+
+
+def install_stream_shutdown() -> None:
+    """Close this process's event streams as soon as uvicorn is told to exit (RT-06).
+
+    Uvicorn's graceful shutdown waits for open connections to finish before it
+    runs the lifespan's shutdown - and an event stream never finishes on its
+    own, so the lifespan would be reached only when the grace period ran out.
+    Wrapping `Server.handle_exit` (the handler of SIGINT and SIGTERM) tells each
+    stream to say `closed` (`server_restart`) and end first. Once per process.
+    """
+    if getattr(uvicorn.Server.handle_exit, "_closes_streams", False):
+        return
+    original = uvicorn.Server.handle_exit
+
+    def handle_exit(self: uvicorn.Server, sig: int, frame: FrameType | None) -> None:
+        close_every_stream("server_restart")
+        original(self, sig, frame)
+
+    handle_exit._closes_streams = True  # type: ignore[attr-defined]
+    uvicorn.Server.handle_exit = handle_exit  # type: ignore[method-assign]
 
 
 @asynccontextmanager
@@ -98,6 +122,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # The realtime collectors, once per process: they only stage hints on a
     # session, and publish nothing until a sink is set (ADR-155).
     install_events()
+    # Open event streams end with `closed` when the exit signal arrives (RT-06).
+    install_stream_shutdown()
     # The API half of the email configuration, checked in the process that
     # needs it rather than in `Settings` - which every process builds, and
     # which would therefore force the webhook secret into the worker container

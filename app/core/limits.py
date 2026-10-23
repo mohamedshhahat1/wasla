@@ -68,8 +68,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Paths that must never be cut off mid-flight. Prefix-matched, so the
-# verification handshake and the delivery endpoint are both covered.
-TIMEOUT_EXEMPT_PREFIXES: Final[tuple[str, ...]] = ("/api/v1/webhooks",)
+# verification handshake and the delivery endpoint are both covered. The event
+# stream is one long request by design (RT-05): it holds no database
+# connection while it waits, and ends on its own reasons.
+TIMEOUT_EXEMPT_PREFIXES: Final[tuple[str, ...]] = ("/api/v1/webhooks", "/api/v1/events/stream")
 # Same path, a different rule: exempt from the timeout, and held to a
 # *tighter* body cap than everything else.
 WEBHOOK_PREFIX: Final = "/api/v1/webhooks"
@@ -397,7 +399,8 @@ class RequestTimeoutMiddleware:
     def _exempt(self, path: str) -> bool:
         """Whether this path must be allowed to finish however long it takes.
 
-        Only the webhook: a timed-out delivery is a non-2xx, Meta retries it,
-        and a subscription that keeps failing is eventually disabled (ADR-032).
+        The webhook: a timed-out delivery is a non-2xx, Meta retries it, and a
+        subscription that keeps failing is eventually disabled (ADR-032). The
+        event stream: it is meant to stay open (ADR-155).
         """
         return path.startswith(TIMEOUT_EXEMPT_PREFIXES)

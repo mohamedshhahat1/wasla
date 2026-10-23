@@ -33,6 +33,7 @@ from app.api.dependencies import (
     MessagingServiceDep,
     TenantAdminDep,
 )
+from app.api.rate_limits import CHARGED_AFTER_ETAG, charge_deferred
 from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
 from app.core.dependencies import SessionDep, SettingsDep
@@ -556,8 +557,10 @@ async def campaigns_progress(
     """One request for every campaign the page shows (PG-12).
 
     Poll every `poll_after_seconds` (10 while any is live, 60 otherwise) with
-    the last `ETag` as `If-None-Match`: 304 when nothing changed. Counted in
-    the campaign rate bucket like any request.
+    the last `ETag` as `If-None-Match`: 304 when nothing changed. A 304 is
+    counted in the workspace bucket only; the campaign bucket is charged for an
+    answer that changed (RT-07). A page with an event stream open polls only
+    after a `campaign.changed` hint, or every 60 s as a safety net.
     """
     found, counts = await campaigns.progress(ids)
     timezone = workspace.tenant.timezone
@@ -594,11 +597,16 @@ async def campaigns_progress(
     tag = '"' + hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()[:32] + '"'
     if request.headers.get("If-None-Match") == tag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": tag})
+    await charge_deferred(request)
     return Response(
         content=body.model_dump_json(),
         media_type="application/json",
         headers={"ETag": tag, "Cache-Control": "no-cache"},
     )
+
+
+# A 304 costs no campaign-bucket token (RT-07).
+setattr(campaigns_progress, CHARGED_AFTER_ETAG, ("campaign",))
 
 
 @router.get("/{campaign_id}", response_model=CampaignRead, summary="One campaign")
