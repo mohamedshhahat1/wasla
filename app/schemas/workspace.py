@@ -202,6 +202,24 @@ class CampaignSettingsRead(BaseModel):
     utc_offset: str
 
 
+class LocalTimeRead(BaseModel):
+    """A wall time in the workspace's zone, resolved by the server (TZ-08).
+
+    The page sends `at_local` on, never an offset it computed itself. On the
+    autumn change day a wall time in the repeated hour is `ambiguous`: both
+    instants are in `alternatives` and `at_local` is the first. In the spring
+    gap it is `nonexistent`: `at_local` is the first instant after the gap.
+    """
+
+    at_local: datetime
+    at_utc: datetime
+    timezone: str
+    offset: str
+    ambiguous: bool
+    nonexistent: bool
+    alternatives: list[datetime]
+
+
 class CampaignSettingsUpdateRequest(_Payload):
     """The whole of the quiet hours: every field, every time (a `PUT`)."""
 

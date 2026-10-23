@@ -220,3 +220,78 @@ __all__ = [
     "validated",
     "zone",
 ]
+
+
+#: The stable error code a wall time the local-time route cannot read is refused with.
+LOCAL_TIME_INVALID_CODE: Final = "local_time_invalid"
+
+
+class InvalidLocalTimeError(ValidationError):
+    """Not a wall time `YYYY-MM-DDTHH:MM` (422 `local_time_invalid`)."""
+
+    error_code = LOCAL_TIME_INVALID_CODE
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedWallTime:
+    """A workspace wall time as the instants it names (TZ-08).
+
+    `at` is the one to use: the first of two in the autumn fold (the earlier
+    instant, `fold=0`), the first instant that exists after a spring gap.
+    `alternatives` lists every instant the wall time could mean - two in the
+    fold, one otherwise.
+    """
+
+    at: datetime
+    ambiguous: bool
+    nonexistent: bool
+    alternatives: tuple[datetime, ...]
+
+
+def parse_wall_time(value: str) -> datetime:
+    """`2026-10-30T09:00` as a naive datetime; anything else 422 `local_time_invalid`.
+
+    A wall time has no offset - that is the point of resolving it - and no
+    seconds: the pages pick minutes.
+    """
+    candidate = value.strip()
+    try:
+        wall = datetime.fromisoformat(candidate)
+    except ValueError:
+        wall = None
+    if (
+        wall is None
+        or wall.tzinfo is not None
+        or len(candidate) != len("YYYY-MM-DDTHH:MM")
+        or wall.second
+        or wall.microsecond
+    ):
+        raise InvalidLocalTimeError(
+            "Send a wall time as YYYY-MM-DDTHH:MM, with no offset and no seconds.",
+            error_code=LOCAL_TIME_INVALID_CODE,
+        )
+    return wall
+
+
+def resolve_wall_time(wall: datetime, name: str) -> ResolvedWallTime:
+    """The instant(s) the naive wall time `wall` names in the zone called `name`."""
+    tz = zone(name)
+    early = wall.replace(tzinfo=tz, fold=0)
+    late = wall.replace(tzinfo=tz, fold=1)
+    exists = early.astimezone(UTC).astimezone(tz).replace(tzinfo=None) == wall
+    if not exists:
+        # Inside a spring gap: the two folds straddle the transition, which is
+        # the first instant whose local reading is past the gap.
+        low = min(early.astimezone(UTC), late.astimezone(UTC))
+        high = max(early.astimezone(UTC), late.astimezone(UTC))
+        before = low.astimezone(tz).utcoffset()
+        moment = low
+        while moment < high and moment.astimezone(tz).utcoffset() == before:
+            moment += timedelta(minutes=1)
+        first = moment.astimezone(tz)
+        return ResolvedWallTime(at=first, ambiguous=False, nonexistent=True, alternatives=(first,))
+    if early.utcoffset() != late.utcoffset():
+        both = (early.astimezone(UTC).astimezone(tz), late.astimezone(UTC).astimezone(tz))
+        return ResolvedWallTime(at=both[0], ambiguous=True, nonexistent=False, alternatives=both)
+    single = early.astimezone(UTC).astimezone(tz)
+    return ResolvedWallTime(at=single, ambiguous=False, nonexistent=False, alternatives=(single,))

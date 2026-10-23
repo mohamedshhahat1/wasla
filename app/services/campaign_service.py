@@ -1642,8 +1642,10 @@ class CampaignService:
 
         if scheduled_at is not None and scheduled_at.utcoffset() is None:
             # Refused rather than taken as UTC (CMP-15): a Cairo admin's 10:00
-            # was sent at 13:00 local. There is no workspace time zone to
-            # interpret it in (CMQ-04), so the offset has to come with it.
+            # was sent at 13:00 local. The workspace has a zone (TZ-01), but a
+            # wall time on a DST change day can name two instants or none, so
+            # the client resolves it first - `GET /workspace/local-time` does
+            # (TZ-08) - and sends the instant with its offset.
             raise ValidationError(
                 "A scheduled time needs a UTC offset, for example 2026-10-20T10:00:00+03:00.",
                 error_code=NAIVE_SCHEDULE_CODE,

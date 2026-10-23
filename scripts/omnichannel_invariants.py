@@ -60,6 +60,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.db.session import utc_connect_args
 from app.repositories.entitlement_census import CAPACITY_CENSUS_SQL
 
 # The deployment defaults the entitlement checks bind (`app.core.config`),
@@ -889,7 +890,7 @@ async def entitlement_violations(
 
 
 async def _run(command: str, url: str) -> int:
-    engine = create_async_engine(url, poolclass=NullPool)
+    engine = create_async_engine(url, poolclass=NullPool, connect_args=utc_connect_args(url))
     try:
         async with engine.connect() as connection, connection.begin():
             if command == "census":
@@ -915,7 +916,7 @@ async def _recover(url: str, *, apply: bool) -> int:
 
     from app.services.opt_out_recovery import recover_button_opt_outs
 
-    engine = create_async_engine(url, poolclass=NullPool)
+    engine = create_async_engine(url, poolclass=NullPool, connect_args=utc_connect_args(url))
     try:
         async with AsyncSession(engine, expire_on_commit=False) as session:
             if not apply:

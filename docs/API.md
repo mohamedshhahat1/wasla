@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **237 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **238 operations**, of which
 18 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -175,6 +175,21 @@ Tripoli, Beirut, London, Istanbul. Sorted by current offset, then name;
 `?q=` (at most 64 characters) filters by id or label. `Cache-Control: public,
 max-age=3600` and an `ETag` that changes with the tzdata release or any zone's
 offset (304 on `If-None-Match`).
+
+## Workspace local time (TZ-08)
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/workspace/local-time?at=YYYY-MM-DDTHH:MM` | Any workspace member |
+
+Resolves a wall time in the workspace's zone so a page never computes an
+offset itself: `{at_local, at_utc, timezone, offset, ambiguous, nonexistent,
+alternatives}`. A wall time in the autumn repeated hour is `ambiguous`, both
+instants in `alternatives`, `at_local` the first (the earlier). One in the
+spring gap is `nonexistent`; `at_local` is the first instant after the gap.
+An offset, seconds or any other shape is `422 local_time_invalid`. Send the
+returned `at_local` to `POST /campaigns/{id}/schedule`, which still requires an
+aware time (CMP-15).
 
 ## Workspace campaign settings
 

@@ -27,6 +27,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.db.session import utc_connect_args
+
 # Alembic's own bookkeeping, which only one of the two builds has.
 IGNORED_TABLES = frozenset({"alembic_version"})
 
@@ -141,7 +143,7 @@ def differences(
 
 
 async def _snapshot_url(url: str) -> dict[str, dict[str, str]]:
-    engine = create_async_engine(url, poolclass=NullPool)
+    engine = create_async_engine(url, poolclass=NullPool, connect_args=utc_connect_args(url))
     try:
         async with engine.connect() as connection:
             return await snapshot(connection)

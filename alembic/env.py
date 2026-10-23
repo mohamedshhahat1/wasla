@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import get_settings
 from app.db.models import Base
+from app.db.session import utc_connect_args
 
 config = context.config
 
@@ -74,6 +75,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=utc_connect_args(config.get_main_option("sqlalchemy.url") or ""),
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

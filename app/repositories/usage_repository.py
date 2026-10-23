@@ -147,10 +147,11 @@ class UsageEventRepository(TenantScopedRepository[UsageEvent]):
     ) -> list[UsagePoint]:
         """One point per day per meter, oldest first.
 
-        Days are UTC. A workspace in another timezone sees a boundary that is
-        not its midnight, which is a real limitation and the honest one to have
-        until a workspace can tell us what its timezone is: guessing from a
-        phone number would silently move every figure.
+        Days are UTC: every connection runs with `TimeZone = 'UTC'` (TZ-06), so
+        `date_trunc` cuts at UTC midnight whatever zone the database server
+        itself is set to. The workspace's own zone (`tenants.timezone`) is not
+        applied here; a workspace east of UTC sees a day that starts at its
+        02:00 or 03:00, not its midnight.
         """
         day = func.date_trunc("day", UsageEvent.occurred_at).label("day")
         statement = (

@@ -50,6 +50,24 @@ def session_timeouts(settings: Settings) -> dict[str, str]:
     }
 
 
+#: Every connection Wasla opens reads and writes `timestamptz` in UTC (TZ-06).
+#: A server whose own `TimeZone` is, say, Africa/Cairo would otherwise move
+#: every `date_trunc('day', ...)` and `::date` boundary to its midnight.
+UTC_SESSION: Final[dict[str, str]] = {"TimeZone": "UTC"}
+
+
+def utc_connect_args(url: str) -> dict[str, Any]:
+    """Connect arguments pinning the session time zone, for an engine opened outside `Database`.
+
+    The scripts and Alembic open their own engines; each passes these so no
+    connection of this application inherits the server's zone. Only asyncpg
+    takes `server_settings`; another driver gets nothing.
+    """
+    if "asyncpg" not in url:
+        return {}
+    return {"server_settings": dict(UTC_SESSION)}
+
+
 class Database:
     """Owns the async engine and hands out sessions."""
 
@@ -95,6 +113,7 @@ class Database:
             "server_settings": {
                 "application_name": settings.app_name.lower(),
                 **session_timeouts(settings),
+                **UTC_SESSION,
             },
         }
 

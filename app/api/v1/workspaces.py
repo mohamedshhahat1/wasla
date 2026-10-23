@@ -32,8 +32,9 @@ per-address limit instead.
 from __future__ import annotations
 
 from datetime import UTC, datetime, time
+from typing import Annotated
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
@@ -45,11 +46,12 @@ from app.api.dependencies import (
 from app.api.rate_limits import AuthRateLimit, WorkspaceRateLimit
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep
-from app.core.timezones import format_offset, offset_of
+from app.core.timezones import format_offset, offset_of, parse_wall_time, resolve_wall_time
 from app.db.models import Tenant
 from app.schemas.workspace import (
     CampaignSettingsRead,
     CampaignSettingsUpdateRequest,
+    LocalTimeRead,
     OwnershipTransferRequest,
     OwnershipTransferResponse,
     WorkspaceCreatedResponse,
@@ -233,6 +235,37 @@ async def update_campaign_settings(
         quiet_hours_end=_clock(payload.quiet_hours_end),
     )
     return _settings_read(settings)
+
+
+@router.get(
+    "/workspace/local-time",
+    response_model=LocalTimeRead,
+    summary="Resolve a wall time in this workspace's zone",
+    responses={422: {"description": "local_time_invalid: not YYYY-MM-DDTHH:MM without an offset."}},
+)
+async def resolve_local_time(
+    workspace: ActiveWorkspaceDep,
+    limit: WorkspaceRateLimit,
+    at: Annotated[str, Query(max_length=32, description="A wall time, YYYY-MM-DDTHH:MM.")],
+) -> LocalTimeRead:
+    """Any member. The instant a wall time names here, daylight saving included (TZ-08).
+
+    A page that lets a person pick a date and a time resolves it here and sends
+    the returned `at_local` to `POST /campaigns/{id}/schedule`, so no browser
+    computes an offset with its own zone or a stale one.
+    """
+    name = workspace.tenant.timezone
+    resolved = resolve_wall_time(parse_wall_time(at), name)
+    offset = resolved.at.utcoffset()
+    return LocalTimeRead(
+        at_local=resolved.at,
+        at_utc=resolved.at.astimezone(UTC),
+        timezone=name,
+        offset=format_offset(offset) if offset is not None else "+00:00",
+        ambiguous=resolved.ambiguous,
+        nonexistent=resolved.nonexistent,
+        alternatives=list(resolved.alternatives),
+    )
 
 
 @router.post(

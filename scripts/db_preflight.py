@@ -61,6 +61,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.sql.compiler import IdentifierPreparer
 
+from app.db.session import utc_connect_args
+
 REQUIRED_EXTENSIONS = ("vector", "pgcrypto")
 
 UNVALIDATED_CONSTRAINTS = """
@@ -260,7 +262,7 @@ See docs/BACKUP.md, "Restore prerequisites"."""
 
 
 async def _run(check: str, url: str) -> int:
-    engine = create_async_engine(url, poolclass=NullPool)
+    engine = create_async_engine(url, poolclass=NullPool, connect_args=utc_connect_args(url))
     try:
         async with engine.connect() as connection:
             if check == "prerequisites":

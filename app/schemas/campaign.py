@@ -453,6 +453,18 @@ class HeaderMediaUploadRead(HeaderMediaRead):
         )
 
 
+# The campaign's own times that get a `_local` twin from `CampaignRead.from_model`.
+_LOCAL_TWINS: tuple[str, ...] = (
+    "scheduled_at",
+    "started_at",
+    "completed_at",
+    "cancelled_at",
+    "next_send_at",
+    "created_at",
+    "updated_at",
+)
+
+
 class CampaignRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -513,6 +525,15 @@ class CampaignRead(BaseModel):
     audience_cleared: bool | None = None
     created_at: datetime
     updated_at: datetime
+    # Every time above in the workspace's own zone with its offset (TZ-05):
+    # the page shows these, never a conversion made with the browser's zone.
+    scheduled_at_local: datetime | None = None
+    started_at_local: datetime | None = None
+    completed_at_local: datetime | None = None
+    cancelled_at_local: datetime | None = None
+    next_send_at_local: datetime | None = None
+    created_at_local: datetime | None = None
+    updated_at_local: datetime | None = None
 
     @field_validator("version", mode="before")
     @classmethod
@@ -534,6 +555,11 @@ class CampaignRead(BaseModel):
         read.audience_ready = campaign.audience_size > 0
         if header_media is not None:
             read.header_media = HeaderMediaRead.from_model(header_media)
+        if timezone is not None:
+            for name in _LOCAL_TWINS:
+                moment = getattr(read, name)
+                if moment is not None:
+                    setattr(read, f"{name}_local", local(moment, timezone))
         if timezone is not None and read.resumes_at is not None:
             read.resumes_at_local = local(read.resumes_at, timezone)
         if timezone is not None and read.send_until is not None:

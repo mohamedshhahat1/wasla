@@ -14,6 +14,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from app.db.session import utc_connect_args
+
 
 async def provision() -> None:
     migration_url = make_url(os.environ["MIGRATION_DATABASE_URL"])
@@ -29,7 +31,12 @@ async def provision() -> None:
     ):
         raise ValueError("migration and runtime URLs must use distinct roles on the same database")
 
-    engine = create_async_engine(migration_url, echo=False, hide_parameters=True)
+    engine = create_async_engine(
+        migration_url,
+        echo=False,
+        hide_parameters=True,
+        connect_args=utc_connect_args(migration_url.drivername),
+    )
     try:
         async with engine.begin() as connection:
             role = await connection.execute(
