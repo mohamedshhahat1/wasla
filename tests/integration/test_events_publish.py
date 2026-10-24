@@ -12,7 +12,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -21,10 +21,24 @@ from redis.asyncio import Redis
 
 from app.core import events
 from app.db.models.conversation import ConversationMode, MessageDirection, MessageOrigin
+from app.db.models.enums import TenantRole
 from app.db.models.lead import ActorKind
+from app.db.models.tenant import Tenant
+from app.db.models.user import User
+from app.db.session import Database
+from app.services.campaign_planner import quiet_hours_of
+from app.services.campaign_settings_service import CampaignSettingsService
 from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
-from tests.integration.campaign_harness import FakeMeta, compose, erase, quiesce, seed, worker
+from tests.integration.campaign_harness import (
+    USER_DOMAIN,
+    FakeMeta,
+    compose,
+    erase,
+    quiesce,
+    seed,
+    worker,
+)
 from tests.integration.sequence_harness import (
     ai_reply,
     build,
@@ -159,6 +173,30 @@ async def test_a_takeover_and_a_follow_up_are_hinted(prepared_database: str, red
         await database.dispose()
 
 
+async def quiet_hours_off(database: Database, tenant_id: uuid.UUID) -> None:
+    """Switch the workspace's quiet hours off as its owner does, and check they are off."""
+    async with database.session_factory() as session:
+        owner = User(
+            email=f"rt-owner-{uuid.uuid4().hex[:8]}{USER_DOMAIN}",
+            is_active=True,
+            email_verified_at=datetime.now(UTC),
+        )
+        session.add(owner)
+        tenant = await session.get(Tenant, tenant_id)
+        assert tenant is not None
+        current = CampaignSettingsService(session, tenant=tenant).read()
+        await CampaignSettingsService(session, tenant=tenant).update(
+            actor=owner,
+            actor_role=TenantRole.TENANT_OWNER,
+            quiet_hours_enabled=False,
+            quiet_hours_start=current.quiet_hours_start,
+            quiet_hours_end=current.quiet_hours_end,
+        )
+        await session.commit()
+        window = await quiet_hours_of(session, tenant_id)
+    assert not window.enabled, "quiet hours are off: this test is about hint fan-out, not the night"
+
+
 async def test_a_campaign_is_hinted_per_transition_never_per_recipient(
     prepared_database: str, redis: Redis
 ) -> None:
@@ -167,6 +205,9 @@ async def test_a_campaign_is_hinted_per_transition_never_per_recipient(
     try:
         await quiesce(database)
         workspace = await seed(database, recipients=25)
+        # Quiet hours would hold every send from 22:00 to 09:00 Cairo (FRM-04);
+        # this test is about how many hints a campaign publishes, not the night.
+        await quiet_hours_off(database, workspace.tenant_id)
         campaign_id = await compose(database, workspace)
         for _ in range(10):
             if not await replica.run_once():
