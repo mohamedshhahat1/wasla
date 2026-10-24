@@ -7475,6 +7475,48 @@ day buckets no longer depend on the server's zone. `GET
 the first valid instant); the frontend sends the returned `at_local` to the
 routes that need an aware time, which are unchanged.
 
+## ADR-157 — The API Runs In A Server That Closes Its Streams On The Exit Signal; Tests Never Depend On The Hour (FRM-03, FRM-04, SD-01 .. SD-07, HB-01 .. HB-06)
+
+**Context.** Uvicorn registers the bound `Server.handle_exit` for SIGINT and
+SIGTERM in `capture_signals()` before it imports the application, so the
+class-level wrapper `create_app` installed (RT-06) never ran under the
+entrypoint: on `docker stop` open streams got no `closed`, the graceful
+shutdown waited out its 25 s bound and cut them (FRM-03). Separately, a stage
+test swept a campaign on the real clock inside Cairo's default quiet hours and
+failed from 22:00 to 09:00 (FRM-04).
+
+**Decision.**
+
+1. **The server, not an import-time patch**: `python -m app.serve` builds the
+   same uvicorn `Config` the command line did (proxy headers off, the graceful
+   bound, `WEB_CONCURRENCY` / `--workers`, `--reload`) and runs
+   `StreamClosingServer`, whose `handle_exit` closes every stream of the
+   process (`server_restart`) and then continues uvicorn's own exit. Every
+   worker of a multi-process run is that server. Both `api` branches of the
+   entrypoint exec it; uvicorn's `UVICORN_*` variables are not read (none is
+   set by any shipped configuration).
+2. **Visible**: the lifespan logs `events.shutdown_hook active=true|false` -
+   whether SIGTERM in this process is handled by that server. Plain `uvicorn
+   app.main:app` still serves, logs `active=false`, and cuts streams at the
+   bound instead of closing them.
+3. **Late streams**: a hub closed for shutdown closes a stream that joins
+   afterwards at once.
+4. **Exit 0** after a graceful shutdown, PID 1 or not: uvicorn re-raises the
+   captured signal once it has stopped, and the launcher answers SIGTERM's
+   with a clean exit.
+5. **Proof**: `test_events_shutdown_signal` starts the entrypoint in a child
+   process and sends it a real SIGTERM / SIGINT (POSIX only, Linux CI);
+   `test_events_stream`'s in-process server is the same class.
+6. **Hours in tests**: a test that sweeps a worker on the real clock, under the
+   `quiet_hours` mark, either pins its clock (`now=`, `SimClock`), places the
+   window around the real now (`sequence_harness.build`), or switches quiet
+   hours off through `CampaignSettingsService` and asserts it. Outside the mark
+   quiet hours never bind (TZ-03).
+
+**Consequences.** No migration, no protocol change; `--timeout-graceful-shutdown
+25` stays as the backstop for a transport that never detaches. A stop with
+streams open takes about a second instead of ~27 s.
+
 ## ADR-022 (amended 2026-10-23) — Follow-up Steps Are Polled Too
 
 A sequence step is a `follow_ups` row and is polled, claimed and dispatched
@@ -7510,3 +7552,10 @@ A `304` from `GET /campaigns/progress` costs no campaign-bucket token (RT-07);
 the inbox event stream (ADR-155) carries `campaign.changed` per transition, and
 a page holding it polls after that hint or every 60 s. Counts still come from
 the poll.
+
+## ADR-155 (amended 2026-10-24) — The Exit Signal Is Handled By The Server The Entrypoint Runs
+
+Point 6's "the exit signal closes every stream (`server_restart`) before
+uvicorn drains" holds only under `python -m app.serve`, which the entrypoint
+runs: the hook lives in `StreamClosingServer.handle_exit`, not in a patch
+applied while the application is imported (ADR-157, FRM-03).

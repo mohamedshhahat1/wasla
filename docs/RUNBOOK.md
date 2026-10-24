@@ -60,6 +60,8 @@ The inbox learns of a new message through its event stream and falls back to pol
 3. **Are hints being published?** `wasla_events_published_total{type}` should rise with traffic. `wasla_events_publish_failed_total` rising is Redis refusing writes: the business writes committed anyway (a publish never fails one), clients converge by polling and `resync`; fix Redis.
 4. **Is the reader alive?** `grep events.reader_failed` / `events.watch_failed`: the per-workspace reader or the checker could not reach Redis or PostgreSQL and is retrying each second.
 
+5. **Right after a restart?** Every inbox should have reconnected within seconds: the API closes its streams (`server_restart`) the moment it is stopped. Check the API's first log line, `events.shutdown_hook active=true`. `active=false` means the process was not started by the entrypoint (`python -m app.serve`) - a command override such as plain `uvicorn app.main:app` - and each stop cuts every inbox only after the 25 s graceful bound, with no `closed` to reconnect on; restore the image's own command (`api`).
+
 Nothing in an event is content - ids and hints only - so no log line or metric of this path names a customer, a message or a ticket.
 
 ### Customers' messages are not arriving
@@ -817,6 +819,8 @@ docker compose -f docker-compose.prod.yml up -d --wait
 ```
 
 `--wait` blocks until health checks pass, so a container that starts and dies fails the deploy rather than being reported as shipped.
+
+The API is started by the image's command (`api`: the entrypoint execs `python -m app.serve`) and stopped with SIGTERM; with inboxes open it stops in about a second, each inbox told `closed` (`server_restart`) and reconnecting by itself. Do not override the API's command: the first log line of a correctly started process is `events.shutdown_hook active=true`.
 
 ### Roll back
 
