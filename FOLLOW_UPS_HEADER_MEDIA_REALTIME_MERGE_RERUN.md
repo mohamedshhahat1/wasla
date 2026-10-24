@@ -1,6 +1,6 @@
 # FOLLOW-UPS, HEADER MEDIA & REALTIME — CANONICAL MERGE RE-RUN
 
-**Verdict: FOLLOW-UPS, HEADER MEDIA & REALTIME MERGED — push and the first GitHub Actions run are recorded in the commit that follows this report**
+**Verdict: FOLLOW-UPS, HEADER MEDIA & REALTIME MERGED AND PUSHED, CI GREEN**
 
 Supersedes `FOLLOW_UPS_HEADER_MEDIA_REALTIME_MERGE_VERIFICATION.md` (c59e02c, on its own branch, not merged).
 FRM-03 (open event streams never told `closed` on shutdown under the shipped entrypoint) and FRM-04 (an hour-bound
@@ -25,7 +25,7 @@ into `worktree-billing-google-auth` as one merge commit whose tree is byte-ident
 | B night gates (real clock, from 22:00:31) | done: green; night lane pair 0 failed | section "Night" | 22:00–23:33 | — |
 | merge | done | — | 23:34 | 3bc7c74 |
 | gates on the final tree | done: green | logs/F_* | 23:35– | — |
-| report commit, push, GitHub Actions | see the next commit | — | — | — |
+| report commit, push, GitHub Actions | done: pushed 062c590 (no force); run 40134820030 green in all 5 jobs | — | 25 Oct 00:34–01:32 | 062c590 pushed |
 
 ## 1. Executive Summary
 
@@ -374,11 +374,24 @@ parents `8752324` and `7e19cbc`; no conflict; `git diff --exit-code 7e19cbc 3bc7
 
 ## 28. Push
 
-`git push origin worktree-billing-google-auth` (no force) after this report commit, only with origin still at 8752324; result recorded in the next commit.
+`git fetch` → origin still 8752324; `merge-base --is-ancestor origin HEAD` true; `git push origin worktree-billing-google-auth` (no force) at 21:34:27 UTC (00:34 Cairo): `8752324..062c590`; after `git fetch`, origin = local = `062c59043920bfef75d2a4937aae2c5115e2cca7`.
 
 ## 29. First GitHub Actions Run
 
-Recorded in the next commit.
+Run [40134820030](https://github.com/mohamedshhahat1/wasla/actions/runs/40134820030) (CI, push of 062c590), started 21:34:28 UTC = 00:34 Cairo, **inside Cairo's quiet hours**; conclusion **success**:
+
+| Job | Conclusion | Duration (UTC) |
+| --- | --- | --- |
+| Lint, format, types | success | 21:34:31 → 21:36:04 |
+| Docker build | success | 21:34:31 → 21:36:11 |
+| Alert rules and receivers | success | 21:34:31 → 21:36:47 |
+| Migration-built schema (parity, migrated suites, kept-data sweep) | success | 21:34:30 → 22:19:41 (45 min) |
+| Tests and migrations | success: 7,426 passed, 15 skipped (OpenAI ×11, schema parity ×4 — the allowed reasons), 2 deselected, 56:34; application factory ok; upgrade → base → head; preflight; alembic check | 21:34:31 → 22:32:46 (58 min) |
+
+The real-signal suite ran on GitHub's Linux runner: the local Windows model lane skipped 21 (incl. the 5 POSIX-only
+signal cases and tmpfs), GitHub 15 with none of those reasons, and 0 failed — the first time the signal, stream and
+capacity suites ran on GitHub. `app/serve.py` coverage 94 % (uncovered: the reload, workers and start-up-failure
+branches, l. 104, 106, 112). No job needed a section 33 fix.
 
 ## 30. Findings
 
@@ -386,7 +399,7 @@ Recorded in the next commit.
 | --- | --- | --- |
 | FRM-01 | ACCEPTED RESIDUAL (informational) | the stage report commit's one-row contract change; consistent with the code |
 | FRM-02 | CLOSED (b7d4ccf; lands with this merge) | harness race in test_campaign_messaging_limit |
-| FRM-03 | CLOSED locally (Linux, docker, nginx); GitHub run in the next commit | streams never told `closed` under the entrypoint; fixed by app/serve.py (ee0be25); real-signal test; M-R01..06 killed; docker stop through nginx proven |
+| FRM-03 | CLOSED (real-signal test green on Linux locally and on GitHub; M-R01..06 killed; docker stop through nginx proven) | streams never told `closed` under the entrypoint; fixed by app/serve.py (ee0be25); real-signal test; M-R01..06 killed; docker stop through nginx proven |
 | FRM-04 | CLOSED | hour-bound test fixed test-only (8f91ec9); green inside / outside quiet hours and shifted; M-Q01 killed |
 | FRM-05 | ACCEPTED RESIDUAL | two unreproduced SIGINT-5 failures during A4 under host load (3.61 s first `closed`; one exit > 15 s); 0 recurrences in every later run (≥ 40 runs of the signal file incl. CPU burn, two workers, Part A / B / final gates) |
 | FRM-06 | CLOSED (7e19cbc) | realtime suites skipped without WASLA_TEST_REDIS_URL (ci.yml sets none): would fail GitHub's skip gate |
@@ -435,4 +448,4 @@ E:\wasla-verification-scripts\followups-realtime\ (section 41).
 
 ## 34. Final Verdict
 
-**FOLLOW-UPS, HEADER MEDIA & REALTIME MERGED — push and the first GitHub Actions run are recorded in the commit that follows this report**
+**FOLLOW-UPS, HEADER MEDIA & REALTIME MERGED AND PUSHED, CI GREEN**
