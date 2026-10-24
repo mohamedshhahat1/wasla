@@ -39,6 +39,14 @@ counting, is audited and is named by the reduction it opened. Those checks read 
 deployment's `DEFAULT_PLAN_CODE` and `AI_TURN_HOLD_TTL_SECONDS` from the
 environment the command runs in.
 
+`verify` also runs the campaigns' CR-01..CR-17 and the follow-ups' FU-01..FU-08
+(ADR-151..ADR-154): no automatic step after the customer replied, after a
+takeover, past the window less `FOLLOW_UP_WINDOW_MARGIN_SECONDS`, as a template,
+or beyond `FOLLOW_UP_SEQUENCE_MAX_STEPS`; no ledger row for a free-form message;
+no template follow-up inside quiet hours; no requested time moved by a wait.
+With `INVARIANTS_REDIS_URL` (or `REDIS_URL`) set it adds RT-I01 (ADR-155): no
+realtime hint in one workspace's stream naming another workspace's row.
+
 `recover-button-opt-outs` is the one command here that can write, and only with
 `--apply` (OMNI-030). It replays the "stop" taps still held in retained raw
 payloads through the one opt-out writer, with the provenance `replay`; the dry
@@ -50,16 +58,22 @@ per workspace id; never a phone, a business-scoped id or a message.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Final
 
+from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.db.session import utc_connect_args
+from app.integrations.whatsapp.policy import SERVICE_WINDOW as WHATSAPP_SERVICE_WINDOW
 from app.repositories.entitlement_census import CAPACITY_CENSUS_SQL
 
 # The deployment defaults the entitlement checks bind (`app.core.config`),
@@ -493,7 +507,21 @@ _REDUCTION_DISABLE = "('capacity_reduction', 'capacity_reduction_automatic')"
 _DISABLED = "('channel_connection_disabled', 'whatsapp_account_disabled')"
 _RELEASED = "('channel_connection_released', 'whatsapp_account_released')"
 
-# Campaigns (CR-01..CR-15, ADR-134..ADR-150): what the campaigns audit counted
+# The format of a campaign template's header, upper case, or NULL: `t` is the
+# template row.
+_HEADER_FORMAT = (
+    "(SELECT upper(component ->> 'format') FROM"
+    " jsonb_array_elements(COALESCE(t.components, '[]'::jsonb)) component"
+    " WHERE upper(component ->> 'type') = 'HEADER' LIMIT 1)"
+)
+CAMPAIGN_HEADER_MEDIA_MAX_FILES = int(os.environ.get("CAMPAIGN_HEADER_MEDIA_MAX_FILES", "20"))
+FOLLOW_UP_SEQUENCE_MAX_STEPS = int(os.environ.get("FOLLOW_UP_SEQUENCE_MAX_STEPS", "5"))
+FOLLOW_UP_WINDOW_MARGIN_SECONDS = int(os.environ.get("FOLLOW_UP_WINDOW_MARGIN_SECONDS", "1800"))
+# The customer service window every supported channel's policy module states
+# (WhatsApp: `SERVICE_WINDOW`); read from it, never a literal here.
+SERVICE_WINDOW_SECONDS = int(WHATSAPP_SERVICE_WINDOW.total_seconds())
+
+# Campaigns (CR-01..CR-17, ADR-134..ADR-154): what the campaigns audit counted
 # by hand after its probes, kept here so a restore or a deployment can be
 # checked the same way. Every one is zero on a healthy database.
 CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
@@ -647,6 +675,138 @@ CAMPAIGN_INVARIANTS: tuple[Check, ...] = (
         "SELECT count(*) FROM campaign_recipients r WHERE r.status = 'sent'"
         " AND r.rendered_parameters IS NOT NULL"
         " AND r.rendered_parameters ->> 'contact_id' IS DISTINCT FROM CAST(r.contact_id AS text)",
+    ),
+    # CR-16: a sent recipient whose header file - their own (HMR-01) or the
+    # campaign's - belongs to another workspace, or is not of the kind the
+    # template's header takes.
+    Check(
+        "cr16_recipient_header_file_of_another_workspace_or_kind",
+        "SELECT count(*) FROM campaign_recipients r"  # noqa: S608 - module constants
+        " JOIN campaigns c ON c.id = r.campaign_id"
+        " JOIN campaign_header_media h ON h.id = COALESCE(r.header_media_id, c.header_media_id)"
+        " JOIN whatsapp_templates t ON t.id = c.template_id"
+        f" WHERE r.status = 'sent' AND (h.tenant_id <> r.tenant_id"
+        f" OR upper(h.kind) IS DISTINCT FROM {_HEADER_FORMAT})",
+    ),
+    # CR-17: a per-recipient campaign naming more distinct files than a
+    # campaign may (HMR-01), or a sent recipient with no file although the
+    # template's header needs one.
+    Check(
+        "cr17_header_files_over_the_maximum_or_missing",
+        "SELECT (SELECT count(*) FROM campaigns c WHERE c.header_media_mode = 'per_recipient'"  # noqa: S608 - module constants
+        " AND (SELECT count(DISTINCT x) FROM ("
+        " SELECT r.header_media_id AS x FROM campaign_recipients r WHERE r.campaign_id = c.id"
+        " UNION SELECT CAST(rule ->> 'header_media_id' AS uuid)"
+        " FROM jsonb_array_elements(COALESCE(c.header_media_rules, '[]'::jsonb)) rule"
+        " UNION SELECT c.header_media_id) files WHERE x IS NOT NULL)"
+        f" > {CAMPAIGN_HEADER_MEDIA_MAX_FILES})"
+        " + (SELECT count(*) FROM campaign_recipients r JOIN campaigns c ON c.id = r.campaign_id"
+        " JOIN whatsapp_templates t ON t.id = c.template_id"
+        f" WHERE r.status = 'sent' AND {_HEADER_FORMAT} IN ('IMAGE', 'VIDEO', 'DOCUMENT')"
+        " AND COALESCE(r.header_media_id, c.header_media_id) IS NULL)",
+    ),
+)
+
+# The moment a follow-up was sent: its message, staged in the send intent's
+# own transaction before the provider call. `sent_at` is written after the
+# call, and a customer's reply that raced the call is not a violation.
+_SENT_MOMENT = (
+    "COALESCE((SELECT om.created_at FROM messages om WHERE om.id = f.message_id"
+    " AND om.tenant_id = f.tenant_id), f.sent_at)"
+)
+_STEP_SENT = "f.origin = 'sequence' AND f.status = 'sent'"
+
+# Follow-ups (FU-01..FU-08, ADR-151..ADR-153): what the stop rules, the window
+# rule, the step limit, the ledger rule, quiet hours and the kept request time
+# promise. Every one is zero on a healthy database.
+FOLLOW_UP_INVARIANTS: tuple[Check, ...] = (
+    # FU-01: a sequence step sent although the customer had written after the
+    # step's anchor - a reply stops the run (FUS-06).
+    Check(
+        "fu01_step_sent_after_the_customer_replied",
+        f"SELECT count(*) FROM follow_ups f WHERE {_STEP_SENT}"  # noqa: S608 - module constants
+        " AND EXISTS (SELECT 1 FROM messages m WHERE m.tenant_id = f.tenant_id"
+        " AND m.conversation_id = f.conversation_id AND m.direction = 'inbound'"
+        f" AND m.created_at > f.anchor_at AND m.created_at < {_SENT_MOMENT})",
+    ),
+    # FU-02: a sequence step sent while a person owned the conversation: a
+    # takeover after the anchor with no hand-back to the AI before the send.
+    Check(
+        "fu02_step_sent_while_a_person_owned_the_conversation",
+        f"SELECT count(*) FROM follow_ups f WHERE {_STEP_SENT}"  # noqa: S608 - module constants
+        " AND EXISTS (SELECT 1 FROM audit_logs a WHERE a.tenant_id = f.tenant_id"
+        " AND a.target_id = f.conversation_id AND a.action = 'conversation_taken_over'"
+        f" AND a.occurred_at > f.anchor_at AND a.occurred_at < {_SENT_MOMENT}"
+        " AND NOT EXISTS (SELECT 1 FROM audit_logs b WHERE b.tenant_id = a.tenant_id"
+        " AND b.target_id = a.target_id AND b.action = 'conversation_released_to_ai'"
+        f" AND b.occurred_at > a.occurred_at AND b.occurred_at < {_SENT_MOMENT}))",
+    ),
+    # FU-03: a sequence step sent later than the customer's window minus the
+    # margin (FUS-05): 24 hours after their last message before the send.
+    Check(
+        "fu03_step_sent_past_the_window_less_the_margin",
+        f"SELECT count(*) FROM follow_ups f WHERE {_STEP_SENT}"  # noqa: S608 - module constants
+        f" AND {_SENT_MOMENT} > COALESCE((SELECT max(m.created_at) FROM messages m"
+        " WHERE m.tenant_id = f.tenant_id AND m.conversation_id = f.conversation_id"
+        f" AND m.direction = 'inbound' AND m.created_at <= {_SENT_MOMENT}),"
+        " '-infinity'::timestamptz)"
+        f" + interval '{SERVICE_WINDOW_SECONDS} seconds'"
+        f" - interval '{FOLLOW_UP_WINDOW_MARGIN_SECONDS} seconds'",
+    ),
+    # FU-04: a sequence step sent as a template - a step is always free-form,
+    # never a template and never a message tag (FUS-05).
+    Check(
+        "fu04_step_sent_as_a_template",
+        f"SELECT count(*) FROM follow_ups f WHERE {_STEP_SENT}"  # noqa: S608 - module constants
+        " AND (f.template_name IS NOT NULL OR EXISTS (SELECT 1 FROM messages om"
+        " WHERE om.id = f.message_id AND om.tenant_id = f.tenant_id"
+        " AND (om.kind = 'template' OR om.template_name IS NOT NULL)))",
+    ),
+    # FU-05: a run that sent more steps than a run may have, or a conversation
+    # with two active runs at once (FUS-02, FUS-03).
+    Check(
+        "fu05_run_over_its_steps_or_two_active_runs",
+        "SELECT (SELECT count(*) FROM follow_up_sequence_runs r"  # noqa: S608 - module constants
+        " WHERE (SELECT count(*) FROM follow_ups f WHERE f.sequence_run_id = r.id"
+        f" AND f.status = 'sent') > {FOLLOW_UP_SEQUENCE_MAX_STEPS})"
+        " + (SELECT count(*) FROM (SELECT conversation_id FROM follow_up_sequence_runs"
+        " WHERE state = 'active' GROUP BY tenant_id, conversation_id HAVING count(*) > 1) s)",
+    ),
+    # FU-06: a business-initiated ledger row naming a free-form message:
+    # only templates count toward Meta's portfolio limit (FLIM-03).
+    Check(
+        "fu06_ledger_row_for_a_free_form_message",
+        "SELECT count(*) FROM business_initiated_sends b JOIN messages m"
+        " ON m.id = b.message_id AND m.tenant_id = b.tenant_id"
+        " WHERE m.kind <> 'template' AND m.template_name IS NULL",
+    ),
+    # FU-07: a template follow-up sent inside the workspace's quiet hours
+    # (FQH-01), in the workspace's zone. Counted from the workspace's
+    # follow-up settings onwards - before them nothing bound follow-ups to quiet
+    # hours - and against the quiet hours in force now: an edit after the send
+    # can raise it, which the audit log explains.
+    Check(
+        "fu07_template_follow_up_sent_in_quiet_hours",
+        "SELECT count(*) FROM follow_ups f JOIN tenants t ON t.id = f.tenant_id"
+        " JOIN follow_up_settings fs ON fs.tenant_id = f.tenant_id"
+        " WHERE f.status = 'sent' AND f.template_name IS NOT NULL"
+        " AND t.campaign_quiet_hours_enabled AND f.sent_at >= fs.created_at"
+        " AND CASE WHEN t.campaign_quiet_hours_start < t.campaign_quiet_hours_end"
+        " THEN CAST(f.sent_at AT TIME ZONE t.timezone AS time) >= t.campaign_quiet_hours_start"
+        " AND CAST(f.sent_at AT TIME ZONE t.timezone AS time) < t.campaign_quiet_hours_end"
+        " ELSE CAST(f.sent_at AT TIME ZONE t.timezone AS time) >= t.campaign_quiet_hours_start"
+        " OR CAST(f.sent_at AT TIME ZONE t.timezone AS time) < t.campaign_quiet_hours_end END",
+    ),
+    # FU-08: a follow-up whose requested time moved (FQH-04). A wait moves only
+    # `scheduled_at`, and always later: so with no wait and no failed attempt
+    # the two are equal, and after a wait the request is earlier.
+    Check(
+        "fu08_requested_time_changed",
+        "SELECT count(*) FROM follow_ups f WHERE"
+        " (f.attempts = 0 AND COALESCE(jsonb_array_length(f.deferrals), 0) = 0"
+        " AND f.scheduled_at <> f.requested_at)"
+        " OR (COALESCE(jsonb_array_length(f.deferrals), 0) > 0"
+        " AND f.requested_at >= f.scheduled_at)",
     ),
 )
 
@@ -868,7 +1028,7 @@ async def violations(
     """Every invariant's violation count. All zero on a healthy database."""
     return await _counts(
         connection,
-        INVARIANTS + ENTITLEMENT_INVARIANTS + CAMPAIGN_INVARIANTS,
+        INVARIANTS + ENTITLEMENT_INVARIANTS + CAMPAIGN_INVARIANTS + FOLLOW_UP_INVARIANTS,
         read_only=read_only,
         bindings=bindings,
     )
@@ -877,8 +1037,64 @@ async def violations(
 async def campaign_violations(
     connection: AsyncConnection, *, read_only: bool = True
 ) -> dict[str, int]:
-    """The campaign invariants alone (CR-01..CR-15). All zero on a healthy database."""
+    """The campaign invariants alone (CR-01..CR-17). All zero on a healthy database."""
     return await _counts(connection, CAMPAIGN_INVARIANTS, read_only=read_only)
+
+
+async def follow_up_violations(
+    connection: AsyncConnection, *, read_only: bool = True
+) -> dict[str, int]:
+    """The follow-up invariants alone (FU-01..FU-08). All zero on a healthy database."""
+    return await _counts(connection, FOLLOW_UP_INVARIANTS, read_only=read_only)
+
+
+#: The id fields a realtime hint may carry, and the table each names.
+_HINT_IDS: Final[dict[str, str]] = {
+    "conversation_id": "conversations",
+    "message_id": "messages",
+    "campaign_id": "campaigns",
+}
+REALTIME_CHECK = "rt_i01_hint_naming_another_workspace"
+
+
+async def realtime_violations(connection: AsyncConnection, redis: Redis) -> dict[str, int]:
+    """RT-I01: hints in a workspace's stream that name another workspace's rows.
+
+    Reads every workspace stream (`wasla:rt:events:*`) and asks the database,
+    per id a hint carries, which workspace owns it. An id no table holds (a
+    row since deleted) is not counted.
+    """
+    from app.core.events import STREAM_PREFIX
+
+    named: dict[str, set[tuple[str, str]]] = {table: set() for table in _HINT_IDS.values()}
+    async for key in redis.scan_iter(match=f"{STREAM_PREFIX}*"):
+        stream = key.decode() if isinstance(key, bytes) else str(key)
+        tenant = stream.removeprefix(STREAM_PREFIX)
+        for _entry_id, fields in await redis.xrange(stream):
+            values = {
+                (k.decode() if isinstance(k, bytes) else k): (
+                    v.decode() if isinstance(v, bytes) else v
+                )
+                for k, v in fields.items()
+            }
+            data = json.loads(values.get("data", "{}"))
+            for field_name, table in _HINT_IDS.items():
+                if data.get(field_name):
+                    named[table].add((tenant, str(data[field_name])))
+    broken = 0
+    for table, pairs in named.items():
+        for tenant, row_id in pairs:
+            owner = (
+                await connection.execute(
+                    text(
+                        f"SELECT CAST(tenant_id AS text) FROM {table} WHERE id = :id"  # noqa: S608
+                    ),
+                    {"id": uuid.UUID(row_id)},
+                )
+            ).scalar_one_or_none()
+            if owner is not None and owner != tenant:
+                broken += 1
+    return {REALTIME_CHECK: broken}
 
 
 async def entitlement_violations(
@@ -888,14 +1104,22 @@ async def entitlement_violations(
     return await _counts(connection, ENTITLEMENT_INVARIANTS, read_only=read_only, bindings=bindings)
 
 
-async def _run(command: str, url: str) -> int:
-    engine = create_async_engine(url, poolclass=NullPool)
+async def _run(command: str, url: str, redis_url: str | None = None) -> int:
+    engine = create_async_engine(url, poolclass=NullPool, connect_args=utc_connect_args(url))
     try:
         async with engine.connect() as connection, connection.begin():
             if command == "census":
                 found = await census(connection)
             else:
                 found = await violations(connection)
+                if redis_url:
+                    # RT-I01 reads the realtime streams too, when there is a
+                    # Redis to read them from.
+                    redis = Redis.from_url(redis_url)
+                    try:
+                        found |= await realtime_violations(connection, redis)
+                    finally:
+                        await redis.aclose()
     finally:
         await engine.dispose()
     for name, count in found.items():
@@ -915,7 +1139,7 @@ async def _recover(url: str, *, apply: bool) -> int:
 
     from app.services.opt_out_recovery import recover_button_opt_outs
 
-    engine = create_async_engine(url, poolclass=NullPool)
+    engine = create_async_engine(url, poolclass=NullPool, connect_args=utc_connect_args(url))
     try:
         async with AsyncSession(engine, expire_on_commit=False) as session:
             if not apply:
@@ -967,7 +1191,8 @@ def main(argv: list[str]) -> int:
     if not url:
         sys.stderr.write("omnichannel_invariants: INVARIANTS_DATABASE_URL or DATABASE_URL\n")
         return 64
-    return asyncio.run(_run(argv[0], url))
+    redis_url = os.environ.get("INVARIANTS_REDIS_URL") or os.environ.get("REDIS_URL")
+    return asyncio.run(_run(argv[0], url, redis_url))
 
 
 if __name__ == "__main__":  # pragma: no cover - operator entry point

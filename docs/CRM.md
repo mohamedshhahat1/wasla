@@ -137,11 +137,23 @@ Listing supports filtering by status, source, assignee, unassigned-only, tag, fr
 
 ## Follow-ups
 
-A follow-up is a promise to say something later unless the customer speaks first. Soft signals such as "I'll think about it" lead an agent to call `schedule_follow_up`; a person can schedule one over the API.
+A follow-up is a promise to say something later unless the customer speaks first. There are two kinds: **one-off** follow-ups, which a person schedules over the API (or the agent, through `schedule_follow_up`, where sequences do not cover the conversation), and **sequence steps**, the owner's automatic reminders (ADR-151).
+
+### Sequences: the owner's reminders (ADR-151)
+
+The workspace's follow-up settings (`GET`/`PUT /api/v1/workspace/follow-up-settings`) hold `enabled`, the platforms (`channel_types`, WhatsApp only while it is the one working adapter) and up to five reminders of 5 minutes to 23 hours each, with optional guidance for the AI. Every workspace starts **on, WhatsApp, one reminder after 5 minutes**.
+
+- **Start.** When the AI or a person sends a free-form reply on an AI-owned, open conversation of a covered platform, and the customer has written since the last run began, a run starts: step 1 is due that reply plus the first reminder. Each later step is due the previous step's **send** plus its reminder. Another reply restarts the run from step 1 (`sequence_restarted`); a business message to a customer who has not written since never starts one. Only the next step is ever waiting.
+- **The AI writes each step when it is due**, from the conversation itself, and may decide not to send (`concluded`, `purchased`, `declined`, `waiting_on_business`, `inappropriate`, `other`): a skip ends the run. A text the guardrails refuse (over the channel's length, a credential shape, a phone number) is skipped `guardrail`. A model that fails twice ends the run `ai_unavailable`. A step that asked the model costs one AI turn; a step cancelled before costs nothing.
+- **Never outside the window.** A step is sent only while at least `FOLLOW_UP_WINDOW_MARGIN_SECONDS` (30 minutes) of the customer's 24-hour window remain: a later step is never scheduled (`window_closing`), and one that came due too late is skipped (`window_closed`). A step is always free text - never a template, never a message tag.
+- **Stops.** The run ends, in the transaction that causes it, when the customer writes (`customer_replied`; `opted_out` for a STOP), a person takes over or is assigned (`human_took_over`), the conversation is closed (`conversation_closed`), the customer opts out on that channel (`opted_out`), the lead is won or lost (`lead_closed`), or the settings stop covering it (`settings_changed`: turned off, platform removed, or the waiting reminder deleted). At dispatch also: the workspace not served (`not_served`), the allowance exhausted (`allowance_exhausted`). Wasla records no purchases; a customer who says they will buy is the AI's `purchased`.
+- **Any hour.** Steps are not bound by quiet hours: the customer wrote inside the window.
+- **Who owns the slot.** While sequences cover a conversation the agent is not offered `schedule_follow_up` (a call is refused with readable text); a person's one-off replaces the waiting step and ends the run (`replaced_by_person`); a colleague's waiting one-off keeps any run from starting.
+- **What a person sees.** `GET /conversations/{id}` carries `follow_up` (state, step of total, due time with its local twin, how it ended); `GET /conversations/{id}/follow-ups` is the history (the text of sent steps only); `DELETE /conversations/{id}/follow-up` stops the run (`stopped_by_person`, audited).
 
 ### Model
 
-`follow_ups` carries `tenant_id`, `conversation_id`, `lead_id`, `scheduled_at`, `status`, `body`, `template_name`, `template_language`, `template_components`, `reason`, `created_by_id`, `created_by_kind`, `attempts`, `last_error`, `sent_at`, `cancelled_at`, `cancelled_reason` and `message_id`.
+`follow_ups` carries `tenant_id`, `conversation_id`, `lead_id`, `scheduled_at`, `requested_at`, `deferred_reason`, `deferrals`, `status`, `body`, `template_name`, `template_language`, `template_components`, `header_media_id`, `reason`, `created_by_id`, `created_by_kind`, `attempts`, `last_error`, `sent_at`, `cancelled_at`, `cancelled_reason`, `message_id` and, for a step, `origin = sequence`, `sequence_run_id`, `step_index`, `anchor_at` and `skip_reason`. `follow_up_sequence_runs` holds a run's anchor, state, `end_reason`, `ended_at` and `steps_sent`.
 
 The row carries both what to say inside the service window (`body`) and which approved template to use outside it, because which one applies is not known until the moment it comes due.
 
@@ -163,14 +175,16 @@ A colleague's own follow-up (`created_by_kind = user`) is a person's reminder, n
 
 The sweep claims a due row by stamping it with a `claim_token` and `claimed_until`; `scheduled_at` is only ever what somebody asked for. A worker may send only while the row still carries its exact token. Rescheduling or cancelling a claimed row clears the token, so a worker holding it sends nothing and the new time and text are what go out. Once the send intent has committed the customer may have the message, so a reschedule or cancel answers **409 `dispatch_in_progress`** and the row ends `SENT` (or `FAILED`) — never `CANCELLED` naming a sent message.
 
-`scheduled_at` must carry a UTC offset (`Z`, `+02:00`, …); a naive time is **422** (PD-CRM-9). It is stored normalised to UTC. There is no workspace time zone.
+`scheduled_at` must carry a UTC offset (`Z`, `+02:00`, …); a naive time is **422** (PD-CRM-9). It is stored normalised to UTC, and kept as `requested_at`: a wait for Meta's limit (`deferred_reason: portfolio_limit`, FLIM-01) or for the workspace's quiet hours (`quiet_hours`, a template follow-up only - FQH-01) moves `scheduled_at` and never `requested_at`, and spends no attempt; editing the quiet hours or the zone re-evaluates a waiting follow-up at the next sweep (FQH-03). The workspace has a time zone (`tenants.timezone`), but the API does not guess an offset for a wall time; `GET /api/v1/workspace/local-time` resolves one (TZ-08).
 
 ### Window and template compliance
 
+This table is a one-off follow-up's; a sequence step is free text inside the window or nothing (above).
+
 | Situation | What happens |
 | --- | --- |
-| Inside the 24-hour window, has a body | Free text is sent |
-| Outside the window, has an approved template | The template is sent |
+| Inside the 24-hour window, has a body | Free text is sent, at any hour |
+| Outside the window, has an approved template | The template is sent - outside the workspace's quiet hours (it waits for them, `quiet_hours`) and under Meta's whole limit (it waits for the window to free, `portfolio_limit`) (ADR-152, ADR-153). A media header uses a file of the workspace's library (`header_media_id`, ADR-154) |
 | Outside the window, no template | **`SKIPPED`** — not sent, recorded, never retried |
 | Conversation closed before it came due | `SKIPPED` |
 | Send attempted and rejected | Retried with widening backoff, then `FAILED` |

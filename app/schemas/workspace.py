@@ -202,6 +202,69 @@ class CampaignSettingsRead(BaseModel):
     utc_offset: str
 
 
+class LocalTimeRead(BaseModel):
+    """A wall time in the workspace's zone, resolved by the server (TZ-08).
+
+    The page sends `at_local` on, never an offset it computed itself. On the
+    autumn change day a wall time in the repeated hour is `ambiguous`: both
+    instants are in `alternatives` and `at_local` is the first. In the spring
+    gap it is `nonexistent`: `at_local` is the first instant after the gap.
+    """
+
+    at_local: datetime
+    at_utc: datetime
+    timezone: str
+    offset: str
+    ambiguous: bool
+    nonexistent: bool
+    alternatives: list[datetime]
+
+
+class FollowUpStepPayload(_Payload):
+    """One reminder: "after N minutes" (the card sends hours x 60)."""
+
+    delay_minutes: int
+    # An instruction to the AI for this reminder, never sent as it is.
+    guidance: str | None = Field(default=None, max_length=2000)
+
+
+class FollowUpSettingsUpdateRequest(_Payload):
+    """The whole of the follow-up settings: every field, every time (a `PUT`)."""
+
+    enabled: bool
+    channel_types: list[str] = Field(max_length=10)
+    steps: list[FollowUpStepPayload] = Field(max_length=20)
+
+
+class FollowUpStepRead(BaseModel):
+    delay_minutes: int
+    guidance: str | None
+
+
+class FollowUpSettingsSummary(BaseModel):
+    """The card's header line: "مفعّل · خطوة واحدة"."""
+
+    enabled: bool
+    steps_count: int
+
+
+class FollowUpSettingsRead(BaseModel):
+    """A workspace's automatic follow-ups (FUS-01): the owner's card.
+
+    `available_channel_types` are the platforms this deployment can run them
+    on; the card greys the others out. `version` goes back as `If-Match`.
+    """
+
+    enabled: bool
+    channel_types: list[str]
+    available_channel_types: list[str]
+    steps: list[FollowUpStepRead]
+    summary: FollowUpSettingsSummary
+    version: int
+    updated_at: datetime | None
+    updated_by: uuid.UUID | None
+
+
 class CampaignSettingsUpdateRequest(_Payload):
     """The whole of the quiet hours: every field, every time (a `PUT`)."""
 

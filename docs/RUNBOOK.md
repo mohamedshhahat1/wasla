@@ -51,6 +51,19 @@ previous schema intact; do not copy card tokens into logs or manually rewrite
 payment-method rows. See [DEPLOYMENT.md](DEPLOYMENT.md) for role provisioning,
 key rotation, and rollback constraints.
 
+### The inbox does not update
+
+The inbox learns of a new message through its event stream and falls back to polling `GET /conversations?updated_since=` every `poll_after_seconds` (ADR-155). So a page that is slow to update but never wrong is the stream failing; a page that is wrong is not this section.
+
+1. **Is the stream open?** `wasla_events_streams_open` per API process. Zero while people work: the stream route is failing or the proxy is cutting it - check that the proxy has the `/api/v1/events/stream` location (`proxy_buffering off`, `proxy_read_timeout 1h`); a proxy that buffers delivers every hint late, in a burst.
+2. **Why did it close?** `wasla_events_stream_closed_total{reason}` and `grep events.stream_closed`: `token_changed` (logout, password change), `membership_revoked`, `workspace_switched` (the person opened another workspace), `workspace_unavailable` (suspended or deleted) are correct closes; a run of `server_restart` is a deploy. `429 stream_limit` at open means the person has five streams (tabs) or the workspace `RT_STREAMS_PER_WORKSPACE`.
+3. **Are hints being published?** `wasla_events_published_total{type}` should rise with traffic. `wasla_events_publish_failed_total` rising is Redis refusing writes: the business writes committed anyway (a publish never fails one), clients converge by polling and `resync`; fix Redis.
+4. **Is the reader alive?** `grep events.reader_failed` / `events.watch_failed`: the per-workspace reader or the checker could not reach Redis or PostgreSQL and is retrying each second.
+
+5. **Right after a restart?** Every inbox should have reconnected within seconds: the API closes its streams (`server_restart`) the moment it is stopped. Check the API's first log line, `events.shutdown_hook active=true`. `active=false` means the process was not started by the entrypoint (`python -m app.serve`) - a command override such as plain `uvicorn app.main:app` - and each stop cuts every inbox only after the 25 s graceful bound, with no `closed` to reconnect on; restore the image's own command (`api`).
+
+Nothing in an event is content - ids and hints only - so no log line or metric of this path names a customer, a message or a ticket.
+
 ### Customers' messages are not arriving
 
 The webhook is the one path that must never be refused. Work backwards:
@@ -635,6 +648,16 @@ SELECT round_number, call_ordinal, tool_name, state, reason_code, argument_field
  ORDER BY round_number, call_ordinal;
 ```
 
+### Follow-ups are not sending
+
+Two kinds behave differently (ADR-151..ADR-153): **sequence steps** (the owner's reminders, free text inside the customer's window, any hour) and **one-off** follow-ups (a person's or the agent's; a template outside the window). Read the conversation's history first: `GET /api/v1/conversations/{id}/follow-ups` names each step's status and closed reason.
+
+1. **Are reminders on for that platform?** `GET /api/v1/workspace/follow-up-settings`. A workspace with `version: 0` has no settings row and runs nothing (one written directly into the database). A platform other than WhatsApp cannot be chosen yet.
+2. **Did a run start?** Only after an AI's or a person's free-form reply on an AI-owned, open conversation whose customer wrote since the last run began; never while a colleague's one-off waits.
+3. **How did it end?** `follow_up_sequence_runs.end_reason`: `customer_replied`, `human_took_over`, `conversation_closed`, `opted_out`, `lead_closed`, `settings_changed`, `stopped_by_person`, `replaced_by_person` and `sequence_restarted` are the rules working. `window_closing` - the next reminder would land within `FOLLOW_UP_WINDOW_MARGIN_SECONDS` of the window's end, so it was never scheduled: shorten the reminders. `ai_skipped` / `purchased` - the model judged the conversation finished. `guardrail` - the model's text was too long for the channel or carried a phone number or credential shape. `ai_unavailable` - the model failed twice (`FollowUpAiFailing`; `grep follow_up.step_write_failed`). `allowance_exhausted`, `not_served` - the workspace's plan or state.
+4. **A one-off template is waiting?** `deferred_reason`: `quiet_hours` (sent when they end; editing them or the zone releases it at the next sweep) or `portfolio_limit` (sent when Meta's 24-hour window frees, `PortfolioLimitReached`). Neither spends an attempt; `requested_at` keeps the time asked for, `deferrals` every wait.
+5. **Is the worker sweeping?** As for any follow-up: `wasla_follow_up_*` counters and the follow-up worker's heartbeat; `wasla_follow_up_sequence_steps_total{outcome}` and `wasla_follow_up_defers_total{reason}` say what it decided.
+
 ### Campaigns are not sending
 
 ```sql
@@ -796,6 +819,8 @@ docker compose -f docker-compose.prod.yml up -d --wait
 ```
 
 `--wait` blocks until health checks pass, so a container that starts and dies fails the deploy rather than being reported as shipped.
+
+The API is started by the image's command (`api`: the entrypoint execs `python -m app.serve`) and stopped with SIGTERM; with inboxes open it stops in about a second, each inbox told `closed` (`server_restart`) and reconnecting by itself. Do not override the API's command: the first log line of a correctly started process is `events.shutdown_hook active=true`.
 
 ### Roll back
 
@@ -2099,6 +2124,24 @@ VALID` then validated under a 15 s `lock_timeout`, the label and the index are
 built in autocommit blocks. **The downgrade refuses** (nothing changed) while
 any header file exists, any campaign names one or Meta's id for one, any
 campaign stopped for a header reason, or any audit entry records an upload.
+
+### Follow-ups, header media and realtime (0121-0125)
+
+Additive migrations of FOLLOW_UPS_HEADER_MEDIA_REALTIME_IMPLEMENTATION.md
+(ADR-151..ADR-156), written like 0108-0120. The table grows with each phase:
+
+| Revision | Adds |
+| --- | --- |
+| 0121 | `follow_ups.requested_at` (backfilled from `scheduled_at` in batches of 5,000, NOT NULL through a validated CHECK), `deferred_reason` (`portfolio_limit`, `quiet_hours`), `deferrals` |
+| 0122 | `follow_up_settings` (one row per workspace, the default - on, WhatsApp, one 5-minute reminder - written for every existing workspace); audit actions `follow_up_settings_updated`, `follow_up_stopped_by_person` |
+| 0123 | `follow_up_sequence_runs` (one active per conversation); `follow_ups.origin`, `sequence_run_id`, `step_index`, `anchor_at`, `skip_reason`; index `CONCURRENTLY` |
+| 0124 | `campaign_header_media.deleted_at`; `template_header_uploads` (Meta's id per file and connection, or per campaign, file and connection); `follow_ups.header_media_id` and its index (`CONCURRENTLY`) |
+| 0125 | `campaigns.header_media_mode` (constant default `campaign`), `header_media_rules`, `header_media_refusals`; `campaign_recipients.header_media_id` and its index (`CONCURRENTLY`); reason code `header_media_refused` |
+| 0126 | `ix_conversations_tenant_id_updated_at` (`CONCURRENTLY`), for `GET /conversations?updated_since=`; `updated_at` is maintained by the application's `onupdate` on every ORM flush and Core `UPDATE` of `conversations` |
+
+Every downgrade refuses (nothing changed) while its new columns or rows hold
+data, and leaves the stamp; 0121 refuses while any follow-up waited
+(`deferred_reason` / `deferrals`) or is due later than the time asked for.
 
 ### Campaign page features (0108-0120)
 

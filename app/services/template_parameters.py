@@ -296,6 +296,15 @@ def _parameter(name: str, value: str, *, named: bool) -> dict[str, Any]:
     return parameter
 
 
+def header_file_component(header_file: HeaderFileParameter) -> dict[str, Any]:
+    """A media header in Meta's shape - the one builder for campaigns, a person's and a
+    follow-up's template (ADR-137, HMT-02)."""
+    media: dict[str, Any] = {"id": header_file.provider_media_id}
+    if header_file.kind == "document" and header_file.filename:
+        media["filename"] = header_file.filename
+    return {"type": "header", "parameters": [{"type": header_file.kind, header_file.kind: media}]}
+
+
 def send_components(
     spec: ParameterSpec, supplied: CampaignParameters
 ) -> list[dict[str, Any]] | None:
@@ -311,15 +320,7 @@ def send_components(
         header_file = supplied.header_file
         if header_file is None:
             raise ValueError("A media header needs Meta's id for the campaign's header file.")
-        media: dict[str, Any] = {"id": header_file.provider_media_id}
-        if header_file.kind == "document" and header_file.filename:
-            media["filename"] = header_file.filename
-        components.append(
-            {
-                "type": "header",
-                "parameters": [{"type": header_file.kind, header_file.kind: media}],
-            }
-        )
+        components.append(header_file_component(header_file))
     if spec.header:
         components.append(
             {
@@ -369,6 +370,7 @@ __all__ = [
     "CampaignParameters",
     "HeaderFileParameter",
     "ParameterSpec",
+    "header_file_component",
     "parameter_spec",
     "refusal",
     "send_components",

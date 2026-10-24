@@ -227,7 +227,9 @@ async def test_the_conversation_list_answers_a_page_not_a_bare_array(
 
     assert response.status_code == 200
     body = response.json()
-    assert list(body) == ["items", "next_cursor"]
+    # The page and its poll hint (RT-04, ADR-155): still a page, never a bare array.
+    assert list(body) == ["items", "next_cursor", "poll_after_seconds"]
+    assert body["poll_after_seconds"] == 30
     assert body["items"][0]["id"] == str(CONVERSATION_ID)
     assert body["next_cursor"] == NEXT_CURSOR
 

@@ -26,6 +26,7 @@ from app.agents.lifecycle import serving_state, tool_refusal_for
 from app.agents.memory import build_window
 from app.agents.registry import (
     HANDOFF_TOOL,
+    SCHEDULE_FOLLOW_UP_TOOL,
     ToolArgumentError,
     ToolContext,
     ToolDefinition,
@@ -60,6 +61,7 @@ from app.repositories.tool_execution_repository import (
     ToolExecutionRepository,
     terminal_values,
 )
+from app.services.follow_up_sequences import SequenceService
 from app.services.sentiment_service import SentimentService
 
 logger = get_logger(__name__)
@@ -503,8 +505,16 @@ class AgentOrchestrator:
         # the model is *offered*; `granted` decides what it is allowed to
         # actually run. See `_run`.
         granted = {grant.name for grant in grants}
+        offered = [grant.name for grant in grants]
+        if SCHEDULE_FOLLOW_UP_TOOL in granted and await SequenceService(
+            self._session, tenant_id=self._tenant_id, channels=self._channels
+        ).covers(await self._conversations.require_by_id(conversation_id)):
+            # The workspace's reminders own the follow-up slot (FUS-03): the
+            # tool is not described this turn. A call that arrives anyway is
+            # refused by the service in words the model can read.
+            offered = [name for name in offered if name != SCHEDULE_FOLLOW_UP_TOOL]
         # Described as the conversation's channel allows (OMNI-039).
-        specs = self._registry.specs((grant.name for grant in grants), policy=channel_policy)
+        specs = self._registry.specs(offered, policy=channel_policy)
 
         turns = list(window.turns)
         results: list[ToolResult] = []

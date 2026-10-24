@@ -10,14 +10,18 @@ staff an inbox from using it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Header, Query, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
+    FollowUpServiceDep,
     InboxServiceDep,
     MediaServiceDep,
     MediaStorageDep,
@@ -27,6 +31,7 @@ from app.api.dependencies import (
 from app.api.route import CommittingRoute
 from app.api.uploads import read_capped
 from app.channels.policy import REQUEST_CAPTION_CEILING
+from app.core.dependencies import RedisDep, SessionDep, SettingsDep
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
@@ -36,6 +41,7 @@ from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
     AssignmentRequest,
+    ConversationListPage,
     ConversationRead,
     CursorPage,
     MessageRead,
@@ -43,11 +49,15 @@ from app.schemas.conversation import (
     PriorityUpdateRequest,
     SendTemplateRequest,
     SendTextRequest,
+    TemplateSentRead,
 )
+from app.schemas.follow_up import FollowUpHistoryRead, FollowUpStateRead
 from app.schemas.text import StorableText
+from app.services.follow_up_sequences import SequenceService
 from app.services.inbox_service import InboxService
 from app.services.media_retention_service import purge_reason
 from app.services.messaging_service import MessagingService
+from app.services.realtime_streams import open_streams
 
 # The header a caller sends to say "this is the same request as before", so a
 # double-clicked button or a retried mobile request produces one message rather
@@ -77,6 +87,11 @@ LimitQuery = Annotated[int, Query(ge=1, le=100)]
 # meant to be constructed by hand. Bounded so a long query string is rejected
 # before any decoding is attempted.
 CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
+
+# How long the inbox waits before polling again (RT-04, RT-07): with a stream
+# open the poll is only the safety net behind it.
+POLL_WITHOUT_STREAM_SECONDS = 30
+POLL_WITH_STREAM_SECONDS = 60
 
 # The largest caption any supported channel accepts (OMNI-044); each channel's
 # own limit is applied by the send.
@@ -111,16 +126,25 @@ async def _present(
     return (await _present_all([conversation], inbox=inbox, messaging=messaging))[0]
 
 
-@router.get("", response_model=CursorPage[ConversationRead])
+@router.get(
+    "",
+    response_model=ConversationListPage,
+    responses={304: {"description": "Nothing changed since the ETag sent (first page)."}},
+)
 async def list_conversations(
+    request: Request,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
+    redis: RedisDep,
+    settings: SettingsDep,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
     priority: ConversationPriority | None = None,
     channel: Channel | None = None,
     connection_id: uuid.UUID | None = None,
-) -> CursorPage[ConversationRead]:
+    updated_since: datetime | None = None,
+) -> Response:
     """Open conversations, most recently active first.
 
     Paged by cursor rather than offset: the inbox is written to while it is
@@ -131,28 +155,128 @@ async def list_conversations(
     be worked deliberately while the default view stays as it was. `channel`
     and `connection_id` narrow it the same way, to one channel or one
     connection.
+
+    **Catching up** (RT-04): `updated_since` (with its offset) lists every
+    conversation changed at or after it - closed ones too - oldest change
+    first. The first page carries an `ETag`: send it back as `If-None-Match`
+    and an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30
+    with no event stream open, 60 with one.
     """
-    page = await inbox.list_conversations(
-        limit=limit,
-        cursor=cursor,
-        priority=priority,
-        channel=channel,
-        connection_id=connection_id,
-    )
-    return CursorPage[ConversationRead](
+    if updated_since is not None:
+        if updated_since.utcoffset() is None:
+            raise ValidationError(
+                "updated_since needs a UTC offset, for example 2026-10-30T09:00:00+02:00.",
+                error_code="updated_since_needs_offset",
+            )
+        page = await inbox.list_changed_since(since=updated_since, limit=limit, cursor=cursor)
+    else:
+        page = await inbox.list_conversations(
+            limit=limit,
+            cursor=cursor,
+            priority=priority,
+            channel=channel,
+            connection_id=connection_id,
+        )
+    try:
+        streaming = await open_streams(
+            redis.client,
+            user_id=workspace.user.id,
+            keepalive_seconds=settings.rt_keepalive_seconds,
+        )
+    except Exception:
+        streaming = 0
+    body = ConversationListPage(
         items=await _present_all(page.items, inbox=inbox, messaging=messaging),
         next_cursor=page.next_cursor,
+        poll_after_seconds=POLL_WITH_STREAM_SECONDS if streaming else POLL_WITHOUT_STREAM_SECONDS,
     )
+    headers = {"Cache-Control": "no-cache"}
+    if cursor is None:
+        stable = [
+            [str(item.id), item.updated_at.isoformat() if item.updated_at else None]
+            for item in body.items
+        ]
+        tag = (
+            '"'
+            + hashlib.sha256(
+                json.dumps([stable, body.next_cursor, body.poll_after_seconds]).encode()
+            ).hexdigest()[:32]
+            + '"'
+        )
+        if request.headers.get("If-None-Match") == tag:
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": tag})
+        headers["ETag"] = tag
+    return Response(content=body.model_dump_json(), media_type="application/json", headers=headers)
 
 
 @router.get("/{conversation_id}", response_model=ConversationRead)
 async def get_conversation(
     conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
     inbox: InboxServiceDep,
     messaging: MessagingServiceDep,
+    session: SessionDep,
 ) -> ConversationRead:
+    """One conversation, with its follow-ups' state (FUS-09)."""
     conversation = await inbox.get_conversation(conversation_id)
-    return await _present(conversation, inbox=inbox, messaging=messaging)
+    read = await _present(conversation, inbox=inbox, messaging=messaging)
+    state = await SequenceService(session, tenant_id=workspace.tenant.id).state(conversation.id)
+    read.follow_up = FollowUpStateRead.from_state(state, timezone=workspace.tenant.timezone)
+    return read
+
+
+@router.get(
+    "/{conversation_id}/follow-ups",
+    response_model=CursorPage[FollowUpHistoryRead],
+    summary="A conversation's follow-up history",
+)
+async def list_conversation_follow_ups(
+    conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    inbox: InboxServiceDep,
+    follow_ups: FollowUpServiceDep,
+    limit: LimitQuery = 50,
+    cursor: CursorQuery = None,
+) -> CursorPage[FollowUpHistoryRead]:
+    """Every follow-up of the conversation, latest due first: steps, one-offs, outcomes, reasons.
+
+    The text is shown for a sent one only; what the model wrote for a step it
+    skipped is never kept or shown (FUS-09).
+    """
+    await inbox.get_conversation(conversation_id)
+    page = await follow_ups.list_follow_ups(
+        conversation_id=conversation_id, limit=limit, cursor=cursor
+    )
+    return CursorPage[FollowUpHistoryRead](
+        items=[
+            FollowUpHistoryRead.from_model(row, timezone=workspace.tenant.timezone)
+            for row in page.items
+        ],
+        next_cursor=page.next_cursor,
+    )
+
+
+@router.delete(
+    "/{conversation_id}/follow-up",
+    response_model=FollowUpStateRead,
+    summary="Stop this conversation's automatic follow-ups",
+)
+async def stop_conversation_follow_ups(
+    conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    inbox: InboxServiceDep,
+    session: SessionDep,
+) -> FollowUpStateRead:
+    """Any member who may reply here: the run ends `stopped_by_person`, audited (FUS-09).
+
+    Nothing waiting is not an error: the current state is returned. A
+    reminder whose send has already been committed is not recalled.
+    """
+    await inbox.get_conversation(conversation_id)
+    sequences = SequenceService(session, tenant_id=workspace.tenant.id)
+    await sequences.stop_by_person(conversation_id, actor=workspace.user)
+    state = await sequences.state(conversation_id)
+    return FollowUpStateRead.from_state(state, timezone=workspace.tenant.timezone)
 
 
 @router.get("/{conversation_id}/messages", response_model=CursorPage[MessageRead])
@@ -161,8 +285,17 @@ async def list_messages(
     inbox: InboxServiceDep,
     limit: LimitQuery = 50,
     cursor: CursorQuery = None,
+    after: uuid.UUID | None = None,
 ) -> CursorPage[MessageRead]:
-    """Most recent messages first."""
+    """Most recent messages first - or, with `after` (a message id), the messages after it,
+    oldest first, for a client catching up after a stream event (RT-04)."""
+    if after is not None:
+        newer = await inbox.list_messages_after(
+            conversation_id=conversation_id, message_id=after, limit=limit
+        )
+        return CursorPage[MessageRead](
+            items=[MessageRead.from_model(message) for message in newer], next_cursor=None
+        )
     page = await inbox.list_messages(
         conversation_id=conversation_id,
         limit=limit,
@@ -207,37 +340,55 @@ async def send_text(
 
 @router.post(
     "/{conversation_id}/messages/template",
-    response_model=MessageRead,
+    response_model=TemplateSentRead,
     status_code=status.HTTP_201_CREATED,
+    responses={
+        409: {
+            "description": (
+                "portfolio_limit_reached: Meta's messaging limit is used at 100 %; "
+                "details {available_at, available_at_local}."
+            )
+        },
+        422: {
+            "description": (
+                "header_media_must_be_uploaded, header_media_required, "
+                "header_media_kind_mismatch (HMT-02)."
+            )
+        },
+    },
 )
 async def send_template(
     conversation_id: uuid.UUID,
     payload: SendTemplateRequest,
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
+    storage: MediaStorageDep,
     idempotency_key: IdempotencyKeyHeader = None,
-) -> MessageRead:
+) -> TemplateSentRead:
     """Send an approved template, which is valid outside the service window.
 
     Refused with 422 when the local registry records the template as paused,
     rejected or disabled. A template the registry has never heard of is allowed
     through, because a workspace that has not synced cannot be told apart from
-    one whose template does not exist.
+    one whose template does not exist. Refused with 409 at 100 % of Meta's
+    messaging limit, with when it can go (FLIM-02); sent while the limit is
+    unknown, with the notice `messaging_limit_unknown`.
 
     Send `Idempotency-Key` to make a retry safe.
     """
-    message = await messaging.send_template(
+    message, notices = await messaging.send_manual_template(
         conversation_id=conversation_id,
         name=payload.name,
         language=payload.language,
         components=payload.components,
         sent_by_id=workspace.user.id,
         idempotency_key=idempotency_key,
-        origin=MessageOrigin.HUMAN,
         # A marketing template is admin-only and opt-out-checked (CMQ-02).
         sender_role=workspace.role,
+        header_media_id=payload.header_media_id,
+        storage=storage,
     )
-    return MessageRead.from_model(message)
+    return TemplateSentRead(**MessageRead.from_model(message).model_dump(), notices=notices)
 
 
 @router.post(

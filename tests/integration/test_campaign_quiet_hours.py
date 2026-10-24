@@ -114,15 +114,20 @@ async def _drain(clock: SimClock, replica: Any, *, rounds: int = 20) -> None:
 async def test_a_batch_reaching_the_window_stops_at_the_next_person_and_resumes_in_the_morning(
     prepared_database: str,
 ) -> None:
-    """21:58:59 local, Meta answering in 0.3 s: the batch crosses 21:59 and stops there.
+    """21:58:48 local, Meta answering in 1 s: the batch crosses 21:59 and stops there.
 
     A campaign stops deciding sends `SEND_LEAD` (a minute) before the window
     opens, so a send decided just before it still reaches Meta before 22:00
     (CPF-08). Nobody is sent between 22:00 and 09:00 local; the rest go at
     09:00; no attempt is spent and the status never leaves `running`.
+
+    The sweep starts 12 s before the decision cut-off, and twenty sends need
+    twenty: the first send has 12 s of real-time margin however loaded the
+    machine is, and the batch still cannot finish before the cut-off (RT-08,
+    closing CPM-06's 1-second margin).
     """
-    clock = SimClock(now=cairo(2026, 10, 20, 21, 58, 59.0))
-    meta = FakeMeta(latency=0.3)
+    clock = SimClock(now=cairo(2026, 10, 20, 21, 58, 48.0))
+    meta = FakeMeta(latency=1.0)
     meta.clock = clock.at
     replica, db = worker(prepared_database, meta, name="quiet-edge")
     try:

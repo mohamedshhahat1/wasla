@@ -313,6 +313,8 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         # alone finds the workspace and then discards most of what it read
         # by filter, which costs more the longer a workspace has existed.
         Index("ix_conversations_tenant_id_created_at", "tenant_id", "created_at"),
+        # The inbox's incremental read (RT-04): changed since a moment.
+        Index("ix_conversations_tenant_id_updated_at", "tenant_id", "updated_at", "id"),
         # The campaign contact picker on one number, most recent inbound
         # first (PG-07). 0116.
         Index(

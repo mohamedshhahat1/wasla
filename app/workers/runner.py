@@ -27,6 +27,9 @@ from collections.abc import Iterable, Sequence
 from typing import Final, Protocol
 
 from app.core.config import Settings, get_settings
+from app.core.events import drain as drain_events
+from app.core.events import install as install_events
+from app.core.events import set_event_sink
 from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
 from app.core.telemetry import set_counter_sink
@@ -354,6 +357,13 @@ async def main() -> None:
     # process serves no HTTP for a scraper to read (ADR-069). The API renders
     # them.
     set_counter_sink(redis.client if settings.metrics_enabled else None)
+    # Workers write the rows the inbox watches: their hints go out too (ADR-155).
+    install_events()
+    set_event_sink(
+        redis.client,
+        maxlen=settings.rt_stream_maxlen,
+        retention_seconds=settings.rt_stream_retention_seconds,
+    )
     kinds = selected_kinds()
     workers = build_workers(
         kinds=kinds,
@@ -392,6 +402,8 @@ async def main() -> None:
         # Stopped before Redis closes, so the beat does not fail on a client
         # that is already going away and log a warning nobody should act on.
         set_counter_sink(None)
+        await drain_events()
+        set_event_sink(None)
         stopping.set()
         heartbeat.cancel()
         renewal.cancel()

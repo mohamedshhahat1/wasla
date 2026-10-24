@@ -79,6 +79,8 @@ RESPONSES_PATH: Final = "/responses"
 RESPOND_AGENT: Final = "respond_agent"
 RESPOND_SENTIMENT: Final = "respond_sentiment"
 RESPOND_VISION: Final = "respond_vision"
+# An automatic follow-up written from the conversation (FUS-04).
+RESPOND_FOLLOW_UP: Final = "respond_follow_up"
 REQUEST_TIMEOUT_SECONDS: Final = 60.0
 # What a request carries when its caller named no output ceiling. The deployment
 # default, and deliberately not configurable here: callers are expected to pass

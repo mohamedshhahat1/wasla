@@ -51,6 +51,7 @@ from app.db.models.conversation import (
     ConversationStatus,
     Message,
 )
+from app.db.models.follow_up_sequence import SequenceEndReason
 from app.db.models.sentiment import ConversationPriority
 from app.db.models.user import User
 from app.repositories.channel_repository import ContactIdentityRepository
@@ -58,6 +59,7 @@ from app.repositories.conversation_repository import ConversationRepository, Mes
 from app.repositories.membership_repository import MembershipRepository
 from app.services.analytics_service import AnalyticsRecorder
 from app.services.audit_service import AuditTrail
+from app.services.follow_up_sequences import SequenceService
 from app.services.follow_up_service import FollowUpService
 
 logger = get_logger(__name__)
@@ -108,6 +110,7 @@ class InboxService:
         # Constructed without settings, like the ingestion path's copy: nothing
         # here sends, and only `dispatch` needs somewhere to send from.
         self._follow_ups = FollowUpService(session=session, tenant_id=tenant_id)
+        self._sequences = SequenceService(session, tenant_id=tenant_id)
 
     async def list_conversations(
         self,
@@ -155,6 +158,25 @@ class InboxService:
         """
         return await self._identities.map_by_ids(
             {conversation.participant_identity_id for conversation in conversations}
+        )
+
+    async def list_changed_since(
+        self, *, since: datetime, limit: int = 50, cursor: str | None = None
+    ) -> Page[Conversation]:
+        """Conversations changed at or after `since` (RT-04), for a client catching up."""
+        after = Cursor.decode(cursor) if cursor else None
+        rows = await self._conversations.list_changed_since(since=since, limit=limit, after=after)
+        return paginate(
+            rows, limit=limit, key=lambda row: Cursor(sort_value=row.updated_at, id=row.id)
+        )
+
+    async def list_messages_after(
+        self, *, conversation_id: uuid.UUID, message_id: uuid.UUID, limit: int = 50
+    ) -> list[Message]:
+        """The messages after one the client holds, oldest first (RT-04)."""
+        await self._conversations.require_by_id(conversation_id)
+        return await self._messages.list_after(
+            conversation_id=conversation_id, message_id=message_id, limit=limit
         )
 
     async def list_messages(
@@ -308,6 +330,8 @@ class InboxService:
             conversation_id=conversation_id,
             reason="A colleague took the conversation over.",
         )
+        # The workspace's automatic reminders stop with the AI (FUS-06).
+        await self._sequences.stop_conversation(conversation_id, SequenceEndReason.HUMAN_TOOK_OVER)
         if cancelled:
             logger.info(
                 "follow_up.cancelled_on_handoff",
@@ -431,6 +455,11 @@ class InboxService:
             return conversation
 
         conversation.assigned_to_id = assigned_to_id
+        if assigned_to_id is not None:
+            # A person now owns it: the automatic reminders stop (FUS-06).
+            await self._sequences.stop_conversation(
+                conversation_id, SequenceEndReason.HUMAN_TOOK_OVER
+            )
         if assigned_to_id is None:
             action = AuditAction.CONVERSATION_UNASSIGNED
         elif current is None:
@@ -502,6 +531,11 @@ class InboxService:
             return conversation
         previous = conversation.status
         conversation.status = status
+        if status is ConversationStatus.CLOSED:
+            # A finished conversation is followed up no more (FUS-06).
+            await self._sequences.stop_conversation(
+                conversation_id, SequenceEndReason.CONVERSATION_CLOSED
+            )
         self._record(
             action,
             conversation,

@@ -51,6 +51,7 @@ from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
 from app.services.email_verification_service import EmailVerificationService
+from app.services.follow_up_settings_service import default_settings_row
 from app.services.subscription_service import bootstrap_default_subscription
 
 logger = get_logger(__name__)
@@ -199,6 +200,9 @@ class AuthService:
         )
         # Identifiers are assigned on flush, and the membership needs both.
         await self._session.flush()
+        # The owner's follow-up card opens on, WhatsApp, one reminder after
+        # five minutes (FUS-01).
+        self._session.add(default_settings_row(tenant.id))
 
         memberships = MembershipRepository(self._session, tenant_id=tenant.id)
         membership = await memberships.add_member(

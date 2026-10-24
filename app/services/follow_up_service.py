@@ -47,21 +47,25 @@ conversation has gone quiet. See `docs/CAMPAIGNS.md`.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.memory import build_window
 from app.channels.outcomes import ProviderConnectionRefusedError
 from app.channels.policy import (
     FollowUpAction,
     OutOfWindow,
     PolicyRefusalError,
     require_sendable_text,
+    text_length,
 )
 from app.channels.registry import (
     PAUSED_RECHECK,
@@ -71,7 +75,7 @@ from app.channels.registry import (
     default_registry,
 )
 from app.channels.throughput import ConnectionThrottledError
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     ConflictError,
     ExternalServiceError,
@@ -81,6 +85,8 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
+from app.core.storage import MediaStorage, build_media_storage
+from app.core.telemetry import record_follow_up_defer, record_follow_up_step
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -92,27 +98,44 @@ from app.db.models.conversation import (
 from app.db.models.follow_up import (
     MAX_ATTEMPTS,
     MAX_BODY_LENGTH,
+    MAX_DEFERRALS,
     MAX_REASON_LENGTH,
     FollowUp,
+    FollowUpDeferReason,
     FollowUpStatus,
 )
+from app.db.models.follow_up_sequence import (
+    SequenceEndReason,
+    SequenceSkipReason,
+    end_reason_for,
+)
 from app.db.models.lead import ActorKind
+from app.db.models.tenant import Tenant
+from app.db.models.usage import UsageEventType
+from app.repositories.agent_repository import AgentRepository
 from app.repositories.consent_repository import ContactConsentRepository
 from app.repositories.conversation_repository import (
     ContactRepository,
     ConversationRepository,
+    MessageRepository,
 )
 from app.repositories.follow_up_repository import FollowUpRepository
 from app.repositories.lead_repository import LeadRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.services import workspace_serving as serving
+from app.services.business_initiated_ledger import PortfolioLimitReachedError
 from app.services.entitlement_service import (
     CHANNEL_NOT_IN_PLAN_DETAIL,
     EntitlementService,
 )
+from app.services.follow_up_sequences import SequenceService
+from app.services.follow_up_writer import StepAnswer, StepRequest, step_instructions
 from app.services.messaging_service import MessagingService
+from app.services.quiet_hours import QuietHours
+from app.services.template_header_media import TemplateHeaderMediaService
 from app.services.template_service import refusal_reason_for
+from app.services.usage_service import UsageRecorder
 
 logger = get_logger(__name__)
 
@@ -132,6 +155,13 @@ DISPATCH_IN_PROGRESS: Final = "dispatch_in_progress"
 #: `cancelled_reason` for the reminders of a colleague removed from the
 #: workspace (PD-CRM-8).
 MEMBER_REVOKED_REASON: Final = "member_revoked"
+
+#: The words a model reads when it asks for a follow-up the workspace sends by
+#: itself (FUS-03).
+SEQUENCES_AUTOMATIC: Final = (
+    "Follow-ups are automatic in this workspace: Wasla sends the owner's reminders "
+    "by itself. Do not schedule one."
+)
 
 #: `cancelled_reason` for the nudges of a connection that was disabled - by a
 #: person or by a capacity reduction (ENT-14).
@@ -155,6 +185,15 @@ class _Intention:
     reason: str | None
     created_by_id: uuid.UUID | None
     created_by_kind: ActorKind
+    header_media_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StepPreparation:
+    """A step's first part: finished already (`outcome`), or a model call to make."""
+
+    outcome: DispatchOutcome | None = None
+    request: StepRequest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +216,7 @@ class FollowUpService:
         settings: Settings | None = None,
         messaging: MessagingService | None = None,
         channels: ChannelRegistry | None = None,
+        storage: MediaStorage | None = None,
     ) -> None:
         """`settings` is needed only to send; `messaging` overrides how.
 
@@ -190,6 +230,8 @@ class FollowUpService:
         self._tenant_id = tenant_id
         self._settings = settings
         self._messaging = messaging
+        # Where a follow-up template's header file is read from (HMT-03).
+        self._storage = storage
         # What a due follow-up may do is its conversation's channel's rule
         # (OMNI-008), not a WhatsApp window written into this service.
         self._channels = channels or default_registry()
@@ -244,6 +286,7 @@ class FollowUpService:
         lead_id: uuid.UUID | None = None,
         created_by_id: uuid.UUID | None = None,
         created_by_kind: ActorKind = ActorKind.USER,
+        header_media_id: uuid.UUID | None = None,
     ) -> FollowUp:
         """Schedule a nudge, or reschedule the one already waiting.
 
@@ -276,6 +319,13 @@ class FollowUpService:
             # it is sent (PD-CRM-1).
             raise ConflictError("This conversation is handled by a colleague.")
 
+        sequences = SequenceService(self._session, tenant_id=self._tenant_id)
+        if created_by_kind is ActorKind.AGENT and await sequences.covers(conversation):
+            # The slot belongs to the workspace's reminders (FUS-03). The tool
+            # is not offered here; a call that arrives anyway is refused in
+            # words the model can read.
+            raise ValidationError(SEQUENCES_AUTOMATIC)
+
         if lead_id is not None:
             await self._require_lead_of(lead_id, contact_id=conversation.contact_id)
 
@@ -300,6 +350,15 @@ class FollowUpService:
                 # a person is present to fix it; the send happens hours later
                 # against nobody.
                 raise ValidationError(refusal)
+            # Its header file, checked now while a person is present (HMT-03).
+            await self._headers().resolve(
+                template_name=name,
+                language=str(language),
+                components=template_components,
+                header_media_id=header_media_id,
+            )
+        elif header_media_id is not None:
+            raise ValidationError("A header file goes with a template.")
 
         intention = _Intention(
             scheduled_at=when,
@@ -307,6 +366,7 @@ class FollowUpService:
             template_name=name,
             template_language=language,
             template_components=template_components,
+            header_media_id=header_media_id,
             reason=_trimmed(reason),
             created_by_id=created_by_id,
             created_by_kind=created_by_kind,
@@ -316,6 +376,17 @@ class FollowUpService:
             conversation_id,
             for_update=True,
         )
+        if existing is not None and existing.is_sequence_step and not existing.is_in_flight:
+            # A person's one-off replaces the waiting step and ends the run
+            # (FUS-03): the slot is theirs now, and the row stays the step it was.
+            existing.claim_token = None
+            existing.claimed_until = None
+            existing.status = FollowUpStatus.CANCELLED
+            existing.cancelled_at = datetime.now(UTC)
+            existing.cancelled_reason = "replaced_by_person"
+            await sequences.replaced_by_person(conversation_id)
+            await self._session.flush()
+            existing = None
         if existing is not None:
             return self._reschedule(existing, intention)
 
@@ -376,10 +447,16 @@ class FollowUpService:
             )
         _release_claim(follow_up)
         follow_up.scheduled_at = intention.scheduled_at
+        # A new intention: the time asked for is this one, and no wait of the
+        # old one carries over (FQH-04).
+        follow_up.requested_at = intention.scheduled_at
+        follow_up.deferred_reason = None
+        follow_up.deferrals = None
         follow_up.body = intention.body
         follow_up.template_name = intention.template_name
         follow_up.template_language = intention.template_language
         follow_up.template_components = intention.template_components
+        follow_up.header_media_id = intention.header_media_id
         follow_up.reason = intention.reason
         follow_up.created_by_id = intention.created_by_id
         follow_up.created_by_kind = intention.created_by_kind
@@ -423,6 +500,7 @@ class FollowUpService:
                     template_name=intention.template_name,
                     template_language=intention.template_language,
                     template_components=intention.template_components,
+                    header_media_id=intention.header_media_id,
                     reason=intention.reason,
                     lead_id=lead_id,
                     created_by_id=intention.created_by_id,
@@ -725,6 +803,11 @@ class FollowUpService:
                 tenant_id=self._tenant_id,
             )
 
+        if follow_up.is_sequence_step:
+            # A step is written by the AI between two transactions, so it is
+            # the worker's to dispatch in three parts (FUS-04).
+            raise RuntimeError("A sequence step is dispatched with prepare_step / finish_step.")
+
         if not await self._workspace_is_served():
             # **No automated message leaves a workspace that is not being
             # served** (TOOL-04, PD-TOOLS-06). Every other pre-send fact here is
@@ -866,13 +949,51 @@ class FollowUpService:
             )
             if refusal is not None:
                 return self._skip(follow_up, refusal)
+            now = datetime.now(UTC)
+            if not channel_policy.standard_window_open(conversation, now=now):
+                # The business writing first again, to somebody whose window
+                # closed: the workspace's quiet hours bind it as they bind a
+                # campaign (FQH-01), with the same minute of lead so a send
+                # decided at 21:59:59 does not reach Meta inside the window. A
+                # wait, not a failure: no attempt is spent (FQH-04).
+                quiet = await self._quiet_hours()
+                if quiet.closed_to_sends(now):
+                    await record_follow_up_defer(FollowUpDeferReason.QUIET_HOURS.value)
+                    return self._defer(
+                        follow_up,
+                        quiet.reopens_after(now),
+                        detail="Quiet hours.",
+                        reason=FollowUpDeferReason.QUIET_HOURS,
+                    )
+            components = follow_up.template_components
+            if follow_up.header_media_id is not None:
+                # Its header file, uploaded to Meta once per (file, connection)
+                # and reused while fresh (HMT-03). Deleting the file is refused
+                # while this follow-up waits, so it is here.
+                headers = self._headers()
+                asset = await headers.resolve(
+                    template_name=str(follow_up.template_name),
+                    language=str(follow_up.template_language),
+                    components=components,
+                    header_media_id=follow_up.header_media_id,
+                )
+                if asset is not None:
+                    provider_media_id = await headers.provider_media_id(
+                        asset,
+                        connection_id=conversation.account_id,
+                        upload=messaging.upload_header_file,
+                        origin="follow_up",
+                    )
+                    components = headers.components_with_header(
+                        components, asset, provider_media_id
+                    )
             # Valid in or out of the window. Preferred outside it because it is
             # the only thing Meta will accept there.
             send = messaging.send_template(
                 conversation_id=conversation.id,
                 name=str(follow_up.template_name),
                 language=str(follow_up.template_language),
-                components=follow_up.template_components,
+                components=components,
                 link=link,
                 origin=MessageOrigin.FOLLOW_UP,
             )
@@ -884,6 +1005,23 @@ class FollowUpService:
 
         try:
             message = await send
+        except PortfolioLimitReachedError as error:
+            # Meta's portfolio limit is used at 100 % (FLIM-01): refused under
+            # the portfolio's lock before anything was staged, so this nudge
+            # waits for the moment somebody leaves the moving 24 hours. No
+            # attempt is spent and the time asked for is kept.
+            resumes_at = error.resumes_at
+            await record_follow_up_defer(FollowUpDeferReason.PORTFOLIO_LIMIT.value)
+            return await self._settle(
+                follow_up,
+                claim,
+                lambda row: self._defer(
+                    row,
+                    resumes_at,
+                    detail="Meta's messaging limit is reached for now.",
+                    reason=FollowUpDeferReason.PORTFOLIO_LIMIT,
+                ),
+            )
         except ProviderConnectionRefusedError:
             # Let out rather than recorded against this nudge. The number's
             # credential - or the connection itself (OMNI-035) - is refused, so
@@ -914,6 +1052,252 @@ class FollowUpService:
                 row, message, used_template=decision.action is FollowUpAction.TEMPLATE
             ),
         )
+
+    async def prepare_step(self, step: FollowUp) -> StepPreparation:
+        """The first of a step's three parts: decide, charge and read - then commit (FUS-04).
+
+        Every stop rule, the serving, the plan, the channel and the window are
+        asked again; a step that fails one ends here, skipped or cancelled, and
+        costs nothing. One that passes takes one AI turn from the workspace's
+        allowance - refused at the allowance: skipped `allowance_exhausted`, no
+        model call - and is charged it now, because the model is called next
+        whatever it answers (FUS-07). Everything the call needs is read here, so
+        the caller can commit and call the model with no transaction open.
+        """
+        sequences = SequenceService(
+            self._session, tenant_id=self._tenant_id, channels=self._channels
+        )
+        if not await self._workspace_is_served():
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.NOT_SERVED,
+                    "The workspace was not being served when the follow-up came due.",
+                )
+            )
+        conversation = await self._conversations.lock_by_id(step.conversation_id, share=True)
+        early = await self._step_refusal(step, sequences, conversation)
+        if early is not None:
+            return StepPreparation(outcome=early)
+        if not await EntitlementService(
+            self._session,
+            tenant_id=self._tenant_id,
+            default_plan_code=(
+                self._settings.default_plan_code if self._settings is not None else None
+            ),
+        ).channel_in_plan(conversation.channel):
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.CHANNEL_UNAVAILABLE,
+                    CHANNEL_NOT_IN_PLAN_DETAIL,
+                )
+            )
+        try:
+            self._channels.policy_for(conversation.channel)
+        except ChannelPausedError:
+            return StepPreparation(
+                outcome=self._defer(
+                    step, datetime.now(UTC) + PAUSED_RECHECK, detail="The channel is paused."
+                )
+            )
+        except ChannelUnavailableError:
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.CHANNEL_UNAVAILABLE,
+                    "Wasla cannot operate this conversation's channel.",
+                )
+            )
+        agent = await AgentRepository(
+            self._session, tenant_id=self._tenant_id
+        ).get_answering_default()
+        if agent is None:
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.AI_UNAVAILABLE,
+                    "No agent is answering in this workspace.",
+                )
+            )
+        entitlements = EntitlementService(
+            self._session,
+            tenant_id=self._tenant_id,
+            default_plan_code=(
+                self._settings.default_plan_code if self._settings is not None else None
+            ),
+        )
+        if not (await entitlements.hold_ai_turn()).allowed:
+            return StepPreparation(
+                outcome=await self._skip_step(
+                    step,
+                    sequences,
+                    SequenceSkipReason.ALLOWANCE_EXHAUSTED,
+                    "The workspace's AI allowance is used up.",
+                )
+            )
+        # One AI turn, charged as the model is about to be called (FUS-07):
+        # under the allowance lock `hold_ai_turn` took, so the next decision
+        # counts it. Named by the step, not an agent turn - a follow-up step is
+        # not an answer to a customer message (ADR-131 as amended by ADR-151).
+        UsageRecorder(self._session, tenant_id=self._tenant_id).record(
+            UsageEventType.AI_TURN,
+            meta={
+                "follow_up_id": str(step.id),
+                "conversation_id": str(conversation.id),
+            },
+            channel=conversation.channel,
+            connection_id=conversation.account_id,
+        )
+        settings = await sequences.settings()
+        index = int(step.step_index or 1)
+        guidance = settings.steps[index - 1].guidance if index <= len(settings.steps) else None
+        history = await MessageRepository(
+            self._session, tenant_id=self._tenant_id
+        ).list_for_conversation(
+            conversation_id=conversation.id,
+            limit=agent.memory_message_limit * 3,
+        )
+        window = build_window(
+            history,
+            message_limit=agent.memory_message_limit,
+            token_budget=agent.memory_token_budget,
+        )
+        since = datetime.now(UTC) - (conversation.last_inbound_at or datetime.now(UTC))
+        request = StepRequest(
+            model=agent.model,
+            instructions=step_instructions(
+                persona=agent.system_prompt,
+                step_index=index,
+                steps_total=len(settings.steps),
+                guidance=guidance,
+                since_customer=since,
+                channel=conversation.channel.value,
+            ),
+            turns=tuple(window.turns),
+        )
+        return StepPreparation(request=request)
+
+    async def finish_step(
+        self,
+        step: FollowUp,
+        claim: uuid.UUID | None,
+        answer: StepAnswer | None,
+        messaging: MessagingService,
+    ) -> DispatchOutcome:
+        """The third part: the model's answer, sent or not - if the row is still this claim's.
+
+        The caller re-took the row by its claim token, so a reply, a takeover or
+        a restart during the call has already discarded the text. The stop rules
+        and the window are asked once more: minutes passed. `answer` None is a
+        model that failed twice: skipped `ai_unavailable`. A skip ends the run.
+        The text must pass the channel's guardrails as an agent reply does.
+        """
+        sequences = SequenceService(
+            self._session, tenant_id=self._tenant_id, channels=self._channels
+        )
+        conversation = await self._conversations.lock_by_id(step.conversation_id, share=True)
+        refusal = await self._step_refusal(step, sequences, conversation)
+        if refusal is not None:
+            return refusal
+        if answer is None:
+            return await self._skip_step(
+                step,
+                sequences,
+                SequenceSkipReason.AI_UNAVAILABLE,
+                "The AI could not write this follow-up.",
+            )
+        if answer.action == "skip":
+            reason = answer.reason or SequenceSkipReason.OTHER
+            return await self._skip_step(
+                step, sequences, reason, f"The AI decided not to follow up ({reason.value})."
+            )
+        text = guarded_step_text(answer.text, conversation=conversation, channels=self._channels)
+        if text is None:
+            return await self._skip_step(
+                step,
+                sequences,
+                SequenceSkipReason.GUARDRAIL,
+                "The AI's text did not pass the reply guardrails.",
+            )
+        step.body = text
+
+        def link(message: Message) -> None:
+            step.message_id = message.id
+
+        try:
+            message = await messaging.send_text(
+                conversation_id=conversation.id,
+                body=text,
+                link=link,
+                origin=MessageOrigin.FOLLOW_UP,
+            )
+        except ProviderConnectionRefusedError:
+            raise
+        except ConnectionThrottledError as error:
+            retry_at = error.retry_at
+            return await self._settle(step, claim, lambda row: self._defer(row, retry_at))
+        except PolicyRefusalError as error:
+            refusal_text = str(error)
+            return await self._settle(step, claim, lambda row: self._skip(row, refusal_text))
+        except (ExternalServiceError, RateLimitedError, ValidationError) as error:
+            detail = str(error)
+            return await self._settle(step, claim, lambda row: self._fail(row, detail))
+
+        outcome = await self._settle(
+            step, claim, lambda row: self._record_sent(row, message, used_template=False)
+        )
+        if outcome.status is FollowUpStatus.SENT:
+            await record_follow_up_step("sent")
+            await sequences.after_step_sent(
+                outcome.follow_up, sent_at=outcome.follow_up.sent_at or datetime.now(UTC)
+            )
+        elif outcome.status in (FollowUpStatus.FAILED, FollowUpStatus.SKIPPED):
+            await sequences.end_run(outcome.follow_up, SequenceEndReason.FAILED)
+        return outcome
+
+    async def _step_refusal(
+        self,
+        step: FollowUp,
+        sequences: SequenceService,
+        conversation: Conversation,
+    ) -> DispatchOutcome | None:
+        """The stop rules, the settings and the window, asked of a due step (FUS-05, FUS-06)."""
+        stopped = await sequences.stopped(conversation)
+        if stopped is not None:
+            return await self._skip_step(
+                step, sequences, SequenceSkipReason(stopped.value), "A stop rule holds."
+            )
+        if not (await sequences.settings()).covers(conversation.channel):
+            await sequences.cancel_step(step, SequenceEndReason.SETTINGS_CHANGED)
+            return DispatchOutcome(step, FollowUpStatus.CANCELLED, "settings_changed")
+        window_end = sequences.window_end(conversation)
+        if window_end is None or datetime.now(UTC) > window_end:
+            return await self._skip_step(
+                step,
+                sequences,
+                SequenceSkipReason.WINDOW_CLOSED,
+                "The customer's window was about to close.",
+            )
+        return None
+
+    async def _skip_step(
+        self,
+        step: FollowUp,
+        sequences: SequenceService,
+        reason: SequenceSkipReason,
+        detail: str,
+    ) -> DispatchOutcome:
+        """A step that came due and was not sent: skipped with its reason; the run ends."""
+        outcome = self._skip(step, detail)
+        step.skip_reason = reason.value
+        await sequences.end_run(step, end_reason_for(reason))
+        await record_follow_up_step("skipped", reason.value)
+        return outcome
 
     async def _settle(
         self,
@@ -985,6 +1369,37 @@ class FollowUpService:
             },
         )
         return DispatchOutcome(follow_up, FollowUpStatus.SENT)
+
+    def _headers(self) -> TemplateHeaderMediaService:
+        refresh = (
+            self._settings.campaign_header_media_refresh_seconds
+            if self._settings is not None
+            else get_settings().campaign_header_media_refresh_seconds
+        )
+        return TemplateHeaderMediaService(
+            self._session,
+            tenant_id=self._tenant_id,
+            refresh=timedelta(seconds=refresh),
+            storage=(
+                self._storage
+                if self._storage is not None
+                else build_media_storage(self._settings or get_settings())
+            ),
+        )
+
+    async def _quiet_hours(self) -> QuietHours:
+        """The workspace's quiet hours as its row holds them now, in its zone."""
+        row = (
+            await self._session.execute(
+                select(
+                    Tenant.campaign_quiet_hours_enabled,
+                    Tenant.campaign_quiet_hours_start,
+                    Tenant.campaign_quiet_hours_end,
+                    Tenant.timezone,
+                ).where(Tenant.id == self._tenant_id)
+            )
+        ).one()
+        return QuietHours(enabled=row[0], start=row[1], end=row[2], timezone=row[3])
 
     async def _workspace_is_served(self) -> bool:
         """Whether this workspace is still one Wasla sends for.
@@ -1110,22 +1525,95 @@ class FollowUpService:
         until: datetime,
         *,
         detail: str = "The number's sending allowance is spent.",
+        reason: FollowUpDeferReason | None = None,
     ) -> DispatchOutcome:
-        """Wait for the allowance (ADR-123) or a paused channel, spending no attempt.
+        """Wait for the allowance (ADR-123), a paused channel, Meta's limit or the morning.
 
-        Nothing reached the customer - the allowance and the pause refuse before
-        a message exists, and a provider throttle is recorded undelivered - so
-        this nudge is exactly as it was, only later, and any message an attempt
-        staged is unlinked as the finished undelivered send it is.
+        Nothing reached the customer - the allowance, the pause and the limit
+        refuse before a message exists, and a provider throttle is recorded
+        undelivered - so this nudge is exactly as it was, only later, and any
+        message an attempt staged is unlinked as the finished undelivered send
+        it is. No attempt is spent, and `requested_at` is never touched: only
+        `scheduled_at` moves (FQH-04). A wait with a reason the API shows
+        (`portfolio_limit`, `quiet_hours`) is recorded, in order.
         """
         _release_claim(follow_up)
         follow_up.message_id = None
         follow_up.scheduled_at = until
+        if reason is not None:
+            follow_up.deferred_reason = reason.value
+            history = list(follow_up.deferrals or [])
+            history.append(
+                {
+                    "reason": reason.value,
+                    "until": until.isoformat(),
+                    "at": datetime.now(UTC).isoformat(),
+                }
+            )
+            follow_up.deferrals = history[-MAX_DEFERRALS:]
         logger.info(
             "follow_up.deferred",
             extra={"follow_up_id": str(follow_up.id), "detail": detail},
         )
         return DispatchOutcome(follow_up, FollowUpStatus.PENDING, detail)
+
+
+async def release_follow_up_quiet_waits(
+    session: AsyncSession, tenant_id: uuid.UUID, *, now: datetime | None = None
+) -> int:
+    """Make every follow-up of this workspace waiting for quiet hours due now (FQH-03).
+
+    Called when the window is edited or switched off and when the workspace's
+    zone changes, in that transaction. The next sweep asks the window again -
+    it waits to the new end, or sends - so nothing here decides whether it is
+    night. A claimed row is left to its worker. The campaign equivalent is
+    `release_quiet_waits`, which touches campaigns only.
+    """
+    moment = now or datetime.now(UTC)
+    result = await session.execute(
+        update(FollowUp)
+        .where(
+            FollowUp.tenant_id == tenant_id,
+            FollowUp.status == FollowUpStatus.PENDING,
+            FollowUp.deferred_reason == FollowUpDeferReason.QUIET_HOURS.value,
+            FollowUp.claim_token.is_(None),
+            FollowUp.message_id.is_(None),
+            FollowUp.scheduled_at > moment,
+        )
+        .values(scheduled_at=moment)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+
+#: Something that looks like a credential: never in a message to a customer.
+_SECRET = re.compile(r"(sk-[A-Za-z0-9]{8,}|Bearer\s+[A-Za-z0-9._-]{8,}|EAA[A-Za-z0-9]{20,})")
+#: A run of digits long enough to be somebody's phone number.
+_PHONE = re.compile(r"\+?\d[\d\s-]{8,}\d")
+
+
+def guarded_step_text(
+    text: str, *, conversation: Conversation, channels: ChannelRegistry
+) -> str | None:
+    """The step's text if it passes the reply guardrails; None if it does not (FUS-04).
+
+    Empty, over the channel's text limit (in its own unit - a step is never
+    shortened, it is skipped), carrying something shaped like a credential,
+    or carrying a phone number: none of them is sent. The guard does not
+    translate.
+    """
+    body = text.strip()
+    if not body:
+        return None
+    try:
+        capabilities = channels.policy_for(conversation.channel).capabilities
+    except ChannelUnavailableError:
+        return None
+    if text_length(body, capabilities.text_unit) > capabilities.text_limit:
+        return None
+    if _SECRET.search(body) or _PHONE.search(body):
+        return None
+    return body
 
 
 def _release_claim(follow_up: FollowUp) -> None:
@@ -1182,4 +1670,5 @@ __all__ = [
     "MIN_DELAY",
     "DispatchOutcome",
     "FollowUpService",
+    "release_follow_up_quiet_waits",
 ]

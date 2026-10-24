@@ -32,8 +32,9 @@ per-address limit instead.
 from __future__ import annotations
 
 from datetime import UTC, datetime, time
+from typing import Annotated
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Header, Query, Response, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
@@ -45,11 +46,17 @@ from app.api.dependencies import (
 from app.api.rate_limits import AuthRateLimit, WorkspaceRateLimit
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep
-from app.core.timezones import format_offset, offset_of
+from app.core.exceptions import ValidationError
+from app.core.timezones import format_offset, offset_of, parse_wall_time, resolve_wall_time
 from app.db.models import Tenant
 from app.schemas.workspace import (
     CampaignSettingsRead,
     CampaignSettingsUpdateRequest,
+    FollowUpSettingsRead,
+    FollowUpSettingsSummary,
+    FollowUpSettingsUpdateRequest,
+    FollowUpStepRead,
+    LocalTimeRead,
     OwnershipTransferRequest,
     OwnershipTransferResponse,
     WorkspaceCreatedResponse,
@@ -61,6 +68,12 @@ from app.schemas.workspace import (
 from app.services.campaign_settings_service import (
     CampaignSettings,
     CampaignSettingsService,
+)
+from app.services.follow_up_settings_service import (
+    FollowUpSettingsService,
+    SequenceSettings,
+    Step,
+    clean_guidance,
 )
 
 router = APIRouter(route_class=CommittingRoute, tags=["Workspace"])
@@ -233,6 +246,134 @@ async def update_campaign_settings(
         quiet_hours_end=_clock(payload.quiet_hours_end),
     )
     return _settings_read(settings)
+
+
+def _follow_up_settings_read(
+    settings: SequenceSettings, available: tuple[str, ...]
+) -> FollowUpSettingsRead:
+    return FollowUpSettingsRead(
+        enabled=settings.enabled,
+        channel_types=list(settings.channel_types),
+        available_channel_types=list(available),
+        steps=[
+            FollowUpStepRead(delay_minutes=step.delay_minutes, guidance=step.guidance)
+            for step in settings.steps
+        ],
+        summary=FollowUpSettingsSummary(enabled=settings.enabled, steps_count=len(settings.steps)),
+        version=settings.version,
+        updated_at=settings.updated_at,
+        updated_by=settings.updated_by_id,
+    )
+
+
+def _settings_version(if_match: str) -> int:
+    raw = if_match.strip().removeprefix("W/").strip('"')
+    if not raw.isdigit():
+        raise ValidationError(
+            'If-Match carries the settings\' version, for example "3".',
+            error_code="follow_up_settings_version_required",
+        )
+    return int(raw)
+
+
+@router.get(
+    "/workspace/follow-up-settings",
+    response_model=FollowUpSettingsRead,
+    summary="This workspace's automatic follow-ups",
+)
+async def read_follow_up_settings(
+    workspace: ActiveWorkspaceDep,
+    session: SessionDep,
+    response: Response,
+    limit: WorkspaceRateLimit,
+) -> FollowUpSettingsRead:
+    """Any member. The reminders the AI sends a customer who stopped answering (FUS-01)."""
+    service = FollowUpSettingsService(session, tenant_id=workspace.tenant.id)
+    settings = await service.read()
+    response.headers["ETag"] = f'"{settings.version}"'
+    return _follow_up_settings_read(settings, service.available_channel_types())
+
+
+@router.put(
+    "/workspace/follow-up-settings",
+    response_model=FollowUpSettingsRead,
+    summary="Change this workspace's automatic follow-ups",
+    responses={
+        409: {"description": "follow_up_settings_changed: If-Match is not the current version."},
+        422: {
+            "description": (
+                "follow_up_steps_required, follow_up_channels_required, "
+                "channel_type_unavailable, follow_up_delay_out_of_range, "
+                "follow_up_too_many_steps, follow_up_guidance_too_long, "
+                "follow_up_settings_version_required."
+            )
+        },
+    },
+)
+async def update_follow_up_settings(
+    payload: FollowUpSettingsUpdateRequest,
+    workspace: TenantAdminDep,
+    session: SessionDep,
+    response: Response,
+    limit: WorkspaceRateLimit,
+    if_match: Annotated[str | None, Header(alias="If-Match", max_length=32)] = None,
+) -> FollowUpSettingsRead:
+    """Owner or administrator; If-Match the version read; audited, old and new (FUS-01).
+
+    Every field, every time. Reminders wait 5 minutes to 23 hours, at most 5;
+    `enabled` needs a reminder and a platform. Switching off, removing a
+    platform or deleting a reminder cancels the steps waiting on it in this
+    request (FUS-06).
+    """
+    if if_match is None:
+        raise ValidationError(
+            "Send the version you edited as If-Match.",
+            error_code="follow_up_settings_version_required",
+        )
+    service = FollowUpSettingsService(session, tenant_id=workspace.tenant.id)
+    settings = await service.update(
+        actor=workspace.user,
+        enabled=payload.enabled,
+        channel_types=payload.channel_types,
+        steps=[
+            Step(delay_minutes=step.delay_minutes, guidance=clean_guidance(step.guidance))
+            for step in payload.steps
+        ],
+        version=_settings_version(if_match),
+    )
+    response.headers["ETag"] = f'"{settings.version}"'
+    return _follow_up_settings_read(settings, service.available_channel_types())
+
+
+@router.get(
+    "/workspace/local-time",
+    response_model=LocalTimeRead,
+    summary="Resolve a wall time in this workspace's zone",
+    responses={422: {"description": "local_time_invalid: not YYYY-MM-DDTHH:MM without an offset."}},
+)
+async def resolve_local_time(
+    workspace: ActiveWorkspaceDep,
+    limit: WorkspaceRateLimit,
+    at: Annotated[str, Query(max_length=32, description="A wall time, YYYY-MM-DDTHH:MM.")],
+) -> LocalTimeRead:
+    """Any member. The instant a wall time names here, daylight saving included (TZ-08).
+
+    A page that lets a person pick a date and a time resolves it here and sends
+    the returned `at_local` to `POST /campaigns/{id}/schedule`, so no browser
+    computes an offset with its own zone or a stale one.
+    """
+    name = workspace.tenant.timezone
+    resolved = resolve_wall_time(parse_wall_time(at), name)
+    offset = resolved.at.utcoffset()
+    return LocalTimeRead(
+        at_local=resolved.at,
+        at_utc=resolved.at.astimezone(UTC),
+        timezone=name,
+        offset=format_offset(offset) if offset is not None else "+00:00",
+        ambiguous=resolved.ambiguous,
+        nonexistent=resolved.nonexistent,
+        alternatives=list(resolved.alternatives),
+    )
 
 
 @router.post(

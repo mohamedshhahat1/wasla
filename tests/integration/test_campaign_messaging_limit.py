@@ -184,7 +184,15 @@ async def drive(
     replicas = list(workers_)
     end = clock.now + horizon
     for _ in range(rounds):
-        await asyncio.gather(*(clock.sweep(replica) for replica in replicas))
+        # Every replica's sweep ends before a failure is raised: a sweep that
+        # failed must not leave the others sending while the test's teardown
+        # erases, where they deadlock with it and hide the failure (FRM-02).
+        outcomes = await asyncio.gather(
+            *(clock.sweep(replica) for replica in replicas), return_exceptions=True
+        )
+        failure = next((each for each in outcomes if isinstance(each, BaseException)), None)
+        if failure is not None:
+            raise failure
         async with database.session_factory() as session:
             rows = (
                 await session.execute(

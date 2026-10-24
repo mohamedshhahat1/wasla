@@ -30,12 +30,13 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, Final
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -64,6 +65,7 @@ from app.core.telemetry import (
     record_campaign_send,
     record_campaign_stop,
     record_campaign_wait,
+    record_template_header_upload,
 )
 from app.db import advisory_locks
 from app.db.models.audit import AuditAction, AuditActorKind, AuditLog
@@ -80,12 +82,17 @@ from app.db.models.campaign import (
     CampaignStopReason,
     CampaignTestSend,
     CampaignWaitReason,
+    HeaderMediaMode,
     OptOutSource,
     OptOutVia,
     RecipientReason,
     RecipientStatus,
 )
-from app.db.models.campaign_media import CampaignHeaderMedia, HeaderMediaKind
+from app.db.models.campaign_media import (
+    CampaignHeaderMedia,
+    HeaderMediaKind,
+    TemplateHeaderUpload,
+)
 from app.db.models.channel import Channel, ContactIdentity
 from app.db.models.consent import ContactChannelConsent
 from app.db.models.conversation import (
@@ -164,6 +171,7 @@ from app.services.personalisation import (
     Rendered,
     fill,
     normalise,
+    raw_value,
     resolve,
 )
 from app.services.quiet_hours import QuietHours
@@ -198,6 +206,17 @@ TEMPLATE_CATEGORY_CODE: Final = "template_category"
 # The stable error code for a header file that is not stored: never written, or
 # removed by retention (HM-02, HM-07).
 HEADER_MEDIA_NOT_STORED_CODE: Final = "header_media_not_stored"
+# Per-recipient header media (HMR-01).
+HEADER_RULES_NEED_MODE_CODE: Final = "header_media_rules_need_per_recipient"
+HEADER_MEDIA_DEFAULT_REQUIRED_CODE: Final = "header_media_default_required"
+HEADER_MEDIA_KIND_MISMATCH_CODE: Final = "header_media_kind_mismatch"
+HEADER_MEDIA_TOO_MANY_FILES_CODE: Final = "header_media_too_many_files"
+#: The most distinct header files one campaign may send, and the most uploads
+#: to Meta one connection makes a minute for them (HMR-01, HMR-02).
+DEFAULT_HEADER_MEDIA_MAX_FILES: Final = 20
+DEFAULT_HEADER_UPLOADS_PER_MINUTE: Final = 20
+#: Refusals of one file's upload before its recipients are skipped (HMR-02).
+HEADER_FILE_REFUSALS_BEFORE_SKIP: Final = 3
 
 # The stable error codes of a composition's per-person values (PER-01, PER-03).
 PARAMETERS_CONFLICT_CODE: Final = "parameters_conflict"
@@ -240,6 +259,8 @@ COMPOSITION_FIELDS: Final = frozenset(
         "body_mappings",
         "header_mappings",
         "header_media_id",
+        "header_media_mode",
+        "header_media_rules",
     }
 )
 DRAFT_FIELDS: Final = COMPOSITION_FIELDS | {"name", "description", "messages_per_minute"}
@@ -324,6 +345,8 @@ class CampaignService:
         limits: portfolio_limits.MessagingLimitService | None = None,
         contact_cap_interval: timedelta | None = None,
         parameter_max_chars: int | None = None,
+        header_media_max_files: int = DEFAULT_HEADER_MEDIA_MAX_FILES,
+        header_uploads_per_minute: int = DEFAULT_HEADER_UPLOADS_PER_MINUTE,
     ) -> None:
         """`messaging` is needed only to send.
 
@@ -357,6 +380,9 @@ class CampaignService:
         # for it may grow before it is uploaded again (HM-05). The worker
         # supplies the store; a request never uploads.
         self._storage = storage
+        # Per-recipient header media (HMR-01, HMR-02).
+        self._header_max_files = header_media_max_files
+        self._header_uploads_per_minute = header_uploads_per_minute
         self._header_refresh = (
             header_media_refresh
             if header_media_refresh is not None
@@ -648,6 +674,8 @@ class CampaignService:
         header_mappings: list[Mapping] | None = None,
         idempotency_key: str | None = None,
         request_hash: str | None = None,
+        header_media_mode: str = HeaderMediaMode.CAMPAIGN.value,
+        header_media_rules: list[dict[str, Any]] | None = None,
     ) -> Campaign:
         """Compose a draft. Nothing is sent and no audience exists yet.
 
@@ -686,6 +714,8 @@ class CampaignService:
             header_media_id=header_media_id,
             body_mappings=body_mappings,
             header_mappings=header_mappings,
+            header_media_mode=header_media_mode,
+            header_media_rules=header_media_rules,
         )
 
         campaign = self._campaigns.create(
@@ -699,6 +729,8 @@ class CampaignService:
         )
         campaign.template_parameters = composition.stored()
         campaign.header_media_id = header_media_id
+        campaign.header_media_mode = composition.header_mode
+        campaign.header_media_rules = composition.header_rules
         if idempotency_key is not None:
             # The draft and its key in one savepoint: a concurrent retry that
             # holds the key first makes this draft vanish and that one answer.
@@ -753,6 +785,8 @@ class CampaignService:
         header_media_id: uuid.UUID | None,
         body_mappings: list[Mapping] | None,
         header_mappings: list[Mapping] | None,
+        header_media_mode: str = HeaderMediaMode.CAMPAIGN.value,
+        header_media_rules: list[dict[str, Any]] | None = None,
     ) -> _Composition:
         """Everything a campaign is composed of, validated - the one validator (PG-03).
 
@@ -814,11 +848,83 @@ class CampaignService:
         refused = parameter_refusal(parameter_spec(template.components), supplied)
         if refused is not None:
             raise refused
+        header_rules = await self._validated_header_rules(
+            header_media_mode, header_media_rules, default=header_file
+        )
         return _Composition(
             parameters=supplied,
             body_sources=body_sources,
             header_sources=header_sources,
+            header_mode=header_media_mode,
+            header_rules=header_rules,
         )
+
+    async def _validated_header_rules(
+        self,
+        mode: str,
+        rules: list[dict[str, Any]] | None,
+        *,
+        default: CampaignHeaderMedia | None,
+    ) -> list[dict[str, Any]] | None:
+        """Per-recipient header rules, checked (HMR-01); None for one file for everybody.
+
+        Every file is this workspace's (another's is not found), stored, and of
+        the default file's kind - which composition already matched to the
+        template's header. At most `CAMPAIGN_HEADER_MEDIA_MAX_FILES` distinct
+        files, the default included.
+        """
+        if mode != HeaderMediaMode.PER_RECIPIENT.value:
+            if rules:
+                raise ValidationError(
+                    "Header rules need header_media_mode per_recipient.",
+                    error_code=HEADER_RULES_NEED_MODE_CODE,
+                )
+            return None
+        if default is None:
+            raise ValidationError(
+                "Per-recipient header files need a default file (header_media_id) for "
+                "everybody no rule matches.",
+                error_code=HEADER_MEDIA_DEFAULT_REQUIRED_CODE,
+            )
+        checked: list[dict[str, Any]] = []
+        files = {default.id}
+        for rule in rules or []:
+            when = rule.get("when") or {}
+            source = ParameterSource(str(when.get("field")))
+            if source is ParameterSource.CONSTANT:
+                raise ValidationError("A header rule names a person's field, not a constant.")
+            key = when.get("key")
+            if source is ParameterSource.LEAD_CUSTOM_FIELD and not key:
+                raise ValidationError("A custom field rule names the field's key.")
+            asset = await self._header_files.require_by_id(uuid.UUID(str(rule["header_media_id"])))
+            if not asset.is_stored or asset.deleted_at is not None:
+                raise ValidationError(
+                    "This header file is not stored. Upload it again.",
+                    error_code=HEADER_MEDIA_NOT_STORED_CODE,
+                )
+            if asset.kind != default.kind:
+                raise ValidationError(
+                    "Every header file of a campaign is the kind its template's header takes.",
+                    error_code=HEADER_MEDIA_KIND_MISMATCH_CODE,
+                )
+            files.add(asset.id)
+            checked.append(
+                {
+                    "when": {
+                        "field": source.value,
+                        "key": key if source is ParameterSource.LEAD_CUSTOM_FIELD else None,
+                        "equals": normalise(when.get("equals")),
+                    },
+                    "header_media_id": str(asset.id),
+                }
+            )
+        if len(files) > self._header_max_files:
+            raise ValidationError(
+                f"A campaign may send at most {self._header_max_files} different header files.",
+                error_code=HEADER_MEDIA_TOO_MANY_FILES_CODE,
+                details={"max_files": self._header_max_files},
+            )
+        return checked
 
     async def _validated_mappings(
         self, mappings: list[Mapping] | None, constants: list[str] | None, part: str
@@ -948,9 +1054,10 @@ class CampaignService:
         # Each person's own values, resolved now and written down with them
         # (PER-02): what this campaign will send them, whatever changes later.
         renderer = await self._renderer(campaign)
+        per_recipient = campaign.header_media_mode == HeaderMediaMode.PER_RECIPIENT.value
         facts = (
             await self._facts([contact for contact, _ in members if contact.id not in already])
-            if renderer is not None
+            if renderer is not None or per_recipient
             else {}
         )
         added = 0
@@ -965,6 +1072,10 @@ class CampaignService:
             )
             if renderer is not None:
                 recipient.rendered_parameters = renderer(facts[contact.id]).as_dict()
+            if per_recipient:
+                # This person's header file, chosen now and frozen (HMR-01):
+                # what the campaign will send them, whatever changes later.
+                recipient.header_media_id = header_file_for(campaign, facts[contact.id])
             added += 1
 
         campaign.audience = filters.as_dict()
@@ -1083,7 +1194,17 @@ class CampaignService:
             if not has_audience
             else {}
         )
-        facts = await self._facts(list(eligible.values())) if renderer is not None else {}
+        per_recipient = campaign.header_media_mode == HeaderMediaMode.PER_RECIPIENT.value
+        facts = (
+            await self._facts(list(eligible.values()))
+            if renderer is not None or per_recipient
+            else {}
+        )
+        chosen = (
+            await self._recipients.header_files_for(campaign.id, contact_ids)
+            if has_audience
+            else {}
+        )
         defaults = CampaignParameters.from_campaign(
             campaign.variables, campaign.template_parameters
         )
@@ -1113,6 +1234,17 @@ class CampaignService:
                     buttons=_button_texts(template.components, parameters.buttons),
                     body_fallbacks=rendered.body_fallbacks if rendered else (),
                     header_fallbacks=rendered.header_fallbacks if rendered else (),
+                    # This person's header file - Wasla's id, never Meta's (HMR-01).
+                    header_media_id=(
+                        (
+                            chosen.get(contact_id)
+                            if has_audience
+                            else header_file_for(campaign, facts[contact_id])
+                        )
+                        if per_recipient
+                        else None
+                    )
+                    or campaign.header_media_id,
                 )
             )
         return previews
@@ -1154,6 +1286,8 @@ class CampaignService:
                 if isinstance(entry, dict) and "index" in entry and "value" in entry
             },
             "header_media_id": campaign.header_media_id,
+            "header_media_mode": campaign.header_media_mode,
+            "header_media_rules": campaign.header_media_rules,
             "body_mappings": (
                 [Mapping.from_dict(entry) for entry in body_sources]
                 if body_sources is not None
@@ -1229,6 +1363,8 @@ class CampaignService:
                 "variables": campaign.variables,
                 "template_parameters": campaign.template_parameters,
                 "header_media_id": campaign.header_media_id,
+                "header_media_mode": campaign.header_media_mode,
+                "header_media_rules": campaign.header_media_rules,
             }
             after = {
                 "account_id": inputs["account_id"],
@@ -1236,6 +1372,8 @@ class CampaignService:
                 "variables": body,
                 "template_parameters": stored,
                 "header_media_id": inputs["header_media_id"],
+                "header_media_mode": composition.header_mode,
+                "header_media_rules": composition.header_rules,
             }
             changed |= {field for field in before if before[field] != after[field]}
             if changed:
@@ -1244,6 +1382,8 @@ class CampaignService:
                 campaign.template_parameters = stored
                 campaign.variables = body
                 campaign.header_media_id = inputs["header_media_id"]
+                campaign.header_media_mode = composition.header_mode
+                campaign.header_media_rules = composition.header_rules
                 if await self._recipients.delete_all(campaign.id) or campaign.audience_size:
                     cleared = True
                 campaign.audience_size = 0
@@ -1642,8 +1782,10 @@ class CampaignService:
 
         if scheduled_at is not None and scheduled_at.utcoffset() is None:
             # Refused rather than taken as UTC (CMP-15): a Cairo admin's 10:00
-            # was sent at 13:00 local. There is no workspace time zone to
-            # interpret it in (CMQ-04), so the offset has to come with it.
+            # was sent at 13:00 local. The workspace has a zone (TZ-01), but a
+            # wall time on a DST change day can name two instants or none, so
+            # the client resolves it first - `GET /workspace/local-time` does
+            # (TZ-08) - and sends the instant with its offset.
             raise ValidationError(
                 "A scheduled time needs a UTC offset, for example 2026-10-20T10:00:00+03:00.",
                 error_code=NAIVE_SCHEDULE_CODE,
@@ -1935,7 +2077,16 @@ class CampaignService:
         spec = parameter_spec(
             (await self._templates.require_by_id(campaign.template_id)).components
         )
-        if spec is not None and spec.header_format in FILE_HEADER_FORMATS:
+        if (
+            spec is not None
+            and spec.header_format in FILE_HEADER_FORMATS
+            and campaign.header_media_mode == HeaderMediaMode.PER_RECIPIENT.value
+        ):
+            # **Each person's own file** (HMR-02): uploaded as the first person
+            # who needs it is reached, once per file and connection, under the
+            # lease; a file Meta refuses waits its people, never the campaign.
+            header.per_recipient = True
+        elif spec is not None and spec.header_format in FILE_HEADER_FORMATS:
             prepared = await self._header_file(
                 campaign, token=token, lease_until=lease_until, clock=clock, messaging=messaging
             )
@@ -2235,6 +2386,17 @@ class CampaignService:
         all for that cause. Returns None when the person was taken by another
         worker between the two sends.
         """
+        if header.per_recipient:
+            return await self._deliver_personal_header(
+                campaign,
+                recipient,
+                messaging=messaging,
+                now=now,
+                header=header,
+                token=token,
+                lease_until=lease_until,
+                clock=clock,
+            )
         try:
             return await self._deliver(
                 campaign,
@@ -2278,6 +2440,248 @@ class CampaignService:
             )
         except _HeaderFileRejectedError:
             raise _BatchEndedError(await self._header_refused(campaign, token=token)) from None
+
+    async def _deliver_personal_header(
+        self,
+        campaign: Campaign,
+        recipient: CampaignRecipient,
+        *,
+        messaging: MessagingService,
+        now: datetime,
+        header: _HeaderState,
+        token: uuid.UUID | None,
+        lease_until: Callable[[], datetime | None],
+        clock: Callable[[], datetime],
+    ) -> RecipientStatus | _Deferred | None:
+        """One person sent with their own header file (HMR-01, HMR-02).
+
+        The file frozen on the recipient, or the campaign's default. A file
+        Meta refused three times skips its people `header_media_refused`; a
+        refusal before that, or a send Meta refused for the file (131053),
+        defers the person - no attempt spent - and the campaign goes on with
+        everybody else.
+        """
+        file_id = recipient.header_media_id or campaign.header_media_id
+        if file_id is None:  # pragma: no cover - composition requires a default
+            raise _BatchEndedError(
+                await self._header_stop(
+                    campaign, token=token, pause=CampaignStopReason.HEADER_MEDIA_UNAVAILABLE
+                )
+            )
+        if self._file_refusals(campaign, file_id) >= HEADER_FILE_REFUSALS_BEFORE_SKIP:
+            return self._skip(
+                recipient,
+                "WhatsApp refused this person's header file.",
+                RecipientReason.HEADER_MEDIA_REFUSED,
+            )
+        parameter = header.files.get(file_id)
+        if parameter is None:
+            prepared = await self._recipient_header_file(
+                campaign,
+                file_id,
+                header=header,
+                token=token,
+                lease_until=lease_until,
+                clock=clock,
+                messaging=messaging,
+            )
+            if isinstance(prepared, BatchOutcome):
+                raise _BatchEndedError(prepared)
+            if prepared is None:
+                if self._file_refusals(campaign, file_id) >= HEADER_FILE_REFUSALS_BEFORE_SKIP:
+                    return self._skip(
+                        recipient,
+                        "WhatsApp refused this person's header file.",
+                        RecipientReason.HEADER_MEDIA_REFUSED,
+                    )
+                # Not uploaded yet - paced, or refused once: this person waits.
+                recipient.not_before = clock() + PROVIDER_UNREACHABLE_BACKOFF
+                return _DEFERRED
+            header.files[file_id] = prepared
+            parameter = prepared
+            if not await self._campaigns.hold(
+                campaign.id, lease_token=token, lease_until=lease_until()
+            ):
+                raise _BatchEndedError(await self._stopped(campaign, sent=0, failed=0, skipped=0))
+            if await self._recipients.take(recipient) is None:
+                return None
+        try:
+            return await self._deliver(
+                campaign,
+                recipient,
+                messaging=messaging,
+                now=now,
+                header_file=parameter,
+                at=clock(),
+            )
+        except _HeaderFileRejectedError:
+            # Meta could not use the id on a send: nothing was delivered. The
+            # file is uploaded again for the next person who needs it, and this
+            # one waits; a file refused often enough skips its people.
+            header.files.pop(file_id, None)
+            await self._forget_header_upload(campaign, file_id)
+            await self._count_refusal(campaign, file_id, token=token, lease_until=lease_until)
+            recipient.not_before = clock() + PROVIDER_UNREACHABLE_BACKOFF
+            return _DEFERRED
+
+    @staticmethod
+    def _file_refusals(campaign: Campaign, file_id: uuid.UUID) -> int:
+        return int((campaign.header_media_refusals or {}).get(str(file_id), 0))
+
+    async def _count_refusal(
+        self,
+        campaign: Campaign,
+        file_id: uuid.UUID,
+        *,
+        token: uuid.UUID | None,
+        lease_until: Callable[[], datetime | None],
+    ) -> None:
+        """One more refusal of this file, written under the lease in its own transaction."""
+        if not await self._campaigns.hold(
+            campaign.id, lease_token=token, lease_until=lease_until()
+        ):
+            return
+        counts = dict(campaign.header_media_refusals or {})
+        counts[str(file_id)] = int(counts.get(str(file_id), 0)) + 1
+        campaign.header_media_refusals = counts
+        await self._session.commit()
+
+    async def _forget_header_upload(self, campaign: Campaign, file_id: uuid.UUID) -> None:
+        await self._session.execute(
+            delete(TemplateHeaderUpload).where(
+                TemplateHeaderUpload.tenant_id == self._tenant_id,
+                TemplateHeaderUpload.campaign_id == campaign.id,
+                TemplateHeaderUpload.header_media_id == file_id,
+            )
+        )
+
+    async def _recipient_header_file(
+        self,
+        campaign: Campaign,
+        file_id: uuid.UUID,
+        *,
+        header: _HeaderState,
+        token: uuid.UUID | None,
+        lease_until: Callable[[], datetime | None],
+        clock: Callable[[], datetime],
+        messaging: MessagingService,
+    ) -> HeaderFileParameter | BatchOutcome | None:
+        """Meta's id for one of the campaign's files through its number (HMR-02).
+
+        Reused while fresh - one upload per (campaign, file, connection).
+        Otherwise uploaded by the worker holding the lease, with no transaction
+        or row lock across the store or the call, and recorded under the lease.
+        None: not uploaded now - this batch reached its upload pace, or Meta
+        refused the file (counted); the person waits. A `BatchOutcome`: the
+        campaign stopped or waits as a whole (Meta unreachable, a credential).
+        """
+        asset = await self._header_files.get_by_id(file_id)
+        if asset is None or not asset.is_stored:
+            return await self._header_stop(
+                campaign, token=token, pause=CampaignStopReason.HEADER_MEDIA_UNAVAILABLE
+            )
+        found = await self._session.scalar(
+            select(TemplateHeaderUpload).where(
+                TemplateHeaderUpload.tenant_id == self._tenant_id,
+                TemplateHeaderUpload.campaign_id == campaign.id,
+                TemplateHeaderUpload.header_media_id == file_id,
+                TemplateHeaderUpload.account_id == campaign.account_id,
+            )
+        )
+        if found is not None and clock() - found.uploaded_at < self._header_refresh:
+            return _header_parameter(asset, found.provider_media_id)
+        if header.uploads >= self._header_uploads_per_minute:
+            return None
+        if not await self._campaigns.hold(
+            campaign.id, lease_token=token, lease_until=lease_until()
+        ):
+            return await self._stopped(campaign, sent=0, failed=0, skipped=0)
+        if self._storage is None:  # pragma: no cover - the worker always supplies one
+            raise RuntimeError("Sending a campaign's header file needs the media store.")
+        loader = CampaignHeaderMediaService(
+            session=self._session, tenant_id=self._tenant_id, storage=self._storage
+        )
+        try:
+            async with released(self._session):
+                header_bytes = await loader.load_for_upload(asset)
+        except HeaderMediaUnavailableError:
+            return await self._header_stop(
+                campaign, token=token, pause=CampaignStopReason.HEADER_MEDIA_UNAVAILABLE
+            )
+        except StorageError:
+            return await self._header_wait(
+                campaign, token=token, until=clock() + PROVIDER_UNREACHABLE_BACKOFF
+            )
+        header.uploads += 1
+        try:
+            provider_media_id = await messaging.upload_header_file(
+                connection_id=campaign.account_id,
+                content=header_bytes.content,
+                mime_type=header_bytes.mime_type,
+                filename=_upload_name(asset),
+            )
+        except ProviderUnreachableError:
+            return await self._header_wait(
+                campaign, token=token, until=clock() + PROVIDER_UNREACHABLE_BACKOFF
+            )
+        except (MediaUploadRefusedError, ValidationError):
+            # About this file, for its people only (HMR-02).
+            await self._count_refusal(campaign, file_id, token=token, lease_until=lease_until)
+            return None
+        except (ProviderAuthError, ProviderConnectionRefusedError) as error:
+            return await self._header_stop(
+                campaign,
+                token=token,
+                fail=(
+                    CampaignStopReason.CREDENTIAL_REFUSED
+                    if isinstance(error, ProviderAuthError)
+                    else CampaignStopReason.CONNECTION_REFUSED
+                ),
+                detail=str(error),
+            )
+        except (DependencyUnavailableError, CredentialDecryptionError) as error:
+            return await self._header_stop(
+                campaign,
+                token=token,
+                fail=CampaignStopReason.CREDENTIAL_REFUSED,
+                detail=str(error),
+            )
+        except (ExternalServiceError, RateLimitedError):
+            return await self._header_wait(
+                campaign, token=token, until=clock() + PROVIDER_UNREACHABLE_BACKOFF
+            )
+        if not await self._campaigns.hold(
+            campaign.id, lease_token=token, lease_until=lease_until()
+        ):
+            # The lease was taken over during the upload: the id is unused at
+            # Meta, which expires it, and nothing is sent by this worker.
+            return await self._stopped(campaign, sent=0, failed=0, skipped=0)
+        uploaded_at = clock()
+        await self._session.execute(
+            pg_insert(TemplateHeaderUpload)
+            .values(
+                tenant_id=self._tenant_id,
+                header_media_id=file_id,
+                account_id=campaign.account_id,
+                campaign_id=campaign.id,
+                provider_media_id=provider_media_id,
+                uploaded_at=uploaded_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[
+                    TemplateHeaderUpload.campaign_id,
+                    TemplateHeaderUpload.header_media_id,
+                    TemplateHeaderUpload.account_id,
+                ],
+                index_where=TemplateHeaderUpload.campaign_id.is_not(None),
+                set_={"provider_media_id": provider_media_id, "uploaded_at": uploaded_at},
+            )
+        )
+        # Its own short transaction: the id is durable before anybody is sent it.
+        await self._session.commit()
+        campaign.provider_unreachable_since = None
+        await record_template_header_upload("campaign")
+        return _header_parameter(asset, provider_media_id)
 
     async def _header_file(
         self,
@@ -2452,6 +2856,7 @@ class CampaignService:
         set_committed_value(campaign, "header_provider_account_id", campaign.account_id)
         # Meta answered: whatever outage there was is over (CMP-07).
         campaign.provider_unreachable_since = None
+        await record_template_header_upload("campaign")
         if not again:
             await record_campaign_event(
                 "header_media_refreshed" if refreshing else "header_media_uploaded"
@@ -3267,6 +3672,8 @@ class _Composition:
     parameters: CampaignParameters
     body_sources: tuple[Mapping, ...] | None = None
     header_sources: tuple[Mapping, ...] | None = None
+    header_mode: str = HeaderMediaMode.CAMPAIGN.value
+    header_rules: list[dict[str, Any]] | None = None
 
     def stored(self) -> dict[str, Any] | None:
         stored = self.parameters.as_dict() or {}
@@ -3290,6 +3697,7 @@ class MessagePreview:
     buttons: tuple[str, ...]
     body_fallbacks: tuple[int, ...]
     header_fallbacks: tuple[int, ...]
+    header_media_id: uuid.UUID | None = None
 
 
 def _personal(defaults: CampaignParameters, rendered: Rendered | None) -> CampaignParameters:
@@ -3386,10 +3794,18 @@ class _BatchEndedError(Exception):
 
 @dataclass(slots=True)
 class _HeaderState:
-    """One batch's header file: what is being sent, and whether it was re-uploaded."""
+    """One batch's header file: what is being sent, and whether it was re-uploaded.
+
+    With per-recipient files (HMR-02), `files` holds each file's parameter as
+    this batch prepared it, and `uploads` how many it uploaded - paced to
+    `CAMPAIGN_HEADER_UPLOADS_PER_MINUTE`.
+    """
 
     file: HeaderFileParameter | None = None
     reuploaded: bool = False
+    per_recipient: bool = False
+    files: dict[uuid.UUID, HeaderFileParameter] = field(default_factory=dict)
+    uploads: int = 0
 
 
 _DEADLINE_PASSED: Final = "The campaign's deadline passed before this person was sent."
@@ -3406,6 +3822,28 @@ _HEADER_REFUSED_TWICE: Final = (
 def _upload_name(asset: CampaignHeaderMedia) -> str:
     """The Meta-safe name the file is uploaded and sent with, as an attachment's (MEDIA-06)."""
     return safe_upload_filename(asset.filename, mime_type=asset.mime_type)
+
+
+def header_file_for(campaign: Campaign, facts: PersonFacts) -> uuid.UUID | None:
+    """The header file the campaign's rules give this person: the first match, else the default.
+
+    Compared as PER-05 normalises a value, ignoring case: "Kitchen" and
+    "kitchen " are the same interest.
+    """
+    for rule in campaign.header_media_rules or []:
+        when = rule.get("when") or {}
+        mapping = Mapping(
+            source=ParameterSource(str(when.get("field"))),
+            key=when.get("key"),
+            fallback="",
+        )
+        value = raw_value(mapping, facts)
+        if (
+            value is not None
+            and normalise(value).casefold() == str(when.get("equals", "")).casefold()
+        ):
+            return uuid.UUID(str(rule["header_media_id"]))
+    return campaign.header_media_id
 
 
 def _header_parameter(asset: CampaignHeaderMedia, provider_media_id: str) -> HeaderFileParameter:

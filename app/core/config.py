@@ -622,6 +622,29 @@ class Settings(BaseSettings):
     campaign_contact_marketing_interval_seconds: int = Field(
         default=86_400, ge=3600, le=30 * 86_400
     )
+    # Per-recipient header media (HMR-01, HMR-02): the most distinct files one
+    # campaign may send, and the most of them one connection uploads a minute.
+    campaign_header_media_max_files: int = Field(default=20, ge=1, le=100)
+    campaign_header_uploads_per_minute: int = Field(default=20, ge=1, le=600)
+    # Realtime hints (ADR-155): a workspace's Redis stream keeps this many
+    # entries (approximately) for this long; a person holds at most this many
+    # open streams, a workspace at most this many; a ticket lives this long; an
+    # idle stream says it is alive this often.
+    rt_stream_maxlen: int = Field(default=5000, ge=100, le=1_000_000)
+    rt_stream_retention_seconds: int = Field(default=900, ge=60, le=86_400)
+    rt_streams_per_user: int = Field(default=5, ge=1, le=100)
+    rt_streams_per_workspace: int = Field(default=100, ge=1, le=10_000)
+    rt_ticket_ttl_seconds: int = Field(default=60, ge=5, le=600)
+    rt_keepalive_seconds: float = Field(default=15.0, gt=0, le=300)
+    # Automatic follow-ups (FUS-05, ADR-151): a step is sent only while the
+    # customer's window has at least this long left - the platform's own clock
+    # for "24 hours" is not documented, and a sweep can be late.
+    follow_up_window_margin_seconds: int = Field(default=1800, ge=60, le=6 * 3600)
+    # The most reminders a workspace may set; never more than five (FUS-01).
+    follow_up_sequence_max_steps: int = Field(default=5, ge=1, le=5)
+    # A follow-up step whose model call fails is tried once more after this
+    # long, then skipped `ai_unavailable` (FUS-04) - never a retry storm.
+    follow_up_ai_retry_seconds: float = Field(default=60.0, ge=0, le=600)
     # Channels this deployment holds paused (OMNI-031, ADR-126): their inbound
     # is still stored and shown, and nothing is sent, fetched or answered by an
     # agent on them. The rollback for a misbehaving channel - a flag and a

@@ -341,6 +341,8 @@ class CampaignWorker:
                 seconds=self._settings.campaign_contact_marketing_interval_seconds
             ),
             parameter_max_chars=self._settings.campaign_parameter_max_chars,
+            header_media_max_files=self._settings.campaign_header_media_max_files,
+            header_uploads_per_minute=self._settings.campaign_header_uploads_per_minute,
         )
         return await service.dispatch_batch(campaign, now=now, lease=lease)
 

@@ -68,8 +68,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Paths that must never be cut off mid-flight. Prefix-matched, so the
-# verification handshake and the delivery endpoint are both covered.
-TIMEOUT_EXEMPT_PREFIXES: Final[tuple[str, ...]] = ("/api/v1/webhooks",)
+# verification handshake and the delivery endpoint are both covered. The event
+# stream is one long request by design (RT-05): it holds no database
+# connection while it waits, and ends on its own reasons.
+TIMEOUT_EXEMPT_PREFIXES: Final[tuple[str, ...]] = ("/api/v1/webhooks", "/api/v1/events/stream")
 # Same path, a different rule: exempt from the timeout, and held to a
 # *tighter* body cap than everything else.
 WEBHOOK_PREFIX: Final = "/api/v1/webhooks"
@@ -96,6 +98,9 @@ UPLOAD_ALLOWANCES: Final[tuple[BodyAllowance, ...]] = (
     BodyAllowance("POST", re.compile(r"/conversations/[^/]+/messages/media"), UPLOAD),
     # A campaign's template header file (HM-02); the same cap, the same reader.
     BodyAllowance("POST", re.compile(r"/campaigns/header-media"), UPLOAD),
+    # The template header library's upload (HMT-01): the same file, the same
+    # cap and reader as a campaign's header upload.
+    BodyAllowance("POST", re.compile(r"/template-header-media"), UPLOAD),
     # Meta's rate card as CSV, read to 1 MB inside (COST-01).
     BodyAllowance("POST", re.compile(r"/platform/whatsapp-rate-cards"), UPLOAD),
     # A knowledge document as text or base64, up to 400 000 characters.
@@ -397,7 +402,8 @@ class RequestTimeoutMiddleware:
     def _exempt(self, path: str) -> bool:
         """Whether this path must be allowed to finish however long it takes.
 
-        Only the webhook: a timed-out delivery is a non-2xx, Meta retries it,
-        and a subscription that keeps failing is eventually disabled (ADR-032).
+        The webhook: a timed-out delivery is a non-2xx, Meta retries it, and a
+        subscription that keeps failing is eventually disabled (ADR-032). The
+        event stream: it is meant to stay open (ADR-155).
         """
         return path.startswith(TIMEOUT_EXEMPT_PREFIXES)

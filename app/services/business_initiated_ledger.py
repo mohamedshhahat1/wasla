@@ -17,11 +17,15 @@ one hour of margin against the 24-hour window closing between this check and
 Meta handling the request. An open window costs nothing and is not recorded. A
 person already counted in the window is not a new person.
 
-**Who is held back.** Only campaigns (by `CAMPAIGN_PORTFOLIO_LIMIT_SHARE` of
-the limit, 80 %) and test sends (by the whole limit). Follow-ups, manual
-templates and anything else are recorded but never refused here: they are one
-person somebody is waiting on, and the other 20 % is theirs (LIM-04; what a
-follow-up does at 100 % is an open product decision).
+**Who is held back.** Campaigns (by `CAMPAIGN_PORTFOLIO_LIMIT_SHARE` of the
+limit, 80 %), test sends (by the whole limit, refused while it is unknown), and
+template follow-ups and manual templates (by the whole limit, `DEFER_AT_LIMIT`:
+the other 20 % is theirs, and at 100 % a follow-up waits for `resumes_at` and a
+person is told when - FLIM-01, FLIM-02). While the limit is unknown those two
+are sent and recorded with `limit_at_send` null: one person somebody is waiting
+on is not held back by a read nobody has made. Anything else is recorded only.
+A free-form message inside the customer's window never reaches the ledger
+(FLIM-03).
 
 **Released only when provably undelivered.** `release` deletes the row of a
 send Meta refused (the message recorded UNDELIVERED); an uncertain answer keeps
@@ -65,8 +69,16 @@ class Enforcement(StrEnum):
     CAMPAIGN = "campaign"
     #: The whole limit: a test send is refused only when nothing is left.
     WHOLE_LIMIT = "whole_limit"
+    #: The whole limit, but sent while the limit is unknown: a template
+    #: follow-up waits at 100 %, a manual template is refused with when
+    #: (FLIM-01, FLIM-02).
+    DEFER_AT_LIMIT = "defer_at_limit"
     #: Recorded, never refused.
     RECORD_ONLY = "record_only"
+
+
+#: The enforcements that refuse a send while nobody has read the limit.
+_FAIL_CLOSED: Final = frozenset({Enforcement.CAMPAIGN, Enforcement.WHOLE_LIMIT})
 
 
 class PortfolioLimitReachedError(Exception):
@@ -251,7 +263,7 @@ class BusinessInitiatedLedger:
         if window_open(last_inbound_at, at=at):
             return None
         limit, portfolio_id = await self._portfolio(account_id)
-        if enforcement is not Enforcement.RECORD_ONLY and not limit.known:
+        if enforcement in _FAIL_CLOSED and not limit.known:
             raise MessagingLimitUnknownError()
         if portfolio_id is None:
             return None
@@ -260,7 +272,12 @@ class BusinessInitiatedLedger:
         budget = (
             campaign_budget(limit.messaging_limit, self._share)
             if enforcement is Enforcement.CAMPAIGN
-            else limit.messaging_limit if enforcement is Enforcement.WHOLE_LIMIT else None
+            else (
+                limit.messaging_limit
+                if enforcement is Enforcement.WHOLE_LIMIT
+                or (enforcement is Enforcement.DEFER_AT_LIMIT and limit.known)
+                else None
+            )
         )
         if budget is not None and not await self._counted(portfolio_id, recipient, at=at):
             usage = await self.usage(portfolio_id, at=at)
@@ -300,6 +317,18 @@ class BusinessInitiatedLedger:
                 budget_at_send=reservation.budget_at_send,
             )
         )
+
+    async def recorded_without_limit(self, message_id: uuid.UUID) -> bool:
+        """Whether this message's ledger row was written while the limit was unknown."""
+        found = await self._session.scalar(
+            select(BusinessInitiatedSend.id)
+            .where(
+                BusinessInitiatedSend.message_id == message_id,
+                BusinessInitiatedSend.limit_at_send.is_(None),
+            )
+            .limit(1)
+        )
+        return found is not None
 
     async def release(self, message_id: uuid.UUID) -> int:
         """Forget the send of a message Meta provably did not accept."""

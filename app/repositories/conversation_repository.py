@@ -391,6 +391,31 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
             query = query.where(_after_nullable(Conversation, after))
         return await self._all(query)
 
+    async def list_changed_since(
+        self,
+        *,
+        since: datetime,
+        limit: int = 50,
+        after: Cursor | None = None,
+    ) -> list[Conversation]:
+        """Conversations changed at or after `since`, oldest change first (RT-04).
+
+        Closed ones included: a client that held the conversation needs to
+        learn it closed. Keyed by `(updated_at, id)`.
+        """
+        query = (
+            self._select()
+            .where(Conversation.updated_at >= since)
+            .order_by(Conversation.updated_at, Conversation.id)
+            .limit(limit)
+        )
+        if after is not None:
+            query = query.where(
+                (Conversation.updated_at > after.sort_value)
+                | ((Conversation.updated_at == after.sort_value) & (Conversation.id > after.id))
+            )
+        return await self._all(query)
+
     async def touch_inbound(self, conversation: Conversation, *, at: datetime) -> None:
         """Record customer activity, which reopens the service window.
 
@@ -519,6 +544,31 @@ class MessageRepository(TenantScopedRepository[Message]):
                 .scalar_subquery()
             )
             query = query.where(Message.sequence < position)
+        return await self._all(query)
+
+    async def list_after(
+        self, *, conversation_id: uuid.UUID, message_id: uuid.UUID, limit: int = 50
+    ) -> list[Message]:
+        """The messages after `message_id` in the conversation, oldest first (RT-04).
+
+        By position, as `list_for_conversation` reads; a message of another
+        conversation or workspace resolves to no position and matches nothing.
+        """
+        position = (
+            select(Message.sequence)
+            .where(
+                Message.id == message_id,
+                Message.conversation_id == conversation_id,
+                self._tenant_filter(),
+            )
+            .scalar_subquery()
+        )
+        query = (
+            self._select()
+            .where(Message.conversation_id == conversation_id, Message.sequence > position)
+            .order_by(Message.sequence)
+            .limit(limit)
+        )
         return await self._all(query)
 
     async def latest_inbound(self, conversation_id: uuid.UUID) -> Message | None:

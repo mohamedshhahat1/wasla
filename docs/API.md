@@ -4,8 +4,8 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **237 operations**, of which
-18 are unauthenticated and each is listed with what bounds it in
+The production shape - `DOCS_ENABLED=false` - serves **247 operations**, of which
+19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
 dependency graph and compares it with the figure above, and
@@ -175,6 +175,67 @@ Tripoli, Beirut, London, Istanbul. Sorted by current offset, then name;
 `?q=` (at most 64 characters) filters by id or label. `Cache-Control: public,
 max-age=3600` and an `ETag` that changes with the tzdata release or any zone's
 offset (304 on `If-None-Match`).
+
+## Template header library (HMT-01)
+
+| Method | Path | Role |
+| --- | --- | --- |
+| POST | `/api/v1/template-header-media` | Owner or admin; multipart `file` (`201`) |
+| GET | `/api/v1/template-header-media?kind=&cursor=&limit=` | Any workspace member |
+| DELETE | `/api/v1/template-header-media/{asset_id}` | Owner or admin (`204`); `409 header_media_in_use` while a live campaign or a waiting follow-up names it |
+
+The files a template's IMAGE, VIDEO or DOCUMENT header is sent with - by a
+campaign, a person's template (`header_media_id` on `POST
+/conversations/{id}/messages/template`) or a follow-up template
+(`header_media_id` on `POST /follow-ups`). The file's bytes decide its kind
+(JPEG/PNG image, MP4/3GPP video, PDF document; GIF refused). Wasla uploads a
+file to Meta once per (file, number) and reuses the id while it is fresh; Meta's
+id is never returned. A template request whose `components` carry a media
+header itself (`image.id`, `image.link`, ...) is `422
+header_media_must_be_uploaded` - **an API change**: raw media header
+parameters from a client are no longer accepted (no client existed). A media
+header with no `header_media_id` is `422 header_media_required`; a file of
+another kind is `422 header_media_kind_mismatch`; another workspace's file is
+`404`.
+
+## Workspace follow-up settings (FUS-01)
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/workspace/follow-up-settings` | Any workspace member |
+| PUT | `/api/v1/workspace/follow-up-settings` | Owner or admin; `If-Match` the version read; audited `follow_up_settings_updated` |
+
+The owner's card: `{enabled, channel_types, available_channel_types, steps:
+[{delay_minutes, guidance}], summary: {enabled, steps_count}, version,
+updated_at, updated_by}`, with the version as `ETag`. A workspace created
+through the API starts on: `["whatsapp"]`, one reminder after 5 minutes.
+`PUT` takes every field every time: reminders of 5-1380 minutes (`422
+follow_up_delay_out_of_range`; the card's hours are sent as minutes), at most 5
+(`follow_up_too_many_steps`); `enabled` with none is
+`follow_up_steps_required`, with no platform `follow_up_channels_required`; a
+platform without an adapter in this deployment is `channel_type_unavailable`
+(`available_channel_types` lists the ones that may be chosen - WhatsApp
+today); `guidance` (an instruction to the AI, never sent as it is) is at most
+500 characters after it is made one line without control characters
+(`follow_up_guidance_too_long`). A stale `If-Match` is `409
+follow_up_settings_changed`; none is `422 follow_up_settings_version_required`.
+A workspace with no settings row (never configured) reads `enabled: false,
+version: 0`.
+
+## Workspace local time (TZ-08)
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/api/v1/workspace/local-time?at=YYYY-MM-DDTHH:MM` | Any workspace member |
+
+Resolves a wall time in the workspace's zone so a page never computes an
+offset itself: `{at_local, at_utc, timezone, offset, ambiguous, nonexistent,
+alternatives}`. A wall time in the autumn repeated hour is `ambiguous`, both
+instants in `alternatives`, `at_local` the first (the earlier). One in the
+spring gap is `nonexistent`; `at_local` is the first instant after the gap.
+An offset, seconds or any other shape is `422 local_time_invalid`. Send the
+returned `at_local` to `POST /campaigns/{id}/schedule`, which still requires an
+aware time (CMP-15).
 
 ## Workspace campaign settings
 
@@ -413,14 +474,45 @@ All conversation routes are available to any member of the workspace. Restrictin
 | POST | `/api/v1/conversations/{conversation_id}/mode` | Take over (you become the owner) or release to the AI |
 | POST | `/api/v1/conversations/{conversation_id}/priority` | Set priority by hand |
 | POST | `/api/v1/conversations/{conversation_id}/assignment` | Assign or clear; requires `expected_assigned_to_id` (`409 stale_assignment` if stale) |
+| GET | `/api/v1/conversations/{conversation_id}/follow-ups` | The conversation's follow-up history (FUS-09) |
+| DELETE | `/api/v1/conversations/{conversation_id}/follow-up` | Stop its automatic follow-ups; audited `follow_up_stopped_by_person` |
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
+
+**Catching up** (RT-04). `GET /conversations` answers `{items, next_cursor, poll_after_seconds}`; `poll_after_seconds` is 30 with no event stream open for you, 60 with one (then the poll is only a safety net). `?updated_since=<time with offset>` lists every conversation changed at or after it - closed ones too - oldest change first, keyed by `updated_at` (now on every conversation read); a time without an offset is `422 updated_since_needs_offset`. The first page carries an `ETag`; send it as `If-None-Match` and an unchanged inbox answers `304`. `GET /conversations/{id}/messages?after=<message id>` lists the messages after that one, oldest first (a message of another conversation names no position and lists nothing).
+
+### The inbox event stream (RT-01, RT-02, RT-05, ADR-155)
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| POST | `/api/v1/events/ticket` | any member | `201 {ticket, expires_at}`: random, single use, valid `RT_TICKET_TTL_SECONDS` (60), bound to you, the active workspace and your token version; workspace rate bucket. Never logged. |
+| GET | `/api/v1/events/stream?ticket=` | the ticket | `text/event-stream`. A browser's `EventSource` cannot send an `Authorization` header, so the ticket is the credential. An unknown, used, expired or no-longer-valid ticket is `401`; a sixth stream for one person (`RT_STREAMS_PER_USER`) or one past `RT_STREAMS_PER_WORKSPACE` is `429 stream_limit`. Exempt from the request timeout and from per-request buckets. Headers `Cache-Control: no-store`, `X-Accel-Buffering: no`. |
+
+The stream opens with `retry: 3000`, sends a `: keep-alive` comment every `RT_KEEPALIVE_SECONDS` (15), and carries **ids and hints, never content** - fetch the content through the routes above, which apply their own authorization:
+
+| `event:` | `data:` |
+|---|---|
+| `message.created` | `{conversation_id, message_id, direction, channel_type, created_at}` |
+| `message.status` | `{conversation_id, message_id, status}` |
+| `conversation.updated` | `{conversation_id, fields}` - `fields` among `status`, `owner`, `assignee`, `priority` |
+| `follow_up.updated` | `{conversation_id, state}` |
+| `campaign.changed` | `{campaign_id}` - once per transition, never per recipient |
+| `resync` | `{}` - re-read with `GET /conversations?updated_since=`: the stream could not give you everything since your `Last-Event-ID`, or you fell behind |
+| `closed` | `{reason}` - `token_changed` (logout, password change), `membership_revoked`, `workspace_switched` (you opened a stream on another workspace), `workspace_unavailable` (suspended or deleted), `server_restart`; the stream then ends |
+
+Every event but `resync` and `closed` has an `id:`. Reconnecting, the browser sends it back as `Last-Event-ID` (or `?lastEventId=`): the events after it are replayed in order while the workspace's stream still holds them (`RT_STREAM_RETENTION_SECONDS`, 900; at most `RT_STREAM_MAXLEN`, 5,000); otherwise the first event is `resync`. A stream re-checks your token version, membership, the workspace and your active workspace at every keep-alive, however busy it is.
+
+**Polling budget** (RT-07). `GET /campaigns/progress` with `If-None-Match` answering `304` costs no campaign-bucket token (it still counts in the workspace bucket); an answer that changed costs one. A page with a stream open polls progress after a `campaign.changed` event, or every 60 s as a safety net.
+
+**Follow-ups on a conversation** (FUS-09). `GET /conversations/{id}` carries `follow_up: {state: none | scheduled | ended, step_index, steps_total, due_at, due_at_local, ended_reason, ended_at}` (null in the list). `GET /conversations/{id}/follow-ups` is its history, latest due first: `{id, origin: one_off | sequence, step_index, status, requested_at, scheduled_at, scheduled_at_local, sent_at, cancelled_at, cancelled_reason, skip_reason, deferred_reason, text, message_id, created_by_kind}` - `text` only for a sent one; what the AI wrote for a step it skipped is never kept or shown. `DELETE /conversations/{id}/follow-up` (any member) ends the run `stopped_by_person`, audited, and returns the state; with nothing waiting it changes nothing.
 
 Four behaviours worth knowing before integrating:
 
 - **Ownership writes are conditional.** Assignment needs the owner you are replacing as `expected_assigned_to_id` (the `assigned_to_id` you read; null is a value) and answers `409` with code `stale_assignment` if somebody changed it first. Taking over a conversation that is already human changes nothing and returns it as it is. See [CRM.md](CRM.md).
 - **Free text is only accepted inside the 24-hour service window.** Outside it, Meta accepts approved templates only, so the free-text route answers `422` and the template route still works. Every conversation read includes `service_window_open`, so a client can disable its composer instead of discovering the rule by failing a send.
 - **A rejected send answers `201`, with the message in `failed` state.** The message row is written before Meta is called, and a rejection is recorded on that row. Raising instead would roll the request back and destroy the only evidence the attempt was made. A missing platform credential does raise `503`, because nothing was attempted. Callers should read `status` rather than relying on the response code.
+
+- **A person's template stops at Meta's whole limit** (FLIM-02). At 100 % of the portfolio's messaging limit the template route answers `409 portfolio_limit_reached` with `details: {available_at, available_at_local}`; nothing is sent or recorded. While nobody has read the limit it is sent and the `201` carries `notices: ["messaging_limit_unknown"]` (`notices` is empty otherwise).
 
 - **A template message has no `body`.** It carries `template_name` and `template_language` instead, and `kind` is `template`. Meta renders the wording from its own approved copy, so Wasla has no text to return; a client should render the template it identifies rather than expecting the words the customer saw. Both fields are null on every other kind.
 
@@ -538,6 +630,7 @@ Four behaviours worth knowing:
 - **Supply a `body`, a template, or both.** A template needs both `template_name` and `template_language`; half a template answers `422`.
 - **Scheduling a second follow-up on one conversation replaces the first.** It answers `201` either way, and there is no route that edits one in place.
 - **Cancelling one already sent or cancelled succeeds and changes nothing.** Losing that race is not the caller's mistake.
+- **A follow-up may wait without failing** (FLIM-01, FQH-01). `requested_at` is the time asked for and never moves; `scheduled_at` is when it is due now; `deferred_reason` says why they differ: `portfolio_limit` (a template follow-up at 100 % of Meta's limit) or `quiet_hours` (a template follow-up - the customer's window closed - inside the workspace's quiet hours). No attempt is spent. `due_at_local` and `requested_at_local` are the two times in the workspace's zone. A free-form follow-up inside the customer's window is sent at its time, day or night.
 
 There is no endpoint that sends a follow-up now. Sending is the worker's job, and "send this immediately" is just a message — use `POST /conversations/{id}/messages`.
 

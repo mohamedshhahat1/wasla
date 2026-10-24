@@ -1602,8 +1602,10 @@ groups:
       - alert: PortfolioLimitReached
         # A business portfolio's last 24 hours reached Meta's whole messaging
         # limit, every source counted (LIM-04, LIM-07). Campaigns stop at 80 %
-        # by themselves; what fills the rest is follow-ups and manual templates,
-        # which are recorded and not refused - an open product decision.
+        # by themselves; what fills the rest is template follow-ups and manual
+        # templates, which stop at 100 % (FLIM-01, FLIM-02, ADR-152): a
+        # follow-up waits for the window to free up, a person's template is
+        # refused 409 with when. While the limit is unknown both are sent.
         expr: max(wasla_portfolio_limit_utilisation{bucket=">=100"}) > 0
         for: 5m
         labels:
@@ -1614,8 +1616,10 @@ groups:
           description: >-
             A business portfolio has messaged as many people outside their
             service window in the last 24 hours as Meta's messaging limit
-            allows. Campaigns are already waiting (daily_limit); follow-ups
-            and manual templates past this point are Meta's to refuse. Read
+            allows. Campaigns are already waiting (daily_limit); template
+            follow-ups wait (deferred_reason portfolio_limit) and a person's
+            template is refused 409 portfolio_limit_reached with when it can
+            go. Free-form replies inside a customer's window are unaffected. Read
             GET /api/v1/whatsapp/accounts/{id}/messaging-limit for the
             workspaces on it (docs/RUNBOOK.md, "Campaigns are not sending").
           runbook: docs/RUNBOOK.md
@@ -1667,6 +1671,74 @@ groups:
             in a row and it was paused. Find campaign.batch_failed with its
             error_type in the worker logs; fix the cause, then reschedule.
           runbook: docs/RUNBOOK.md
+
+  # ------------------------------------------------------------ follow-ups
+  #
+  # ADR-151..ADR-153. Steps of the owner's reminders are written by the model
+  # at dispatch; a model that keeps failing ends runs (ai_unavailable) instead
+  # of sending anything, so the symptom is silence, not a wrong message.
+  - name: wasla-follow-ups
+    rules:
+      - alert: FollowUpAiFailing
+        # FUS-04: a step's model call failed or answered outside the shape,
+        # the one retry included. Above 0.2 a second for ten minutes is the
+        # model provider failing, not one bad answer.
+        expr: sum(rate(wasla_follow_up_ai_failures_total[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          component: follow-ups
+        annotations:
+          summary: "Automatic follow-ups cannot reach the model"
+          description: >-
+            Follow-up steps keep failing to get their text from the model. Each
+            step is retried once after 60 s, then skipped (ai_unavailable) and
+            its run ended: customers who went quiet are not being reminded, and
+            nothing wrong is being sent. Check the OpenAI status and the
+            worker's ai.request_failed lines (docs/RUNBOOK.md, "Follow-ups are
+            not sending").
+          runbook: docs/RUNBOOK.md
+
+  # -------------------------------------------------------------- realtime
+  #
+  # ADR-155. The inbox's event stream carries hints only; when it fails the
+  # inbox falls back to polling, so these are warnings, never pages.
+  - name: wasla-realtime
+    rules:
+      - alert: EventsPublishFailing
+        # RT-03: a hint could not be written to Redis after its commit. The
+        # business write is safe; open inboxes learn of it only by polling.
+        expr: sum(increase(wasla_events_publish_failed_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: realtime
+        annotations:
+          summary: "Inbox updates are not being published"
+          description: >-
+            Realtime hints could not be written to Redis for five minutes. Every
+            message and change was stored; open inboxes now update only when they
+            poll (every 30 to 60 s) or resync. Check Redis (docs/RUNBOOK.md, "The
+            inbox does not update").
+          runbook: docs/RUNBOOK.md
+
+      - alert: EventsStreamsNearLimit
+        # RT-06: one API process held 200 open streams with p95 delivery
+        # 0.27 s (test_events_capacity.py). Past 80 % of that on one process,
+        # add an API replica before delivery slows.
+        expr: max(wasla_events_streams_open) > 160
+        for: 10m
+        labels:
+          severity: warning
+          component: realtime
+        annotations:
+          summary: "An API process holds most of the event streams it was measured for"
+          description: >-
+            One API process has held more than 160 open inbox event streams for
+            ten minutes; 200 is what one process was measured to serve. Add an
+            API replica, or check for a client opening streams it never closes
+            (docs/DEPLOYMENT.md, "The inbox event stream").
+          runbook: docs/DEPLOYMENT.md
 
   # --------------------------------------------------------------- database
   #

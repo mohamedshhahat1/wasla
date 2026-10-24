@@ -38,6 +38,7 @@ from app.api.v1 import (
     conversations,
     email_verification,
     email_webhooks,
+    events,
     follow_ups,
     google_oauth,
     invitations,
@@ -51,6 +52,7 @@ from app.api.v1 import (
     platform_commercial,
     platform_entitlements,
     platform_rate_cards,
+    template_header_media,
     templates,
     timezones,
     usage,
@@ -78,6 +80,8 @@ WORKSPACE_ROUTERS = (
     knowledge.router,
     leads.router,
     members.router,
+    # The template header library (HMT-01).
+    template_header_media.router,
     usage.router,
     whatsapp.router,
 )
@@ -147,6 +151,11 @@ UNLIMITED_ROUTERS = (
     # Not unguarded: its one route declares `PublicRateLimit`, counted by
     # client address; the workspace limit would need a workspace.
     timezones.router,
+    # The inbox's event stream (ADR-155). Its ticket route declares
+    # `WorkspaceRateLimit` itself; the stream is one long request bounded by
+    # open-stream limits instead (429 `stream_limit`), and resolves no session -
+    # EventSource cannot send one, so the ticket is its authorization.
+    events.router,
     # A payment provider cannot hold a credential of ours and retries anything
     # that is not a 2xx, so the same reasoning as the other two: an HMAC is its
     # authorization, and a 429 here would lose a payment notification.

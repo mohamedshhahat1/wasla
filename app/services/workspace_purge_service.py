@@ -129,8 +129,14 @@ PURGED_TABLES: tuple[str, ...] = (
     "campaign_test_sends",
     "campaign_recipients",
     "follow_ups",
+    # Runs of the automatic reminders (FUS-02): after the steps that name
+    # them, before `conversations`, which each one names.
+    "follow_up_sequence_runs",
     "messages",
     "conversations",
+    # Meta's ids for template header files (HMR-02, HMT-02): they name a
+    # campaign, a file and a connection, so before all three.
+    "template_header_uploads",
     # The drafts an Idempotency-Key made (PG-08). Before `campaigns`, which
     # each one names.
     "campaign_create_keys",
@@ -162,6 +168,9 @@ PURGED_TABLES: tuple[str, ...] = (
     "knowledge_bases",
     "agent_tools",
     "agents",
+    # The workspace's automatic follow-up reminders (FUS-01): a reminder's
+    # instruction to the AI is the business's own wording, erased with it.
+    "follow_up_settings",
     "whatsapp_events",
     "whatsapp_templates",
     "whatsapp_accounts",

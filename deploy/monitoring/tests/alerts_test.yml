@@ -2189,7 +2189,7 @@ tests:
           component: campaigns
         exp_annotations:
           summary: A business portfolio reached Meta's messaging limit
-          description: A business portfolio has messaged as many people outside their service window in the last 24 hours as Meta's messaging limit allows. Campaigns are already waiting (daily_limit); follow-ups and manual templates past this point are Meta's to refuse. Read GET /api/v1/whatsapp/accounts/{id}/messaging-limit for the workspaces on it (docs/RUNBOOK.md, "Campaigns are not sending").
+          description: A business portfolio has messaged as many people outside their service window in the last 24 hours as Meta's messaging limit allows. Campaigns are already waiting (daily_limit); template follow-ups wait (deferred_reason portfolio_limit) and a person's template is refused 409 portfolio_limit_reached with when it can go. Free-form replies inside a customer's window are unaffected. Read GET /api/v1/whatsapp/accounts/{id}/messaging-limit for the workspaces on it (docs/RUNBOOK.md, "Campaigns are not sending").
           runbook: docs/RUNBOOK.md
     - eval_time: 50m
       alertname: PortfolioLimitReached
@@ -2272,4 +2272,105 @@ tests:
           runbook: docs/RUNBOOK.md
     - eval_time: 100m
       alertname: CampaignsPausedRepeatedBatchFailure
+      exp_alerts: []
+  - interval: 1m
+    name: follow-up model failures above 0.2 a second warn and clear
+    input_series:
+    - series: wasla_follow_up_ai_failures_total{job="wasla-api"}
+      values: 0+30x30 900x60
+    alert_rule_test:
+    - eval_time: 8m
+      alertname: FollowUpAiFailing
+      exp_alerts: []
+    - eval_time: 25m
+      alertname: FollowUpAiFailing
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: follow-ups
+        exp_annotations:
+          summary: Automatic follow-ups cannot reach the model
+          description: 'Follow-up steps keep failing to get their text from the model. Each step is retried once after 60 s, then skipped (ai_unavailable) and its run ended: customers who went quiet are not being reminded, and nothing wrong is being sent. Check the OpenAI status and the worker''s ai.request_failed lines (docs/RUNBOOK.md, "Follow-ups are not sending").'
+          runbook: docs/RUNBOOK.md
+    - eval_time: 60m
+      alertname: FollowUpAiFailing
+      exp_alerts: []
+  - interval: 1m
+    name: an occasional follow-up model failure stays silent
+    input_series:
+    - series: wasla_follow_up_ai_failures_total{job="wasla-api"}
+      values: 0+1x90
+    alert_rule_test:
+    - eval_time: 60m
+      alertname: FollowUpAiFailing
+      exp_alerts: []
+  - interval: 1m
+    name: failing realtime publishes warn and clear
+    input_series:
+    - series: wasla_events_publish_failed_total{job="wasla-api"}
+      values: 0x5 0+2x20 40x60
+    - series: wasla_events_published_total{job="wasla-api", type="message.created"}
+      values: 0+50x85
+    alert_rule_test:
+    - eval_time: 8m
+      alertname: EventsPublishFailing
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: EventsPublishFailing
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: realtime
+        exp_annotations:
+          summary: Inbox updates are not being published
+          description: 'Realtime hints could not be written to Redis for five minutes. Every message and change was stored; open inboxes now update only when they poll (every 30 to 60 s) or resync. Check Redis (docs/RUNBOOK.md, "The inbox does not update").'
+          runbook: docs/RUNBOOK.md
+    - eval_time: 60m
+      alertname: EventsPublishFailing
+      exp_alerts: []
+  - interval: 1m
+    name: publishing on ordinary traffic stays silent
+    input_series:
+    - series: wasla_events_published_total{job="wasla-api", type="message.created"}
+      values: 0+50x60
+    - series: wasla_events_publish_failed_total{job="wasla-api"}
+      values: 0x60
+    alert_rule_test:
+    - eval_time: 50m
+      alertname: EventsPublishFailing
+      exp_alerts: []
+  - interval: 1m
+    name: a process near its measured stream capacity warns and clears
+    input_series:
+    - series: wasla_events_streams_open{job="wasla-api", instance="api-1:8000"}
+      values: 100x5 170x20 90x40
+    - series: wasla_events_streams_open{job="wasla-api", instance="api-2:8000"}
+      values: 120x65
+    alert_rule_test:
+    - eval_time: 10m
+      alertname: EventsStreamsNearLimit
+      exp_alerts: []
+    - eval_time: 20m
+      alertname: EventsStreamsNearLimit
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          component: realtime
+        exp_annotations:
+          summary: An API process holds most of the event streams it was measured for
+          description: 'One API process has held more than 160 open inbox event streams for ten minutes; 200 is what one process was measured to serve. Add an API replica, or check for a client opening streams it never closes (docs/DEPLOYMENT.md, "The inbox event stream").'
+          runbook: docs/DEPLOYMENT.md
+    - eval_time: 45m
+      alertname: EventsStreamsNearLimit
+      exp_alerts: []
+  - interval: 1m
+    name: streams spread over processes stay silent
+    input_series:
+    - series: wasla_events_streams_open{job="wasla-api", instance="api-1:8000"}
+      values: 150x60
+    - series: wasla_events_streams_open{job="wasla-api", instance="api-2:8000"}
+      values: 150x60
+    alert_rule_test:
+    - eval_time: 50m
+      alertname: EventsStreamsNearLimit
       exp_alerts: []

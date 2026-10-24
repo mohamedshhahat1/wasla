@@ -193,6 +193,16 @@ class RecipientReason(StrEnum):
     #: Sent a marketing message less than 24 hours earlier, and the deadline
     #: came first (FREQ-01).
     CONTACT_FREQUENCY_CAP = "contact_frequency_cap"
+    #: Meta refused this person's header file three times (HMR-02); the rest
+    #: of the campaign went on with the others' files.
+    HEADER_MEDIA_REFUSED = "header_media_refused"
+
+
+class HeaderMediaMode(StrEnum):
+    """One header file for everybody, or each person's own (HMR-01)."""
+
+    CAMPAIGN = "campaign"
+    PER_RECIPIENT = "per_recipient"
 
 
 class RecipientStatus(StrEnum):
@@ -377,6 +387,10 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         # Meta's id, when it is recorded, comes with when and through which
         # connection it was uploaded, and only for a campaign with an asset.
         CheckConstraint(
+            "header_media_mode IN ('campaign', 'per_recipient')",
+            name="header_media_mode_known",
+        ),
+        CheckConstraint(
             "(header_provider_media_id IS NULL AND header_provider_uploaded_at IS NULL "
             "AND header_provider_account_id IS NULL) "
             "OR (header_provider_media_id IS NOT NULL AND header_provider_uploaded_at IS NOT NULL "
@@ -465,8 +479,21 @@ class Campaign(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
         Integer, nullable=False, default=0, server_default=text("0")
     )
     # The file a media-header template is sent with (HM-02). Fixed at
-    # composition: nothing changes it afterwards.
+    # composition: nothing changes it afterwards. With `per_recipient`, the
+    # file of everybody no rule matches (HMR-01).
     header_media_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # One file for everybody, or each person's own chosen by `header_media_rules`
+    # (`[{when: {field, key?, equals}, header_media_id}]`, first match wins) and
+    # frozen on the recipient at materialisation (HMR-01).
+    header_media_mode: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=HeaderMediaMode.CAMPAIGN.value,
+        server_default=text("'campaign'"),
+    )
+    header_media_rules: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    # How often Meta refused each file's upload (HMR-02): `{file id: n}`.
+    header_media_refusals: Mapped[dict[str, int] | None] = mapped_column(JSONB, nullable=True)
     # What Meta calls that file, uploaded once per campaign and connection by
     # the worker holding the campaign's lease (HM-04), and when - re-uploaded
     # before Meta forgets it (HM-05). Never in a response, a log or the audit.
@@ -572,6 +599,18 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
             + ")",
             name="reason_code_known",
         ),
+        # This person's header file, of the campaign's own workspace (HMR-01).
+        ForeignKeyConstraint(
+            ["tenant_id", "header_media_id"],
+            ["campaign_header_media.tenant_id", "campaign_header_media.id"],
+            name="fk_campaign_recipients_tenant_header_media",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_campaign_recipients_header_media_id",
+            "header_media_id",
+            postgresql_where=text("header_media_id IS NOT NULL"),
+        ),
         # The identity this copy is addressed to: one of this recipient's own
         # contact's identities, in its own workspace (OMNI-004).
         ForeignKeyConstraint(
@@ -635,6 +674,9 @@ class CampaignRecipient(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampM
     # (131056) is about this person and this number, so the person waits and
     # the rest of the campaign goes on. The claim skips it until then.
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The header file this person is sent, chosen by the campaign's rules at
+    # materialisation and frozen (HMR-01); null: the campaign's own file.
+    header_media_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # This person's own values, resolved once when the audience was written
     # (PER-02): `{"contact_id", "body", "header", "fallbacks", "body_too_long"}`.

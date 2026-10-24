@@ -153,17 +153,28 @@ INCONSISTENT_CHARGE_ROWS: Final = f"""
      WHERE t.charge_state = 'charged'
        AND (t.outcome::text IN {NEVER_CHARGED} OR t.outcome IS NULL)
     UNION ALL
-    -- B7: every ai_turn event names a turn of its own workspace. A turn deleted
-    -- with its conversation leaves its charge on the ledger by design, so a
-    -- missing turn counts only while that conversation still exists.
+    -- B7: every ai_turn event names a turn of its own workspace - or, without
+    -- one, an automatic follow-up step of its own workspace (ADR-151, FUS-07:
+    -- a step's model call is charged without an agent turn). A turn or a step
+    -- deleted with its conversation leaves its charge on the ledger by design,
+    -- so a missing one counts only while that conversation still exists.
     SELECT 'B7', u.tenant_id, u.id
       FROM usage_events u
      WHERE u.event_type = 'ai_turn'
-       AND (u.agent_turn_id IS NULL
+       AND ((u.agent_turn_id IS NULL
+             AND NOT EXISTS (SELECT 1 FROM follow_ups f
+                              WHERE f.tenant_id = u.tenant_id
+                                AND f.origin = 'sequence'
+                                AND f.id::text = u.metadata ->> 'follow_up_id')
+             AND (u.metadata ->> 'follow_up_id' IS NULL
+                  OR EXISTS (SELECT 1 FROM conversations c
+                              WHERE c.tenant_id = u.tenant_id
+                                AND c.id::text = u.metadata ->> 'conversation_id')))
             OR EXISTS (SELECT 1 FROM agent_turns o
                         WHERE o.id = u.agent_turn_id AND o.tenant_id <> u.tenant_id)
-            OR (NOT EXISTS (SELECT 1 FROM agent_turns t
-                             WHERE t.tenant_id = u.tenant_id AND t.id = u.agent_turn_id)
+            OR (u.agent_turn_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM agent_turns t
+                                 WHERE t.tenant_id = u.tenant_id AND t.id = u.agent_turn_id)
                 AND (u.metadata ->> 'conversation_id' IS NULL
                      OR EXISTS (SELECT 1 FROM conversations c
                                  WHERE c.tenant_id = u.tenant_id

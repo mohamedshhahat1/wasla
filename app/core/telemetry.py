@@ -122,6 +122,11 @@ HTTP_IN_FLIGHT = REGISTRY.gauge(
     "Requests currently being handled by this process.",
 )
 
+EVENT_STREAMS_OPEN = REGISTRY.gauge(
+    "wasla_events_streams_open",
+    "Inbox event streams currently open on this process (ADR-155).",
+)
+
 DEPENDENCY_UP = REGISTRY.gauge(
     "wasla_dependency_up",
     "Whether a readiness dependency answered its last probe (1) or did not (0).",
@@ -535,6 +540,44 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
     "wasla_ai_turn_charge_total": (
         "AI turn holds, and whether each was charged, released or expired.",
         ("outcome",),
+    ),
+    # Automatic follow-up steps (FUS-04 .. FUS-06): `sent`, `skipped` or
+    # `cancelled` with the closed reason, and `not_scheduled` (reason
+    # `window_closing`) for a step the window left no room for.
+    "wasla_follow_up_sequence_steps_total": (
+        "Automatic follow-up steps, by outcome and closed reason.",
+        ("outcome", "reason"),
+    ),
+    # A due follow-up that waited instead of being sent (FLIM-01, FQH-01).
+    "wasla_follow_up_defers_total": (
+        "Follow-ups that waited for Meta's limit or the workspace's quiet hours.",
+        ("reason",),
+    ),
+    # A step's model call that failed (FUS-04): each failure, so the one retry
+    # shows as two.
+    # A template header file uploaded to Meta (HMR-02, HMT-02): for a
+    # campaign, a person's template or a follow-up template.
+    "wasla_template_header_uploads_total": (
+        "Template header files uploaded to Meta, by what they were for.",
+        ("origin",),
+    ),
+    # Realtime hints (RT-03, RT-05): published by type; publishes that failed
+    # (the business write committed anyway); streams closed, by why.
+    "wasla_events_published_total": (
+        "Realtime hints published to a workspace's stream, by type.",
+        ("type",),
+    ),
+    "wasla_events_publish_failed_total": (
+        "Realtime hints that could not be published; their writes committed.",
+        (),
+    ),
+    "wasla_events_stream_closed_total": (
+        "Open event streams closed by the server, by reason.",
+        ("reason",),
+    ),
+    "wasla_follow_up_ai_failures_total": (
+        "Follow-up steps whose model call failed or answered outside the shape.",
+        (),
     ),
     # Capacity reductions (ENT-14, ENT-15): `opened` at a boundary, then how
     # each ended - an owner's choice, the automatic fallback, or capacity back.
@@ -1463,6 +1506,26 @@ BILLING_OUTCOMES: Final[dict[str, frozenset[str]]] = {
     "wasla_ai_turn_charge_total": frozenset(
         {"held", "charged", "released", "hold_expired", "late_charge"}
     ),
+    "wasla_follow_up_defers_total": frozenset({"portfolio_limit", "quiet_hours"}),
+    "wasla_template_header_uploads_total": frozenset({"campaign", "manual", "follow_up"}),
+    "wasla_events_published_total": frozenset(
+        {
+            "message.created",
+            "message.status",
+            "conversation.updated",
+            "follow_up.updated",
+            "campaign.changed",
+        }
+    ),
+    "wasla_events_stream_closed_total": frozenset(
+        {
+            "token_changed",
+            "membership_revoked",
+            "workspace_switched",
+            "workspace_unavailable",
+            "server_restart",
+        }
+    ),
     "wasla_channel_capacity_reduction_disables_total": frozenset({"owner", "system"}),
 }
 
@@ -1648,6 +1711,78 @@ async def record_ai_turn_charge(outcome: str, *, amount: int = 1) -> None:
         await _tolerate(_increment_by(metric, {"outcome": _closed(metric, outcome)}, amount))
 
 
+#: The closed domains of `wasla_follow_up_sequence_steps_total`.
+STEP_OUTCOMES: Final[frozenset[str]] = frozenset({"sent", "skipped", "cancelled", "not_scheduled"})
+STEP_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "none",
+        "concluded",
+        "purchased",
+        "declined",
+        "waiting_on_business",
+        "inappropriate",
+        "other",
+        "guardrail",
+        "window_closed",
+        "window_closing",
+        "ai_unavailable",
+        "allowance_exhausted",
+        "not_served",
+        "human_took_over",
+        "conversation_closed",
+        "opted_out",
+        "lead_closed",
+        "channel_unavailable",
+        "customer_replied",
+        "settings_changed",
+        "sequence_restarted",
+        "replaced_by_person",
+        "stopped_by_person",
+    }
+)
+
+
+async def record_follow_up_step(outcome: str, reason: str | None = None) -> None:
+    """A step was sent, skipped, cancelled, or never scheduled (FUS-04 .. FUS-06)."""
+    metric = "wasla_follow_up_sequence_steps_total"
+    labels = {
+        "outcome": outcome if outcome in STEP_OUTCOMES else "other",
+        "reason": (reason or "none") if (reason or "none") in STEP_REASONS else "other",
+    }
+    await _tolerate(_increment(metric, labels))
+
+
+async def record_follow_up_defer(reason: str) -> None:
+    """A due follow-up waited for Meta's limit or quiet hours (FLIM-01, FQH-01)."""
+    metric = "wasla_follow_up_defers_total"
+    await _tolerate(_increment(metric, {"reason": _closed(metric, reason)}))
+
+
+async def record_template_header_upload(origin: str) -> None:
+    """A template header file went to Meta (HMR-02, HMT-02)."""
+    metric = "wasla_template_header_uploads_total"
+    await _tolerate(_increment(metric, {"origin": _closed(metric, origin)}))
+
+
+async def record_events_published(event_type: str) -> None:
+    metric = "wasla_events_published_total"
+    await _tolerate(_increment(metric, {"type": _closed(metric, event_type)}))
+
+
+async def record_events_publish_failed() -> None:
+    await _tolerate(_increment("wasla_events_publish_failed_total", {}))
+
+
+async def record_events_stream_closed(reason: str) -> None:
+    metric = "wasla_events_stream_closed_total"
+    await _tolerate(_increment(metric, {"reason": _closed(metric, reason)}))
+
+
+async def record_follow_up_ai_failure() -> None:
+    """A step's model call failed (FUS-04)."""
+    await _tolerate(_increment("wasla_follow_up_ai_failures_total", {}))
+
+
 async def record_capacity_reduction(cause: str, resolution: str) -> None:
     """A capacity reduction opened or resolved (ENT-14, ENT-15)."""
     metric = "wasla_channel_capacity_reductions_total"
@@ -1800,6 +1935,7 @@ __all__ = [
     "COUNTER_PREFIX",
     "DEPENDENCY_FAILURES",
     "DEPENDENCY_UP",
+    "EVENT_STREAMS_OPEN",
     "HISTOGRAM_PREFIX",
     "HTTP_IN_FLIGHT",
     "HTTP_LATENCY",

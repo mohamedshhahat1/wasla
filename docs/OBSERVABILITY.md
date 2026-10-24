@@ -53,6 +53,14 @@ customers.
 | `wasla_provider_attempts_total` | counter | `provider`, `operation`, `outcome` | Every attempt, retries included. A call that succeeded on its third try is one success above and two `rate_limited` attempts here — throttling the retry absorbed is visible only in this series. |
 | `wasla_agent_turn_outcomes_total` | counter | `outcome` | How agent turns ended: `replied`, `handed_off`, `escalated`, `empty_response`, `nothing_to_answer`, `quota_blocked`, `channel_not_in_plan`, or `suppressed_human` / `_agent` / `_workspace` / `_closed` / `_channel`. Twelve fixed values. |
 | `wasla_ai_turn_charge_total` | counter | `outcome` | The AI allowance (ADR-131): `held` at engagement, then `charged` or `released` when the turn settles, `hold_expired` by the billing sweep, `late_charge` for a settle after that sweep. |
+| `wasla_follow_up_sequence_steps_total` | counter | `outcome`, `reason` | Automatic follow-up steps (ADR-151): `sent`; `skipped` with the closed skip reason (the AI's own, `guardrail`, `window_closed`, `ai_unavailable`, `allowance_exhausted`, a stop rule); `cancelled` with the cancel reason (`customer_replied`, `human_took_over`, `settings_changed`, ...); `not_scheduled` / `window_closing` for a step the window left no room for. |
+| `wasla_follow_up_defers_total` | counter | `reason` | A due follow-up that waited instead of being sent: `portfolio_limit` (a template follow-up at 100 % of Meta's limit, FLIM-01) or `quiet_hours` (a template follow-up inside the workspace's quiet hours, FQH-01). Never a failure. |
+| `wasla_follow_up_ai_failures_total` | counter | - | A step's model call that failed or answered outside the shape (FUS-04); the one retry counts again. |
+| `wasla_template_header_uploads_total` | counter | `origin` | A template header file uploaded to Meta (ADR-154): `campaign` (once per file, connection and campaign, under the lease), `manual` (a person's template from the inbox) or `follow_up` (a follow-up template), the latter two once per file and connection while the id is fresh. |
+| `wasla_events_published_total` | counter | `type` | Realtime hints published to a workspace's Redis stream after their commit (ADR-155): `message.created`, `message.status`, `conversation.updated`, `follow_up.updated`, `campaign.changed`. |
+| `wasla_events_publish_failed_total` | counter | - | Hints that could not be written to Redis. The write that caused them committed anyway; clients converge through `resync` and the incremental reads. |
+| `wasla_events_stream_closed_total` | counter | `reason` | Open event streams the server closed: `token_changed`, `membership_revoked`, `workspace_switched`, `workspace_unavailable`, `server_restart`. `server_restart` rises by the number of open inboxes on every deploy or restart of an API process (ADR-157); a restart that adds none while inboxes were open is a process not started by the entrypoint (its start-up line `events.shutdown_hook active=false`). |
+| `wasla_events_streams_open` | gauge | - | Event streams open on **this API process** now (in-process, like the HTTP gauges; sum across instances for the deployment). One process carried 200 with p95 delivery 0.27 s (`test_events_capacity.py`). |
 | `wasla_ai_turn_holds_open` | gauge | — | Turns holding a unit of their workspace's allowance right now - generating. |
 | `wasla_ai_turn_holds_past_ttl` | gauge | — | **A state invariant**: holds older than `AI_TURN_HOLD_TTL_SECONDS` the sweep has not released. Should be zero. |
 | `wasla_entitlement_refusals_total` | counter | `key`, `reason` | What the entitlements refused: `channel_connections`/`capacity_exceeded`, `allowed_channel_types`/`type_not_allowed` (the capacity guard, pre-check and authoritative check each counted), `period_ai_turns`/`quota_exhausted`. |
@@ -247,12 +255,28 @@ every source counted. The gauge counts portfolios per bucket; it never names one
 | `CampaignsPausedProviderUnreachable` | A campaign paused `provider_unreachable` in the last hour | warning |
 | `CampaignsPausedRepeatedBatchFailure` | A campaign paused `repeated_batch_failure` in the last hour | warning |
 | `CampaignHeaderMediaRefused` | A campaign failed `header_media_refused` in the last hour - Meta refused its header file (ADR-144) | warning |
-| `PortfolioLimitReached` | `wasla_portfolio_limit_utilisation{bucket=">=100"} > 0` for 5m - a portfolio reached Meta's whole limit (ADR-146) | warning |
+| `PortfolioLimitReached` | `wasla_portfolio_limit_utilisation{bucket=">=100"} > 0` for 5m - a portfolio reached Meta's whole limit (ADR-146); template follow-ups wait and manual templates are refused 409 from here (ADR-152) | warning |
 | `CampaignMetaQualityReview` | A campaign paused `meta_quality_review` in the last hour - Meta dropped a held message (135000) | warning |
 | `MessagingLimitUnknown` | Any limit Meta answered outside the known tiers in the last hour - treated as 250 | warning |
 
 Each was proved with `promtool test rules` to fire, clear, and stay silent on
 ordinary traffic (an admin's pause, a lease takeover alone).
+
+### Follow-ups and the inbox event stream
+
+Added by FOLLOW_UPS_HEADER_MEDIA_REALTIME_IMPLEMENTATION.md (ADR-151, ADR-155).
+Both fail quietly by design - a step whose model fails is skipped, an inbox whose
+stream fails polls - so these are warnings that say what is not happening.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `FollowUpAiFailing` | `rate(wasla_follow_up_ai_failures_total[5m]) > 0.2` for 10m - steps are being skipped `ai_unavailable` (FUS-04) | warning |
+| `EventsPublishFailing` | Any `wasla_events_publish_failed_total` increase for 5m - inboxes fall back to polling (RT-03) | warning |
+| `EventsStreamsNearLimit` | `max(wasla_events_streams_open) > 160` for 10m - one API process past 80 % of the 200 streams it was measured to serve (RT-06). Per process, because capacity is per process; the per-workspace limit is a 429, not an alert | warning |
+
+Each was proved with `promtool test rules` to fire, clear, and stay silent on
+ordinary traffic (an occasional model failure, steady publishing, streams
+spread over two processes).
 
 ### Media
 

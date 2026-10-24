@@ -15,6 +15,8 @@ from datetime import datetime
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import inspect
+from sqlalchemy.orm.base import NO_VALUE
 
 from app.channels.policy import (
     REQUEST_TEXT_CEILING,
@@ -38,6 +40,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
+from app.schemas.follow_up import FollowUpStateRead
 from app.schemas.text import StorableText
 
 # The largest text any supported channel accepts, before the conversation's
@@ -63,6 +66,10 @@ class SendTemplateRequest(BaseModel):
     # so an oversized structure is refused here rather than after a database
     # write and a Graph API round trip - see `app.schemas.bounds`.
     components: list[dict[str, Any]] | None = None
+    # A file of the workspace's template header library (HMT-02): required for
+    # a template whose header is an image, a video or a document. A raw media
+    # header in `components` is refused.
+    header_media_id: uuid.UUID | None = None
 
     @field_validator("components")
     @classmethod
@@ -203,6 +210,16 @@ class MessageRead(BaseModel):
         )
 
 
+class TemplateSentRead(MessageRead):
+    """A person's template, and what its answer needs to say about it (FLIM-02).
+
+    `notices` holds `messaging_limit_unknown` when it was sent while nobody had
+    read the number's WhatsApp messaging limit; empty otherwise.
+    """
+
+    notices: list[str] = Field(default_factory=list)
+
+
 class ParticipantRead(BaseModel):
     """Who a conversation is with, as its channel addresses them - never the value itself.
 
@@ -291,6 +308,12 @@ class ConversationRead(BaseModel):
     service_window_open: bool
     reply_policy: ReplyPolicyRead
     created_at: datetime
+    # When anything the list shows last changed (RT-04): what `updated_since`
+    # reads. Null only on a row read before its first flush.
+    updated_at: datetime | None = None
+    # The conversation's follow-ups (FUS-09): on `GET /conversations/{id}` only;
+    # null in a list.
+    follow_up: FollowUpStateRead | None = None
 
     @classmethod
     def from_model(
@@ -322,4 +345,24 @@ class ConversationRead(BaseModel):
             service_window_open=service_window_open,
             reply_policy=ReplyPolicyRead.from_policy(reply_policy),
             created_at=conversation.created_at,
+            updated_at=_loaded_updated_at(conversation),
         )
+
+
+class ConversationListPage(BaseModel):
+    """A page of the inbox, and how long to wait before polling again (RT-04).
+
+    `poll_after_seconds` is 30 while this person has no event stream open, 60
+    while they do - then polling is only the safety net behind the stream.
+    """
+
+    items: list[ConversationRead]
+    next_cursor: str | None
+    poll_after_seconds: int
+
+
+def _loaded_updated_at(conversation: Conversation) -> datetime | None:
+    """`updated_at` if it is loaded: a write just flushed expires it (its `onupdate` is
+    the database's clock), and reading it then would be I/O inside serialisation."""
+    value = inspect(conversation).attrs.updated_at.loaded_value
+    return None if value is NO_VALUE else value
