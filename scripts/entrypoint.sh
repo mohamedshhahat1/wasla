@@ -22,18 +22,17 @@ case "${command}" in
     # command bypasses this branch entirely - migrations included. That is
     # exactly the bug this flag exists to make impossible.
     if [ "${UVICORN_RELOAD:-false}" = "true" ]; then
-      exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --reload --no-proxy-headers
+      exec python -m app.serve --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --reload
     fi
-    # Wasla owns the only forwarding-header policy. Uvicorn must not rewrite
-    # request.client before `client_identity` can verify the immediate peer
-    # against TRUSTED_PROXY_IPS; two trust systems with different allowlists
-    # turn a forged X-Forwarded-For value into a socket address.
+    # Uvicorn, through `app.serve`: its exit signal closes every open event
+    # stream first (FRM-03), and it never reads forwarding headers - Wasla owns
+    # the only forwarding-header policy (see app/serve.py).
     # A bounded graceful shutdown (FSR-03): open event streams are told to
     # end on SIGTERM, but a connection the runtime never finishes closing
     # must not hold the lifespan's shutdown - the event drain, closing Redis
     # and the database - past Docker's 30 s stop_grace_period, after which
     # the process is killed without it.
-    exec uvicorn app.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" --no-proxy-headers \
+    exec python -m app.serve --host "${HOST:-0.0.0.0}" --port "${PORT:-8000}" \
       --timeout-graceful-shutdown "${UVICORN_GRACEFUL_SHUTDOWN_SECONDS:-25}"
     ;;
   worker)

@@ -42,6 +42,7 @@ from app.db.models.membership import Membership
 from app.db.models.tenant import Tenant
 from app.db.models.user import User
 from app.main import create_app
+from app.serve import StreamClosingServer
 from app.services.realtime import close_every_stream, issue_ticket
 from tests.integration.campaign_harness import (
     PLATFORM_TOKEN,
@@ -76,7 +77,7 @@ class Live:
     theirs: World
     settings: Settings
     base_url: str
-    server: uvicorn.Server
+    server: StreamClosingServer
     redis: Redis
     words: list[str] = field(default_factory=list)
 
@@ -111,7 +112,9 @@ async def running(prepared_database: str, **overrides: Any) -> AsyncIterator[Liv
     mine = await build(database, prepared_database, meta, steps=[5], recipients=2, enabled=False)
     theirs = await build(database, prepared_database, meta, steps=[5], recipients=1, enabled=False)
     port = _free_port()
-    server = uvicorn.Server(
+    # The server the entrypoint runs (`python -m app.serve`), so these tests
+    # exercise the production exit handler (SD-07).
+    server = StreamClosingServer(
         uvicorn.Config(
             create_app(configured),
             host="127.0.0.1",
@@ -132,9 +135,9 @@ async def running(prepared_database: str, **overrides: Any) -> AsyncIterator[Liv
     try:
         yield state
     finally:
-        # As the exit signal does (`install_stream_shutdown`): every open stream
-        # is told to end first, then uvicorn stops - rather than waiting for
-        # each stream to notice its client has gone.
+        # As the exit signal does (`StreamClosingServer.handle_exit`): every
+        # open stream is told to end first, then uvicorn stops - rather than
+        # waiting for each stream to notice its client has gone.
         close_every_stream("server_restart")
         server.should_exit = True
         await asyncio.wait_for(serving, timeout=90)
@@ -538,12 +541,13 @@ async def _outlives(live: Live) -> None:
 
 
 async def test_a_graceful_shutdown_closes_every_stream_first(live: Live) -> None:
+    """The exit handler closes every stream; the OS signal path is test_events_shutdown_signal's."""
     _, headers = await member(live.mine, live)
     async with client_for(live) as client:
         contexts = [stream(client, await ticket(client, headers)) for _ in range(3)]
         readers = [await context.__aenter__() for context in contexts]
         try:
-            assert getattr(uvicorn.Server.handle_exit, "_closes_streams", False), "hook installed"
+            assert isinstance(live.server, StreamClosingServer), "the entrypoint's server"
             # What SIGTERM runs. Uvicorn then re-raises the signal it captured
             # once it has stopped (to end the process) - here that would end
             # the test session, so the captured signal is dropped.

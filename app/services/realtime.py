@@ -138,6 +138,8 @@ class StreamHub:
         self._subscribers: dict[uuid.UUID, set[_Subscriber]] = {}
         self._tasks: dict[uuid.UUID, tuple[asyncio.Task[None], asyncio.Task[None]]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Set by `close_all`: a stream that joins afterwards is closed at once.
+        self._closed_with: str | None = None
         _HUBS.add(self)
 
     @property
@@ -156,6 +158,8 @@ class StreamHub:
         subscriber = _Subscriber(ticket=ticket, stream_id=stream_id)
         self._subscribers.setdefault(tenant_id, set()).add(subscriber)
         EVENT_STREAMS_OPEN.add(1)
+        if self._closed_with is not None:
+            _close(subscriber, self._closed_with)
         running = self._tasks.get(tenant_id)
         if running is None or any(task.done() for task in running):
             for task in running or ():
@@ -235,6 +239,7 @@ class StreamHub:
 
     def close_all(self, reason: str) -> None:
         """Every open stream of this process says `closed` and ends (graceful shutdown)."""
+        self._closed_with = reason
         for group in list(self._subscribers.values()):
             for subscriber in list(group):
                 _close(subscriber, reason)
@@ -320,7 +325,7 @@ def close_every_stream(reason: str = "server_restart") -> None:
 
     Uvicorn waits for open connections to finish before it runs the lifespan's
     shutdown, so a stream must be told to end when the exit signal arrives, not
-    after (RT-06).
+    after (RT-06): `app.serve.StreamClosingServer.handle_exit` calls this.
     """
     for hub in list(_HUBS):
         loop = hub._loop
