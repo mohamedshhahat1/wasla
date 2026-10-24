@@ -9,7 +9,6 @@ publish that cannot reach Redis never fails the write.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -46,6 +45,7 @@ from tests.integration.sequence_harness import (
     customer_writes,
 )
 from tests.integration.test_follow_up_sequences import _person
+from tests.redis_url import shared_redis_url
 
 pytestmark = [pytest.mark.integration, pytest.mark.quiet_hours]
 
@@ -54,9 +54,7 @@ FORBIDDEN_KEYS = {"body", "text", "name", "phone", "wa_id", "media_id", "paramet
 
 @pytest_asyncio.fixture
 async def redis() -> AsyncIterator[Redis]:
-    url = os.environ.get("WASLA_TEST_REDIS_URL")
-    if not url:
-        pytest.skip("No test Redis: set WASLA_TEST_REDIS_URL.")
+    url = shared_redis_url()
     client = Redis.from_url(url, decode_responses=True)
     events.install()
     events.set_event_sink(client, maxlen=5000, retention_seconds=900)

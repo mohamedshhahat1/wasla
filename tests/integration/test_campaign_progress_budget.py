@@ -9,7 +9,6 @@ there.
 
 from __future__ import annotations
 
-import os
 import uuid
 from collections.abc import AsyncIterator
 
@@ -33,6 +32,7 @@ from tests.integration.campaign_harness import (
     worker,
 )
 from tests.integration.test_manual_marketing_templates import _person
+from tests.redis_url import shared_redis_url
 
 pytestmark = pytest.mark.integration
 
@@ -42,9 +42,7 @@ POLLS = 60
 
 @pytest_asyncio.fixture
 async def page(prepared_database: str) -> AsyncIterator[tuple[AsyncClient, dict[str, str], str]]:
-    url = os.environ.get("WASLA_TEST_REDIS_URL")
-    if not url:
-        pytest.skip("No test Redis: set WASLA_TEST_REDIS_URL.")
+    url = shared_redis_url()
     meta = FakeMeta()
     _, database = worker(prepared_database, meta, name="progress-budget")
     configured = Settings(

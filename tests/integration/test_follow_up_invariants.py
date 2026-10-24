@@ -13,7 +13,6 @@ id a hint names: a hint naming another workspace's conversation counts one.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -48,6 +47,7 @@ from scripts.omnichannel_invariants import (
     realtime_violations,
 )
 from tests.integration.test_campaign_invariants import _header_file, _image_header, _world
+from tests.redis_url import shared_redis_url
 
 pytestmark = pytest.mark.integration
 
@@ -447,9 +447,7 @@ async def test_cr17_a_per_recipient_campaign_over_the_maximum(db_session: AsyncS
 async def test_rt_i01_a_hint_naming_another_workspaces_conversation(
     db_session: AsyncSession,
 ) -> None:
-    url = os.environ.get("WASLA_TEST_REDIS_URL")
-    if not url:
-        pytest.skip("No test Redis: set WASLA_TEST_REDIS_URL.")
+    url = shared_redis_url()
     _, _, mine = await _world(db_session, "rti01")
     _, _, theirs = await _world(db_session, "rti01-other")
     await db_session.flush()

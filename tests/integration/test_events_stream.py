@@ -53,6 +53,7 @@ from tests.integration.campaign_harness import (
 )
 from tests.integration.sequence_harness import World, ai_reply, build, conversations
 from tests.integration.sequence_harness import customer_writes as _customer_writes
+from tests.redis_url import shared_redis_url
 
 pytestmark = [pytest.mark.integration, pytest.mark.quiet_hours]
 
@@ -91,9 +92,7 @@ async def live(prepared_database: str) -> AsyncIterator[Live]:
 @asynccontextmanager
 async def running(prepared_database: str, **overrides: Any) -> AsyncIterator[Live]:
     """Two workspaces and a real server on a free port; `overrides` adjust its settings."""
-    url = os.environ.get("WASLA_TEST_REDIS_URL")
-    if not url:
-        pytest.skip("No test Redis: set WASLA_TEST_REDIS_URL.")
+    url = shared_redis_url()
     meta = FakeMeta()
     _, database = worker(prepared_database, meta, name="rt-stream")
     configured = Settings(

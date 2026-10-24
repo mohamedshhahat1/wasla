@@ -44,6 +44,7 @@ from app.db.session import Database
 from app.services.realtime import issue_ticket
 from tests.integration.campaign_harness import USER_DOMAIN, FakeMeta, erase, worker
 from tests.integration.sequence_harness import World, build
+from tests.redis_url import shared_redis_url
 
 pytestmark = [
     pytest.mark.integration,
@@ -224,9 +225,7 @@ def _entrypoint() -> list[str]:
 async def test_the_exit_signal_closes_every_stream_first(
     prepared_database: str, sig: signal.Signals, streams: int
 ) -> None:
-    redis_url = os.environ.get("WASLA_TEST_REDIS_URL")
-    if not redis_url:
-        pytest.skip("No test Redis: set WASLA_TEST_REDIS_URL.")
+    redis_url = shared_redis_url()
     async with asyncio.timeout(TEST_WITHIN):
         await _signal_run(prepared_database, redis_url, sig, streams)
 
@@ -324,9 +323,7 @@ async def _signal_run(
 
 async def test_plain_uvicorn_says_streams_will_be_cut(prepared_database: str) -> None:
     """Plain `uvicorn app.main:app` serves, and says at start-up that streams are cut (SD-04)."""
-    redis_url = os.environ.get("WASLA_TEST_REDIS_URL")
-    if not redis_url:
-        pytest.skip("No test Redis: set WASLA_TEST_REDIS_URL.")
+    redis_url = shared_redis_url()
     command = [sys.executable, "-m", "uvicorn", "app.main:app", "--port", "{port}"]
     async with (
         asyncio.timeout(TEST_WITHIN),

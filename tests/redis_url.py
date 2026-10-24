@@ -22,3 +22,13 @@ def redis_url_for(database: int) -> str:
     """The Redis URL for a suite that owns database `database`."""
     host = os.environ.get("WASLA_TEST_REDIS_HOST", DEFAULT_HOST).rstrip("/")
     return f"{host}/{database}"
+
+
+def shared_redis_url() -> str:
+    """The Redis the realtime suites share: `WASLA_TEST_REDIS_URL`, else database 15.
+
+    Database 15 is what the AI and RAG harnesses already default to. Without a
+    default these suites skipped wherever the variable was not set - CI among
+    those places, where the skip gate refuses a skip nobody chose (FRM-06).
+    """
+    return os.environ.get("WASLA_TEST_REDIS_URL") or redis_url_for(15)
