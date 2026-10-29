@@ -47,7 +47,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -462,6 +462,14 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # The exact-word channel (RQ-15, migration 0133): a GIN index over the
+        # chunk's lexemes, so a SKU or a model number finds its passage even
+        # when the embedding does not place it near the question.
+        Index(
+            "ix_document_chunks_search_tsv",
+            "search_tsv",
+            postgresql_using="gin",
+        ),
         # Every parent pinned. This is the table a retrieval reads, so a row here
         # claiming a foreign parent is the shape of a cross-tenant answer - and
         # `KnowledgeRepository.search` filters chunks by `knowledge_base_id`
@@ -509,6 +517,14 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
     # (FX-1.2). NULL for a passage outside any heading and for chunks written
     # before breadcrumbs existed.
     heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The chunk as the exact-word channel reads it, `for_lexical` (RQ-15), and
+    # its lexemes as a `tsvector` - written at publish from lexemes Python
+    # tokenised, not by the `'simple'` parser, which splits `bk-35` and `4,500`
+    # (RR-16). NULL for chunks published before migration 0132 until
+    # `reindex-all` rebuilds them; such a chunk is still found by the vector
+    # channel.
+    search_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_tsv: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
     # Nullable in the schema and never NULL in practice: a generation's chunks
     # are written in the transaction that publishes it, with validated vectors.
     embedding: Mapped[list[float] | None] = mapped_column(
