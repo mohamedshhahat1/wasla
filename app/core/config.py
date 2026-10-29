@@ -512,6 +512,46 @@ class Settings(BaseSettings):
     # which is why it alone is on by default. Existing agents are not changed.
     agent_default_knowledge_grant: bool = True
 
+    # Knowledge retrieval (RAG remediation part 2, G9). Every behaviour that
+    # changes what an agent retrieves or says and needs a calibration this
+    # deployment does not have yet ships off; a workspace may override each one
+    # (`tenants.knowledge_settings`, `PATCH /knowledge/settings`).
+    #
+    # The exact-word channel beside the vector one (RQ-15): needs no calibration.
+    rag_hybrid_enabled: bool = True
+    # One small-model call scoring each search's candidates (RQ-16). Off: it adds
+    # a model call to every search and has not been measured on real traffic.
+    # Needs `rag_rerank_model`, which must be an allowed model.
+    rag_rerank_enabled: bool = False
+    rag_rerank_model: str | None = None
+    rag_rerank_timeout_seconds: float = Field(default=1.5, gt=0, le=10)
+    # strong / partial / none from the best distance (RQ-13). Off until a real
+    # distance distribution calibrates the cut-offs, which are per embedding
+    # model: `{"text-embedding-3-small": [0.35, 0.55]}`. Enabled with no entry
+    # for the current model, tiers stay inert.
+    rag_confidence_tiers_enabled: bool = False
+    rag_confidence_tiers: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    # Stop adding passages this much farther than the best one (FX-3.16). None:
+    # inert until calibrated.
+    rag_passage_margin: float | None = Field(default=None, gt=0, le=2)
+    # Currency amounts and percentages in a reply checked against what the turn
+    # retrieved (RQ-19): off | observe (count only) | correct (one corrective
+    # round) | strict (withhold, hand to a colleague).
+    rag_number_grounding: Literal["off", "observe", "correct", "strict"] = "observe"
+    # A search on the customer's message before the first round (RQ-20). Off,
+    # and inert until tiers are calibrated: only strong or partial matches are
+    # injected.
+    rag_preretrieval_enabled: bool = False
+    # The sentiment classifier and the first round in parallel, sending gated on
+    # the classification (RQ-20, amends AI-04). Off.
+    rag_parallel_sentiment_enabled: bool = False
+
+    @field_validator("rag_rerank_model", "rag_passage_margin", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        """`RAG_RERANK_MODEL=` and `RAG_PASSAGE_MARGIN=` in an env file mean "not set"."""
+        return None if isinstance(value, str) and not value.strip() else value
+
     # Media
     # Which implementation of `MediaStorage` this deployment uses (ADR-077).
     #

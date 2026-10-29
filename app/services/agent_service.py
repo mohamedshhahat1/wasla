@@ -32,8 +32,9 @@ from app.db.models.sentiment import SentimentLabel
 from app.db.models.user import User
 from app.integrations.openai.types import ToolSpec
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
-from app.repositories.knowledge_repository import knowledge_unreachable
+from app.repositories.knowledge_repository import KnowledgeBaseRepository, knowledge_unreachable
 from app.services.audit_service import AuditTrail
+from app.services.retrieval_policy import KNOWLEDGE_SCOPE_KEY
 
 logger = get_logger(__name__)
 
@@ -320,7 +321,10 @@ class AgentService:
         agent = await self._agents.require_by_id(agent_id)
         if not self._registry.knows(name):
             raise ValidationError(f"There is no tool named {name}.")
-        _refuse_unsupported_config(config)
+        if name == SEARCH_KNOWLEDGE_TOOL and config:
+            config = await self._knowledge_scope_config(config)
+        else:
+            _refuse_unsupported_config(config)
 
         grant = await self._grants.upsert(
             agent_id=agent.id,
@@ -335,6 +339,41 @@ class AgentService:
             extra={"agent_id": str(agent.id), "tool": name, "enabled": enabled},
         )
         return grant
+
+    async def _knowledge_scope_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Validate a `search_knowledge` scope against this workspace (RQ-18).
+
+        Every id must be a knowledge base of *this* workspace: a scope can never
+        point an agent at another workspace's documents, and an id that is not
+        found here is refused with the same words whether it exists elsewhere or
+        not (G3). An empty list is refused rather than accepted as "read
+        nothing", which would make the agent answer "no information" to every
+        question while looking configured.
+        """
+        unexpected = sorted(set(config) - {KNOWLEDGE_SCOPE_KEY})
+        if unexpected:
+            raise ValidationError(
+                "The only setting search_knowledge accepts is knowledge_base_ids.",
+                details={"unexpected": unexpected},
+            )
+        raw = config.get(KNOWLEDGE_SCOPE_KEY)
+        if not isinstance(raw, list) or not raw:
+            raise ValidationError(
+                "knowledge_base_ids must list at least one knowledge base, or leave "
+                "config out to search every knowledge base of the workspace."
+            )
+        try:
+            ids = list(dict.fromkeys(uuid.UUID(str(value)) for value in raw))
+        except ValueError:
+            raise ValidationError("knowledge_base_ids must be knowledge base ids.") from None
+        bases = KnowledgeBaseRepository(self._session, tenant_id=self._tenant_id)
+        for knowledge_base_id in ids:
+            if await bases.get_by_id(knowledge_base_id) is None:
+                raise ValidationError(
+                    "knowledge_base_ids names a knowledge base this workspace does not have.",
+                    details={"knowledge_base_id": str(knowledge_base_id)},
+                )
+        return {KNOWLEDGE_SCOPE_KEY: [str(value) for value in ids]}
 
     async def revoke_tool(
         self,

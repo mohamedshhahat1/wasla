@@ -645,7 +645,12 @@ async def test_the_clamp_actually_bites_on_a_full_knowledge_base(
     retrieval = await service.search(query=CHUNK_SUBJECT, top_k=1_000_000)
 
     assert SEEDED_CHUNKS > MAX_TOP_K
-    assert len(retrieval.passages) == MAX_TOP_K
+    # Exactly the cap was chosen. Neighbours of one section are merged into one
+    # passage (FX-3.11), so the cap is counted in chosen chunks, not sources.
+    assert retrieval.diagnostics is not None
+    chosen = [d for d in retrieval.diagnostics.decisions if d.outcome == "kept"]
+    assert len(chosen) == MAX_TOP_K
+    assert 1 <= len(retrieval.passages) <= MAX_TOP_K
 
 
 class _CountingEmbeddings:

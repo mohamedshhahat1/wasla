@@ -805,10 +805,15 @@ async def test_a_tool_that_does_run_acts_in_the_conversation_workspace(
     recorded = recorders["create_lead"].context
     assert recorded is not None
     assert recorded.tenant_id == tenant.id
-    # The context carries no field a model's arguments could reach.
+    # The context carries no field a model's arguments could reach. The three
+    # retrieval fields (RAG part 2) come from the worker's resolved settings,
+    # the agent's grant and the tool's own results, never from arguments.
     assert {field.name for field in fields(ToolContext)} == {
         "tenant_id",
         "conversation_id",
         "session",
         "embeddings",
+        "retrieval",
+        "reranker",
+        "searches",
     }

@@ -179,6 +179,31 @@ class Passage:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateDecision:
+    """What became of one candidate, for the admin preview (FX-3.9)."""
+
+    document_id: uuid.UUID
+    document_title: str
+    ordinal: int
+    distance: float
+    channels: tuple[str, ...]
+    #: `kept`, or why not: threshold, duplicate, document_cap, margin, top_k.
+    outcome: str
+
+
+@dataclass(frozen=True, slots=True)
+class SearchDiagnostics:
+    """Numbers about one search - never its text - for the preview and the logs."""
+
+    candidates: dict[str, int]
+    best_distance: float | None
+    dropped: dict[str, int]
+    rerank: str
+    decisions: tuple[CandidateDecision, ...] = ()
+    queries: int = 1
+
+
+@dataclass(frozen=True, slots=True)
 class Retrieval:
     """What one search found.
 
@@ -191,6 +216,7 @@ class Retrieval:
     query: str
     #: The search's confidence tier (RQ-13), or None while tiers are disabled.
     match: str | None = None
+    diagnostics: SearchDiagnostics | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -302,8 +328,15 @@ class RetrievalService:
         knowledge_base_id: uuid.UUID | None = None,
         max_distance: float = MAX_DISTANCE,
         release_session: bool = False,
+        alternate_query: str | None = None,
     ) -> Retrieval:
         """Find the passages in this workspace most relevant to a question.
+
+        `alternate_query` is the same question in the language the documents
+        are written in (RQ-17), written by the model in the same tool call: it
+        is embedded in the same batched request as `query`, searched by both
+        channels, and fused with the rest by RRF - so an Arabic question about
+        an English price list reaches the row an English question would.
 
         Raises `KnowledgeSearchUnavailableError`, and nothing else, when the
         search cannot be completed.
@@ -328,9 +361,16 @@ class RetrievalService:
         limit = effective_top_k(top_k)
         threshold = effective_distance(max_distance)
         started = perf_counter()
+        queries = [cleaned]
+        if alternate_query:
+            alternate = for_matching(alternate_query[: MAX_QUERY_CHARACTERS * 2])[
+                :MAX_QUERY_CHARACTERS
+            ].strip()
+            if alternate and alternate != cleaned:
+                queries.append(alternate)
 
         try:
-            batch = await self._embed(cleaned, release_session=release_session)
+            batch = await self._embed(queries, release_session=release_session)
             await record_ai_stage("embedding", perf_counter() - started)
         except KnowledgeSearchUnavailableError:
             raise
@@ -353,47 +393,50 @@ class RetrievalService:
         )
 
         searched = perf_counter()
-        lexemes = lexical_tokens(cleaned) if self._policy.hybrid else []
-        tsquery = tsquery_text(lexemes)
         scope = _scope(knowledge_base_id, self._policy.knowledge_base_ids)
-        seconds: dict[str, float] = {}
+        seconds: dict[str, float] = {VECTOR: 0.0, LEXICAL: 0.0}
+        lists: list[list[Candidate]] = []
+        counted = {VECTOR: 0, LEXICAL: 0}
         try:
             async with self._session.begin_nested():
-                vector_rows = await self._chunks.search(
-                    embedding=batch.vectors[0],
-                    space=space,
-                    limit=CHANNEL_CANDIDATES,
-                    knowledge_base_ids=scope,
-                )
-                seconds[VECTOR] = perf_counter() - searched
-                lexical_rows: list[ScoredChunk] = []
-                if tsquery is not None:
-                    lexical_started = perf_counter()
-                    lexical_rows = await self._chunks.lexical_search(
-                        tsquery=tsquery,
-                        embedding=batch.vectors[0],
+                for text_query, vector in zip(queries, batch.vectors, strict=True):
+                    vector_started = perf_counter()
+                    vector_rows = await self._chunks.search(
+                        embedding=vector,
                         space=space,
                         limit=CHANNEL_CANDIDATES,
                         knowledge_base_ids=scope,
                     )
-                    seconds[LEXICAL] = perf_counter() - lexical_started
+                    seconds[VECTOR] += perf_counter() - vector_started
+                    lists.append([_candidate(row, VECTOR) for row in vector_rows])
+                    counted[VECTOR] += len(vector_rows)
+                    lexemes = lexical_tokens(text_query) if self._policy.hybrid else []
+                    tsquery = tsquery_text(lexemes)
+                    if tsquery is None:
+                        continue
+                    lexical_started = perf_counter()
+                    lexical_rows = await self._chunks.lexical_search(
+                        tsquery=tsquery,
+                        embedding=vector,
+                        space=space,
+                        limit=CHANNEL_CANDIDATES,
+                        knowledge_base_ids=scope,
+                    )
+                    seconds[LEXICAL] += perf_counter() - lexical_started
+                    asked = frozenset(lexemes)
+                    lists.append([_candidate(row, LEXICAL, asked=asked) for row in lexical_rows])
+                    counted[LEXICAL] += len(lexical_rows)
         except Exception as error:
             await self._failed(started, stage="search", error=error)
             raise KnowledgeSearchUnavailableError() from None
 
         await record_ai_stage("sql", perf_counter() - searched)
 
-        asked = frozenset(lexemes)
-        fused = rrf_fuse(
-            [
-                [_candidate(row, VECTOR) for row in vector_rows],
-                [_candidate(row, LEXICAL, asked=asked) for row in lexical_rows],
-            ]
-        )
-        identifiers = identifier_tokens(cleaned)
+        fused = rrf_fuse(lists)
+        identifiers = frozenset().union(*(identifier_tokens(q) for q in queries))
         close = [c for c in fused if keeps(c, threshold=threshold, identifiers=identifiers)]
         diverse = diversify(close)
-        ranked = diverse.kept
+        ranked = diverse.ranked
         rerank_outcome = DISABLED
         if self._policy.rerank and self._reranker is not None:
             rerank_started = perf_counter()
@@ -408,6 +451,7 @@ class RetrievalService:
         # The best `limit` chunks, then neighbours of one section joined: a
         # merged passage holds every chunk it replaced, so what was asked for
         # is what is delivered, in fewer sources.
+        chosen_ids = {c.chunk_id for c in within[:limit]}
         chosen = merge_adjacent(within[:limit])
         chosen = await self._expanded(chosen, space=space, scope=scope)
         passages = tuple(_passage(candidate) for candidate in chosen)
@@ -422,14 +466,33 @@ class RetrievalService:
             else None
         )
         retrieval = Retrieval(passages=passages, query=cleaned, match=tier)
-        budget_dropped = len(passages) - len(retrieval.packed()) if passages else 0
+        packed = len(retrieval.packed()) if passages else 0
         dropped = {
             "threshold": len(fused) - len(close),
             "duplicate": diverse.duplicates,
-            "document_cap": diverse.capped,
+            "document_cap": len({c.chunk_id for c in diverse.capped} - chosen_ids),
             "margin": len(ranked) - len(within),
-            "budget": budget_dropped,
+            "budget": len(passages) - packed,
         }
+        retrieval = Retrieval(
+            passages=passages,
+            query=cleaned,
+            match=tier,
+            diagnostics=SearchDiagnostics(
+                candidates=dict(counted),
+                best_distance=best,
+                dropped=dropped,
+                rerank=rerank_outcome,
+                decisions=_decisions(
+                    fused,
+                    close=close,
+                    within=within,
+                    chosen=within[:limit],
+                    diverse=diverse.ranked,
+                ),
+                queries=len(queries),
+            ),
+        )
         await record_retrieval(
             outcome=FOUND if passages else EMPTY,
             duration_seconds=perf_counter() - started,
@@ -439,7 +502,7 @@ class RetrievalService:
             dropped=dropped,
             context_characters=len(retrieval.as_context()) if passages else 0,
             context_tokens=estimate_tokens(retrieval.as_context()) if passages else 0,
-            candidates={VECTOR: len(vector_rows), LEXICAL: len(lexical_rows)},
+            candidates=counted,
             channel_seconds=seconds,
             tier=tier,
         )
@@ -449,8 +512,9 @@ class RetrievalService:
                 "tenant_id": str(self._tenant_id),
                 # The question itself is a customer's words and is not logged.
                 "candidates": len(fused),
-                "vector_candidates": len(vector_rows),
-                "lexical_candidates": len(lexical_rows),
+                "vector_candidates": counted[VECTOR],
+                "lexical_candidates": counted[LEXICAL],
+                "queries": len(queries),
                 "kept": len(passages),
                 # Distances are numbers about the index, not the customer, and
                 # are what calibrating the cut-off needs (RV-26).
@@ -537,7 +601,7 @@ class RetrievalService:
             )
         return chosen
 
-    async def _embed(self, cleaned: str, *, release_session: bool) -> EmbeddingBatch:
+    async def _embed(self, queries: list[str], *, release_session: bool) -> EmbeddingBatch:
         """Turn the question into a vector, optionally with no connection held.
 
         Nothing touches the session inside the released block - the embeddings
@@ -546,9 +610,9 @@ class RetrievalService:
         `tests/integration/test_provider_session_lifetime.py` exists to catch.
         """
         if not release_session:
-            return await self._embeddings.embed_batch([cleaned])
+            return await self._embeddings.embed_batch(queries)
         async with released(self._session):
-            return await self._embeddings.embed_batch([cleaned])
+            return await self._embeddings.embed_batch(queries)
 
     async def _failed(self, started: float, *, stage: str, error: BaseException) -> None:
         await record_retrieval(
@@ -593,6 +657,46 @@ def _candidate(row: ScoredChunk, channel: str, *, asked: frozenset[str] = frozen
         lexical_tokens=(asked & frozenset(lexical_tokens(chunk.content))) if asked else frozenset(),
         updated_at=row.document_updated_at,
     )
+
+
+def _decisions(
+    fused: list[Candidate],
+    *,
+    close: list[Candidate],
+    diverse: list[Candidate],
+    within: list[Candidate],
+    chosen: list[Candidate],
+) -> tuple[CandidateDecision, ...]:
+    ids = {
+        "close": {c.chunk_id for c in close},
+        "diverse": {c.chunk_id for c in diverse},
+        "within": {c.chunk_id for c in within},
+        "chosen": {c.chunk_id for c in chosen},
+    }
+    repeated = {c.chunk_id for c in close} - ids["diverse"]
+    decisions = []
+    for candidate in fused:
+        if candidate.chunk_id not in ids["close"]:
+            outcome = "threshold"
+        elif candidate.chunk_id in repeated:
+            outcome = "duplicate"
+        elif candidate.chunk_id not in ids["within"]:
+            outcome = "margin"
+        elif candidate.chunk_id not in ids["chosen"]:
+            outcome = "top_k"
+        else:
+            outcome = "kept"
+        decisions.append(
+            CandidateDecision(
+                document_id=candidate.document_id,
+                document_title=candidate.title,
+                ordinal=candidate.ordinal,
+                distance=candidate.distance,
+                channels=tuple(sorted(candidate.channels)),
+                outcome=outcome,
+            )
+        )
+    return tuple(decisions)
 
 
 def _attach(candidate: Candidate, neighbour: DocumentChunk) -> None:

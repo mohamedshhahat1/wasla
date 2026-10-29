@@ -195,17 +195,26 @@ def _overlap(first: frozenset[object], second: frozenset[object]) -> float:
 
 @dataclass(frozen=True, slots=True)
 class Diversified:
-    """What diversity kept, and how many it dropped for each reason."""
+    """What diversity kept, in order, and what it dropped or deferred.
+
+    `capped` are the passages past a document's cap: deferred behind every
+    other document's rather than dropped, so a workspace whose answer lives in
+    one long document still receives as many of its passages as were asked for.
+    """
 
     kept: list[Candidate]
     duplicates: int
-    capped: int
+    capped: list[Candidate]
+
+    @property
+    def ranked(self) -> list[Candidate]:
+        return [*self.kept, *self.capped]
 
 
 def diversify(
     candidates: Sequence[Candidate], *, per_document: int = MAX_PASSAGES_PER_DOCUMENT
 ) -> Diversified:
-    """Drop exact and near repeats, then cap passages per document, in rank order.
+    """Drop exact and near repeats, then defer passages past a document's cap, in rank order.
 
     Adjacent chunks of one document share their overlap, so a near-repeat test
     between them would drop the continuation an answer needs: neighbours are
@@ -215,7 +224,8 @@ def diversify(
     seen: set[str] = set()
     token_sets: list[tuple[Candidate, frozenset[object], frozenset[str]]] = []
     per: dict[uuid.UUID, int] = {}
-    duplicates = capped = 0
+    duplicates = 0
+    capped: list[Candidate] = []
     for candidate in candidates:
         digest = _digest(candidate.content)
         tokens: frozenset[object] = frozenset(shingles(candidate.content))
@@ -232,11 +242,11 @@ def diversify(
         if repeat:
             duplicates += 1
             continue
-        if per.get(candidate.document_id, 0) >= per_document:
-            capped += 1
-            continue
         seen.add(digest)
         token_sets.append((candidate, tokens, numbers))
+        if per.get(candidate.document_id, 0) >= per_document:
+            capped.append(candidate)
+            continue
         per[candidate.document_id] = per.get(candidate.document_id, 0) + 1
         kept.append(candidate)
     return Diversified(kept=kept, duplicates=duplicates, capped=capped)

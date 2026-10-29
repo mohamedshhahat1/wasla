@@ -171,8 +171,8 @@ def test_neighbours_sharing_their_overlap_are_not_repeats() -> None:
     assert len(diversify([first, second]).kept) == 2
 
 
-def test_one_document_holds_at_most_three_passages() -> None:
-    """M-R49: the per-document cap."""
+def test_a_documents_fourth_passage_waits_behind_other_documents() -> None:
+    """M-R49: the per-document cap defers, so another document is not crowded out."""
     many = [
         _candidate(f"m{n}", content=f"distinct passage number {n} about zebra{n}", ordinal=n * 3)
         for n in range(5)
@@ -181,9 +181,10 @@ def test_one_document_holds_at_most_three_passages() -> None:
 
     result = diversify([*many, other])
 
-    assert len([c for c in result.kept if c.document_id == DOCUMENT]) == 3
-    assert other.chunk_id in {c.chunk_id for c in result.kept}
-    assert result.capped == 2
+    order = [c.chunk_id for c in result.ranked]
+    assert order[:4] == [*(c.chunk_id for c in many[:3]), other.chunk_id]
+    assert order[4:] == [c.chunk_id for c in many[3:]]
+    assert len(result.capped) == 2
 
 
 # ------------------------------------------------------------------- merging
