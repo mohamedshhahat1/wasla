@@ -64,7 +64,9 @@ def downgrade() -> None:
         raise RuntimeError(
             f"Refusing to downgrade 0129: it would discard {count} document source keys."
         )
-    with op.get_context().autocommit_block():
-        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX}")
+    # In the run's transaction, never `CONCURRENTLY` in an autocommit block:
+    # that would commit every downgrade step above this one, and a refusal
+    # further down would leave the database stamped part-way (MIG-0091).
     op.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
+    op.execute(f"DROP INDEX IF EXISTS {INDEX}")
     op.drop_column("documents", "source_key")
