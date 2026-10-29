@@ -42,6 +42,7 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.memory import estimate_tokens
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
 from app.core.telemetry import record_ai_stage, record_retrieval
@@ -55,18 +56,32 @@ from app.services.usage_service import EMBEDDING_PURPOSE_QUERY, UsageRecorder
 logger = get_logger(__name__)
 
 DEFAULT_TOP_K: Final = 4
-MAX_TOP_K: Final = 10
-# Cosine distance, so smaller is closer. Embeddings of unrelated text sit around
-# 0.8 and above with OpenAI's models; this keeps plainly irrelevant passages out
-# rather than handing an agent the least-bad match in an empty knowledge base.
-# It is also the *loosest* threshold any caller gets: see `effective_distance`.
-# Calibrating the number against the production model is deployment work.
+# Cosine distance, so smaller is closer. It is also the *loosest* threshold any
+# caller gets: see `effective_distance`. Not yet measured against the
+# production embedding model: the suite embeds with a bag-of-words fake, and
+# calibrating the number from a real distance distribution is the external
+# verification step recorded in docs/RAG.md (RV-26, RQ-13).
 MAX_DISTANCE: Final = 0.75
+# What one passage can cost the model, in estimated tokens (`estimate_tokens`),
+# serialised as the model reads it (RQ-12). The largest chunk the chunker makes
+# is MAX_CHUNK_TOKENS + CHUNK_OVERLAP_TOKENS + MIN_CHUNK_TOKENS = 300 estimated
+# tokens; its title and section are clipped to MODEL_LABEL_CHARACTERS each; and
+# JSON escaping of a newline-heavy chunk can add a quarter. Measured worst case
+# of one entry: 521 (`tests/unit/test_retrieval_budget.py` holds the bound).
+PASSAGE_TOKEN_CEILING: Final = 540
 # Retrieved text is pasted into a prompt. Without a ceiling one large document
-# could crowd out the conversation the agent is supposed to be answering. Counted
-# over the serialized context - titles, identifiers and escaping included - not
-# over passage text alone.
-MAX_CONTEXT_CHARACTERS: Final = 6_000
+# could crowd out the conversation the agent is supposed to be answering.
+# Counted over the serialized context - titles, structure and escaping included
+# - in estimated tokens, not characters: Arabic costs about twice the tokens of
+# English per character, so a character budget delivered a different number of
+# passages per language (RV-15). Sized so MAX_TOP_K passages of the largest
+# size always fit: 6 x 540 + 60 for the envelope = 3,300.
+MAX_TOP_K: Final = 6
+CONTEXT_ENVELOPE_TOKENS: Final = 60
+MAX_CONTEXT_TOKENS: Final = MAX_TOP_K * PASSAGE_TOKEN_CEILING + CONTEXT_ENVELOPE_TOKENS
+# A title or section longer than this is clipped in what the model reads; the
+# stored title is untouched. Bounds a passage's cost whatever a title says.
+MODEL_LABEL_CHARACTERS: Final = 120
 # What of a model-chosen query is embedded. A question is a sentence or two; a
 # longer "query" is a model pasting the conversation into a tool argument.
 MAX_QUERY_CHARACTERS: Final = 2_000
@@ -144,6 +159,8 @@ class Retrieval:
 
     passages: tuple[Passage, ...]
     query: str
+    #: The search's confidence tier (RQ-13), or None while tiers are disabled.
+    match: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -157,43 +174,49 @@ class Retrieval:
         knowledge base has nothing on the subject will say so.
 
         The non-empty form is one JSON object, built passage by passage in rank
-        order and stopped before the serialized whole would pass
-        `MAX_CONTEXT_CHARACTERS`, so the lowest-ranked passages are the ones
-        left out. Ids are internal source metadata for the model, not citations
-        for the customer (PD-RAG-9).
+        order within `MAX_CONTEXT_TOKENS`. A passage that does not fit is
+        skipped and the next one tried (RV-19): stopping at the first one that
+        did not fit dropped a small rank-2 passage behind a large rank-1 one.
+        Sources are numbered; document ids stay server-side (`passages`), so
+        the model reads no identifiers it has no use for (IMP-22, PD-RAG-9).
         """
         if self.is_empty:
             return EMPTY_CONTEXT
+        return _serialize(self.packed())
 
+    def packed(self) -> list[dict[str, Any]]:
+        """The model-facing sources that fit the budget, in rank order."""
         sources: list[dict[str, Any]] = []
         for index, passage in enumerate(self.passages, start=1):
-            entry = _source(index, passage)
-            if len(_serialize([*sources, entry])) > MAX_CONTEXT_CHARACTERS:
-                if not sources:
-                    # A single passage too large once escaped: kept, shortened,
-                    # rather than answering "nothing found" about a search that
-                    # found something.
-                    sources.append(_shortened(entry))
-                break
-            sources.append(entry)
-        return _serialize(sources)
+            entry = _source(index, passage, match=self.match)
+            if estimate_tokens(_serialize([*sources, entry])) <= MAX_CONTEXT_TOKENS:
+                sources.append(entry)
+        if not sources:
+            # A single passage too large once escaped - a chunk stored before
+            # the chunker bounded sizes: kept, shortened, rather than answering
+            # "nothing found" about a search that found something.
+            sources.append(_shortened(_source(1, self.passages[0], match=self.match)))
+        return sources
 
 
-def _source(index: int, passage: Passage) -> dict[str, Any]:
-    entry: dict[str, Any] = {
-        "source": index,
-        "document_id": str(passage.document_id) if passage.document_id else None,
-        "title": passage.document_title,
-        "chunk": passage.ordinal,
-    }
+def _clip(label: str) -> str:
+    return label if len(label) <= MODEL_LABEL_CHARACTERS else label[:MODEL_LABEL_CHARACTERS] + "…"
+
+
+def _source(index: int, passage: Passage, *, match: str | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"source": index, "title": _clip(passage.document_title)}
     if passage.heading_path:
         # The section the passage sits under (FX-1.2), so a passage cut from the
         # middle of "Pricing > Premium" still says what it prices.
-        entry["section"] = passage.heading_path
+        entry["section"] = _clip(passage.heading_path)
     if passage.updated_at is not None:
         # When this version was published (FX-2.5): the tool tells the model to
         # prefer the most recent source when sources disagree.
         entry["updated_at"] = passage.updated_at.date().isoformat()
+    if match is not None:
+        # How strong the search's best match was (RQ-13), only once tiers are
+        # calibrated and enabled.
+        entry["match"] = match
     entry["content"] = passage.content
     return entry
 
@@ -213,7 +236,8 @@ def _shortened(entry: dict[str, Any]) -> dict[str, Any]:
     low, high = 0, len(content)
     while low < high:
         middle = (low + high + 1) // 2
-        if len(_serialize([{**entry, "content": content[:middle]}])) <= MAX_CONTEXT_CHARACTERS:
+        trial = _serialize([{**entry, "content": content[:middle]}])
+        if estimate_tokens(trial) <= MAX_CONTEXT_TOKENS:
             low = middle
         else:
             high = middle - 1
@@ -325,6 +349,7 @@ class RetrievalService:
                 "duplicate": len(close) - len(passages),
             },
             context_characters=len(retrieval.as_context()) if passages else 0,
+            context_tokens=estimate_tokens(retrieval.as_context()) if passages else 0,
         )
         logger.info(
             "knowledge.searched",
@@ -405,7 +430,7 @@ def _passage(row: ScoredChunk) -> Passage:
 __all__ = [
     "DEFAULT_TOP_K",
     "EMPTY_CONTEXT",
-    "MAX_CONTEXT_CHARACTERS",
+    "MAX_CONTEXT_TOKENS",
     "MAX_DISTANCE",
     "MAX_QUERY_CHARACTERS",
     "MAX_TOP_K",

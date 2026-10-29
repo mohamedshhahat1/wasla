@@ -29,11 +29,12 @@ import httpx
 import pytest
 from sqlalchemy import text
 
+from app.agents.memory import estimate_tokens
 from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.repositories.knowledge_repository import DocumentChunkRepository
 from app.services.knowledge_service import KnowledgeService
-from app.services.retrieval_service import MAX_CONTEXT_CHARACTERS, MAX_TOP_K
+from app.services.retrieval_service import MAX_CONTEXT_TOKENS, MAX_TOP_K
 from tests.fake_embeddings import FakeEmbeddings
 from tests.fakes import as_embeddings
 from tests.integration.ai_harness import (
@@ -299,7 +300,7 @@ async def test_the_server_still_bounds_a_count_it_does_accept(
     (output,) = _tool_outputs(ai_providers)
     sources = json.loads(output)["knowledge_sources"]
     assert 0 < len(sources) <= MAX_TOP_K
-    assert len(output) <= MAX_CONTEXT_CHARACTERS
+    assert estimate_tokens(output) <= MAX_CONTEXT_TOKENS
 
 
 async def test_an_unrelated_document_never_passes_the_relevance_threshold(

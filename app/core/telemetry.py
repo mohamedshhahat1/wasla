@@ -406,6 +406,34 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Search candidates dropped before reaching the model, by reason.",
         ("reason",),
     ),
+    # Candidates each retrieval channel produced (RQ-15): `vector` or `lexical`.
+    "wasla_rag_retrieval_candidates_total": (
+        "Knowledge search candidates by the channel that found them.",
+        ("channel",),
+    ),
+    # How strong a search's best match was (RQ-13): `strong`, `partial`, `none`.
+    # Counted only while tiers are enabled, so its absence means "not enabled".
+    "wasla_rag_confidence_tier_total": (
+        "Knowledge searches by confidence tier, when tiers are enabled.",
+        ("tier",),
+    ),
+    # The optional re-rank call (RQ-16): `ok`, `timeout`, `error`, `disabled`.
+    "wasla_rag_rerank_total": (
+        "Knowledge search re-rank attempts by outcome.",
+        ("outcome",),
+    ),
+    # Currency amounts and percentages in replies checked against what the turn
+    # retrieved (RQ-19): `grounded`, `ungrounded`, `corrected`, `handed_off`.
+    "wasla_rag_number_grounding_total": (
+        "Numbers in agent replies by grounding outcome.",
+        ("outcome",),
+    ),
+    # Searches made before the first round (RQ-20): `injected`, `weak` (ran,
+    # not injected), `skipped` (message not worth a search), `refused`.
+    "wasla_rag_preretrieval_total": (
+        "Pre-retrieval attempts by outcome.",
+        ("outcome",),
+    ),
     # Lines an extraction flagged as possibly re-ordered (RQ-04): one of
     # `EXTRACTION_WARNING_CODES`, counted per line.
     "wasla_knowledge_extraction_warnings_total": (
@@ -775,8 +803,25 @@ CONTEXT_CHARACTER_BUCKETS: Final[tuple[float, ...]] = (
     6_000.0,
     8_000.0,
 )
-STAGES: Final = frozenset({"sentiment", "round", "embedding", "sql"})
-DROP_REASONS: Final = frozenset({"threshold", "duplicate", "validity"})
+CONTEXT_TOKEN_BUCKETS: Final[tuple[float, ...]] = (
+    0.0,
+    250.0,
+    500.0,
+    1_000.0,
+    1_500.0,
+    2_000.0,
+    2_500.0,
+    3_300.0,
+)
+STAGES: Final = frozenset({"sentiment", "round", "embedding", "sql", "rerank"})
+DROP_REASONS: Final = frozenset(
+    {"threshold", "duplicate", "validity", "budget", "scope", "margin", "document_cap"}
+)
+RETRIEVAL_CHANNELS: Final = frozenset({"vector", "lexical"})
+CONFIDENCE_TIERS: Final = frozenset({"strong", "partial", "none"})
+RERANK_OUTCOMES: Final = frozenset({"ok", "timeout", "error", "disabled"})
+GROUNDING_OUTCOMES: Final = frozenset({"grounded", "ungrounded", "corrected", "handed_off"})
+PRERETRIEVAL_OUTCOMES: Final = frozenset({"injected", "weak", "skipped", "refused"})
 REPLACEMENT_OUTCOMES: Final = frozenset({"published", "failed", "cancelled", "metadata_only"})
 
 # Passages per search, one bucket per possible count up to the top-k ceiling.
@@ -823,6 +868,20 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
         "Characters of knowledge context a search returned to the model.",
         (),
         CONTEXT_CHARACTER_BUCKETS,
+    ),
+    # Estimated tokens of context a search handed the model (RQ-12): the unit
+    # the budget is now counted in. Beside the characters histogram, which is
+    # kept so a dashboard built on it does not go blank.
+    "wasla_rag_context_tokens": (
+        "Estimated tokens of knowledge context a search returned to the model.",
+        (),
+        CONTEXT_TOKEN_BUCKETS,
+    ),
+    # Each retrieval channel's database time (RQ-15): `vector`, `lexical`.
+    "wasla_rag_search_seconds": (
+        "How long one retrieval channel's query took.",
+        ("channel",),
+        PROVIDER_LATENCY_BUCKETS,
     ),
     # One stage of an agent turn (FX-1.13): `sentiment`, `round` (each model
     # round), `embedding` and `sql` (a knowledge search's two halves).
@@ -1067,6 +1126,10 @@ async def record_retrieval(
     best_distance: float | None = None,
     dropped: Mapping[str, int] | None = None,
     context_characters: int | None = None,
+    context_tokens: int | None = None,
+    candidates: Mapping[str, int] | None = None,
+    channel_seconds: Mapping[str, float] | None = None,
+    tier: str | None = None,
 ) -> None:
     """One knowledge search: `found`, `empty` or `failed`, how long, how many kept.
 
@@ -1088,6 +1151,36 @@ async def record_retrieval(
         await _observe(
             "wasla_rag_context_characters", {}, float(context_characters), CONTEXT_CHARACTER_BUCKETS
         )
+    if context_tokens is not None:
+        await _observe("wasla_rag_context_tokens", {}, float(context_tokens), CONTEXT_TOKEN_BUCKETS)
+    for channel, count in (candidates or {}).items():
+        if count and channel in RETRIEVAL_CHANNELS:
+            await _increment_by("wasla_rag_retrieval_candidates_total", {"channel": channel}, count)
+    for channel, seconds in (channel_seconds or {}).items():
+        if channel in RETRIEVAL_CHANNELS:
+            await _observe(
+                "wasla_rag_search_seconds", {"channel": channel}, seconds, PROVIDER_LATENCY_BUCKETS
+            )
+    if tier is not None and tier in CONFIDENCE_TIERS:
+        await _increment("wasla_rag_confidence_tier_total", {"tier": tier})
+
+
+async def record_rerank(outcome: str) -> None:
+    """One re-rank attempt (RQ-16), by closed outcome."""
+    if outcome in RERANK_OUTCOMES:
+        await _increment("wasla_rag_rerank_total", {"outcome": outcome})
+
+
+async def record_number_grounding(outcome: str, count: int = 1) -> None:
+    """Numbers of a reply checked against what the turn retrieved (RQ-19)."""
+    if count and outcome in GROUNDING_OUTCOMES:
+        await _increment_by("wasla_rag_number_grounding_total", {"outcome": outcome}, count)
+
+
+async def record_preretrieval(outcome: str) -> None:
+    """One pre-retrieval decision (RQ-20), by closed outcome."""
+    if outcome in PRERETRIEVAL_OUTCOMES:
+        await _increment("wasla_rag_preretrieval_total", {"outcome": outcome})
 
 
 async def record_ai_stage(stage: str, duration_seconds: float) -> None:
