@@ -1151,6 +1151,73 @@ tests:
                 An indexing claim has not been renewed for half an hour, so the worker that held it is gone and the recovery sweep has not handed it on. Check the ingestion_recovery loop (WorkerLoopNotBeating) and list the attempts with `python -m app.workers.queues unindexed-documents`.
               runbook: docs/RUNBOOK.md
 
+  - interval: 1m
+    name: a workspace whose agent cannot search its documents alerts after an hour
+    input_series:
+      - series: 'wasla_knowledge_unreachable_workspaces{job="wasla-api"}'
+        values: "0x10 1x120"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: KnowledgeUnreachable
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: KnowledgeUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "A workspace's documents cannot be searched by its answering agent"
+              description: >-
+                At least one workspace has ready documents while its active default agent holds no enabled search_knowledge grant, so no answer uses them. Run `python -m scripts.rag_triage` for the workspaces; the agent's knowledge_unreachable field says the same to the workspace.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 5m
+    name: duplicate documents alert only when they persist
+    input_series:
+      - series: 'wasla_knowledge_duplicate_documents{job="wasla-api"}'
+        values: "0x2 2x100"
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: KnowledgeDuplicateDocuments
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: KnowledgeDuplicateDocuments
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "A workspace holds the same document text more than once"
+              description: >-
+                Ready documents of one workspace share their exact text. Retrieval serves the copy once, but the duplicate still costs index space and hides which version is meant. Run `python -m scripts.rag_triage` and delete the extra copy.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: replacements that mostly fail alert, ones that mostly publish do not
+    input_series:
+      - series: 'wasla_knowledge_replacements_total{job="wasla-api", outcome="published"}'
+        values: "0+1x200"
+      - series: 'wasla_knowledge_replacements_total{job="wasla-api", outcome="failed"}'
+        values: "0+0x60 0+3x140"
+      - series: 'wasla_knowledge_replacements_total{job="wasla-api", outcome="metadata_only"}'
+        values: "0+20x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: KnowledgeReplacementsFailing
+        exp_alerts: []
+      - eval_time: 180m
+        alertname: KnowledgeReplacementsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "Most document replacements are failing"
+              description: >-
+                More than half of the replacements that finished in the last hour failed, and each document keeps serving its previous version. Run `python -m app.workers.queues failed-documents` for the codes.
+              runbook: docs/RUNBOOK.md
+
   # -------------------------------------------------------- agent tool calls
   - interval: 30s
     name: ordinary refusals do not look like tool failures

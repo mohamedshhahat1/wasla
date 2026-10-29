@@ -1042,6 +1042,61 @@ groups:
             unindexed-documents`.
           runbook: docs/RUNBOOK.md
 
+      - alert: KnowledgeUnreachable
+        # Ready documents and an answering agent without the search_knowledge
+        # grant (RC-7, RQ-11): every customer question is answered from the
+        # prompt alone. Not an outage, a configuration a person has to fix.
+        expr: max(wasla_knowledge_unreachable_workspaces) > 0
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "A workspace's documents cannot be searched by its answering agent"
+          description: >-
+            At least one workspace has ready documents while its active default
+            agent holds no enabled search_knowledge grant, so no answer uses
+            them. Run `python -m scripts.rag_triage` for the workspaces; the
+            agent's knowledge_unreachable field says the same to the workspace.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeDuplicateDocuments
+        # The same text ready twice in one workspace: stored before upload
+        # refused it (RQ-08), so a search spends two of its passages on one fact.
+        expr: max(wasla_knowledge_duplicate_documents) > 0
+        for: 6h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "A workspace holds the same document text more than once"
+          description: >-
+            Ready documents of one workspace share their exact text. Retrieval
+            serves the copy once, but the duplicate still costs index space and
+            hides which version is meant. Run `python -m scripts.rag_triage`
+            and delete the extra copy.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeReplacementsFailing
+        # Replacing a document's content keeps the old version serving when
+        # the new one fails (RQ-06), so customers see stale facts, not errors.
+        expr: |
+          sum(rate(wasla_knowledge_replacements_total{outcome="failed"}[1h]))
+          /
+          clamp_min(sum(rate(wasla_knowledge_replacements_total{outcome=~"published|failed"}[1h])), 0.001)
+          > 0.5
+        for: 30m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Most document replacements are failing"
+          description: >-
+            More than half of the replacements that finished in the last hour
+            failed, and each document keeps serving its previous version. Run
+            `python -m app.workers.queues failed-documents` for the codes.
+          runbook: docs/RUNBOOK.md
+
   # ------------------------------------------------------------------ media
   # Inbound attachments (MEDIA-15). Every rule reads a closed-label counter or
   # an unlabelled gauge: no workspace, file, key or URL. None fires on a single
