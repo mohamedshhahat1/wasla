@@ -50,7 +50,8 @@ async def _all_pages(
 ) -> list[uuid.UUID]:
     seen: list[uuid.UUID] = []
     cursor: str | None = None
-    while True:
+    # Bounded, so a cursor that is ignored fails here instead of paging for ever.
+    for _ in range(50):
         async with indexing.database.session() as session:
             views, cursor = await KnowledgeService(
                 session=session, tenant_id=tenant_id
@@ -60,6 +61,7 @@ async def _all_pages(
         seen += [view.document.id for view in views]
         if cursor is None:
             return seen
+    raise AssertionError("the listing never reached its last page")
 
 
 async def test_250_documents_are_all_listed_by_cursor_once_each(indexing: Indexing) -> None:
