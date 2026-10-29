@@ -22,8 +22,18 @@ async def test_triage_finds_each_problem_and_prints_no_text(indexing: Indexing) 
     async with indexing.database.session() as session:
         knowledge = KnowledgeService(session=session, tenant_id=tenant_id, queue=indexing.queue())
         sales = await knowledge.create_knowledge_base(name="Sales")
-        await knowledge.submit(knowledge_base_id=sales.id, title="Doc", raw=POLICY)
+        copy, _ = await knowledge.submit(
+            knowledge_base_id=sales.id, title="Doc", raw=POLICY + " Sales copy."
+        )
     await indexing.drain()
+    # A cross-knowledge-base copy from before RQ-08, which upload now refuses.
+    original = await indexing.document(first)
+    assert original is not None
+    await indexing.execute(
+        update(Document)
+        .where(Document.id == copy.document.id)
+        .values(content=original.content, content_hash=original.content_hash)
+    )
     # What a document stored before this remediation looks like.
     await indexing.execute(
         update(Document)
