@@ -2528,3 +2528,39 @@ The audit trail says when and why:
 SELECT created_at, meta FROM audit_logs
 WHERE tenant_id = '<tenant-id>' AND action = 'subscription_past_due';
 ```
+
+## Knowledge base (RAG remediation Part 1)
+
+### An updated document shows old facts
+
+The agent quotes an old price after a new list was uploaded. Usually the new list was uploaded as a **second document** rather than replacing the first - which the API now refuses for the same filename (`document_source_exists`) but not for a differently named file.
+
+1. `python -m scripts.rag_triage` - `duplicate-titles` counts workspaces with two documents of one title in one knowledge base.
+2. `GET /api/v1/knowledge/documents/{id}/similar` for the new document lists the likely older versions.
+3. Delete the old one, or replace it: `PUT /api/v1/knowledge/documents/{old_id}/content` with the new content, then delete the new copy. A replacement keeps the old version serving until the new one is indexed.
+4. `wasla_knowledge_duplicate_documents` above 0 means the same text is ready twice in a workspace; triage's `cross-kb-copies` names the workspaces.
+
+### Arabic PDF not found
+
+1. `python -m scripts.rag_triage` - `presentation-forms` counts documents still stored as glyph forms. After the first-deploy back-fill this is 0; if not, run `backfill-normalised-content` and `reindex-all --workspace <id>`.
+2. `extraction-warnings`, and `extraction_warnings` on the document, mean lines whose digits extraction may have re-ordered. Stored text cannot be repaired: upload the document again from its source (a newer export, or a PDF from another tool). For documents uploaded since originals are kept, re-extracting from the original is possible.
+3. A scanned PDF has no text layer and is refused; there is no OCR.
+
+### Re-index everything
+
+`python -m app.workers.queues reindex-all --rate 5 [--workspace ID] [--source pdf]`. Every document keeps serving its current version until its new generation publishes. The command prints the id to resume from; run it again with `--after <id>`. Documents whose latest attempt failed are skipped and listed - retry each with `reindex-document`. Choose the rate from the embedding account's limits; at 5 a second, 10,000 documents take about half an hour to request.
+
+### pgvector version
+
+Every knowledge search failing with the readiness check or `db_preflight` reporting "pgvector X is older than 0.8.0": the extension is too old for `hnsw.iterative_scan`. Upgrade it (`ALTER EXTENSION vector UPDATE` after installing the newer binaries, or the provider's upgrade path) and re-run `db_preflight verify`. Nothing in the data needs repair.
+
+### Answers ignore a document
+
+1. Is it `ready`? `GET /knowledge/documents/{id}`; `failed-documents` lists failures with their code.
+2. Can the answering agent search? `AgentRead.knowledge_unreachable`, the `KnowledgeUnreachable` alert and triage's `unreachable-knowledge`. Grant `search_knowledge` to the active default agent (`PUT /agents/{id}/tools`).
+3. Is it inside its `valid_from` / `valid_until` window?
+4. Extraction warnings (above). A search preview arrives with Part 2 of the remediation.
+
+### KnowledgeReplacementsFailing
+
+Replacements are failing; each document keeps serving its previous version, so customers see stale facts, not errors. `failed-documents` gives the codes: provider codes are an embedding outage or key problem; `document_too_large` and `invalid_document` are uploads to fix.

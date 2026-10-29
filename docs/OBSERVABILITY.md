@@ -418,3 +418,21 @@ an orchestrator to restart every application container.
   OTLP endpoint when one is configured; no collector is part of this stack.
 - **No log aggregation.** Logs are JSON on stdout, which is what a collector
   wants, and nothing collects them here.
+
+## Knowledge retrieval and the document lifecycle (RAG remediation Part 1)
+
+None of these carries a workspace or any text as a label (G7).
+
+| Metric | Type | What it says |
+| --- | --- | --- |
+| `wasla_rag_best_distance{model}` | histogram | The cosine distance of the best candidate each search saw - what calibrating the 0.75 threshold needs (RV-26). |
+| `wasla_rag_passages_dropped_total{reason}` | counter | Candidates dropped by the distance `threshold`, or as a `duplicate` of a higher-ranked passage. A document outside its validity window is never a candidate. |
+| `wasla_rag_context_characters` | histogram | Characters of context a search returned to the model. |
+| `wasla_ai_stage_seconds{stage}` | histogram | Time per stage of a turn: `sentiment`, `round`, `embedding`, `sql`. |
+| `wasla_ai_cached_input_tokens_total` | counter | Input tokens the provider served from its prompt cache. Cached and reasoning tokens are also recorded on the usage rows. |
+| `wasla_knowledge_extraction_warnings_total{code}` | counter | Lines a PDF extraction may have re-ordered (`digits_glued_to_arabic`, `arabic_indic_leading_zero`). |
+| `wasla_knowledge_replacements_total{outcome}` | counter | Replacements `published`, `failed`, `cancelled` (an older attempt ended) or `metadata_only`. |
+| `wasla_knowledge_duplicate_documents` | gauge | Ready documents whose exact text another ready document of the same workspace holds. |
+| `wasla_knowledge_unreachable_workspaces` | gauge | Workspaces with ready documents and no answering agent able to search them. |
+
+Alerts: `KnowledgeUnreachable` (info, the gauge above 0 for an hour), `KnowledgeDuplicateDocuments` (info, for six hours), `KnowledgeReplacementsFailing` (warning, more than half of finished replacements failing for 30 minutes). Each has a promtool test in `deploy/monitoring/tests/alerts_test.yml`.

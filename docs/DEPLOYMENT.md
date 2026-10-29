@@ -704,3 +704,25 @@ opening the conversation.
 Run the `recovery` kind somewhere. It is in `WORKER_KINDS` by default; a
 deployment that narrows that variable and leaves it out has no crash recovery
 at all.
+
+## Knowledge: pgvector and the first deploy of the RAG remediation
+
+**pgvector 0.8.0 or newer is required** (RV-03). Knowledge search sets `hnsw.iterative_scan`, which 0.7 and older do not have; on them every search fails and the agent says it has no information. `python -m scripts.db_preflight prerequisites` and `verify`, and the readiness check, refuse an older extension by name ("pgvector 0.7.4 is older than 0.8.0"). `docker-compose.yml` pins the same image digest as production.
+
+The first deploy of migrations `0127`-`0131` runs, in order, after `alembic upgrade head`:
+
+```bash
+python -m scripts.db_preflight verify
+python -m app.workers.queues backfill-normalised-content --dry-run
+python -m app.workers.queues backfill-normalised-content
+python -m app.workers.queues backfill-source-keys
+python -m scripts.rag_triage
+python -m app.workers.queues reindex-all --rate 5
+python -m scripts.rag_invariants verify
+```
+
+The back-fill is a command, not a migration, so no transaction is held across `documents`; it stores each document as normalised text with its true hash, one short transaction each. A **collision** - the knowledge base already holds the normalised text - is printed as `keep <older> delete <newer>`: delete the newer document, then run the back-fill again. Nothing is merged or deleted automatically. Documents listed for **re-upload** have lines the PDF extraction may have re-ordered; stored text cannot repair them. `backfill-source-keys` keys documents by filename where the filename is unique in its knowledge base and lists the rest. `rag_triage` lists, per workspace and by count only, duplicate titles, cross-knowledge-base copies (delete one), presentation-form PDFs and workspaces whose agent cannot search their documents.
+
+`reindex-all` re-indexes every document through the normal generation path at the given rate, in id order, printing the id to resume from with `--after`. Every document keeps serving its current version until its new generation publishes. `EMBEDDING_SCHEMA_VERSION` is not changed. Rehearsed on a database populated by the previous release (40 documents, 2 workspaces): every served document stayed served before, during and after, and every `rag_invariants` check ended at 0.
+
+Do not change `OPENAI_EMBEDDING_MODEL` in a running deployment: every document becomes unsearchable until re-indexed. The supported path is a shadow switch (Part 3 of the RAG remediation).

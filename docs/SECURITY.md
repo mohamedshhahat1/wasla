@@ -29,6 +29,8 @@ Two properties are deliberate and both are tested. The limiter **fails open**: i
 
 ## Tenant isolation
 
+**Every new way of reading knowledge passes an isolation gate** (FX-1.12, RAG remediation Part 1). Replacement, source-key and duplicate lookups, cross-knowledge-base listings, similar documents, originals in the object store, the retrieval-time duplicate filter and the triage command are each tested with two workspaces holding the same titles, text, hashes and filenames: no foreign id, title, text, count or object key appears in any result, refusal or listing, and a duplicate refusal never reveals that **another** workspace holds the same text - the lookups are scoped by `tenant_id`, never global. Mutants that remove each predicate are killed by those tests.
+
 Isolation is a security control, not a filter convenience. Every tenant-owned query is scoped by `tenant_id` in repositories and services; frontend filtering is never trusted. A client-provided tenant identifier is honoured only after membership verification. Cross-tenant access attempts are explicitly tested for conversations, contacts, leads, messages, documents, embeddings, WhatsApp accounts, agents, analytics, usage, and settings.
 
 ## Input and transport

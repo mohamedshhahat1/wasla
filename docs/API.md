@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **247 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **252 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -570,13 +570,23 @@ Conversations carry identifiers rather than embedded contact objects. The models
 | GET | `/api/v1/knowledge/documents/{document_id}` | Any workspace member |
 | POST | `/api/v1/knowledge/documents/{document_id}/ingest` | Admin or owner (`202`) |
 | DELETE | `/api/v1/knowledge/documents/{document_id}` | Admin or owner (`204`) |
+| PATCH | `/api/v1/knowledge/bases/{knowledge_base_id}` | Admin or owner |
+| DELETE | `/api/v1/knowledge/bases/{knowledge_base_id}` | Admin or owner (`204`; `?cascade=true` to delete its documents) |
+| GET | `/api/v1/knowledge/documents` | Any workspace member (across knowledge bases; cursor, `title`, `status`, `source`) |
+| GET | `/api/v1/knowledge/documents/{document_id}/similar` | Any workspace member |
+| PUT | `/api/v1/knowledge/documents/{document_id}/content` | Admin or owner (`202`) |
 
 Reading is open to any member — the people staffing an inbox need to see what their agents can answer from. Writing is administrators only, because a document added here is something the AI will state to customers as fact.
 
 Three behaviours worth knowing:
 
 - **Submitting a document answers `202`, not `201`.** The document exists but is not yet retrievable; ingestion runs in the background. Poll `GET /knowledge/documents/{id}` until `status` is `ready`. A `failed` document carries the reason in `error`, and `POST .../ingest` queues it again once the cause is fixed.
-- **Submitting the same text twice is not an error.** It returns the existing document with `created: false`, keyed on a hash of the extracted text. The upload was recognised, not duplicated.
+- **Submitting the same text twice is not an error.** It returns the existing document with `created: false`, keyed on a hash of the normalised extracted text, and updates a changed title, filename or media type (`metadata_updated: true`). The upload was recognised, not duplicated.
+- **Updating a document is `PUT …/content`, never a second upload** (RV-02). Same body as a submission (`title?`, `content`, `source`, `filename?`, `media_type?`). The previous version keeps serving until the new one is indexed, then only the new one serves; a replacement consumes no plan slot. Text identical to the document's own is a metadata update; text another document of the workspace holds is `409 document_content_exists`.
+- **A second upload of the same source is refused** (RQ-07): a `source_key` (given, or derived from the filename) already in the knowledge base answers `409 document_source_exists` with `details.document_id` and `details.replace_url`; `POST …/documents?replace=true` replaces it instead.
+- **The same text in another knowledge base of the workspace is refused** (RQ-08): `409 document_exists_in_other_knowledge_base`, naming it. Agents search every knowledge base, so it would be served twice.
+- **Listings are cursor-paged** (RV-13): `limit` and `cursor`, newest first; the next page's cursor, when there is one, is in the `X-Next-Cursor` header. `GET /knowledge/documents/{id}/similar` lists the likely older versions of a document (same source key, title or filename) for a "replace existing?" prompt.
+- **`DocumentRead` adds** `source_key`, `extraction_warnings` (codes and counts of lines the PDF extraction may have re-ordered - re-upload to fix), `valid_from`, `valid_until`, `supersedes_document_id`, `original_available` and, on a resubmission, `metadata_updated`. A document outside its `valid_from`/`valid_until` window is never retrieved. `byte_size` is the size of the uploaded file, not of its base64 text.
 - **A document read never returns the extracted text.** It reports what was ingested — status, chunk count, size, failure reason. The API is not a document store.
 
 ## Leads

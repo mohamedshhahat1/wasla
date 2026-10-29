@@ -298,6 +298,10 @@ Properties that are load-bearing, each with a test:
 - **Vectors are compared only within their embedding space** (ADR-107): a model change excludes old vectors until they are re-indexed.
 - **Parsing and size are bounded before cost** (ADR-108): pages, extracted characters, time, chunks and passage characters each have a ceiling, and a PDF over the page limit is refused rather than truncated.
 - **A failed search never costs the customer their reply** (ADR-109), and nothing found is said, not implied.
+- **Text is stored as the letters a customer types and matched as the customer types them** (ADR-158): `for_storage` (NFKC, no invisible or bidi controls) for what is stored and hashed, `for_matching` (no tatweel or diacritics, ASCII digits) for what is embedded and queried.
+- **A chunk never splits a word, a number, a line or a heading from its section** (ADR-160), and carries its heading path.
+- **An updated document is replaced through a generation snapshot, never duplicated** (ADR-161): the old version serves until the new one publishes, the swap copies the snapshot onto the document in the same transaction, and a replacement takes no plan slot. Source keys and a workspace-wide content check stop a second copy at upload (ADR-162).
+- **An upload holds no lock and no pooled connection while it extracts** (ADR-163): text is extracted, normalised and hashed first; the plan slot is reserved only when a new document is created.
 
 Embedding width is fixed in the column at 1536 rather than being configurable (ADR-018). `ix_document_chunks_embedding_hnsw` is an HNSW index over `vector_cosine_ops`, matching the `<=>` the retrieval query orders by (ADR-079, migration `0039`). PostgreSQL chooses between it and an exact scan per query; two GUCs are set per search and the index is worse than useless without them. `docs/RAG.md` carries the measurements, the limits and the failure semantics.
 

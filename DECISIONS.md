@@ -7559,3 +7559,117 @@ Point 6's "the exit signal closes every stream (`server_restart`) before
 uvicorn drains" holds only under `python -m app.serve`, which the entrypoint
 runs: the hook lives in `StreamClosingServer.handle_exit`, not in a patch
 applied while the application is imported (ADR-157, FRM-03).
+
+## ADR-158 — Knowledge Text Is Stored In One Form And Matched In Another (RQ-01, RQ-02, RV-01, RV-23)
+
+**Context.** `RAG_SYSTEM_REVIEW.md` (RV-01) found an Arabic PDF produced by Chromium stored as 104 Arabic presentation-form code points: 0 of 8 words of a normally typed query were in the stored text, 8 of 8 after NFKC. Queries were not normalised either (RV-23), and NFKC does not unify Arabic-Indic digits (`٤٥٠٠`) with ASCII (`4500`).
+
+**Decision.**
+
+1. `app/services/text_normalisation.py`, pure functions. `for_storage`: NFKC, then NUL, zero-width characters, the BOM and bidi controls removed, then the existing whitespace normalisation. `for_matching`: `for_storage` plus tatweel and Arabic diacritics removed, Persian letter forms folded to Arabic, Arabic-Indic and Persian digits mapped to ASCII. `for_lexical`: `for_matching` plus alef, yeh and teh-marbuta folding and casefold, for the lexical channel only.
+2. `documents.content` and every replacement are `for_storage` text; `content_hash` is the SHA-256 of it. Passages are embedded, and queries embedded, as `for_matching` text.
+3. `EMBEDDING_SCHEMA_VERSION` is not bumped (RQ-02): passages and queries are prepared the same way, so old and new vectors stay comparable while documents are re-indexed.
+4. Stored documents are repaired by the operator command `backfill-normalised-content` and `reindex-all`, never by a migration.
+
+**Consequences.** Until the back-fill and re-index run, an old glyph-form document is still found only by glyph-form queries. The Chromium PDF's letters normalise to Persian forms (`U+06CC`, `U+06A9`, `U+06BE`), which matching folds back; storage keeps them.
+
+## ADR-159 — pypdf Stays; Page Furniture Is Removed And Re-ordered Lines Are Flagged, Never Repaired (RQ-03 .. RQ-05, RV-04, RV-22)
+
+**Context.** The review tested one producer. Mixed Arabic and number lines came out re-ordered (RV-04); running headers, footers and page numbers were indexed once per page and pages were joined with a paragraph break (RV-22).
+
+**Decision.**
+
+1. PDFs of the same sources from Chromium, Microsoft Word and WeasyPrint were extracted with pypdf and pdfminer.six. pdfminer.six was better on Arabic order for none of the three producers, so pypdf stays (RQ-03). PyMuPDF is not allowed (AGPL) - a product decision.
+2. After extraction, in documents of three pages or more, a line in the first or last two lines of at least 60 % of pages is dropped; bare page numbers are dropped at page edges; a page ending without a sentence terminator is joined to the next with one newline.
+3. A line where a digit run is glued to Arabic letters, or an Arabic-Indic number has a leading zero, is recorded as `extraction_warnings` (codes and counts only), shown on `DocumentRead` and counted. The stored text is never re-ordered by guesswork.
+
+**Consequences.** Six questions of the evaluation corpus whose prices two producers' PDFs reverse or drop stay unanswered; their lines are flagged for re-upload. Documents uploaded before originals were kept can be repaired only by uploading them again.
+
+## ADR-160 — Chunks Are Cut At Structure, Never Inside A Word, A Number Or A Line (FX-1.2, RV-05, RV-06, RV-08, RV-09)
+
+**Context.** The chunker cut every 1,000 characters inside numbers and words (`13` | `,795 EGP`), ignored newlines, started overlaps mid-word and glued them with a blank line, measured its minimum after the overlap (a chunk of overlap plus `Page 3`), and orphaned headings; Markdown was plain text.
+
+**Decision.** Boundaries in order of preference: heading, blank line, newline, sentence end (including `؟ ۔ ؛`), whitespace; a cut by length only inside a single token longer than a chunk, and never inside a digit run. Sizes are estimated tokens (250 per chunk, 40 of overlap) so Arabic and English compare. List and table lines are atomic, a question stays with its answer, a heading moves with its section and every chunk stores its `heading_path`. Overlap is whole trailing units or words, joined with one newline. The minimum applies to the piece; a short piece is merged into its neighbour. `chunking.py` stays pure. Not a schema-version change.
+
+**Consequences.** More, smaller chunks for list-heavy documents; existing documents get the new chunks on `reindex-all`. `document_chunks.heading_path` is stored for the contextual prefix of Part 2.
+
+## ADR-161 — A Document Is Replaced Through A Generation Snapshot, Never Duplicated (RQ-06, RV-02)
+
+**Context.** There was no update path. An updated price list uploaded again became a second document, and search returned `7900 EGP` and `7200 EGP` together; re-indexing the old one rebuilt the old text, because the claim always read `documents.content`. "Delete, then upload" leaves a window serving neither and consumes a plan slot twice.
+
+**Decision.**
+
+1. `PUT /knowledge/documents/{id}/content` (and `?replace=true` on upload) extracts, normalises and hashes first, then creates a generation carrying a **snapshot**: content, hash, title, filename, media type, byte size, source, warnings and original key (nullable columns, migration 0128).
+2. The claim reads the generation's snapshot when it has one, else `documents.content`; the publish copies the snapshot onto the document in the same transaction as the swap. This amends ADR-106: a generation may now carry its own text.
+3. The same hash as the document's own is a metadata update only; another document's hash in the workspace is `409 document_content_exists`. A pending older attempt ends `failed` with code `replaced`; a processing one is fenced by clearing its claim. A replacement reserves no plan slot.
+4. A re-index snapshots nothing and keeps rebuilding from the current stored text.
+
+**Consequences.** At every moment exactly one version serves. A failed replacement leaves the previous version serving, visible on `DocumentRead.indexing`. The generation state machine gained only the `replaced` failure code (a text code, no enum change).
+
+## ADR-162 — Documents Have A Stable Source Key, And A Text Is Held Once Per Workspace (RQ-07, RQ-08, RV-07, RV-16)
+
+**Context.** Nothing identified "the same file again", and the same text in a second knowledge base was served twice (`7900, 7900, 7200`), because retrieval reads the whole workspace. A resubmission with a corrected title kept the old title.
+
+**Decision.**
+
+1. `documents.source_key`: explicit, or derived from the filename (NFC, casefold, whitespace collapsed); unique per `(tenant_id, knowledge_base_id, source_key)` where not null (migration 0129, index built concurrently). An existing key answers `409 document_source_exists` with the replace URL, or replaces with `?replace=true`. Existing rows are keyed by `backfill-source-keys` only where unique; collisions are listed, never merged.
+2. An upload whose hash another knowledge base of the workspace holds answers `409 document_exists_in_other_knowledge_base`. The lookup is scoped by `tenant_id` only, so it never reveals another workspace's text (G3).
+3. Retrieval drops a passage whose `for_matching` text a higher-ranked passage already carries - the safety net for copies stored before the refusal.
+4. Resubmitting identical text updates a changed title, filename or media type, audited as `knowledge_document_metadata_updated`.
+
+**Consequences.** A workspace that wants the same policy in two knowledge bases keeps one copy; per-agent knowledge scoping (Part 2) is the way to divide what agents read.
+
+## ADR-163 — An Upload Extracts Before It Locks, And Records Its Real Size (RQ-09, RV-10, RV-17)
+
+**Context.** `DocumentSlotDep` took the workspace's plan advisory lock before the handler, and the request held it - and a pooled connection - across PDF parsing, up to the 20-second extraction limit; a second upload to the same workspace waited past `lock_timeout`, and a burst could exhaust the pool. A PDF's `byte_size` was its base64 length.
+
+**Decision.** Extraction, normalisation and hashing happen before the request takes the plan lock or holds a pooled connection (`release_for_extraction` hands the connection back while parsing). The document slot is reserved inside `submit`, only when a new document will be created. `byte_size` is the decoded file's size.
+
+**Consequences.** Two uploads to one workspace during a slow parse both succeed, and no connection is checked out mid-parse (measured). A slot check now happens after extraction, so an upload at the plan limit spends the parse before it is refused.
+
+## ADR-164 — The Last Round Answers; Rounds Are Replayed In Order; Two Searches Per Turn (RQ-10, RV-14, RV-27)
+
+**Context.** The last of three rounds offered every tool and then refused any call for lack of a round to read it, so a model that searched again ended the turn empty - or with "let me check", said alongside a call, sent as the whole reply. Each round's request replayed all preambles first and all tool exchanges after them.
+
+**Decision.**
+
+1. A last round that follows tool rounds is asked with `tool_choice: "none"`, or `allowed_tools` naming only the terminal handoff when granted, plus a closing system instruction. The tools described are unchanged, so the request prefix is.
+2. Text that came with a tool call is a preamble: carried forward, never the reply. A turn whose model ignores the instruction ends `empty_response`.
+3. Each `ToolResult` records how many turns preceded it; the client replays turn, then that round's calls and outputs, so every round's input begins with the previous round's.
+4. `search_knowledge` runs at most twice per turn; a third is refused with a fixed message under the existing `turn_call_limit` reason. The per-response limit of 8 and per-turn limit of 12 for other tools are unchanged.
+
+**Consequences.** One existing test asserted that the preamble was the reply - the finding itself - and now asserts its reversal. The terminal handoff and CRM-02 behaviour are unchanged.
+
+## ADR-165 — New Agents Can Read The Knowledge Base, And Workspaces That Cannot Are Told (RQ-11, RC-7)
+
+**Context.** An agent was created with no tools. A workspace that uploaded documents and activated it was answered from the prompt alone, and nothing said so.
+
+**Decision.** `AgentService.create` grants `search_knowledge` (enabled, audited) unless `AGENT_DEFAULT_KNOWLEDGE_GRANT=false`; every other tool stays opt-in; no migration changes existing agents. `AgentRead.knowledge_unreachable` is true when the workspace has ready documents and its `ACTIVE` default agent holds no enabled `search_knowledge` grant - the same predicate as the `wasla_knowledge_unreachable_workspaces` gauge, the `KnowledgeUnreachable` alert and `rag_triage`.
+
+**Consequences.** The API has no workspace readiness view to carry the flag; it is on every `AgentRead`. Existing agents without the grant are reported, not changed.
+
+## ADR-166 — Listings Page By Cursor; Documents Have Effective Dates; Originals Are Kept (FX-2.4 .. FX-2.7, RQ-23, RQ-24, RV-13)
+
+**Context.** Document listings were capped at 100 with no cursor, so the oldest documents - the old versions an administrator needs to find - were unreachable. Nothing said which of two conflicting sources was current, and the uploaded file was discarded after extraction.
+
+**Decision.**
+
+1. Knowledge bases and documents list by keyset cursor (`X-Next-Cursor`), with title, status and source filters and a cross-knowledge-base document listing; `GET /knowledge/documents/{id}/similar` finds likely older versions; knowledge bases can be renamed and deleted (`?cascade=true` while they hold documents).
+2. `documents.valid_from`, `valid_until` and `supersedes_document_id` (same workspace and knowledge base, composite FK added `NOT VALID` then validated; migration 0130). Retrieval excludes a document outside its window; the tool output carries `updated_at` and the section per source, and the tool tells the model to prefer the most recent.
+3. Originals of every new upload and replacement are written to the media object store under the workspace's prefix and named by their generation; deleting the document owes them a delete, and the workspace purge erases them.
+
+**Consequences.** Documents uploaded before this have no original and can be re-extracted only by uploading again.
+
+## ADR-167 — Measured Before Tuned: Telemetry, An Evaluation Harness, The pgvector Floor And Paged Operations (FX-1.3, FX-1.8, FX-1.9, FX-1.12, FX-1.13, FX-3.1)
+
+**Context.** Nothing measured retrieval: no distance, no dropped passages, no cached tokens, no per-stage timing, and no labelled questions. Search needs pgvector 0.8 (`hnsw.iterative_scan`) and nothing checked. `reindex-stale-embeddings` re-selected its first batch for ever, and the recovery sweep re-queued its whole backlog every minute.
+
+**Decision.**
+
+1. Retrieval and turn telemetry without tenant or text labels: best distance, passages dropped by reason, context size, cached and reasoning tokens (also on usage rows), per-stage time.
+2. A committed synthetic evaluation corpus and a deterministic structural harness on fake embeddings; a real-provider harness that runs only with an explicit credential.
+3. A two-workspace isolation test for every new way of reading knowledge, with a mutant per predicate.
+4. `db_preflight` and readiness refuse pgvector below 0.8.0, compared as numbers; the development image is pinned to the production digest.
+5. `reindex-stale-embeddings` skips documents with an attempt in flight or a failed latest attempt and pages by `(published_at, id)` with `--after`; the sweep stamps `last_enqueued_at` and does not re-queue within the queue's visibility timeout.
+
+**Consequences.** Fake-embedding numbers are structural, not semantic; calibrating the 0.75 threshold and every quality metric is external verification with the real model.

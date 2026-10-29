@@ -1,6 +1,6 @@
 # Knowledge Base and RAG
 
-**Status: Implemented** — ingestion in indexing generations, tenant-scoped retrieval restricted to each document's active generation in the configured embedding space, and the `search_knowledge` tool, exercised against real PostgreSQL with pgvector. PDF extraction runs in a separate, killable process with hard limits. Every search is metered as a `rag_query`, and every embedding call as `embedding_request` (phase 12, RAG-07). An approximate vector index (HNSW, migration 0039) exists and is measured. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019. Generations, embedding space, bounded extraction and optional retrieval: ADR-106 to ADR-109.
+**Status: Implemented** — ingestion in indexing generations, tenant-scoped retrieval restricted to each document's active generation in the configured embedding space, and the `search_knowledge` tool, exercised against real PostgreSQL with pgvector. PDF extraction runs in a separate, killable process with hard limits. Every search is metered as a `rag_query`, and every embedding call as `embedding_request` (phase 12, RAG-07). An approximate vector index (HNSW, migration 0039) exists and is measured. See [../TASKS.md](../TASKS.md) phase 6. Storage decision: ADR-008. Embedding width: ADR-018. Queue separation: ADR-019. Generations, embedding space, bounded extraction and optional retrieval: ADR-106 to ADR-109. Text normalisation, page structure, structure-aware chunking, document replacement, source keys and workspace dedupe, the upload path, the tool loop's last round, the default knowledge grant, originals and effective dates, and retrieval telemetry: ADR-158 to ADR-167 (RAG remediation Part 1, `RAG_REMEDIATION_PART1_LIFECYCLE.md`).
 
 Scope: knowledge sources, ingestion, embeddings, and tenant-scoped retrieval.
 
@@ -10,7 +10,19 @@ Per-tenant isolated knowledge bases. A workspace may keep several to organise it
 
 **Knowledge is workspace-global (PD-RAG-5).** An agent granted `search_knowledge` searches every document with an active generation in its workspace, whichever knowledge base holds it. Knowledge bases do not currently scope what an agent can read; per-agent or per-department knowledge collections are a future feature (FUT-RAG-03). What *is* enforced is that a chunk's knowledge base is its own document's — a three-column foreign key since migration `0063` (RAG-13).
 
-Plain text, Markdown and PDF are ingested. Markdown keeps its punctuation, because headings and lists are structure the chunker uses. A PDF is submitted base64-encoded, since this endpoint takes JSON and a PDF is not text.
+Plain text, Markdown and PDF are ingested. In Markdown, `#` headings are section boundaries and every chunk carries the heading path it sits under (`Pricing > Premium`); in text and PDF a short line standing alone between blank lines is treated as a heading. A PDF is submitted base64-encoded, since this endpoint takes JSON and a PDF is not text.
+
+### Text is stored as the letters a customer types (RV-01, RV-23, ADR-158)
+
+Every document's text - extracted PDF text, pasted text, Markdown, and replacement content - is stored as `for_storage` text: NFKC, then NUL, zero-width characters, the BOM and every bidi control removed, then whitespace normalised. NFKC is what turns the Arabic *presentation forms* a PDF's glyphs extract as (`U+FB50..U+FDFF`, `U+FE70..U+FEFF`) back into ordinary letters; before it, 0 of 8 words of a typed query matched the stored text of a Chromium-produced Arabic PDF. `content_hash` is the SHA-256 of the stored text, so the same words arriving in two forms are one document.
+
+Passages are embedded, and queries embedded, as `for_matching` text: `for_storage` plus tatweel and Arabic diacritics removed, Persian letter forms folded to Arabic, and Arabic-Indic and Persian digits mapped to ASCII - NFKC does not unify `٤٥٠٠` with `4500`. A query typed with tatweel, diacritics or Arabic-Indic digits therefore meets the passage it means. `for_lexical` (alef, yeh and teh-marbuta folding, casefold) exists for the lexical channel of Part 2 and is never stored or embedded. None of this changes `EMBEDDING_SCHEMA_VERSION` (RQ-02): queries and passages are prepared the same way on both sides.
+
+### PDF page structure and re-ordered lines (RV-04, RV-22, ADR-159)
+
+pypdf stays the extractor: pdfminer.six was measured against PDFs of the same Arabic and English sources from Chromium, Microsoft Word and WeasyPrint and was better on Arabic order for none of them (the table is in the Part 1 report). After extraction, a line in the first or last two lines of at least 60 % of a document's pages (documents of three pages or more) is a running header or footer and is dropped; bare page numbers in their usual forms (`3`, `- 3 -`, `Page 3`, `صفحة ٣`, `3 / 12`) are dropped at page edges; and a page whose last line ends without a sentence terminator is joined to the next with one newline, so a paragraph crossing a page is one paragraph.
+
+A line where extraction glued a digit run to Arabic letters, or produced an Arabic-Indic number with a leading zero, is very likely in the wrong order. It is **flagged, never repaired**: the document records `extraction_warnings` (codes and counts, never text), `DocumentRead` shows them, and `wasla_knowledge_extraction_warnings_total` counts them. The fix is uploading the document again from its source; for a document uploaded since originals are kept, re-extracting from the original.
 
 A **scanned** PDF — a photograph of a page, with no text layer — is refused with a message saying so rather than stored empty. There is no OCR (FUT-RAG-08).
 
@@ -71,7 +83,35 @@ The database enforces **at most one `active` generation per document** and **at 
 
 `POST /knowledge/documents/{id}/ingest` asks for a new generation. The document keeps serving its current active generation while the new one builds. If the new one publishes, the swap is atomic. If it fails, the old one **stays active and searchable**, and the failure is visible on the new generation. A re-index request made while an attempt is already outstanding is **coalesced** into that attempt — calling the endpoint a hundred times costs one embedding run (RAG-07).
 
-Resubmitting identical text is a repeat, not a second document. A repeat of a document whose latest attempt failed is taken as a request to try again and starts a new generation; any other repeat changes nothing.
+Resubmitting identical text to the same knowledge base is a repeat, not a second document. It updates a changed title, filename or media type (audited; the response says `metadata_updated: true`), and a repeat of a document whose latest attempt failed is also taken as a request to try again and starts a new generation.
+
+### Updating a document replaces it - never a second copy (RV-02, ADR-161)
+
+`PUT /knowledge/documents/{id}/content` replaces a document's content. The new text is extracted, normalised and hashed before anything is locked, and a new generation is created carrying the new version as a **snapshot** (content, hash, title, filename, media type, byte size, source, warnings, original file). The document keeps serving - and keeps its stored text, title and hash - until that generation publishes; the publish then retires the old generation, activates the new one and copies the snapshot onto the document in one transaction. There is no moment when neither version is served and no moment when both are: a search over an updated price list returns `7200` before the swap and `7900` after it, never both.
+
+- The same text as the document already holds: a metadata update only (audited), no generation, no provider call.
+- Text another document of the workspace holds: `409 document_content_exists`, naming it.
+- A pending attempt for the old text ends as `failed` with code `replaced`; one a worker holds is fenced out and publishes nothing. Two replacements in a row leave one attempt in flight, the newest.
+- A replacement never takes a plan slot, so a workspace at its document limit can still update its documents.
+- A replacement that fails leaves the previous version serving; `DocumentRead.indexing` shows the failed attempt.
+
+A re-index (`POST …/ingest`) snapshots nothing: it rebuilds from the document's current stored text, as before.
+
+### Stable identity and one copy per workspace (RV-07, RV-16, ADR-162)
+
+A document may carry a `source_key`: given explicitly, or derived from its filename (NFC, case-folded, whitespace collapsed - `Pricing.PDF` and `pricing.pdf` are one source). It is unique per knowledge base. Uploading a second document with an existing source key answers `409 document_source_exists` with the existing document's id and its replace URL; `?replace=true` replaces it instead, with the same response shape as `PUT`. Documents uploaded before source keys existed are keyed by `backfill-source-keys` where their filename is unique in their knowledge base, and listed where it is not.
+
+Agents search every knowledge base of a workspace, so the same text in a second knowledge base would be served twice. It is refused: `409 document_exists_in_other_knowledge_base`, naming the holder. The lookup is scoped by `tenant_id` only - never global - so a refusal never reveals that another workspace holds the same text. Behind it, retrieval drops a passage whose matched text a higher-ranked passage already carries, so copies stored before the refusal are served once.
+
+### Listing, effective dates and recency (RV-13, ADR-166)
+
+Knowledge bases and documents are listed by cursor (`GET /knowledge/bases`, `GET /knowledge/bases/{id}/documents`, and `GET /knowledge/documents` across knowledge bases, filtered by title, status and source); `GET /knowledge/documents/{id}/similar` finds the likely older versions of a document (same source key, title or filename). A knowledge base can be renamed, and deleted - refused while it holds documents unless `?cascade=true`.
+
+A document may carry `valid_from`, `valid_until` and `supersedes_document_id` (same workspace and knowledge base). Retrieval excludes a document outside its window. Each passage in the tool output carries `updated_at` (the publish date of what serves it) and its section, and the tool's description tells the model to prefer the most recent source when two disagree.
+
+### Originals (RQ-23, ADR-166)
+
+The uploaded bytes of every new upload and replacement are kept in the media object store under the workspace's own prefix, named by the generation that carries them. They are owed a delete with their document and erased by the workspace purge. `DocumentRead.original_available` says whether one exists; documents uploaded before this have none.
 
 ### Failure, retry and recovery (RAG-01)
 
@@ -102,7 +142,7 @@ Each embedding call is metered as `embedding_request` (with the model, `purpose`
 
 ## Storage
 
-PostgreSQL with pgvector. `knowledge_bases` groups documents; `documents` holds source metadata, the extracted text and the serving summary; `document_index_generations` holds indexing attempts; `document_chunks` holds chunk text, ordinal, token estimate, the embedding vector and the generation it belongs to.
+PostgreSQL with **pgvector 0.8.0 or newer** - knowledge search sets `hnsw.iterative_scan`, which older versions do not have, and on them every search failed (RV-03). `scripts/db_preflight.py` and the readiness check refuse an older pgvector by name, and the development image is pinned to the production digest. `knowledge_bases` groups documents; `documents` holds source metadata, the extracted text and the serving summary; `document_index_generations` holds indexing attempts; `document_chunks` holds chunk text, ordinal, token estimate, the embedding vector and the generation it belongs to.
 
 `tenant_id` is on every one of these tables, including chunks. Similarity search joins the chunk's generation and its document and applies the tenant predicate to all three; any one alone would be sufficient. The duplication is kept deliberately: a filter that depends on a join is a filter someone eventually writes without the join. Composite foreign keys make a cross-tenant parent impossible at the database, and since `0063` a chunk must also agree with its document on the knowledge base and belong to a generation of that same document.
 
@@ -139,6 +179,10 @@ Recall at 45,000 chunks is 1.000 over 20 queries - the approximate answer is the
 The index is 597MB for 77,000 chunks, roughly 8KB per chunk, and takes ~14 minutes to build at that size. Both matter operationally and are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 **Re-indexing leaves dead vectors behind until vacuum.** A publish deletes the superseded generation's chunks, and deleted tuples stay in the HNSW graph until `VACUUM` removes them; until then the approximate scan spends candidates on them. Measured in the suite: a recall check run straight after thousands of committed-and-deleted chunks fell from its usual level to 28 of 40, and recovered after `VACUUM (ANALYZE) document_chunks`. Autovacuum does this in a deployment, so its thresholds for `document_chunks` under bulk re-indexing - a model change re-indexes everything - belong to deployment verification alongside ANN recall on a production-shaped corpus (RAG-14).
+
+## Chunking (RV-05, RV-06, RV-08, RV-09, ADR-160)
+
+`app/services/chunking.py` is a pure module. Text is cut at the strongest boundary that fits a chunk of at most 250 estimated tokens (the same estimate memory uses, so Arabic and English chunks are comparable): a heading, then a blank line, then a single newline, then a sentence end (`. ! ? ؟ ۔ ؛`), then whitespace - and only for a single unbroken token longer than a chunk, a cut by length that never splits a run of digits. List items and table lines are atomic; a question and its answer (`س/ج`, `Q/A`) stay together. A heading always moves with the section it introduces, and every chunk records its `heading_path`. Overlap is up to 40 tokens of whole trailing sentences or words of the previous chunk of the same section, joined with one newline. A piece shorter than the minimum is merged into its neighbour, so a stray `Page 3` never becomes a passage. Property tests hold over the evaluation corpus: no boundary or overlap start inside a word or a number, every number intact in some chunk, every chunk of a headed section carrying its heading, no chunk of overlap alone, and the pieces reproducing the text.
 
 ## Retrieval flow
 
@@ -181,14 +225,21 @@ If no embedding provider is configured, the tool says so and tells the agent not
 python -m app.workers.queues unindexed-documents         # attempts outstanding, their age, tries and last error
 python -m app.workers.queues failed-documents            # latest attempts that failed, with their code
 python -m app.workers.queues stale-embeddings            # documents served from another embedding space
-python -m app.workers.queues reindex-stale-embeddings --dry-run
+python -m app.workers.queues reindex-stale-embeddings --dry-run [--after <cursor>]
 python -m app.workers.queues reindex-document <workspace> <document>
+python -m app.workers.queues backfill-normalised-content [--dry-run]
+python -m app.workers.queues backfill-source-keys [--dry-run]
+python -m app.workers.queues reindex-all [--workspace ID] [--source pdf] --rate 5 [--after <id>]
+python -m scripts.rag_triage                             # duplicates, glyph PDFs, warnings, unreachable knowledge
+python -m scripts.rag_invariants verify                  # RR-01 .. RR-08
 ```
 
-None of them prints document text, titles or filenames. The re-index commands coalesce like the API does and never take knowledge away. Metrics and alerts — `wasla_documents_*`, `wasla_rag_ingestion_outcomes_total`, `wasla_rag_retrievals_total`, `EmbeddingProviderUnavailable`, `EmbeddingRateLimited`, `RAGRetrievalFailureRate`, `RAGIngestionFailureRate`, `RAGDocumentsStuck`, `UnindexedDocumentBacklog` — are described in [RUNBOOK.md](RUNBOOK.md).
+None of them prints document text, titles or filenames. The re-index commands coalesce like the API does and never take knowledge away. `reindex-stale-embeddings` skips a document already being re-indexed or whose re-index failed, and prints the cursor its next page starts from (RV-12); the recovery sweep does not queue a generation again while the job it sent is within the queue's visibility timeout (RV-18). Metrics and alerts — `wasla_documents_*`, `wasla_rag_ingestion_outcomes_total`, `wasla_rag_retrievals_total`, `wasla_rag_best_distance`, `wasla_rag_passages_dropped_total`, `wasla_rag_context_characters`, `wasla_knowledge_*`, `EmbeddingProviderUnavailable`, `EmbeddingRateLimited`, `RAGRetrievalFailureRate`, `RAGIngestionFailureRate`, `RAGDocumentsStuck`, `UnindexedDocumentBacklog`, `KnowledgeUnreachable`, `KnowledgeDuplicateDocuments`, `KnowledgeReplacementsFailing` — are described in [OBSERVABILITY.md](OBSERVABILITY.md) and [RUNBOOK.md](RUNBOOK.md).
 
-Knowledge administration is audited (RAG-17): `knowledge_base_created`, `knowledge_document_submitted`, `knowledge_document_reindex_requested`, `knowledge_document_deleted` with the acting person, and `knowledge_document_indexing_failed` by the system. Entries carry the knowledge base, source type, generation and failure code, never document text or titles.
+Knowledge administration is audited (RAG-17): `knowledge_base_created`, `knowledge_base_updated`, `knowledge_base_deleted`, `knowledge_document_submitted`, `knowledge_document_metadata_updated`, `knowledge_document_replaced`, `knowledge_document_reindex_requested`, `knowledge_document_deleted` with the acting person, and `knowledge_document_indexing_failed` by the system. Entries carry the knowledge base, source type, generation and failure code, never document text or titles.
 
 ## Testing
 
-Retrieval behaviour is tested against real PostgreSQL and real pgvector. The embedding *model* is faked (`tests/fake_embeddings.py`, a hashed bag of words); the vector *search* is not — chunks go into a real `vector` column and come back ordered by real cosine distance. The provider itself is faked at the HTTP transport, so the embeddings client's request, retry, `Retry-After`, body-size and validation behaviour is exercised as bytes (`tests/unit/test_embeddings_contract.py`). The ingestion lifecycle is tested through the real committing worker and recovery sweep, reading state back on a separate connection (`tests/integration/test_rag_ingestion_lifecycle.py`); failures inside real agent turns, the prompt-injection boundary and the server-owned bounds in `tests/integration/test_rag_turns.py`; database integrity and the audit trail in `tests/integration/test_rag_integrity.py`; and extraction limits with real child processes in `tests/unit/test_knowledge_bounds.py`.
+Retrieval behaviour is tested against real PostgreSQL and real pgvector. The embedding *model* is faked (`tests/fake_embeddings.py`, a hashed bag of words); the vector *search* is not — chunks go into a real `vector` column and come back ordered by real cosine distance. The provider itself is faked at the HTTP transport, so the embeddings client's request, retry, `Retry-After`, body-size and validation behaviour is exercised as bytes (`tests/unit/test_embeddings_contract.py`). The ingestion lifecycle is tested through the real committing worker and recovery sweep, reading state back on a separate connection (`tests/integration/test_rag_ingestion_lifecycle.py`); failures inside real agent turns, the prompt-injection boundary and the server-owned bounds in `tests/integration/test_rag_turns.py`; database integrity and the audit trail in `tests/integration/test_rag_integrity.py`; and extraction limits with real child processes in `tests/unit/test_knowledge_bounds.py`. Replacement, source keys and dedupe are proven by what a search returns (`tests/integration/test_document_replacement.py`), Arabic extraction by the code points stored and the passages a typed query finds (`tests/integration/test_arabic_extraction.py`), and every new way of reading knowledge by a two-workspace isolation test (`tests/integration/test_knowledge_isolation_gate.py`).
+
+**The retrieval evaluation harness** (`tests/integration/test_rag_eval.py`) runs a committed synthetic corpus - 37 documents, 267 labelled questions in Egyptian and Modern Standard Arabic and English, PDFs from three producers, two versions of one price list, an injection document - through the real extractor, chunker, pipeline and search with fake embeddings. Its numbers are **structural** (is the labelled span intact in a chunk, findable by its words, served once and current), not semantic; three runs agree exactly. `tests/real_provider/test_rag_eval_real.py` measures recall@5, MRR@10 and nDCG@5 with the real embedding model and runs only when a credential is explicitly provided.
