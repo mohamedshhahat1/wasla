@@ -30,6 +30,7 @@ from app.agents.registry import (
 )
 from app.core.exceptions import ConflictError
 from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent, AgentStatus
+from app.db.models.agent_turn import TurnOutcome
 from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Conversation,
@@ -815,9 +816,15 @@ async def test_a_tool_no_deployment_implements_does_not_suppress_the_reply(
     assert "no tool named" in client.calls[1]["tool_results"][0].output
 
 
-async def test_the_round_limit_stops_the_loop_but_keeps_the_text(
+async def test_the_round_limit_stops_the_loop_and_sends_no_preamble(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A model that ignores the last round's "answer now" ends the turn empty.
+
+    This test used to assert the reply was "Still checking." - words said
+    alongside a tool call that was then refused, sent as the whole answer.
+    That is RV-14, so the assertion is the finding's reversal (RQ-10).
+    """
     client = StubClient(
         [
             _reply(text="Checking.", tool_calls=[_call("lookup_order")]),
@@ -836,8 +843,10 @@ async def test_the_round_limit_stops_the_loop_but_keeps_the_text(
     outcome = await orchestrator.answer(conversation_id=CONVERSATION)
 
     assert outcome.rounds == 2
-    assert outcome.reply == "Still checking."
+    assert outcome.reply is None
+    assert outcome.outcome is TurnOutcome.EMPTY_RESPONSE
     assert len(client.calls) == 2
+    assert client.calls[1]["tool_choice"] == "none", "the last round offers no tool"
 
 
 async def test_usage_is_summed_across_rounds(monkeypatch: pytest.MonkeyPatch) -> None:

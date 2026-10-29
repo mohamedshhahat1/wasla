@@ -152,14 +152,19 @@ class ToolResult:
     name: str
     arguments_json: str
     output: str
+    #: How many turns preceded this call, so the request replays the exchange
+    #: in the order it happened (RV-27): the words a round said, then its calls
+    #: and their outputs, then the next round. `None` sends it after every turn.
+    after_turns: int | None = None
 
     @classmethod
-    def for_call(cls, call: ToolCall, *, output: str) -> Self:
+    def for_call(cls, call: ToolCall, *, output: str, after_turns: int | None = None) -> Self:
         return cls(
             call_id=call.call_id,
             name=call.name,
             arguments_json=call.arguments_json,
             output=output,
+            after_turns=after_turns,
         )
 
     def to_input(self) -> list[dict[str, Any]]:

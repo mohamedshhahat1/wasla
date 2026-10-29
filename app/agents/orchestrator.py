@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable, Sequence, Set
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,7 @@ from app.agents.memory import build_window
 from app.agents.registry import (
     HANDOFF_TOOL,
     SCHEDULE_FOLLOW_UP_TOOL,
+    SEARCH_KNOWLEDGE_TOOL,
     ToolArgumentError,
     ToolContext,
     ToolDefinition,
@@ -93,6 +94,10 @@ HISTORY_MULTIPLIER: Final = 2
 # out into somebody else's API.
 MAX_TOOL_CALLS_PER_RESPONSE: Final = 8
 MAX_TOOL_CALLS_PER_TURN: Final = 12
+# Knowledge searches one turn may run (RQ-10). A third search in one turn has
+# never found what two did not; it spends an embedding call and a round the
+# model needed for answering.
+MAX_KNOWLEDGE_SEARCHES_PER_TURN: Final = 2
 
 # What the model reads when a call was not run. Fixed sentences: they carry no
 # database state, no exception text and no customer content, and they say enough
@@ -108,6 +113,17 @@ _UNAVAILABLE_NOW_OUTPUT: Final = (
 _ROUND_LIMIT_OUTPUT: Final = (
     "That tool call was not run: there is no round left to read its result. "
     "Answer the customer with what you already know."
+)
+_SEARCH_LIMIT_OUTPUT: Final = (
+    "That search was not run: this turn has already searched the knowledge base "
+    "twice. Answer the customer with what those searches found."
+)
+# Said to the model on the last round of a turn whose earlier rounds ran tools
+# (RV-14). The round offers no tool but a terminal one, so it ends in words.
+_FINAL_ROUND_INSTRUCTION: Final = (
+    "This is the last step of this turn. Do not call any more tools except to "
+    "hand the conversation to a colleague. Reply to the customer now with what "
+    "you already know."
 )
 _DUPLICATE_OUTPUT: Final = "That tool call was already made in this turn; it was not run again."
 _AFTER_HANDOFF_OUTPUT: Final = (
@@ -233,6 +249,8 @@ class _TurnTools:
     #: business effect (TOOL-08, PD-TOOLS-04). The unique index on
     #: `tool_executions` is the backstop behind it.
     seen_call_ids: set[str] = field(default_factory=set)
+    #: Knowledge searches run this turn (RQ-10).
+    searches: int = 0
     #: Set once a handoff has succeeded in the response being executed. Every
     #: later call of that response is recorded and not run (PD-TOOLS-02).
     handed_over: bool = False
@@ -268,6 +286,17 @@ def _reply_instructions(system_prompt: str, policy: ChannelPolicy) -> str:
     bounds text in bytes.
     """
     return f"{system_prompt}{policy.agent_instructions()}"
+
+
+def _closing_choice(terminal: Sequence[str]) -> str | dict[str, Any]:
+    """The last round's `tool_choice`: a terminal tool if granted, else none (RV-14)."""
+    if not terminal:
+        return "none"
+    return {
+        "type": "allowed_tools",
+        "mode": "auto",
+        "tools": [{"type": "function", "name": name} for name in terminal],
+    }
 
 
 def _nothing(
@@ -522,6 +551,14 @@ class AgentOrchestrator:
             offered = [name for name in offered if name != SCHEDULE_FOLLOW_UP_TOOL]
         # Described as the conversation's channel allows (OMNI-039).
         specs = self._registry.specs(offered, policy=channel_policy)
+        # What the last round may still call: only a tool that ends the turn by
+        # itself. Named in `tool_choice` rather than by removing the others, so
+        # the tools described - part of the request prefix - stay the same.
+        terminal = [
+            name
+            for name in offered
+            if (definition := self._registry.get(name)) is not None and definition.terminal
+        ]
 
         turns = list(window.turns)
         results: list[ToolResult] = []
@@ -562,12 +599,18 @@ class AgentOrchestrator:
                     await self._meter_round(resolved.model)
                 rounds = round_number
                 round_started = perf_counter()
+                closing = round_number == self._max_rounds and bool(results)
                 reply = await self._client.respond(
                     model=resolved.model,
                     instructions=_reply_instructions(resolved.system_prompt, channel_policy),
-                    turns=turns,
+                    turns=(
+                        [*turns, Turn(role="system", text=_FINAL_ROUND_INSTRUCTION)]
+                        if closing
+                        else turns
+                    ),
                     tools=specs,
                     tool_results=results,
+                    tool_choice=_closing_choice(terminal) if closing and specs else None,
                     temperature=resolved.temperature,
                     max_output_tokens=self._max_output_tokens(resolved),
                 )
@@ -578,12 +621,14 @@ class AgentOrchestrator:
             cached_input_tokens += reply.usage.cached_input_tokens
             reasoning_tokens += reply.usage.reasoning_tokens
             await record_cached_input_tokens(reply.usage.cached_input_tokens)
-            text = reply.text or text
             response_id = reply.response_id or response_id
 
             pending = reply.wants_tools
             if not pending:
+                text = reply.text
                 break
+            # Words said alongside a tool call are a preamble ("let me check"),
+            # carried into the next round but never the reply (RV-14).
 
             if reply.text:
                 # Tool results replay the call but not the words around it, so
@@ -607,7 +652,9 @@ class AgentOrchestrator:
                     round_number=round_number,
                     ordinal=ordinal,
                 )
-                results.append(ToolResult.for_call(call, output=execution.output))
+                results.append(
+                    ToolResult.for_call(call, output=execution.output, after_turns=len(turns))
+                )
                 tools_run.append(call.name)
                 if call.name == HANDOFF_TOOL and execution.succeeded:
                     # From what the server did, never from what the model named
@@ -660,8 +707,9 @@ class AgentOrchestrator:
                 )
 
         if pending and not handed_off:
-            # It kept asking for tools until the budget ran out. Whatever text it
-            # produced along the way is still worth sending.
+            # It kept asking for tools even on the last round, which offered
+            # none it could run. What it said alongside those calls was a
+            # preamble, not an answer, and is not sent (RV-14).
             logger.warning(
                 "agent.round_limit_reached",
                 extra={"conversation_id": str(conversation_id), "rounds": rounds},
@@ -1010,6 +1058,15 @@ class AgentOrchestrator:
                 ToolExecutionReason.ROUND_LIMIT,
                 _ROUND_LIMIT_OUTPUT,
             )
+
+        if call.name == SEARCH_KNOWLEDGE_TOOL:
+            if self._tools.searches >= MAX_KNOWLEDGE_SEARCHES_PER_TURN:
+                # The per-turn reason, because that is what it is: a per-turn
+                # cap on one tool, read by counting like the others.
+                return await self._refuse(
+                    record, ToolExecutionReason.TURN_CALL_LIMIT, _SEARCH_LIMIT_OUTPUT
+                )
+            self._tools.searches += 1
 
         try:
             arguments = validate_arguments(definition, call.arguments)

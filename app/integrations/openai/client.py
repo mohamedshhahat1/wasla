@@ -220,6 +220,7 @@ class ResponsesClient:
         turns: Sequence[Turn],
         tools: Sequence[ToolSpec] = (),
         tool_results: Sequence[ToolResult] = (),
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
         response_format: StructuredFormat | None = None,
@@ -230,6 +231,12 @@ class ResponsesClient:
         `tool_results` continues an exchange the model started: pass the results
         of the calls it asked for and it will either answer or ask for more.
 
+        Each result is replayed right after the turn it followed
+        (`ToolResult.after_turns`), so a request of three rounds reads in the
+        order it happened and each round's input begins with the previous
+        round's (RV-27). `tool_choice` narrows what the model may call without
+        changing the tools described, which keeps the request prefix stable.
+
         `response_format` constrains the reply to a JSON shape, for callers that
         parse it rather than send it. The reply still arrives as text; decoding
         it belongs to the caller, which is the only thing that knows what the
@@ -238,9 +245,21 @@ class ResponsesClient:
         if not turns and not tool_results:
             raise ValidationError("An agent call needs at least one input item.")
 
-        items: list[dict[str, Any]] = [turn.to_input() for turn in turns]
-        for result in tool_results:
-            items.extend(result.to_input())
+        items: list[dict[str, Any]] = []
+        waiting = list(tool_results)
+
+        def replay(before: int | None) -> None:
+            while waiting and (
+                before is None
+                or (waiting[0].after_turns is not None and waiting[0].after_turns <= before)
+            ):
+                items.extend(waiting.pop(0).to_input())
+
+        replay(0)
+        for count, turn in enumerate(turns, start=1):
+            items.append(turn.to_input())
+            replay(count)
+        replay(None)
 
         payload: dict[str, Any] = {
             "model": model,
@@ -252,6 +271,8 @@ class ResponsesClient:
             payload["instructions"] = instructions
         if tools:
             payload["tools"] = [spec.to_payload() for spec in tools]
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
         if temperature is not None:
             payload["temperature"] = temperature
         # Never absent (AI-05). A request without a ceiling buys whatever output
