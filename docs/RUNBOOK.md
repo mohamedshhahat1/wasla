@@ -2564,3 +2564,31 @@ Every knowledge search failing with the readiness check or `db_preflight` report
 ### KnowledgeReplacementsFailing
 
 Replacements are failing; each document keeps serving its previous version, so customers see stale facts, not errors. `failed-documents` gives the codes: provider codes are an embedding outage or key problem; `document_too_large` and `invalid_document` are uploads to fix.
+
+### Answers ignore a document: the search preview (RAG part 2)
+
+Run the search the agent would run: `POST /api/v1/knowledge/search` with the customer's question (and, for an Arabic question about English documents, `alternate_query`). The response says, for every candidate, what became of it: `threshold` (farther than 0.75 - the cut-off is not yet calibrated for the production model), `duplicate` (the same text, or a near copy adding no new number, ranked higher), `margin`, `top_k`, or `kept`. `candidates.lexical` of 0 for a question naming a SKU means the document was published before migration 0132 and has no lexical text yet: `python -m scripts.rag_invariants verify` reports it as RR-12, and `reindex-all` rebuilds it. A `duplicate_version_warnings` entry means two documents share a title - replace one with the other's content instead of keeping both. A scoped agent (`knowledge_base_ids` on its grant) never sees other knowledge bases; the preview searches under the answering agent's scope.
+
+### Search is slow
+
+`wasla_rag_search_seconds{channel}` splits a search's database time between the vector and the exact-word channel; `wasla_ai_stage_seconds{stage="sql"}` is their sum, `{stage="embedding"}` the provider. The exact-word query is an indexed `@@` on `ix_document_chunks_search_tsv` (GIN); if it dominates, check the index is valid (`SELECT indisvalid FROM pg_index ... ix_document_chunks_search_tsv`) and the table's statistics. The vector query's behaviour by workspace size is in docs/RAG.md ("Measured behaviour"): the exact scan for small workspaces, HNSW above the planner's crossover, `hnsw.iterative_scan` bounded by `hnsw.max_scan_tuples` (20,000 by default) - revisit `hnsw.ef_search` and the scan bound only when a workspace of millions of chunks shows fewer passages than asked for (RV-25, scale-triggered). Re-rank, when on, adds up to `RAG_RERANK_TIMEOUT_SECONDS` per search (`stage="rerank"`).
+
+### Re-rank, grounding, tiers and pre-retrieval: switching them on
+
+All are off or observe-only by default, deployment-wide (`RAG_*` settings) and per workspace (`PATCH /api/v1/knowledge/settings`, audited):
+
+| Switch | Default | Before switching on | Misbehaving looks like |
+|---|---|---|---|
+| `rerank` | off | set `RAG_RERANK_MODEL` to an allowed small model; check latency on the preview | `KnowledgeRerankFailing`; `wasla_rag_rerank_total{outcome="timeout"}` |
+| `confidence_tiers` | off | calibrate `RAG_CONFIDENCE_TIERS` for the current embedding model from `wasla_rag_best_distance` and the real-provider evaluation | many `none` tiers on answerable questions (`wasla_rag_confidence_tier_total`) |
+| `number_grounding` | observe | read `AgentRepliesQuoteUngroundedNumbers` and the preview for the workspace | `correct` adds a model round to affected turns; `strict` hands them to colleagues (`AI_UNGROUNDED_NUMBER`) |
+| `pre_retrieval` | off | tiers must be on and calibrated, or it does nothing | `wasla_rag_preretrieval_total{outcome="weak"}` dominating: cut-offs too strict |
+| `parallel_sentiment` | off | none; it changes only latency | an escalated turn never sends - if one did, switch it off and report it |
+
+### KnowledgeRerankFailing
+
+Re-rank calls are timing out or failing; searches fall back to the fused order after waiting for the timeout. Check provider status and `wasla_provider_request_duration_seconds{operation="respond_rerank"}`; switch `rerank` off for the affected workspaces (`PATCH /knowledge/settings`) or deployment-wide (`RAG_RERANK_ENABLED=false`) until it recovers.
+
+### AgentRepliesQuoteUngroundedNumbers
+
+Agents are quoting prices or percentages their searches did not return. Use the search preview on the workspaces' common questions: a missing or stale document is the usual cause. For a workspace that cannot afford a wrong figure, set `number_grounding` to `correct` (one corrective round) or `strict` (hand over instead of sending).

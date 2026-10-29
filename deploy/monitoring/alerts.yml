@@ -1097,6 +1097,50 @@ groups:
             `python -m app.workers.queues failed-documents` for the codes.
           runbook: docs/RUNBOOK.md
 
+      - alert: KnowledgeRerankFailing
+        # The optional re-rank (RQ-16) falls back to the fused order on any
+        # failure, so answers keep their passages - but every failed attempt
+        # still waited up to its timeout. Silent while re-rank is off: the
+        # `disabled` outcome is not in either side of the ratio.
+        expr: |
+          sum(rate(wasla_rag_rerank_total{outcome=~"timeout|error"}[15m]))
+          /
+          clamp_min(sum(rate(wasla_rag_rerank_total{outcome=~"ok|timeout|error"}[15m])), 0.001)
+          > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Most knowledge re-rank calls are failing"
+          description: >-
+            More than half of the re-rank calls of the last 15 minutes timed
+            out or failed. Searches use the fused order instead, after waiting
+            for the timeout. Check the provider, or switch re-rank off.
+          runbook: docs/RUNBOOK.md
+
+      - alert: AgentRepliesQuoteUngroundedNumbers
+        # Prices and percentages in replies that no retrieved passage, customer
+        # message or agent instruction supports (RQ-19). In observe mode they
+        # were sent; this says how often.
+        expr: |
+          sum(rate(wasla_rag_number_grounding_total{outcome="ungrounded"}[1h]))
+          /
+          clamp_min(sum(rate(wasla_rag_number_grounding_total{outcome=~"grounded|ungrounded"}[1h])), 0.001)
+          > 0.1
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "Agent replies often quote figures the knowledge base does not state"
+          description: >-
+            More than one in ten prices or percentages in agent replies over
+            the last hour were not in what the turn retrieved. Check the
+            documents with the search preview, then consider number grounding
+            "correct" or "strict" for the affected workspaces.
+          runbook: docs/RUNBOOK.md
+
   # ------------------------------------------------------------------ media
   # Inbound attachments (MEDIA-15). Every rule reads a closed-label counter or
   # an unlabelled gauge: no workspace, file, key or URL. None fires on a single

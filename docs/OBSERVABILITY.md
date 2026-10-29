@@ -426,8 +426,15 @@ None of these carries a workspace or any text as a label (G7).
 | Metric | Type | What it says |
 | --- | --- | --- |
 | `wasla_rag_best_distance{model}` | histogram | The cosine distance of the best candidate each search saw - what calibrating the 0.75 threshold needs (RV-26). |
-| `wasla_rag_passages_dropped_total{reason}` | counter | Candidates dropped by the distance `threshold`, or as a `duplicate` of a higher-ranked passage. A document outside its validity window is never a candidate. |
-| `wasla_rag_context_characters` | histogram | Characters of context a search returned to the model. |
+| `wasla_rag_passages_dropped_total{reason}` | counter | Candidates dropped by the distance `threshold`, as a `duplicate` (exact, or a near repeat adding no number), by the per-document cap (`document_cap`), by the passage `margin` (inert until calibrated), or because they did not fit the token `budget`. `scope` and `validity` are applied in SQL and never counted as candidates. |
+| `wasla_rag_context_characters` | histogram | Characters of context a search returned to the model. Kept beside the token histogram so existing dashboards do not go blank. |
+| `wasla_rag_context_tokens` | histogram | Estimated tokens of context a search returned to the model - the unit the budget is counted in (RQ-12; ceiling 3,300). |
+| `wasla_rag_retrieval_candidates_total{channel}` | counter | Candidates each retrieval channel returned: `vector`, `lexical` (RQ-15). |
+| `wasla_rag_search_seconds{channel}` | histogram | Database time of each retrieval channel's queries in one search. |
+| `wasla_rag_confidence_tier_total{tier}` | counter | Searches by confidence tier (`strong`, `partial`, `none`); counted only while tiers are enabled and calibrated. |
+| `wasla_rag_rerank_total{outcome}` | counter | Re-rank attempts: `ok`, `timeout`, `error`, `disabled` (one `disabled` per search while it is off). |
+| `wasla_rag_number_grounding_total{outcome}` | counter | Prices and percentages in agent replies: `grounded`, `ungrounded`, `corrected`, `handed_off` (RQ-19). |
+| `wasla_rag_preretrieval_total{outcome}` | counter | Pre-retrieval decisions: `injected`, `weak`, `skipped`, `refused` (RQ-20). |
 | `wasla_ai_stage_seconds{stage}` | histogram | Time per stage of a turn: `sentiment`, `round`, `embedding`, `sql`. |
 | `wasla_ai_cached_input_tokens_total` | counter | Input tokens the provider served from its prompt cache. Cached and reasoning tokens are also recorded on the usage rows. |
 | `wasla_knowledge_extraction_warnings_total{code}` | counter | Lines a PDF extraction may have re-ordered (`digits_glued_to_arabic`, `arabic_indic_leading_zero`). |

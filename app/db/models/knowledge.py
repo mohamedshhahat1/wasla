@@ -15,10 +15,10 @@ agent for the length of the re-index - and for ever, if the re-index failed. Now
 the old generation keeps serving while the new one builds, and is replaced in one
 short transaction only once the new one is complete.
 
-Knowledge is workspace-global (PD-RAG-5): an agent granted `search_knowledge`
-searches every active generation in its workspace, whichever knowledge base holds
-it. Knowledge bases organise documents for the people managing them; scoping an
-agent to some of them is a future feature, not a filter that exists today.
+Knowledge is workspace-global by default (PD-RAG-5): an agent granted
+`search_knowledge` searches every active generation in its workspace, whichever
+knowledge base holds it - unless its grant names `knowledge_base_ids` (RQ-18),
+which every search query applies as an `IN` predicate.
 
 `tenant_id` is on all three, including the chunks, even though it could be
 reached by joining through the document. Similarity search reads the chunk table
@@ -123,8 +123,10 @@ class KnowledgeBase(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
     """A named collection of documents belonging to one workspace.
 
     Exists so a workspace can keep its sales material apart from its support
-    policies and point different agents at different sets. A workspace that does
-    not care keeps one and never thinks about it again.
+    policies. An agent's `search_knowledge` grant may be scoped to some of them
+    (RQ-18); only the default agent answers customers today, so a scope takes
+    effect for every turn once routing exists. A workspace that does not care
+    keeps one and never thinks about it again.
     """
 
     __tablename__ = "knowledge_bases"

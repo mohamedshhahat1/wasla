@@ -1218,6 +1218,54 @@ tests:
                 More than half of the replacements that finished in the last hour failed, and each document keeps serving its previous version. Run `python -m app.workers.queues failed-documents` for the codes.
               runbook: docs/RUNBOOK.md
 
+  - interval: 1m
+    name: a re-rank that mostly fails alerts, one that is off does not
+    input_series:
+      - series: 'wasla_rag_rerank_total{job="wasla-api", outcome="disabled"}'
+        values: "0+50x120"
+      - series: 'wasla_rag_rerank_total{job="wasla-api", outcome="ok"}'
+        values: "0+0x40 0+1x80"
+      - series: 'wasla_rag_rerank_total{job="wasla-api", outcome="timeout"}'
+        values: "0+0x40 0+3x80"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: KnowledgeRerankFailing
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: KnowledgeRerankFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "Most knowledge re-rank calls are failing"
+              description: >-
+                More than half of the re-rank calls of the last 15 minutes timed out or failed. Searches use the fused order instead, after waiting for the timeout. Check the provider, or switch re-rank off.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: replies quoting ungrounded figures alert, grounded ones do not
+    input_series:
+      - series: 'wasla_rag_number_grounding_total{job="wasla-api", outcome="grounded"}'
+        values: "0+10x300"
+      - series: 'wasla_rag_number_grounding_total{job="wasla-api", outcome="ungrounded"}'
+        values: "0+0x100 0+4x200"
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: AgentRepliesQuoteUngroundedNumbers
+        exp_alerts: []
+      - eval_time: 280m
+        alertname: AgentRepliesQuoteUngroundedNumbers
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "Agent replies often quote figures the knowledge base does not state"
+              description: >-
+                More than one in ten prices or percentages in agent replies over the last hour were not in what the turn retrieved. Check the documents with the search preview, then consider number grounding "correct" or "strict" for the affected workspaces.
+              runbook: docs/RUNBOOK.md
+
   # -------------------------------------------------------- agent tool calls
   - interval: 30s
     name: ordinary refusals do not look like tool failures

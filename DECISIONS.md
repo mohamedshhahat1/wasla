@@ -494,7 +494,7 @@ Date:
 2026-08-22
 
 Status:
-Accepted
+Accepted; amended by ADR-178 (an opt-in parallel mode, sending still gated)
 
 Decision:
 Classify the newest inbound message inside the agent turn, after the agent is resolved and before any reply is composed. Store one reading per message, keyed uniquely on `message_id`. Let a reading raise a conversation's priority and never lower it. Escalate to a human only above a per-agent threshold and above a fixed confidence floor.
@@ -7673,3 +7673,83 @@ applied while the application is imported (ADR-157, FRM-03).
 5. `reindex-stale-embeddings` skips documents with an attempt in flight or a failed latest attempt and pages by `(published_at, id)` with `--after`; the sweep stamps `last_enqueued_at` and does not re-queue within the queue's visibility timeout.
 
 **Consequences.** Fake-embedding numbers are structural, not semantic; calibrating the 0.75 threshold and every quality metric is external verification with the real model.
+
+## ADR-168 — The Context Budget Is Counted In Tokens, And The Tool Promises Only What It Delivers (RQ-12, RV-15, RV-19)
+
+**Context.** `max_results` advertised 1 to 10 passages; a 6,000-character context fitted 4 to 7 depending on the script, and packing stopped at the first passage that did not fit, so a small rank-2 passage was dropped behind a large rank-1 one. The model also read document UUIDs and chunk ordinals it had no use for.
+
+**Decision.**
+
+1. The budget is estimated tokens (`estimate_tokens`) over the serialised sources: `MAX_CONTEXT_TOKENS = MAX_TOP_K x PASSAGE_TOKEN_CEILING + 60 = 6 x 540 + 60 = 3,300`. 540 is the measured worst case of one source: the chunker's largest piece (250 + 40 + 10 = 300 estimated tokens), newline-heavy so escaping costs most, with title and section at their 120-character clip in Arabic (521). A unit test holds the bound.
+2. `MAX_TOP_K = 6`, published in the tool schema; every advertised count is delivered for English, Arabic and multi-line passages of the largest size.
+3. A passage that does not fit is skipped and the next one tried; a single oversized legacy passage is still shortened rather than answering "nothing found".
+4. The model reads `source`, `title`, `section`, `updated_at`, `match` (tiers only) and `content`; document ids stay on the server-side passages for citations and the admin preview (IMP-22).
+
+**Consequences.** A search may now hand the model more context than before (typical: ~2,000 estimated tokens for six passages, ceiling 3,300); the per-turn search cap (ADR-164) bounds it.
+
+## ADR-169 — Confidence Tiers Exist, Off Until A Real Distribution Calibrates Them (RQ-13, FX-3.12)
+
+**Decision.** `strong / partial / none` from the best distance, with per-embedding-model cut-offs in `RAG_CONFIDENCE_TIERS`; `RAG_CONFIDENCE_TIERS_ENABLED=false`. Enabled without cut-offs for the current model, tiers stay inert (`RetrievalPolicy.tiers_active`). With tiers on, each source carries `match` and the tool tells the model to answer cautiously on `partial`. `MAX_DISTANCE` stays 0.75; its comment no longer claims "unrelated text sits around 0.8" - that was never measured here.
+
+**Consequences.** Pre-retrieval (ADR-178) depends on tiers and is therefore inert until calibration. Calibration is external verification.
+
+## ADR-170 — Chunks Are Embedded With Their Document And Section (RQ-14, FX-3.2, IMP-05)
+
+**Decision.** The embedding input is `for_matching("{title} › {sections}\n\n{chunk}")`; the stored and displayed chunk is unchanged. A title that says nothing - empty, "untitled", a bare filename like `scan_003.pdf` - is replaced by a meaningful filename stem or left out; a heading the chunk opens with is not repeated in the label. `EMBEDDING_SCHEMA_VERSION` is not bumped: queries are embedded as before, so labelled and unlabelled vectors are searched together while `reindex-all` rebuilds documents one by one.
+
+**Consequences.** Every document needs one rebuild to gain the label; the first deploy's `reindex-all` (Part 1) does it together with the lexical columns.
+
+## ADR-171 — Hybrid Retrieval: One Predicate Builder, RRF, And An Identifier Keep Rule (RQ-15, FX-3.3, RC-4)
+
+**Context.** Embeddings are weak at exact tokens - SKUs, model numbers, Latin brand names inside Arabic - and the search had no other channel.
+
+**Decision.**
+
+1. `document_chunks.search_text` (`for_lexical`) and `search_tsv` (migration 0132, nullable, catalogue-only), written at publish; a GIN index built `CONCURRENTLY` (0133). `search_tsv` is a plain column built from lexemes Python tokenised (`retrieval_ranking.lexical_tokens`): PostgreSQL's `'simple'` parser splits `bk-35` into `bk`/`-35` and `4,500` into `4`/`500` (RR-16), and a stored generated column would rewrite the table on PostgreSQL 16.
+2. `DocumentChunkRepository.served_predicates` is the one list of predicates the vector query, the exact-word query and the neighbour lookup apply.
+3. Vector top-20 and lexical top-20 per query, fused by Reciprocal Rank Fusion (k = 60).
+4. A candidate past the distance cut-off is kept only for an exact hit on an identifier of the query: a whole token holding a digit, or a Latin-script word of 3+ letters inside an Arabic question.
+5. `RAG_HYBRID_ENABLED=true`; a workspace may switch it off.
+
+**Consequences.** Chunks published before 0132 are found only by the vector channel until rebuilt (RR-12 counts them). The lexical query adds one indexed statement per query.
+
+## ADR-172 — Repeats Are Dropped, Neighbours Merged, One Document Capped; Re-Rank Is Optional (RQ-16, FX-3.4, FX-3.11)
+
+**Decision.** Always on: an exact repeat is dropped, and a near repeat (80 % of the shorter passage's three-word runs shared) unless it carries a number the kept one lacks; a document's fourth and later passages are moved behind every other document's (deferred, not dropped: a one-document workspace still gets what it asked for); the best `k` chunks are merged where they are neighbours in one generation and one section, with the chunker's overlap removed; the best two passages are joined with their ordinal ± 1 neighbours from the same served generation and section while the context fits. Off by default (`RAG_RERANK_ENABLED`): one small-model call to the provider in use scores the fused candidates under a 1.5 s timeout, falling back to the fused order on a timeout, an error or a malformed answer; metered as `knowledge_rerank`. Hosted or self-hosted re-rankers are a product decision.
+
+**Consequences.** Near repeats are measured on word runs because, as bags of words, two rows of one price table looked like repeats and the structural evaluation lost answers to it; the number rule keeps sibling documents that differ only in a price.
+
+## ADR-173 — The Query Contract: Standalone, With An Optional Query In The Documents' Language (RQ-17, FX-3.5, RC-5)
+
+**Decision.** The `query` parameter asks for a short standalone query - references resolved from the conversation, the product named, no greetings - in the customer's language; optional `alternate_query` in the language the documents are written in. Both are embedded in one batched request and searched by both channels; all lists are fused by RRF. Only whether an alternate query was sent is logged, never either query.
+
+**Consequences.** The model's translation quality and its adherence to the contract are measured only against the real provider (external verification).
+
+## ADR-174 — An Agent's Knowledge Scope (RQ-18, FX-3.6, RC-6)
+
+**Decision.** `agent_tools.config` for `search_knowledge` accepts `{"knowledge_base_ids": [...]}`, validated against the workspace when the grant is saved; an empty list, an unknown id and another workspace's id are refused with one 422 wording. Every other tool's config is still refused (TOOL-14). The scope reaches the repository through `ToolContext` as an `IN` predicate in `served_predicates`; a value written by hand that is not a list scopes to nothing.
+
+**Consequences.** Only the workspace's `ACTIVE` default agent answers customers today; the scope matters for every turn once routing exists (a separate stage).
+
+## ADR-175 — An Admin Search Preview (FX-3.9, RV-21, IMP-26)
+
+**Decision.** `POST /knowledge/search`, administrators only, runs the answering agent's search - the workspace's switches, the agent's scope, the same budget - and returns passages with distance, channels and chunk ordinals, every candidate with its outcome, per-channel counts, drops per reason, the re-rank outcome, the tier, a duplicate-title warning and the exact model-facing JSON. Metered like a search; under the workspace rate limit like every workspace route.
+
+## ADR-176 — A Workspace's Knowledge Switches (G9)
+
+**Decision.** `tenants.knowledge_settings` (JSONB, nullable; migration 0134) holds a workspace's overrides of `hybrid`, `rerank`, `confidence_tiers`, `number_grounding`, `pre_retrieval` and `parallel_sentiment`, written by `PATCH /knowledge/settings` (administrators, audited `knowledge_settings_updated`); `null` returns a switch to the deployment default. Cut-offs and the re-rank model remain deployment settings. The worker resolves the switches once per turn.
+
+## ADR-177 — Numbers In A Reply Are Checked Against What The Turn Retrieved (RQ-19, FX-3.13, IMP-14)
+
+**Decision.** `RAG_NUMBER_GROUNDING = off | observe | correct | strict`, default `observe`. Currency amounts and percentages in the composed reply, after digit folding, must equal a number in this turn's retrieved passages, the customer's messages or the agent's instructions - or be a sum, difference or product of grounded numbers (to a fixed point, so a total built on a derived figure is grounded). `observe` counts; `correct` runs one corrective round with `tool_choice: "none"` and sends the correction if it is grounded; `strict`, or a correction still ungrounded, withholds the reply - the worker sends the fallback line and hands over with `AI_UNGROUNDED_NUMBER`. The agent's instructions are a third source, a deviation from RQ-19 recorded here: without it every fee a business writes into its prompt is a false positive.
+
+**Consequences.** A withheld turn ends `empty_response` (no new turn-outcome label, which would be a native-enum migration); the handoff reason distinguishes it.
+
+## ADR-178 — Pre-Retrieval And Sentiment In Parallel, Both Off (RQ-20, FX-3.14, FX-3.15) — amends ADR-024
+
+**Decision.**
+
+1. Pre-retrieval (`RAG_PRERETRIEVAL_ENABLED=false`): for an agent granted `search_knowledge`, a message that is not a greeting, a word or two, or only a file is searched before round one through the executor - a `tool_executions` row (round 1, ordinal 0) with every gate - and injected as the tool's call-and-output pair only for a `strong` or `partial` match. With tiers off it does nothing, not even the search. A weak result does not count against the per-turn search cap.
+2. Sentiment in parallel (`RAG_PARALLEL_SENTIMENT_ENABLED=false`): `SentimentService.assess` is split into `prepare` (reads), `classify` (HTTP only) and `apply` (writes, escalation, metering). In parallel mode round one's call and `classify` run together inside the released session; `apply` runs after both return; an escalation discards round one's reply and runs none of its tool calls, a takeover meanwhile ends the turn `suppressed_human` (CRM-02). The tokens are metered; the escalated turn is not charged as composed, as in serial mode.
+
+**Consequences.** ADR-024's ordering ("before any reply is composed") holds by default. With the flag on, a reply may be composed before the classification but is never sent and no tool runs before it - the property ADR-024 exists for.
