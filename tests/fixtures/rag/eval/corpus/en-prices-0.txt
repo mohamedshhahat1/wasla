@@ -1,0 +1,48 @@
+Sofa model 10 - price 950 EGP - warranty 2 years
+Bookshelf model 11 - price 8,869 EGP - warranty 3 years
+Dining table model 12 - price 5,788 EGP - warranty 4 years
+Armchair model 13 - price 2,707 EGP - warranty 2 years
+Bed frame model 14 - price 10,626 EGP - warranty 3 years
+Wardrobe model 15 - price 7,545 EGP - warranty 4 years
+Desk model 16 - price 4,464 EGP - warranty 2 years
+Sofa model 17 - price 1,383 EGP - warranty 3 years
+Bookshelf model 18 - price 9,302 EGP - warranty 4 years
+Dining table model 19 - price 6,221 EGP - warranty 2 years
+Armchair model 20 - price 3,140 EGP - warranty 3 years
+Bed frame model 21 - price 11,059 EGP - warranty 4 years
+Wardrobe model 22 - price 7,978 EGP - warranty 2 years
+Desk model 23 - price 4,897 EGP - warranty 3 years
+Sofa model 24 - price 1,816 EGP - warranty 4 years
+Bookshelf model 25 - price 9,735 EGP - warranty 2 years
+Dining table model 26 - price 6,654 EGP - warranty 3 years
+Armchair model 27 - price 3,573 EGP - warranty 4 years
+Bed frame model 28 - price 11,492 EGP - warranty 2 years
+Wardrobe model 29 - price 8,411 EGP - warranty 3 years
+Desk model 30 - price 5,330 EGP - warranty 4 years
+Sofa model 31 - price 2,249 EGP - warranty 2 years
+Bookshelf model 32 - price 10,168 EGP - warranty 3 years
+Dining table model 33 - price 7,087 EGP - warranty 4 years
+Armchair model 34 - price 4,006 EGP - warranty 2 years
+Bed frame model 35 - price 11,925 EGP - warranty 3 years
+Wardrobe model 36 - price 8,844 EGP - warranty 4 years
+Desk model 37 - price 5,763 EGP - warranty 2 years
+Sofa model 38 - price 2,682 EGP - warranty 3 years
+Bookshelf model 39 - price 10,601 EGP - warranty 4 years
+Dining table model 40 - price 7,520 EGP - warranty 2 years
+Armchair model 41 - price 4,439 EGP - warranty 3 years
+Bed frame model 42 - price 1,358 EGP - warranty 4 years
+Wardrobe model 43 - price 9,277 EGP - warranty 2 years
+Desk model 44 - price 6,196 EGP - warranty 3 years
+Sofa model 45 - price 3,115 EGP - warranty 4 years
+Bookshelf model 46 - price 11,034 EGP - warranty 2 years
+Dining table model 47 - price 7,953 EGP - warranty 3 years
+Armchair model 48 - price 4,872 EGP - warranty 4 years
+Bed frame model 49 - price 1,791 EGP - warranty 2 years
+Wardrobe model 50 - price 9,710 EGP - warranty 3 years
+Desk model 51 - price 6,629 EGP - warranty 4 years
+Sofa model 52 - price 3,548 EGP - warranty 2 years
+Bookshelf model 53 - price 11,467 EGP - warranty 3 years
+Dining table model 54 - price 8,386 EGP - warranty 4 years
+Armchair model 55 - price 5,305 EGP - warranty 2 years
+Bed frame model 56 - price 2,224 EGP - warranty 3 years
+Wardrobe model 57 - price 10,143 EGP - warranty 4 years

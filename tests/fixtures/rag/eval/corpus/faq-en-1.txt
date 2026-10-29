@@ -1,0 +1,29 @@
+Q: Can I reschedule installation slot 10?
+A: Yes, slot 10 can be moved up to 24 hours before the visit.
+
+Q: Can I reschedule installation slot 11?
+A: Yes, slot 11 can be moved up to 25 hours before the visit.
+
+Q: Can I reschedule installation slot 12?
+A: Yes, slot 12 can be moved up to 26 hours before the visit.
+
+Q: Can I reschedule installation slot 13?
+A: Yes, slot 13 can be moved up to 27 hours before the visit.
+
+Q: Can I reschedule installation slot 14?
+A: Yes, slot 14 can be moved up to 28 hours before the visit.
+
+Q: Can I reschedule installation slot 15?
+A: Yes, slot 15 can be moved up to 29 hours before the visit.
+
+Q: Can I reschedule installation slot 16?
+A: Yes, slot 16 can be moved up to 30 hours before the visit.
+
+Q: Can I reschedule installation slot 17?
+A: Yes, slot 17 can be moved up to 31 hours before the visit.
+
+Q: Can I reschedule installation slot 18?
+A: Yes, slot 18 can be moved up to 32 hours before the visit.
+
+Q: Can I reschedule installation slot 19?
+A: Yes, slot 19 can be moved up to 33 hours before the visit.
