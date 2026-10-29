@@ -184,3 +184,44 @@ async def test_originals_are_kept_under_the_workspaces_own_prefix(
     keys = [g.original_object_key for g in generations if g.original_object_key]
     assert keys and all(key.startswith(f"{twins.viewer}/") for key in keys)
     twins.assert_isolated(keys)
+
+
+# ---------------------------------------------------------------- paths added by RAG part 2
+
+
+async def test_the_lexical_query_returns_nothing_foreign(indexing: Indexing) -> None:
+    """The exact-word channel (RQ-15): the foreign chunk shares the viewer's exact tokens."""
+    from app.services.retrieval_ranking import lexical_tokens, tsquery_text
+
+    twins = await build_twins(indexing)
+    async with indexing.database.session() as session:
+        chunks = DocumentChunkRepository(session, tenant_id=twins.viewer)
+        shared = await chunks.lexical_search(
+            tsquery=tsquery_text(lexical_tokens("7900 EGP premium")) or "",
+            embedding=embed_text("7900 EGP premium"),
+            space=SMALL,
+        )
+        marker = await chunks.lexical_search(
+            tsquery=tsquery_text(lexical_tokens(MARKER)) or "",
+            embedding=embed_text(MARKER),
+            space=SMALL,
+        )
+    # Non-vacuity: the shared token is found - the viewer's own copy of it.
+    assert shared
+    twins.assert_isolated([(r.chunk, r.document_title) for r in shared])
+    twins.assert_isolated([(r.chunk, r.document_title) for r in marker])
+
+
+async def test_the_fused_result_returns_nothing_foreign(indexing: Indexing) -> None:
+    """Vector and lexical candidates fused by RRF (RQ-15), with the identifier keep rule."""
+    twins = await build_twins(indexing)
+    async with indexing.database.session() as session:
+        service = RetrievalService(
+            session=session, tenant_id=twins.viewer, embeddings=as_embeddings(FakeEmbeddings())
+        )
+        shared = await service.search(query="7900 EGP premium finishing", top_k=6)
+        marker = await service.search(query="zephyr quokka 1234 EGP supplier rate", top_k=6)
+    assert shared.passages
+    for found in (shared, marker):
+        twins.assert_isolated(found.as_context())
+        twins.assert_isolated(found.passages)

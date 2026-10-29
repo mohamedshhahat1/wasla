@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.integration.rag_eval import evaluate, measure
+from tests.integration.rag_eval_part2 import measure_part2
 from tests.integration.rag_harness import Indexing
 
 pytestmark = pytest.mark.integration
@@ -56,6 +57,9 @@ async def test_the_structural_evaluation(indexing: Indexing) -> None:
         label = os.environ.get("WASLA_RAG_EVAL_LABEL", "run")
         (target / f"{label}.md").write_text(run.table(label), encoding="utf-8")
     raw = run.metrics["_raw"]
+    part2 = await measure_part2(indexing, tenant_id, run)
+    if out:
+        (Path(out) / f"{label}-part2.md").write_text(part2.table(label), encoding="utf-8")
 
     # Deterministic: the same corpus asked again is measured the same way.
     again = await measure(indexing, tenant_id, run)

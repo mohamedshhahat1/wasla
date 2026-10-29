@@ -104,7 +104,9 @@ def load() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return manifest, questions
 
 
-async def ingest(indexing: Indexing, tenant_id: uuid.UUID, run: EvalRun) -> None:
+async def ingest(
+    indexing: Indexing, tenant_id: uuid.UUID, run: EvalRun, *, only: set[str] | None = None
+) -> None:
     """Every manifest document, the way a workspace would upload it.
 
     The second version of the price list goes through the replace path when the
@@ -113,6 +115,8 @@ async def ingest(indexing: Indexing, tenant_id: uuid.UUID, run: EvalRun) -> None
     """
     manifest, _ = load()
     for entry in manifest:
+        if only is not None and entry["id"] not in only:
+            continue
         raw_bytes = (EVAL / "corpus" / entry["file"]).resolve().read_bytes()
         source = DocumentSource(entry["source"])
         raw = (

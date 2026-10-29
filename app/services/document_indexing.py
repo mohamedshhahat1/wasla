@@ -107,11 +107,13 @@ from app.repositories.knowledge_repository import (
 from app.services import chunking
 from app.services.audit_service import AuditTrail
 from app.services.chunking import Chunk
+from app.services.contextual_embedding import embedding_input
 from app.services.knowledge_limits import (
     MAX_CHUNKS_PER_DOCUMENT,
     MAX_EMBEDDING_CHARACTERS_PER_DOCUMENT,
 )
-from app.services.text_normalisation import for_matching
+from app.services.retrieval_ranking import lexical_tokens
+from app.services.text_normalisation import for_lexical
 from app.services.usage_service import EMBEDDING_PURPOSE_INGEST, UsageRecorder
 
 logger = get_logger(__name__)
@@ -207,6 +209,11 @@ class Claim:
     space: EmbeddingSpace
     # Markdown headings are `#` lines; other sources mark them by layout (FX-1.2).
     markdown: bool = False
+    # What the chunks are labelled with when embedded (RQ-14): the title this
+    # generation will publish under, and the filename for a title that says
+    # nothing.
+    title: str | None = None
+    filename: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +408,8 @@ class DocumentIndexer:
             content=(generation.content if generation.has_snapshot else document.content) or "",
             space=space,
             markdown=(generation.source or document.source) is DocumentSource.MARKDOWN,
+            title=(generation.title if generation.has_snapshot else None) or document.title,
+            filename=(generation.filename if generation.has_snapshot else document.filename),
         )
 
     async def renew(self, claim: Claim) -> bool:
@@ -478,6 +487,10 @@ class DocumentIndexer:
                 token_estimate=piece.token_estimate,
                 embedding=vector,
                 heading_path=piece.heading_path,
+                # The exact-word channel's text and lexemes (RQ-15), written with
+                # the chunk so a published generation is searchable both ways.
+                search_text=for_lexical(piece.content),
+                lexemes=lexical_tokens(piece.content),
             )
 
         previous = await self._generations.active(document_id=document.id, lock=True)
@@ -720,11 +733,21 @@ async def prepare(
             raise ClaimLostError
         # Embedded as it will be compared, not as it is shown (RQ-01): digits,
         # tatweel and diacritics folded the same way a query is, so a customer
-        # typing either digit script reaches the same passage. The stored chunk
+        # typing either digit script reaches the same passage - and labelled
+        # with its document and section (RQ-14), so a chunk that never names
+        # its product still lands near the question that does. The stored chunk
         # keeps its display text. No schema-version bump: queries are folded
         # the same way, so old and new vectors stay comparable (RQ-02).
         batch = await embeddings.embed_batch(
-            [for_matching(piece.content) for piece in pieces[start : start + MAX_BATCH]]
+            [
+                embedding_input(
+                    piece.content,
+                    title=claim.title,
+                    heading_path=piece.heading_path,
+                    filename=claim.filename,
+                )
+                for piece in pieces[start : start + MAX_BATCH]
+            ]
         )
         await meter(batch)
         vectors.extend(batch.vectors)

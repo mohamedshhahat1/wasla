@@ -10,11 +10,26 @@ from __future__ import annotations
 
 import base64
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, and_, delete, false, func, or_, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    Text,
+    and_,
+    cast,
+    delete,
+    false,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.embedding_space import EmbeddingSpace
@@ -37,6 +52,9 @@ from app.repositories.base import BaseRepository, TenantScopedRepository
 # The knowledge tool's name, as `app.agents.registry` registers it; restated so
 # the repository layer does not import the agent runtime (a unit test pins the two).
 SEARCH_KNOWLEDGE_TOOL: Final = "search_knowledge"
+
+# The most rows any one search query may read, whatever its caller asks.
+MAX_SEARCH_ROWS: Final = 50
 
 TRIGGER_SUBMITTED: Final = "submitted"
 TRIGGER_RESUBMITTED: Final = "resubmitted"
@@ -129,6 +147,8 @@ class ScoredChunk:
     # When the document's served version was published (FX-2.5): how a model
     # tells a newer source from an older one when they disagree.
     document_updated_at: datetime | None = None
+    # The exact-word channel's rank (RQ-15); None for a vector-channel row.
+    lexical_rank: float | None = None
 
 
 class KnowledgeBaseRepository(TenantScopedRepository[KnowledgeBase]):
@@ -554,6 +574,8 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         token_estimate: int,
         embedding: list[float] | None,
         heading_path: str | None = None,
+        search_text: str | None = None,
+        lexemes: Sequence[str] | None = None,
     ) -> DocumentChunk:
         return self.add(
             DocumentChunk(
@@ -566,7 +588,73 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 token_estimate=token_estimate,
                 embedding=embedding,
                 heading_path=heading_path,
+                search_text=search_text,
+                # Lexemes as given, not re-parsed: `'simple'` would split an
+                # identifier like `bk-35` (RR-16).
+                search_tsv=(
+                    func.array_to_tsvector(cast(list(lexemes), ARRAY(Text))) if lexemes else None
+                ),
             )
+        )
+
+    def served_predicates(
+        self,
+        *,
+        space: EmbeddingSpace,
+        knowledge_base_ids: Sequence[uuid.UUID] | None = None,
+    ) -> list[ColumnElement[bool]]:
+        """Every predicate a served passage satisfies, for every query that reads one.
+
+        **One builder for the vector, lexical and neighbour queries** (RQ-15):
+        a second query path that wrote its own list could forget one of these,
+        and the one it forgot would be the leak or the stale version. The
+        statement must join `DocumentIndexGeneration` and `Document` on the
+        chunk, which `_served_select` does.
+
+        - `tenant_id` on the chunk, the generation *and* the document. Any one
+          is sufficient, so removing one is safe and removing all is a
+          cross-tenant leak; the suite is written against the property, which
+          is why this note exists for whoever is tempted to delete "the
+          redundant filter".
+        - the generation `ACTIVE`, so a generation still building, one that
+          failed and one that was replaced contribute nothing (PD-RAG-1).
+        - the generation's embedding space equal to the query's (RAG-06).
+        - a non-null embedding.
+        - the document inside its effective dates (RQ-24).
+        - the agent's knowledge scope (RQ-18), when it has one. An empty scope
+          matches nothing; it is refused when the grant is saved, and this is
+          the backstop.
+        """
+        predicates: list[ColumnElement[bool]] = [
+            DocumentChunk.tenant_id == self.tenant_id,
+            DocumentIndexGeneration.tenant_id == self.tenant_id,
+            Document.tenant_id == self.tenant_id,
+            DocumentIndexGeneration.state == GenerationState.ACTIVE,
+            DocumentIndexGeneration.embedding_provider == space.provider,
+            DocumentIndexGeneration.embedding_model == space.model,
+            DocumentIndexGeneration.embedding_dimensions == space.dimensions,
+            DocumentIndexGeneration.embedding_schema_version == space.schema_version,
+            DocumentChunk.embedding.is_not(None),
+            or_(Document.valid_from.is_(None), Document.valid_from <= func.now()),
+            or_(Document.valid_until.is_(None), Document.valid_until > func.now()),
+        ]
+        if knowledge_base_ids is not None:
+            predicates.append(
+                DocumentChunk.knowledge_base_id.in_(list(knowledge_base_ids))
+                if knowledge_base_ids
+                else false()
+            )
+        return predicates
+
+    @staticmethod
+    def _served_select(*columns: Any) -> Any:
+        return (
+            select(*columns)
+            .join(
+                DocumentIndexGeneration,
+                DocumentIndexGeneration.id == DocumentChunk.generation_id,
+            )
+            .join(Document, Document.id == DocumentChunk.document_id)
         )
 
     async def search(
@@ -576,30 +664,11 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         space: EmbeddingSpace,
         limit: int = 5,
         knowledge_base_id: uuid.UUID | None = None,
+        knowledge_base_ids: Sequence[uuid.UUID] | None = None,
     ) -> list[ScoredChunk]:
         """Nearest chunks to an embedding, within this workspace.
 
-        Four filters, and none of them is optional:
-
-        - `tenant_id`, which is what stops one company's question reaching
-          another company's documents. It is applied on the chunk, the joined
-          generation *and* the joined document, and that duplication is
-          deliberate: any one predicate is sufficient, so removing one is safe
-          and removing all is a cross-tenant leak. The suite is written against
-          the property rather than the implementation, so it fails only when
-          every one is gone - which is correct, and is why this note exists for
-          whoever is tempted to delete "the redundant filter".
-        - a join to the chunk's generation restricted to `ACTIVE`, so a
-          generation still building, one that failed, and one that was replaced
-          contribute nothing. This is what keeps the last good version of a
-          document served while a re-index builds beside it, and what makes the
-          swap to the new version atomic (PD-RAG-1).
-        - the generation's embedding space equal to the query's (RAG-06). Two
-          models can share a width and still place text in unrelated spaces; a
-          distance between a query from one and a passage from the other is
-          noise ranked as relevance.
-        - a non-null embedding, since a chunk without one has no position in
-          the space and pgvector would have to be asked what to do with it.
+        The filters are `served_predicates`, and none of them is optional.
 
         Ordering is by cosine distance, which suits normalised embeddings such
         as OpenAI's and is what `ix_document_chunks_embedding_hnsw` is built
@@ -608,33 +677,21 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         """
         await self._prepare_the_planner()
         distance = DocumentChunk.embedding.cosine_distance(embedding)
-        query = (
-            select(DocumentChunk, distance.label("distance"), Document.title, Document.ingested_at)
-            .join(
-                DocumentIndexGeneration,
-                DocumentIndexGeneration.id == DocumentChunk.generation_id,
-            )
-            .join(Document, Document.id == DocumentChunk.document_id)
-            .where(
-                DocumentChunk.tenant_id == self.tenant_id,
-                DocumentIndexGeneration.tenant_id == self.tenant_id,
-                Document.tenant_id == self.tenant_id,
-                DocumentIndexGeneration.state == GenerationState.ACTIVE,
-                DocumentIndexGeneration.embedding_provider == space.provider,
-                DocumentIndexGeneration.embedding_model == space.model,
-                DocumentIndexGeneration.embedding_dimensions == space.dimensions,
-                DocumentIndexGeneration.embedding_schema_version == space.schema_version,
-                DocumentChunk.embedding.is_not(None),
-                # Outside its effective dates a document says nothing (RQ-24).
-                or_(Document.valid_from.is_(None), Document.valid_from <= func.now()),
-                or_(Document.valid_until.is_(None), Document.valid_until > func.now()),
-            )
-            .order_by(distance)
-            .limit(max(1, limit))
-        )
+        scope = knowledge_base_ids
         if knowledge_base_id is not None:
-            query = query.where(DocumentChunk.knowledge_base_id == knowledge_base_id)
-
+            scope = (
+                [knowledge_base_id]
+                if scope is None
+                else [kb for kb in scope if kb == knowledge_base_id]
+            )
+        query = (
+            self._served_select(
+                DocumentChunk, distance.label("distance"), Document.title, Document.ingested_at
+            )
+            .where(*self.served_predicates(space=space, knowledge_base_ids=scope))
+            .order_by(distance)
+            .limit(max(1, min(limit, MAX_SEARCH_ROWS)))
+        )
         result = await self.session.execute(query)
         return [
             ScoredChunk(
@@ -645,6 +702,85 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
             )
             for chunk, value, title, updated in result.all()
         ]
+
+    async def lexical_search(
+        self,
+        *,
+        tsquery: str,
+        embedding: list[float],
+        space: EmbeddingSpace,
+        limit: int = 20,
+        knowledge_base_ids: Sequence[uuid.UUID] | None = None,
+    ) -> list[ScoredChunk]:
+        """Chunks holding the query's exact words, within this workspace (RQ-15).
+
+        The same `served_predicates` as the vector search - the same builder,
+        so the two cannot drift - plus a match on the chunk's lexemes
+        (`search_tsv`, GIN-indexed). Ranked by `ts_rank`; each row also carries
+        its cosine distance to the query, so the keep rule and the tiers judge
+        a lexical hit on the same scale as a vector one.
+
+        `tsquery` is bound as a parameter and cast, never interpolated: it is an
+        OR of quoted lexemes `retrieval_ranking.tsquery_text` built.
+        """
+        query_value = cast(literal(tsquery, Text), TSQUERY)
+        rank = func.ts_rank(DocumentChunk.search_tsv, query_value)
+        distance = DocumentChunk.embedding.cosine_distance(embedding)
+        query = (
+            self._served_select(
+                DocumentChunk,
+                distance.label("distance"),
+                Document.title,
+                Document.ingested_at,
+                rank.label("rank"),
+            )
+            .where(
+                *self.served_predicates(space=space, knowledge_base_ids=knowledge_base_ids),
+                DocumentChunk.search_tsv.op("@@")(query_value),
+            )
+            .order_by(rank.desc(), distance, DocumentChunk.id)
+            .limit(max(1, min(limit, MAX_SEARCH_ROWS)))
+        )
+        result = await self.session.execute(query)
+        return [
+            ScoredChunk(
+                chunk=chunk,
+                distance=float(value),
+                document_title=title,
+                document_updated_at=updated,
+                lexical_rank=float(score),
+            )
+            for chunk, value, title, updated, score in result.all()
+        ]
+
+    async def neighbours(
+        self,
+        *,
+        generation_id: uuid.UUID,
+        ordinals: Sequence[int],
+        space: EmbeddingSpace,
+        knowledge_base_ids: Sequence[uuid.UUID] | None = None,
+    ) -> list[DocumentChunk]:
+        """Chunks of one served generation at the given ordinals (FX-3.11).
+
+        Under `served_predicates`, so a neighbour of a passage is served on
+        exactly the terms the passage was: same workspace, an active generation
+        - this one, never another generation of the same document - its space,
+        the scope and the validity window. Exact lookups on
+        `uq_document_chunks_tenant_id_generation_id_ordinal`.
+        """
+        if not ordinals:
+            return []
+        query = (
+            self._served_select(DocumentChunk)
+            .where(
+                *self.served_predicates(space=space, knowledge_base_ids=knowledge_base_ids),
+                DocumentChunk.generation_id == generation_id,
+                DocumentChunk.ordinal.in_(list(ordinals)),
+            )
+            .order_by(DocumentChunk.ordinal)
+        )
+        return list((await self.session.scalars(query)).all())
 
     async def _prepare_the_planner(self) -> None:
         """Two settings without which the index below is worse than useless.

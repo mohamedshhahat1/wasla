@@ -50,6 +50,18 @@ from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
 from app.repositories.knowledge_repository import DocumentChunkRepository, ScoredChunk
+from app.services.retrieval_policy import RetrievalPolicy
+from app.services.retrieval_ranking import (
+    CHANNEL_CANDIDATES,
+    LEXICAL,
+    VECTOR,
+    Candidate,
+    identifier_tokens,
+    keeps,
+    lexical_tokens,
+    rrf_fuse,
+    tsquery_text,
+)
 from app.services.text_normalisation import for_matching
 from app.services.usage_service import EMBEDDING_PURPOSE_QUERY, UsageRecorder
 
@@ -146,6 +158,10 @@ class Passage:
     ordinal: int | None = None
     heading_path: str | None = None
     updated_at: datetime | None = None
+    #: Which retrieval channels found it (RQ-15), for the admin preview.
+    channels: tuple[str, ...] = ()
+    #: The chunk ordinals it holds: more than one once neighbours are merged.
+    ordinals: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,10 +269,12 @@ class RetrievalService:
         session: AsyncSession,
         tenant_id: uuid.UUID,
         embeddings: EmbeddingsClient,
+        policy: RetrievalPolicy | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._embeddings = embeddings
+        self._policy = policy or RetrievalPolicy()
         self._chunks = DocumentChunkRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
@@ -319,50 +337,80 @@ class RetrievalService:
         )
 
         searched = perf_counter()
+        lexemes = lexical_tokens(cleaned) if self._policy.hybrid else []
+        tsquery = tsquery_text(lexemes)
+        scope = _scope(knowledge_base_id, self._policy.knowledge_base_ids)
+        seconds: dict[str, float] = {}
         try:
             async with self._session.begin_nested():
-                scored = await self._chunks.search(
+                vector_rows = await self._chunks.search(
                     embedding=batch.vectors[0],
                     space=space,
-                    limit=limit,
-                    knowledge_base_id=knowledge_base_id,
+                    limit=CHANNEL_CANDIDATES,
+                    knowledge_base_ids=scope,
                 )
+                seconds[VECTOR] = perf_counter() - searched
+                lexical_rows: list[ScoredChunk] = []
+                if tsquery is not None:
+                    lexical_started = perf_counter()
+                    lexical_rows = await self._chunks.lexical_search(
+                        tsquery=tsquery,
+                        embedding=batch.vectors[0],
+                        space=space,
+                        limit=CHANNEL_CANDIDATES,
+                        knowledge_base_ids=scope,
+                    )
+                    seconds[LEXICAL] = perf_counter() - lexical_started
         except Exception as error:
             await self._failed(started, stage="search", error=error)
             raise KnowledgeSearchUnavailableError() from None
 
         await record_ai_stage("sql", perf_counter() - searched)
 
-        candidates = scored[:limit]
-        close = [row for row in candidates if row.distance <= threshold]
-        passages = tuple(_passage(row) for row in _without_repeats(close))
+        asked = frozenset(lexemes)
+        fused = rrf_fuse(
+            [
+                [_candidate(row, VECTOR) for row in vector_rows],
+                [_candidate(row, LEXICAL, asked=asked) for row in lexical_rows],
+            ]
+        )
+        identifiers = identifier_tokens(cleaned)
+        close = [c for c in fused if keeps(c, threshold=threshold, identifiers=identifiers)]
+        unique = _without_repeats(close)
+        chosen = unique[:limit]
+        passages = tuple(_passage(candidate) for candidate in chosen)
         retrieval = Retrieval(passages=passages, query=cleaned)
-        best = min((row.distance for row in scored), default=None)
+        best = min((c.distance for c in fused), default=None)
+        dropped = {
+            "threshold": len(fused) - len(close),
+            "duplicate": len(close) - len(unique),
+        }
         await record_retrieval(
             outcome=FOUND if passages else EMPTY,
             duration_seconds=perf_counter() - started,
             passages=len(passages),
             model=space.model,
             best_distance=best,
-            dropped={
-                "threshold": len(candidates) - len(close),
-                "duplicate": len(close) - len(passages),
-            },
+            dropped=dropped,
             context_characters=len(retrieval.as_context()) if passages else 0,
             context_tokens=estimate_tokens(retrieval.as_context()) if passages else 0,
+            candidates={VECTOR: len(vector_rows), LEXICAL: len(lexical_rows)},
+            channel_seconds=seconds,
         )
         logger.info(
             "knowledge.searched",
             extra={
                 "tenant_id": str(self._tenant_id),
                 # The question itself is a customer's words and is not logged.
-                "candidates": len(scored),
+                "candidates": len(fused),
+                "vector_candidates": len(vector_rows),
+                "lexical_candidates": len(lexical_rows),
                 "kept": len(passages),
                 # Distances are numbers about the index, not the customer, and
                 # are what calibrating the cut-off needs (RV-26).
                 "best_distance": round(best, 4) if best is not None else None,
-                "dropped_threshold": len(candidates) - len(close),
-                "dropped_duplicate": len(close) - len(passages),
+                "dropped_threshold": dropped["threshold"],
+                "dropped_duplicate": dropped["duplicate"],
             },
         )
         return retrieval
@@ -396,7 +444,36 @@ class RetrievalService:
         )
 
 
-def _without_repeats(rows: list[ScoredChunk]) -> list[ScoredChunk]:
+def _scope(
+    knowledge_base_id: uuid.UUID | None, granted: tuple[uuid.UUID, ...] | None
+) -> tuple[uuid.UUID, ...] | None:
+    """The knowledge bases a search may read: the agent's scope, narrowed by the caller's."""
+    if knowledge_base_id is None:
+        return granted
+    if granted is None:
+        return (knowledge_base_id,)
+    return tuple(kb for kb in granted if kb == knowledge_base_id)
+
+
+def _candidate(row: ScoredChunk, channel: str, *, asked: frozenset[str] = frozenset()) -> Candidate:
+    chunk = row.chunk
+    return Candidate(
+        chunk_id=chunk.id,
+        document_id=chunk.document_id,
+        generation_id=chunk.generation_id,
+        ordinal=chunk.ordinal,
+        content=chunk.content,
+        title=row.document_title,
+        heading_path=chunk.heading_path,
+        distance=row.distance,
+        channels={channel},
+        # Which of the query's words the chunk holds, for the keep rule.
+        lexical_tokens=(asked & frozenset(lexical_tokens(chunk.content))) if asked else frozenset(),
+        updated_at=row.document_updated_at,
+    )
+
+
+def _without_repeats(candidates: list[Candidate]) -> list[Candidate]:
     """Drop a passage whose text a higher-ranked passage already carries (RQ-08).
 
     The safety net behind the upload-time refusal: two documents of a workspace
@@ -405,25 +482,27 @@ def _without_repeats(rows: list[ScoredChunk]) -> list[ScoredChunk]:
     text, scoped to this one search's rows, never across workspaces.
     """
     seen: set[str] = set()
-    kept: list[ScoredChunk] = []
-    for row in rows:
-        digest = hashlib.sha256(for_matching(row.chunk.content).encode("utf-8")).hexdigest()
+    kept: list[Candidate] = []
+    for candidate in candidates:
+        digest = hashlib.sha256(for_matching(candidate.content).encode("utf-8")).hexdigest()
         if digest in seen:
             continue
         seen.add(digest)
-        kept.append(row)
+        kept.append(candidate)
     return kept
 
 
-def _passage(row: ScoredChunk) -> Passage:
+def _passage(candidate: Candidate) -> Passage:
     return Passage(
-        document_title=row.document_title,
-        content=row.chunk.content,
-        distance=row.distance,
-        document_id=row.chunk.document_id,
-        ordinal=row.chunk.ordinal,
-        heading_path=row.chunk.heading_path,
-        updated_at=row.document_updated_at,
+        document_title=candidate.title,
+        content=candidate.content,
+        distance=candidate.distance,
+        document_id=candidate.document_id,
+        ordinal=candidate.ordinal,
+        heading_path=candidate.heading_path,
+        updated_at=candidate.updated_at,
+        channels=tuple(sorted(candidate.channels)),
+        ordinals=candidate.ordinals or (candidate.ordinal,),
     )
 
 
