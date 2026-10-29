@@ -47,6 +47,7 @@ from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
 from app.repositories.knowledge_repository import DocumentChunkRepository, ScoredChunk
+from app.services.text_normalisation import for_matching
 from app.services.usage_service import EMBEDDING_PURPOSE_QUERY, UsageRecorder
 
 logger = get_logger(__name__)
@@ -246,7 +247,10 @@ class RetrievalService:
         is staged at that point is a finished tool's work, which is exactly the
         condition `released` documents for its callers.
         """
-        cleaned = query.strip()[:MAX_QUERY_CHARACTERS].strip()
+        # Folded exactly as passages are embedded (RV-23, RQ-01): a query typed
+        # with Arabic-Indic digits, tatweel or diacritics, or pasted with
+        # invisible controls, is the same string as the stored passage it means.
+        cleaned = for_matching(query[: MAX_QUERY_CHARACTERS * 2])[:MAX_QUERY_CHARACTERS].strip()
         if not cleaned:
             return Retrieval(passages=(), query=query)
 

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from app.agents.memory import estimate_tokens
+from app.services.text_normalisation import normalise_whitespace
 
 # Characters, not tokens: the split happens before anything is embedded, and a
 # character budget needs no tokeniser. The values target roughly 250 tokens per
@@ -34,7 +35,6 @@ CHUNK_OVERLAP_CHARACTERS: Final = 150
 MIN_CHUNK_CHARACTERS: Final = 40
 
 _PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
-_WHITESPACE_RUN = re.compile(r"[ \t]+")
 # Sentence-ish boundaries, including the Arabic full stop and question mark,
 # since the product is Arabic-first.
 # RUF001 reads the Arabic full stop as a lookalike for a hyphen. It is the
@@ -55,17 +55,8 @@ class Chunk:
 
 
 def normalise(text: str) -> str:
-    """Tidy whitespace without destroying structure.
-
-    Runs of spaces and tabs collapse, and trailing space goes, but blank lines
-    survive: they are the paragraph boundaries the splitter depends on.
-    """
-    lines = [
-        _WHITESPACE_RUN.sub(" ", line).strip() for line in text.replace("\r\n", "\n").split("\n")
-    ]
-    collapsed = "\n".join(lines)
-    # Three or more newlines carry no more meaning than two.
-    return re.sub(r"\n{3,}", "\n\n", collapsed).strip()
+    """Tidy whitespace without destroying structure (`normalise_whitespace`)."""
+    return normalise_whitespace(text)
 
 
 def split(text: str) -> list[Chunk]:

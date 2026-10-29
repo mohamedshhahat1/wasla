@@ -108,6 +108,7 @@ from app.services.knowledge_limits import (
     MAX_CHUNKS_PER_DOCUMENT,
     MAX_EMBEDDING_CHARACTERS_PER_DOCUMENT,
 )
+from app.services.text_normalisation import for_matching
 from app.services.usage_service import EMBEDDING_PURPOSE_INGEST, UsageRecorder
 
 logger = get_logger(__name__)
@@ -673,8 +674,13 @@ async def prepare(
     for start in range(0, len(pieces), MAX_BATCH):
         if not await renew():
             raise ClaimLostError
+        # Embedded as it will be compared, not as it is shown (RQ-01): digits,
+        # tatweel and diacritics folded the same way a query is, so a customer
+        # typing either digit script reaches the same passage. The stored chunk
+        # keeps its display text. No schema-version bump: queries are folded
+        # the same way, so old and new vectors stay comparable (RQ-02).
         batch = await embeddings.embed_batch(
-            [piece.content for piece in pieces[start : start + MAX_BATCH]]
+            [for_matching(piece.content) for piece in pieces[start : start + MAX_BATCH]]
         )
         await meter(batch)
         vectors.extend(batch.vectors)
