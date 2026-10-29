@@ -74,12 +74,25 @@ class DocumentCreateRequest(BaseModel):
     source: DocumentSource = DocumentSource.TEXT
     filename: str | None = Field(default=None, max_length=300)
     media_type: str | None = Field(default=None, max_length=150)
+    # The document's stable identity in its knowledge base (RQ-07). Absent, the
+    # filename is used; uploading the same key again is a new version of it.
+    source_key: str | None = Field(default=None, min_length=1, max_length=300)
+    # When its facts apply (RQ-24); retrieval leaves it out otherwise.
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    # A document of the same knowledge base this one replaces as a source of truth.
+    supersedes_document_id: uuid.UUID | None = None
 
     @field_validator("title")
     @classmethod
     def _title(cls, value: str) -> str:
         _storable(value)
         return _visible(value)
+
+    @field_validator("source_key")
+    @classmethod
+    def _source_key(cls, value: str | None) -> str | None:
+        return _storable(value)
 
     @field_validator("content")
     @classmethod
@@ -92,6 +105,57 @@ class DocumentCreateRequest(BaseModel):
     @field_validator("filename", "media_type")
     @classmethod
     def _metadata(cls, value: str | None) -> str | None:
+        return _storable(value)
+
+
+class DocumentReplaceRequest(BaseModel):
+    """A new version of a document's content (RQ-06): replaces, never duplicates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=MAX_DOCUMENT_CHARACTERS)
+    source: DocumentSource = DocumentSource.TEXT
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    filename: str | None = Field(default=None, max_length=300)
+    media_type: str | None = Field(default=None, max_length=150)
+
+    @field_validator("content")
+    @classmethod
+    def _content(cls, value: str) -> str:
+        _storable(value)
+        return _visible(value)
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        _storable(value)
+        return _visible(value)
+
+    @field_validator("filename", "media_type")
+    @classmethod
+    def _metadata(cls, value: str | None) -> str | None:
+        return _storable(value)
+
+
+class KnowledgeBaseUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        _storable(value)
+        return _visible(value)
+
+    @field_validator("description")
+    @classmethod
+    def _description(cls, value: str | None) -> str | None:
         return _storable(value)
 
 
@@ -169,6 +233,14 @@ class DocumentRead(BaseModel):
     # Such lines are indexed as extracted; re-uploading the file from another
     # tool, or re-extracting it, is how they are repaired (RQ-04).
     extraction_warnings: dict[str, int] | None = None
+    source_key: str | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    supersedes_document_id: uuid.UUID | None = None
+    # The served version's uploaded file is kept, so it can be extracted again (RQ-23).
+    original_available: bool = False
+    # This request changed only the title, filename or media type (RQ-09).
+    metadata_updated: bool = False
 
     @classmethod
     def from_view(cls, view: DocumentView) -> Self:
@@ -192,6 +264,12 @@ class DocumentRead(BaseModel):
             ),
             needs_reindex=view.needs_reindex,
             extraction_warnings=document.extraction_warnings,
+            source_key=document.source_key,
+            valid_from=document.valid_from,
+            valid_until=document.valid_until,
+            supersedes_document_id=document.supersedes_document_id,
+            original_available=view.original_available,
+            metadata_updated=view.metadata_updated,
         )
 
 
@@ -205,6 +283,9 @@ class DocumentSubmission(BaseModel):
 
     document: DocumentRead
     created: bool
+    # For a replacement: `replacement_started` (the new version serves once it
+    # is indexed) or `metadata_only` (the same text; only metadata changed).
+    outcome: str | None = None
 
 
 class PassageRead(BaseModel):

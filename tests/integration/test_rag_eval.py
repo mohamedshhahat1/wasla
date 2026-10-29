@@ -32,10 +32,12 @@ pytestmark = pytest.mark.integration
 # slots 2 (the cross-KB copy, RV-07), intact 255, rank-1 193. The six spans
 # still not intact are Arabic-Indic numbers pypdf reversed or dropped in two
 # producers' PDFs - flagged as extraction warnings, not repairable from text.
+# Phase 6 (document lifecycle): the second price list replaces the first and
+# the cross-KB copy is refused - stale versions 0, duplicate slots 0.
 CEILINGS = {
     "presentation": 0,
-    "stale": 1,
-    "duplicates": 2,
+    "stale": 0,
+    "duplicates": 0,
     "empty": 6,
     "numbers_cut": 0,
     "words_cut": 0,

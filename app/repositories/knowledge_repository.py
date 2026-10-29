@@ -8,6 +8,7 @@ is the worst failure this system has available to it (ADR-008).
 
 from __future__ import annotations
 
+import base64
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,7 +17,7 @@ from typing import Any, Final
 from sqlalchemy import ColumnElement, and_, delete, func, or_, select, text, update
 
 from app.core.embedding_space import EmbeddingSpace
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, ValidationError
 from app.db.models.agent import Agent, AgentStatus, AgentTool
 from app.db.models.enums import TenantStatus
 from app.db.models.knowledge import (
@@ -41,6 +42,8 @@ TRIGGER_RESUBMITTED: Final = "resubmitted"
 TRIGGER_REINDEX: Final = "reindex"
 TRIGGER_STALE_EMBEDDING: Final = "stale_embedding"
 TRIGGER_MIGRATED: Final = "migrated"
+# A new version of the document's content (RQ-06): the generation carries it.
+TRIGGER_REPLACED: Final = "replaced"
 GENERATION_TRIGGERS: Final = frozenset(
     {
         TRIGGER_SUBMITTED,
@@ -48,8 +51,65 @@ GENERATION_TRIGGERS: Final = frozenset(
         TRIGGER_REINDEX,
         TRIGGER_STALE_EMBEDDING,
         TRIGGER_MIGRATED,
+        TRIGGER_REPLACED,
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """The content and metadata a replacement generation carries (RQ-06)."""
+
+    content: str
+    content_hash: str
+    title: str
+    filename: str | None
+    media_type: str | None
+    byte_size: int
+    source: DocumentSource
+    extraction_warnings: dict[str, int] | None = None
+    original_object_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Page[T]:
+    """One page of a keyset-ordered listing and the cursor for the next."""
+
+    items: list[T]
+    next_cursor: str | None
+
+
+_ESCAPE: Final = chr(92)
+
+
+def _contains(value: str) -> str:
+    """A LIKE pattern matching `value` anywhere, its wildcards taken literally."""
+    for special in (_ESCAPE, "%", "_"):
+        value = value.replace(special, _ESCAPE + special)
+    return f"%{value}%"
+
+
+def encode_cursor(moment: datetime, row_id: uuid.UUID) -> str:
+    """An opaque position after `(created_at, id)` in newest-first order."""
+    raw = f"{moment.isoformat()}|{row_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    """The position a cursor names; a malformed one is a validation error."""
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        moment, row_id = base64.urlsafe_b64decode(padded).decode().split("|", 1)
+        return datetime.fromisoformat(moment), uuid.UUID(row_id)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ValidationError("That cursor is not valid.") from error
+
+
+def _page[T: (KnowledgeBase, Document)](rows: list[T], limit: int) -> Page[T]:
+    if len(rows) <= limit:
+        return Page(items=rows, next_cursor=None)
+    last = rows[limit - 1]
+    return Page(items=rows[:limit], next_cursor=encode_cursor(last.created_at, last.id))
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +125,9 @@ class ScoredChunk:
     chunk: DocumentChunk
     distance: float
     document_title: str
+    # When the document's served version was published (FX-2.5): how a model
+    # tells a newer source from an older one when they disagree.
+    document_updated_at: datetime | None = None
 
 
 class KnowledgeBaseRepository(TenantScopedRepository[KnowledgeBase]):
@@ -83,6 +146,20 @@ class KnowledgeBaseRepository(TenantScopedRepository[KnowledgeBase]):
 
     async def get_by_name(self, name: str) -> KnowledgeBase | None:
         return await self._first(self._select().where(KnowledgeBase.name == name))
+
+    async def page(self, *, limit: int, cursor: str | None = None) -> Page[KnowledgeBase]:
+        """Knowledge bases newest first, a page at a time (FX-2.4)."""
+        query = self._select().order_by(KnowledgeBase.created_at.desc(), KnowledgeBase.id.desc())
+        if cursor is not None:
+            moment, last = decode_cursor(cursor)
+            query = query.where(
+                or_(
+                    KnowledgeBase.created_at < moment,
+                    and_(KnowledgeBase.created_at == moment, KnowledgeBase.id < last),
+                )
+            )
+        rows = await self._all(query.limit(limit + 1))
+        return _page(rows, limit)
 
     async def list_all(self, *, limit: int = 50) -> list[KnowledgeBase]:
         return await self._all(self._select().order_by(KnowledgeBase.name).limit(limit))
@@ -141,6 +218,88 @@ class DocumentRepository(TenantScopedRepository[Document]):
                 Document.knowledge_base_id == knowledge_base_id,
                 Document.content_hash == content_hash,
             )
+        )
+
+    async def get_by_hash_in_workspace(
+        self, *, content_hash: str, exclude_document_id: uuid.UUID | None = None
+    ) -> Document | None:
+        """Any document of *this* workspace holding exactly this text (RQ-08).
+
+        Never global: a lookup across workspaces would tell one company that
+        another holds the same document (G3).
+        """
+        query = self._select().where(Document.content_hash == content_hash)
+        if exclude_document_id is not None:
+            query = query.where(Document.id != exclude_document_id)
+        return await self._first(query.order_by(Document.created_at, Document.id))
+
+    async def get_by_source_key(
+        self, *, knowledge_base_id: uuid.UUID, source_key: str
+    ) -> Document | None:
+        return await self._first(
+            self._select().where(
+                Document.knowledge_base_id == knowledge_base_id,
+                Document.source_key == source_key,
+            )
+        )
+
+    async def page(
+        self,
+        *,
+        limit: int,
+        cursor: str | None = None,
+        knowledge_base_id: uuid.UUID | None = None,
+        title: str | None = None,
+        status: DocumentStatus | None = None,
+        source: DocumentSource | None = None,
+    ) -> Page[Document]:
+        """Documents newest first, one page at a time, optionally filtered (FX-2.4, RV-13)."""
+        query = self._select().order_by(Document.created_at.desc(), Document.id.desc())
+        if knowledge_base_id is not None:
+            query = query.where(Document.knowledge_base_id == knowledge_base_id)
+        if title:
+            query = query.where(Document.title.ilike(_contains(title), escape=_ESCAPE))
+        if status is not None:
+            query = query.where(Document.status == status)
+        if source is not None:
+            query = query.where(Document.source == source)
+        if cursor is not None:
+            moment, last = decode_cursor(cursor)
+            query = query.where(
+                or_(
+                    Document.created_at < moment,
+                    and_(Document.created_at == moment, Document.id < last),
+                )
+            )
+        rows = await self._all(query.limit(limit + 1))
+        return _page(rows, limit)
+
+    async def similar(self, document: Document, *, limit: int = 20) -> list[Document]:
+        """Documents of this workspace that look like other versions of `document`.
+
+        Same source key, same title (case-insensitively) or same filename - the
+        candidates a person means by "replace the old one" (FX-2.4).
+        """
+        matches = [func.lower(Document.title) == document.title.lower()]
+        if document.source_key:
+            matches.append(Document.source_key == document.source_key)
+        if document.filename:
+            matches.append(Document.filename == document.filename)
+        return await self._all(
+            self._select()
+            .where(Document.id != document.id, or_(*matches))
+            .order_by(Document.created_at.desc(), Document.id.desc())
+            .limit(limit)
+        )
+
+    async def count_in_knowledge_base(self, knowledge_base_id: uuid.UUID) -> int:
+        return int(
+            await self.session.scalar(
+                select(func.count(Document.id)).where(
+                    self._tenant_filter(), Document.knowledge_base_id == knowledge_base_id
+                )
+            )
+            or 0
         )
 
     async def list_for_knowledge_base(
@@ -282,21 +441,46 @@ class GenerationRepository(TenantScopedRepository[DocumentIndexGeneration]):
         return int(highest or 0) + 1
 
     def create(
-        self, *, document_id: uuid.UUID, number: int, trigger: str
+        self,
+        *,
+        document_id: uuid.UUID,
+        number: int,
+        trigger: str,
+        snapshot: Snapshot | None = None,
     ) -> DocumentIndexGeneration:
         if trigger not in GENERATION_TRIGGERS:
             raise ValueError(f"unknown generation trigger {trigger!r}")
-        return self.add(
-            DocumentIndexGeneration(
-                tenant_id=self.tenant_id,
-                document_id=document_id,
-                number=number,
-                state=GenerationState.PENDING,
-                trigger=trigger,
-                attempts=0,
-                chunk_count=0,
+        generation = DocumentIndexGeneration(
+            tenant_id=self.tenant_id,
+            document_id=document_id,
+            number=number,
+            state=GenerationState.PENDING,
+            trigger=trigger,
+            attempts=0,
+            chunk_count=0,
+        )
+        if snapshot is not None:
+            generation.content = snapshot.content
+            generation.content_hash = snapshot.content_hash
+            generation.title = snapshot.title
+            generation.filename = snapshot.filename
+            generation.media_type = snapshot.media_type
+            generation.byte_size = snapshot.byte_size
+            generation.source = snapshot.source
+            generation.extraction_warnings = snapshot.extraction_warnings
+            generation.original_object_key = snapshot.original_object_key
+        return self.add(generation)
+
+    async def original_keys(self, *, document_id: uuid.UUID) -> list[str]:
+        """Every original file a document's generations hold in the object store."""
+        rows = await self.session.scalars(
+            select(DocumentIndexGeneration.original_object_key).where(
+                self._tenant_filter(),
+                DocumentIndexGeneration.document_id == document_id,
+                DocumentIndexGeneration.original_object_key.is_not(None),
             )
         )
+        return sorted({key for key in rows if key})
 
 
 class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
@@ -424,7 +608,7 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         await self._prepare_the_planner()
         distance = DocumentChunk.embedding.cosine_distance(embedding)
         query = (
-            select(DocumentChunk, distance.label("distance"), Document.title)
+            select(DocumentChunk, distance.label("distance"), Document.title, Document.ingested_at)
             .join(
                 DocumentIndexGeneration,
                 DocumentIndexGeneration.id == DocumentChunk.generation_id,
@@ -440,6 +624,9 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 DocumentIndexGeneration.embedding_dimensions == space.dimensions,
                 DocumentIndexGeneration.embedding_schema_version == space.schema_version,
                 DocumentChunk.embedding.is_not(None),
+                # Outside its effective dates a document says nothing (RQ-24).
+                or_(Document.valid_from.is_(None), Document.valid_from <= func.now()),
+                or_(Document.valid_until.is_(None), Document.valid_until > func.now()),
             )
             .order_by(distance)
             .limit(max(1, limit))
@@ -449,8 +636,13 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
 
         result = await self.session.execute(query)
         return [
-            ScoredChunk(chunk=chunk, distance=float(value), document_title=title)
-            for chunk, value, title in result.all()
+            ScoredChunk(
+                chunk=chunk,
+                distance=float(value),
+                document_title=title,
+                document_updated_at=updated,
+            )
+            for chunk, value, title, updated in result.all()
         ]
 
     async def _prepare_the_planner(self) -> None:

@@ -550,7 +550,8 @@ SEARCH_KNOWLEDGE_DEFINITION: Final = ToolDefinition(
         "Search the company's own documents for information before answering. "
         "Use it for any question about products, prices, policies, services or "
         "procedures. Answer only from what it returns; if it returns nothing, "
-        "say you do not have that information."
+        "say you do not have that information. When two sources disagree, prefer "
+        "the one with the most recent updated_at."
     ),
     parameters=(
         ToolParameter(

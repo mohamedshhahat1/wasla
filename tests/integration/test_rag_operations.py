@@ -32,7 +32,7 @@ from app.core.telemetry import read_redis_counters, set_counter_sink
 from app.db.models.audit import AuditLog
 from app.db.models.knowledge import GenerationState
 from app.services.document_indexing import committed_units, run_indexing
-from app.services.knowledge_service import KnowledgeService
+from app.services.knowledge_service import KnowledgeService, content_hash
 from app.services.metrics_service import MetricsService
 from app.services.retrieval_service import KnowledgeSearchUnavailableError, RetrievalService
 from app.workers.ingestion_queue import INGESTION_NAMESPACE
@@ -413,7 +413,13 @@ async def test_the_duplicate_and_unreachable_gauges_equal_the_databases_truth(
     async with indexing.database.session() as session:
         knowledge = KnowledgeService(session=session, tenant_id=reachable, queue=indexing.queue())
         second = await knowledge.create_knowledge_base(name="Sales")
-        await knowledge.submit(knowledge_base_id=second.id, title="Doc", raw=POLICY)
+        copy, _ = await knowledge.submit(
+            knowledge_base_id=second.id, title="Doc", raw="A placeholder until below."
+        )
+        # A copy in a second knowledge base, as stored before uploads refused
+        # one (RQ-08): the gauge is how such legacy copies are found.
+        copy.document.content = POLICY
+        copy.document.content_hash = content_hash(POLICY)
         agent = Agent(
             tenant_id=reachable,
             name="Default",

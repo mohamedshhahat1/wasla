@@ -78,6 +78,7 @@ from app.core.exceptions import (
     WaslaError,
 )
 from app.core.logging import get_logger
+from app.core.telemetry import record_replacement
 from app.core.text_safety import has_visible_content
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.enums import TenantStatus
@@ -98,6 +99,7 @@ from app.integrations.openai.embeddings import (
     EmbeddingsClient,
 )
 from app.repositories.knowledge_repository import (
+    TRIGGER_REPLACED,
     DocumentChunkRepository,
     DocumentRepository,
     GenerationRepository,
@@ -391,9 +393,11 @@ class DocumentIndexer:
             number=generation.number,
             token=generation.claim_token,
             attempt=generation.attempts,
-            content=document.content or "",
+            # A replacement indexes the content it carries; anything else - a
+            # first upload, a re-index - the document's stored text (RQ-06).
+            content=(generation.content if generation.has_snapshot else document.content) or "",
             space=space,
-            markdown=document.source is DocumentSource.MARKDOWN,
+            markdown=(generation.source or document.source) is DocumentSource.MARKDOWN,
         )
 
     async def renew(self, claim: Claim) -> bool:
@@ -446,6 +450,21 @@ class DocumentIndexer:
             await self._session.flush()
             return IndexingOutcome.SUSPENDED
 
+        if generation.has_snapshot and generation.content_hash != document.content_hash:
+            holder = await self._documents.get_by_hash(
+                knowledge_base_id=document.knowledge_base_id,
+                content_hash=generation.content_hash or "",
+            )
+            if holder is not None and holder.id != document.id:
+                # Another document of the knowledge base took this text while
+                # the replacement was being embedded. Publishing would make two
+                # documents hold one text; the replacement fails instead and the
+                # current version keeps serving.
+                raise IndexingError(
+                    IndexingFailure.INVALID_DOCUMENT,
+                    "Another document in this knowledge base now holds that exact text.",
+                )
+
         for piece, vector in zip(prepared.pieces, prepared.vectors, strict=True):
             self._chunks.add_chunk(
                 document_id=document.id,
@@ -477,11 +496,26 @@ class DocumentIndexer:
         generation.next_retry_at = None
         generation.last_error_code = None
         generation.error = None
+        if generation.has_snapshot:
+            # The swap makes the new version the document's, in the same
+            # transaction that makes it the one served: what DocumentRead shows,
+            # what a later re-index rebuilds, and the hash a repeat upload is
+            # recognised by all change at once (RQ-06).
+            document.content = generation.content
+            document.content_hash = generation.content_hash or document.content_hash
+            document.title = generation.title or document.title
+            document.filename = generation.filename
+            document.media_type = generation.media_type
+            document.byte_size = generation.byte_size or 0
+            document.source = generation.source or document.source
+            document.extraction_warnings = generation.extraction_warnings
         document.status = DocumentStatus.READY
         document.chunk_count = len(prepared.pieces)
         document.ingested_at = now
         document.error = None
         await self._session.flush()
+        if generation.trigger == TRIGGER_REPLACED:
+            await record_replacement("published")
 
         logger.info(
             "knowledge.document_ingested",
@@ -603,6 +637,8 @@ class DocumentIndexer:
         now: datetime,
     ) -> None:
         """End a generation terminally. The document keeps any active one."""
+        if generation.trigger == TRIGGER_REPLACED:
+            await record_replacement("failed")
         generation.state = GenerationState.FAILED
         generation.claim_token = None
         generation.claimed_at = None

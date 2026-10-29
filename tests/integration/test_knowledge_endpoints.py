@@ -95,6 +95,11 @@ class StubKnowledge:
     async def list_knowledge_bases(self, *, limit: int = 50) -> list[Any]:
         return [_base()]
 
+    async def list_knowledge_bases_page(
+        self, *, limit: int = 50, cursor: str | None = None
+    ) -> tuple[list[Any], str | None]:
+        return [_base()], None
+
     async def get_knowledge_base(self, knowledge_base_id: uuid.UUID) -> KnowledgeBase:
         if self.missing:
             raise TenantIsolationError()

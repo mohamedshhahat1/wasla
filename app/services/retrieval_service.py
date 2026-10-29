@@ -32,9 +32,11 @@ Rules that matter more than anything else here:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Final
 
@@ -127,6 +129,8 @@ class Passage:
     distance: float
     document_id: uuid.UUID | None = None
     ordinal: int | None = None
+    heading_path: str | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,13 +180,22 @@ class Retrieval:
 
 
 def _source(index: int, passage: Passage) -> dict[str, Any]:
-    return {
+    entry: dict[str, Any] = {
         "source": index,
         "document_id": str(passage.document_id) if passage.document_id else None,
         "title": passage.document_title,
         "chunk": passage.ordinal,
-        "content": passage.content,
     }
+    if passage.heading_path:
+        # The section the passage sits under (FX-1.2), so a passage cut from the
+        # middle of "Pricing > Premium" still says what it prices.
+        entry["section"] = passage.heading_path
+    if passage.updated_at is not None:
+        # When this version was published (FX-2.5): the tool tells the model to
+        # prefer the most recent source when sources disagree.
+        entry["updated_at"] = passage.updated_at.date().isoformat()
+    entry["content"] = passage.content
+    return entry
 
 
 def _serialize(sources: list[dict[str, Any]]) -> str:
@@ -297,7 +310,8 @@ class RetrievalService:
         await record_ai_stage("sql", perf_counter() - searched)
 
         candidates = scored[:limit]
-        passages = tuple(_passage(row) for row in candidates if row.distance <= threshold)
+        close = [row for row in candidates if row.distance <= threshold]
+        passages = tuple(_passage(row) for row in _without_repeats(close))
         retrieval = Retrieval(passages=passages, query=cleaned)
         best = min((row.distance for row in scored), default=None)
         await record_retrieval(
@@ -306,7 +320,10 @@ class RetrievalService:
             passages=len(passages),
             model=space.model,
             best_distance=best,
-            dropped={"threshold": len(candidates) - len(passages)},
+            dropped={
+                "threshold": len(candidates) - len(close),
+                "duplicate": len(close) - len(passages),
+            },
             context_characters=len(retrieval.as_context()) if passages else 0,
         )
         logger.info(
@@ -319,7 +336,8 @@ class RetrievalService:
                 # Distances are numbers about the index, not the customer, and
                 # are what calibrating the cut-off needs (RV-26).
                 "best_distance": round(best, 4) if best is not None else None,
-                "dropped_threshold": len(candidates) - len(passages),
+                "dropped_threshold": len(candidates) - len(close),
+                "dropped_duplicate": len(close) - len(passages),
             },
         )
         return retrieval
@@ -353,6 +371,25 @@ class RetrievalService:
         )
 
 
+def _without_repeats(rows: list[ScoredChunk]) -> list[ScoredChunk]:
+    """Drop a passage whose text a higher-ranked passage already carries (RQ-08).
+
+    The safety net behind the upload-time refusal: two documents of a workspace
+    holding the same words - stored before the refusal existed, or by a race -
+    would otherwise spend two of the few slots on one fact. Compared as matched
+    text, scoped to this one search's rows, never across workspaces.
+    """
+    seen: set[str] = set()
+    kept: list[ScoredChunk] = []
+    for row in rows:
+        digest = hashlib.sha256(for_matching(row.chunk.content).encode("utf-8")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        kept.append(row)
+    return kept
+
+
 def _passage(row: ScoredChunk) -> Passage:
     return Passage(
         document_title=row.document_title,
@@ -360,6 +397,8 @@ def _passage(row: ScoredChunk) -> Passage:
         distance=row.distance,
         document_id=row.chunk.document_id,
         ordinal=row.chunk.ordinal,
+        heading_path=row.chunk.heading_path,
+        updated_at=row.document_updated_at,
     )
 
 

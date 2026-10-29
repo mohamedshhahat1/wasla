@@ -119,6 +119,7 @@ async def test_reindex_all_keeps_every_document_served_and_resumes(indexing: Ind
     assert first.requested + second.requested == 5
 
     indexing.provider.gate = asyncio.Event()
+    indexing.provider.entered = asyncio.Event()
     drain = asyncio.create_task(indexing.drain(budget=20))
     await asyncio.wait_for(indexing.provider.entered.wait(), 10)
     assert await search() == before  # served while the rebuild is held at the provider

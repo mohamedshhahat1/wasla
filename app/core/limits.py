@@ -105,6 +105,8 @@ UPLOAD_ALLOWANCES: Final[tuple[BodyAllowance, ...]] = (
     BodyAllowance("POST", re.compile(r"/platform/whatsapp-rate-cards"), UPLOAD),
     # A knowledge document as text or base64, up to 400 000 characters.
     BodyAllowance("POST", re.compile(r"/knowledge/bases/[^/]+/documents"), DOCUMENT),
+    # A new version of one (RQ-06): the same body, the same cap.
+    BodyAllowance("PUT", re.compile(r"/knowledge/documents/[^/]+/content"), DOCUMENT),
 )
 
 _BEARER: Final = "bearer "

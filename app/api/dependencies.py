@@ -481,6 +481,9 @@ def get_knowledge_service(
             model=settings.openai_embedding_model,
             dimensions=EMBEDDING_DIMENSIONS,
         ),
+        # Where uploaded originals are kept for re-extraction (RQ-23): the same
+        # store `get_media_storage` returns.
+        storage=build_media_storage(settings),
     )
 
 

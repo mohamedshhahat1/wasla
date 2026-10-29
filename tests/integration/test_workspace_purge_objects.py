@@ -42,6 +42,7 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
 )
+from app.db.models.knowledge import DocumentIndexGeneration
 from app.db.models.media import MediaStatus, MediaStorageState, MessageMedia
 from app.db.models.media_purge import MediaPurgeObject
 from app.db.models.tenant import Tenant
@@ -500,4 +501,54 @@ async def test_a_writer_that_dies_after_its_late_write_is_cleaned_up_behind(
     )
     assert late.objects_deleted == 1
     assert await store.exists(key) is False
+    assert await _ledger(committing, tenant_id) == 0
+
+
+# -------------------------------------------------------- RQ-23: knowledge originals
+
+
+async def test_a_purge_deletes_the_workspaces_knowledge_originals(
+    committing: async_sessionmaker[AsyncSession],
+    database: Database,
+    doomed: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    """A document's uploaded files - first upload and every replacement - are in
+    the store under the workspace's prefix, and the purge owes their deletes."""
+    from app.services.knowledge_service import KnowledgeService
+
+    tenant_id, _ = doomed
+    store = _store()
+    async with committing() as session:
+        knowledge = KnowledgeService(session=session, tenant_id=tenant_id, storage=store)
+        base = await knowledge.ensure_default_knowledge_base()
+        view, _ = await knowledge.submit(
+            knowledge_base_id=base.id, title="Price list", raw="Premium costs 7200 EGP."
+        )
+        await knowledge.replace_content(view.document.id, raw="Premium costs 7900 EGP.")
+        await session.commit()
+        keys = [
+            key
+            for key in await session.scalars(
+                select(DocumentIndexGeneration.original_object_key).where(
+                    DocumentIndexGeneration.tenant_id == tenant_id
+                )
+            )
+            if key
+        ]
+    assert len(keys) == 2
+    assert all([await store.exists(key) for key in keys])
+
+    now = datetime.now(UTC)
+    await _make_due(committing, tenant_id, now)
+    async with committing() as session:
+        service = WorkspacePurgeService(session, in_flight_grace=GRACE)
+        (tenant,) = await service.claim_due(now=now, limit=1)
+        outcome = await service.purge(tenant, now=now)
+        await session.commit()
+    assert outcome.objects_recorded == 2
+    finished = await PurgeWorker(
+        database=database, settings=_settings("unused"), storage=store
+    ).run_once(now=now)
+    assert finished.objects_deleted == 2
+    assert [await store.exists(key) for key in keys] == [False, False]
     assert await _ledger(committing, tenant_id) == 0
