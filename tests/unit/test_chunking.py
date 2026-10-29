@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import app.services.chunking as chunking_module
+from app.agents.memory import estimate_tokens
 from app.services.chunking import (
     CHUNK_OVERLAP_TOKENS,
     MAX_CHUNK_TOKENS,
@@ -194,12 +195,30 @@ def test_a_question_and_its_answer_stay_together() -> None:
             assert f"A: Yes, slot {match.group(1)} moves" in chunk.content
 
 
-def test_a_single_unbroken_token_is_cut_but_never_inside_a_digit_run() -> None:
-    token = "x" * 2_000 + "1234567890" * 50 + "y" * 500
+@pytest.mark.parametrize("lead", [1_700, 2_000, 2_300])
+def test_a_single_unbroken_token_is_cut_but_never_inside_a_digit_run(lead: int) -> None:
+    # The digit run straddles where a cut by length would fall for some leads:
+    # at 2,000 the cut happens to land on its edge, which proves nothing.
+    token = "x" * lead + "1234567890" * 50 + "y" * 500
     pieces = [c.content.split("\n")[-1] for c in split(token)]
     assert len(pieces) >= 3
     for left, right in itertools.pairwise(pieces):
         assert not (left[-1].isdigit() and right[0].isdigit())
+
+
+@pytest.mark.parametrize("sentences", range(1, 70, 3))
+@pytest.mark.parametrize("markdown", [False, True])
+def test_no_piece_shorter_than_the_minimum_stands_alone(sentences: int, markdown: bool) -> None:
+    # RV-08: the minimum applies to the piece, never to overlap plus piece. A
+    # short section before a heading whose section will not fit is cut off on
+    # its own by packing; only the minimum folds it into its neighbour.
+    long = " ".join(["Refunds are accepted within fourteen days of delivery."] * sentences)
+    mark = "# " if markdown else ""
+    text = normalise(f"{mark}Intro\n\nHi there.\n\n{mark}Policy\n\n{long}\n\nThanks!")
+    chunks = split(text, markdown=markdown)
+    if len(chunks) > 1:
+        for chunk in chunks:
+            assert estimate_tokens(text[chunk.start : chunk.end]) >= MIN_CHUNK_TOKENS
 
 
 def test_token_estimates_are_positive_and_sizes_comparable_across_scripts() -> None:
