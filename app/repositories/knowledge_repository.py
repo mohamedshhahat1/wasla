@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import ColumnElement, and_, delete, func, or_, select, text, update
+from sqlalchemy import ColumnElement, and_, delete, false, func, or_, select, text, update
 
 from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import ConflictError, ValidationError
@@ -753,6 +753,7 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
         lease_expired_before: datetime,
         max_attempts: int,
         limit: int,
+        requeue_before: datetime | None = None,
     ) -> list[DueGeneration]:
         """Generations owed a worker, locked so one sweeper publishes each.
 
@@ -771,12 +772,25 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
         deleted one's waits for the purge. A `FAILED` generation is never
         eligible - only a person asking for a re-index starts a new one.
 
+        And not one this sweep already queued since `requeue_before` (FX-1.9,
+        RV-18): a job that is on the queue, or was taken and is still within its
+        visibility timeout, is coming; queueing it again every minute only grew
+        the queue by up to a batch a minute during a backlog.
+
         `FOR UPDATE OF ... SKIP LOCKED`: two sweepers divide the backlog rather
         than both publishing it. Duplicates would be harmless - the claim admits
         one worker per generation - but they would double queue depth during the
         recovery that is already behind.
         """
         pending = DocumentIndexGeneration.state == GenerationState.PENDING
+        recently_queued = (
+            and_(
+                DocumentIndexGeneration.last_enqueued_at.is_not(None),
+                DocumentIndexGeneration.last_enqueued_at >= requeue_before,
+            )
+            if requeue_before is not None
+            else false()
+        )
         rows = await self.session.execute(
             select(
                 DocumentIndexGeneration.tenant_id,
@@ -806,6 +820,7 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
                         DocumentIndexGeneration.claimed_at < lease_expired_before,
                     ),
                 ),
+                ~recently_queued,
             )
             .order_by(DocumentIndexGeneration.created_at, DocumentIndexGeneration.id)
             .limit(limit)
@@ -836,19 +851,65 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
             .limit(limit)
         )
 
+    async def mark_enqueued(self, generation_ids: list[uuid.UUID], *, now: datetime) -> None:
+        """Record that the sweep queued these generations (FX-1.9)."""
+        if generation_ids:
+            await self.session.execute(
+                update(DocumentIndexGeneration)
+                .where(DocumentIndexGeneration.id.in_(generation_ids))
+                .values(last_enqueued_at=now)
+            )
+
     async def list_stale(
-        self, *, space: EmbeddingSpace, limit: int
+        self,
+        *,
+        space: EmbeddingSpace,
+        limit: int,
+        after: str | None = None,
     ) -> list[DocumentIndexGeneration]:
-        """Active generations made in a different embedding space (RAG-06)."""
-        return await self._all(
+        """Active generations made in a different embedding space (RAG-06), a page at a time.
+
+        Not a document that already has an attempt in flight - it is being
+        re-indexed - and not one whose latest attempt since this one published
+        has failed - re-trying it is a decision about that document, not part of
+        a sweep (FX-1.8, RV-12). Ordered by `(published_at, id)`; `after` is the
+        cursor of the last row of the previous page, so consecutive runs select
+        disjoint sets.
+        """
+        newer = DocumentIndexGeneration.__table__.alias("newer_generation")
+        query = (
             self._select()
             .where(
                 DocumentIndexGeneration.state == GenerationState.ACTIVE,
                 _not_in(space),
+                ~select(newer.c.id)
+                .where(
+                    newer.c.document_id == DocumentIndexGeneration.document_id,
+                    newer.c.number > DocumentIndexGeneration.number,
+                    newer.c.state.in_(
+                        (
+                            GenerationState.PENDING,
+                            GenerationState.PROCESSING,
+                            GenerationState.FAILED,
+                        )
+                    ),
+                )
+                .exists(),
             )
             .order_by(DocumentIndexGeneration.published_at, DocumentIndexGeneration.id)
-            .limit(limit)
         )
+        if after is not None:
+            moment, last = decode_cursor(after)
+            query = query.where(
+                or_(
+                    DocumentIndexGeneration.published_at > moment,
+                    and_(
+                        DocumentIndexGeneration.published_at == moment,
+                        DocumentIndexGeneration.id > last,
+                    ),
+                )
+            )
+        return await self._all(query.limit(limit))
 
     async def backlog(
         self,

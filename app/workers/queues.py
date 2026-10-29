@@ -85,6 +85,7 @@ from app.repositories.knowledge_repository import (
     TRIGGER_REINDEX,
     TRIGGER_STALE_EMBEDDING,
     IndexingSweep,
+    encode_cursor,
 )
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.workers.inbound_recovery import unprocessed_since
@@ -424,18 +425,20 @@ async def reindex_stale_embeddings(
     space: EmbeddingSpace,
     limit: int,
     dry_run: bool,
+    after: str | None = None,
 ) -> int:
     """Ask for a re-index of every document served from another space.
 
     Coalesced per document like any re-index, so running it twice queues
     nothing twice, and each document keeps serving what it serves until its new
-    generation publishes. Bounded by `--limit`; run it again for the next batch.
+    generation publishes. Bounded by `--limit`: a document already being
+    re-indexed, or whose re-index failed, is not selected again, and the cursor
+    printed at the end is where `--after` continues (RV-12).
     """
     async with database.session() as session:
-        stale = [
-            (generation.tenant_id, generation.document_id)
-            for generation in await IndexingSweep(session).list_stale(space=space, limit=limit)
-        ]
+        generations = await IndexingSweep(session).list_stale(space=space, limit=limit, after=after)
+        stale = [(generation.tenant_id, generation.document_id) for generation in generations]
+        last = generations[-1] if generations else None
     if not stale:
         print(f"no documents outside {space.describe()}")  # noqa: T201
         return 0
@@ -444,6 +447,8 @@ async def reindex_stale_embeddings(
         print(f"{verb}  {tenant_id}  {document_id}")  # noqa: T201
         if not dry_run:
             await _reindex(database, redis, tenant_id, document_id, trigger=TRIGGER_STALE_EMBEDDING)
+    if last is not None and last.published_at is not None and len(stale) == limit:
+        print(f"next page: --after {encode_cursor(last.published_at, last.id)}")  # noqa: T201
     return 0
 
 
@@ -663,6 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     restale.add_argument("--limit", type=int, default=100)
     restale.add_argument("--dry-run", action="store_true")
+    restale.add_argument("--after", default=None, help="the cursor a previous run printed")
 
     one = commands.add_parser("reindex-document", help="retry indexing one document")
     one.add_argument("tenant_id", type=uuid.UUID)
@@ -763,6 +769,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 space=space,
                 limit=arguments.limit,
                 dry_run=arguments.dry_run,
+                after=arguments.after,
             )
         finally:
             await redis_client.close()

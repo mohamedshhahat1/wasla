@@ -267,11 +267,10 @@ async def test_two_sweepers_converge_on_one_indexed_document(
     than the inbound sweeper's and deliberately so. `SKIP LOCKED` divides work
     between sweeps that genuinely *overlap* - proved directly in the test below,
     with one transaction held open across another's claim. It does not stop a
-    second sweep some seconds later re-claiming the same document, because a
-    document stays `PENDING` until the *consumer* indexes it, and the sweeper
-    marks nothing: the document's own status is the durable state, and a sweeper
-    that maintained a second one beside it would be a second thing to keep true
-    and a new way to strand a row.
+    second sweep re-claiming the same document once the queue's visibility
+    window has passed (FX-1.9), because a document stays `PENDING` until the
+    *consumer* indexes it: the document's own status is the durable state, and
+    the sweep's `last_enqueued_at` only defers a re-send, it never replaces it.
 
     So the property that has to hold is convergence rather than a single
     publication, and that is what is asserted here: however many envelopes the

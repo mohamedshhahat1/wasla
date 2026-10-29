@@ -112,10 +112,13 @@ async def test_reindex_all_keeps_every_document_served_and_resumes(indexing: Ind
         assert await search() == before
 
     first = await reindex_all(indexing.database, indexing.queue(), rate=10, limit=3, pause=pause)
-    assert first.requested == 3 and paused == [0.1, 0.1, 0.1]
+    # Pages run in document-id order, so the failed document lands in either
+    # page; it counts towards the page it is in and is never re-indexed.
+    assert first.requested + len(first.skipped_failed) == 3
+    assert paused == [0.1] * first.requested
     second = await reindex_all(indexing.database, indexing.queue(), rate=0, after=first.next_after)
     assert second.next_after is None
-    assert second.skipped_failed == [broken]
+    assert first.skipped_failed + second.skipped_failed == [broken]
     assert first.requested + second.requested == 5
 
     indexing.provider.gate = asyncio.Event()

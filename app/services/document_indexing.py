@@ -335,6 +335,9 @@ class DocumentIndexer:
             # Already published or failed: a duplicate job, or a recovery
             # re-queue that lost a race with the worker it was backing up.
             return ClaimRefusal.NOTHING_OUTSTANDING
+        # The job the sweep sent has arrived, whatever this claim decides: from
+        # here the sweep may send another when the attempt is owed one (FX-1.9).
+        generation.last_enqueued_at = None
         if not served:
             if not deleted and generation.state is GenerationState.PENDING:
                 # Visible to an operator, and spends no attempt: the workspace
