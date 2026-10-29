@@ -215,3 +215,15 @@ async def test_the_source_key_backfill_keys_unique_filenames_and_lists_the_rest(
     await backfill_source_keys(indexing.database)
     rerun = {label: (await indexing.document(i)).source_key for label, i in uploads.items()}  # type: ignore[union-attr]
     assert rerun == keys, "a second run changes nothing"
+
+
+async def test_an_upload_stores_normalised_text_hashed_as_stored(indexing: Indexing) -> None:
+    """RR-07 at the door: the hash is taken over what is stored, not what was sent."""
+    tenant_id = await indexing.workspace()
+    sent = "  Refund​ policy ‏\n\n\n\nRefunds   take 14 days.  "
+    document_id = await indexing.submit(tenant_id, sent)
+    stored = await indexing.document(document_id)
+    assert stored is not None and stored.content is not None
+    assert stored.content == for_storage(sent) != sent
+    assert stored.content_hash == content_hash(stored.content)
+    assert stored.content_hash != content_hash(sent)
