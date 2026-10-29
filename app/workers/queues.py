@@ -18,6 +18,8 @@ has exactly the audience this should have.
     docker compose exec worker python -m app.workers.queues stale-embeddings
     docker compose exec worker python -m app.workers.queues reindex-stale-embeddings --dry-run
     docker compose exec worker python -m app.workers.queues reindex-document <workspace> <document>
+    docker compose exec worker python -m app.workers.queues backfill-normalised-content --dry-run
+    docker compose exec worker python -m app.workers.queues reindex-all --rate 5 [--after <id>]
     docker compose exec worker python -m app.workers.queues unresolved-sends
 
 The database-backed commands are here because this is where an operator already
@@ -74,6 +76,7 @@ from app.core.redis import RedisClient
 from app.db.models.knowledge import (
     EMBEDDING_DIMENSIONS,
     DocumentIndexGeneration,
+    DocumentSource,
     GenerationState,
 )
 from app.db.session import Database
@@ -510,6 +513,55 @@ def _print_generations(
         print(line)  # noqa: T201
 
 
+async def backfill_command(database: Database, *, dry_run: bool) -> int:
+    """Run the normalisation back-fill and print what the operator must do next."""
+    from app.workers.knowledge_repair import backfill_normalised_content
+
+    report = await backfill_normalised_content(database, dry_run=dry_run)
+    verb = "would update" if dry_run else "updated"
+    print(f"examined {report.examined}, {verb} {report.updated}")  # noqa: T201
+    for keep, drop in report.collisions:
+        print(f"collision  keep {keep}  delete {drop}  then run the back-fill again")  # noqa: T201
+    for document_id in report.reupload:
+        print(f"re-upload  {document_id}  lines may be re-ordered")  # noqa: T201
+    return 1 if report.collisions else 0
+
+
+async def reindex_all_command(
+    database: Database,
+    redis: RedisClient,
+    *,
+    workspace: uuid.UUID | None,
+    source: DocumentSource | None,
+    rate: float,
+    after: uuid.UUID | None,
+    limit: int | None,
+    dry_run: bool,
+) -> int:
+    """Run `reindex-all` and print the cursor to resume from."""
+    from app.workers.knowledge_repair import reindex_all
+
+    report = await reindex_all(
+        database,
+        IngestionQueue(redis.client),
+        workspace=workspace,
+        source=source,
+        rate=rate,
+        after=after,
+        limit=limit,
+        dry_run=dry_run,
+    )
+    verb = "would re-index" if dry_run else "re-index requested for"
+    print(f"{verb} {report.requested} document(s)")  # noqa: T201
+    for document_id in report.skipped_failed:
+        print(f"skipped (failed)  {document_id}  retry with reindex-document")  # noqa: T201
+    if report.next_after is not None:
+        print(f"resume with  --after {report.next_after}")  # noqa: T201
+    else:
+        print("done: every document was visited")  # noqa: T201
+    return 0
+
+
 async def unresolved_sends(database: Database, *, limit: int) -> int:
     """Sends Meta may already have delivered, whose outcome is unknown.
 
@@ -616,6 +668,23 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("tenant_id", type=uuid.UUID)
     one.add_argument("document_id", type=uuid.UUID)
 
+    backfill = commands.add_parser(
+        "backfill-normalised-content",
+        help="store every document as normalised text with its true hash (RAG repair)",
+    )
+    backfill.add_argument("--dry-run", action="store_true")
+
+    everything = commands.add_parser(
+        "reindex-all",
+        help="re-index every document through the normal path, at a bounded rate (resumable)",
+    )
+    everything.add_argument("--workspace", type=uuid.UUID, default=None)
+    everything.add_argument("--source", choices=[str(s) for s in DocumentSource], default=None)
+    everything.add_argument("--rate", type=float, default=5.0, help="documents per second")
+    everything.add_argument("--after", type=uuid.UUID, default=None, help="resume after this id")
+    everything.add_argument("--limit", type=int, default=None)
+    everything.add_argument("--dry-run", action="store_true")
+
     open_sends = commands.add_parser(
         "unresolved-sends",
         help="sends whose outcome WhatsApp never confirmed (never resent automatically)",
@@ -659,10 +728,28 @@ async def run(argv: Sequence[str] | None = None) -> int:
         finally:
             await database.dispose()
 
-    if arguments.command in {"reindex-stale-embeddings", "reindex-document"}:
+    if arguments.command == "backfill-normalised-content":
+        database = Database(settings)
+        try:
+            return await backfill_command(database, dry_run=arguments.dry_run)
+        finally:
+            await database.dispose()
+
+    if arguments.command in {"reindex-stale-embeddings", "reindex-document", "reindex-all"}:
         database = Database(settings)
         redis_client = RedisClient(settings)
         try:
+            if arguments.command == "reindex-all":
+                return await reindex_all_command(
+                    database,
+                    redis_client,
+                    workspace=arguments.workspace,
+                    source=DocumentSource(arguments.source) if arguments.source else None,
+                    rate=arguments.rate,
+                    after=arguments.after,
+                    limit=arguments.limit,
+                    dry_run=arguments.dry_run,
+                )
             if arguments.command == "reindex-document":
                 return await reindex_document(
                     database,
