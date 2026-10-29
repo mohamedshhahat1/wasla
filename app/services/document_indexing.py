@@ -84,6 +84,7 @@ from app.db.models.enums import TenantStatus
 from app.db.models.knowledge import (
     Document,
     DocumentIndexGeneration,
+    DocumentSource,
     DocumentStatus,
     GenerationState,
 )
@@ -202,6 +203,8 @@ class Claim:
     attempt: int
     content: str
     space: EmbeddingSpace
+    # Markdown headings are `#` lines; other sources mark them by layout (FX-1.2).
+    markdown: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +393,7 @@ class DocumentIndexer:
             attempt=generation.attempts,
             content=document.content or "",
             space=space,
+            markdown=document.source is DocumentSource.MARKDOWN,
         )
 
     async def renew(self, claim: Claim) -> bool:
@@ -451,6 +455,7 @@ class DocumentIndexer:
                 content=piece.content,
                 token_estimate=piece.token_estimate,
                 embedding=vector,
+                heading_path=piece.heading_path,
             )
 
         previous = await self._generations.active(document_id=document.id, lock=True)
@@ -626,7 +631,7 @@ class DocumentIndexer:
         await self._session.flush()
 
 
-def split_within_limits(content: str) -> tuple[Chunk, ...]:
+def split_within_limits(content: str, *, markdown: bool = False) -> tuple[Chunk, ...]:
     """The document's chunks, refused before any cost if they exceed the limits.
 
     Checked here, at indexing time, and not only when a document is submitted:
@@ -635,7 +640,7 @@ def split_within_limits(content: str) -> tuple[Chunk, ...]:
     """
     if not has_visible_content(content):
         raise IndexingError(IndexingFailure.DOCUMENT_EMPTY, "That document has no text to index.")
-    pieces = tuple(chunking.split(content))
+    pieces = tuple(chunking.split(content, markdown=markdown))
     if not pieces:
         raise IndexingError(
             IndexingFailure.DOCUMENT_EMPTY, "That document produced no passages worth indexing."
@@ -669,7 +674,7 @@ async def prepare(
     of work of its own. A renewal that fails raises `ClaimLostError`, and no
     further batch is paid for.
     """
-    pieces = split_within_limits(claim.content)
+    pieces = split_within_limits(claim.content, markdown=claim.markdown)
     vectors: list[list[float]] = []
     for start in range(0, len(pieces), MAX_BATCH):
         if not await renew():

@@ -28,16 +28,20 @@ pytestmark = pytest.mark.integration
 # Phase 3 (normalisation, page structure): presentation 0, intact 252, top-5
 # 241, rank-1 171; words cut 70 - the old fixed-width cuts landing two words
 # differently in the normalised text, which Phase 4's chunker removes.
+# Phase 4 (structure-aware chunker): numbers, words and headings 0, duplicate
+# slots 2 (the cross-KB copy, RV-07), intact 255, rank-1 193. The six spans
+# still not intact are Arabic-Indic numbers pypdf reversed or dropped in two
+# producers' PDFs - flagged as extraction warnings, not repairable from text.
 CEILINGS = {
     "presentation": 0,
     "stale": 1,
-    "duplicates": 25,
+    "duplicates": 2,
     "empty": 6,
-    "numbers_cut": 9,
-    "words_cut": 70,
-    "headed_without": 9,
+    "numbers_cut": 0,
+    "words_cut": 0,
+    "headed_without": 0,
 }
-FLOORS = {"intact": 252, "hit": 241, "rank1": 171}
+FLOORS = {"intact": 255, "hit": 241, "rank1": 193}
 
 
 async def test_the_structural_evaluation(indexing: Indexing) -> None:

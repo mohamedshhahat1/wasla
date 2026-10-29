@@ -1,122 +1,210 @@
-"""Chunking: where most retrieval quality is won or lost."""
+"""The structure-aware chunker (FX-1.2, RV-05, RV-06, RV-08, RV-09, P-R01, P-R02).
+
+The properties are checked over generated text and over every document of the
+retrieval evaluation corpus, and the review's probes are kept as examples.
+"""
 
 from __future__ import annotations
 
+import itertools
+import random
+import re
+from pathlib import Path
+
+import pytest
+
+import app.services.chunking as chunking_module
 from app.services.chunking import (
-    CHUNK_OVERLAP_CHARACTERS,
-    MAX_CHUNK_CHARACTERS,
+    CHUNK_OVERLAP_TOKENS,
+    MAX_CHUNK_TOKENS,
+    MIN_CHUNK_TOKENS,
+    Chunk,
     normalise,
     split,
 )
+from app.services.text_normalisation import for_storage
 
-PARAGRAPHS = """
-Economy finishing
+CORPUS = Path(__file__).resolve().parents[1] / "fixtures" / "rag" / "eval" / "corpus"
+NUMBER = re.compile(r"\d[\d,.]*\d|\d")
+ARABIC_WORDS = (
+    "نقدم",
+    "خدمات",
+    "الدعم",
+    "الفني",
+    "مدار",
+    "الساعة",
+)
 
-Economy finishing costs 4500 EGP per square metre.
 
-Premium finishing
+def test_the_chunker_under_test_is_this_worktrees() -> None:
+    assert (
+        Path(chunking_module.__file__).resolve().parents[2] == Path(__file__).resolve().parents[2]
+    )
 
-Premium finishing costs 7200 EGP per square metre and adds imported fittings.
-"""
+
+def _generated(seed: int) -> str:
+    generator = random.Random(seed)  # noqa: S311 - reproducible samples
+    blocks = []
+    for _ in range(generator.randint(3, 12)):
+        kind = generator.choice(["heading", "list", "prose", "arabic", "run"])
+        if kind == "heading":
+            blocks.append(f"# Section {generator.randint(1, 99)}")
+        elif kind == "list":
+            blocks.append(
+                "\n".join(
+                    f"Item {n} - price {generator.randint(1, 99)},{generator.randint(100, 999)} EGP"
+                    for n in range(generator.randint(2, 60))
+                )
+            )
+        elif kind == "prose":
+            blocks.append(
+                " ".join(f"Clause {n} covers delivery." for n in range(generator.randint(1, 80)))
+            )
+        elif kind == "arabic":
+            blocks.append(
+                " ".join(generator.choice(ARABIC_WORDS) for _ in range(generator.randint(5, 600)))
+            )
+        else:
+            blocks.append(" ".join(str(generator.randint(0, 99999)) for _ in range(400)))
+    return "\n\n".join(blocks)
+
+
+def _documents() -> list[tuple[str, str, bool]]:
+    found = [
+        (path.name, for_storage(path.read_text(encoding="utf-8")), path.suffix == ".md")
+        for path in sorted(CORPUS.iterdir())
+    ]
+    return found + [(f"generated-{seed}", _generated(seed), True) for seed in range(40)]
+
+
+DOCUMENTS = _documents()
+
+
+def _check_properties(text: str, chunks: list[Chunk]) -> None:
+    source = normalise(text)
+    words = set(source.split())
+    assert chunks
+    position = 0
+    for chunk in chunks:
+        # Pieces are exact, consecutive slices; only whitespace lies between.
+        assert source[position : chunk.start].strip() == ""
+        piece = source[chunk.start : chunk.end]
+        assert chunk.content.endswith(piece)
+        position = chunk.end
+        # No boundary and no overlap start inside a word or a number.
+        assert set(chunk.content.split()) <= words
+        overlap = chunk.content[: -len(piece)]
+        if overlap:
+            # Joined with one newline, never a blank line, and never only overlap.
+            assert overlap.endswith("\n") and not overlap.endswith("\n\n")
+            assert piece.strip()
+        assert chunk.token_estimate <= MAX_CHUNK_TOKENS + CHUNK_OVERLAP_TOKENS + MIN_CHUNK_TOKENS
+    assert source[position:].strip() == ""
+    for number in set(NUMBER.findall(source)):
+        assert any(number in chunk.content for chunk in chunks)
+
+
+@pytest.mark.parametrize(("name", "text", "markdown"), DOCUMENTS, ids=[d[0] for d in DOCUMENTS])
+def test_every_chunker_property_holds(name: str, text: str, markdown: bool) -> None:
+    _check_properties(text, split(text, markdown=markdown))
 
 
 def test_whitespace_collapses_but_paragraph_breaks_survive() -> None:
-    """Blank lines are the boundaries the splitter depends on."""
-    cleaned = normalise("one   two\t\tthree\n\n\n\nfour   ")
-
-    assert cleaned == "one two three\n\nfour"
-
-
-def test_carriage_returns_are_normalised() -> None:
-    assert normalise("one\r\n\r\ntwo") == "one\n\ntwo"
+    assert normalise("a  b\t c\n\n\n\nd") == "a b c\n\nd"
 
 
 def test_text_with_nothing_in_it_produces_no_chunks() -> None:
-    """A caller must treat this as a failed ingestion, not an empty success."""
     assert split("") == []
-    assert split("   \n\n \t ") == []
+    assert split("  \n\n \t ") == []
 
 
 def test_a_short_document_still_produces_a_chunk() -> None:
-    """One sentence of pricing is still what answers a question about pricing."""
-    chunks = split("Delivery is free above 5000 EGP.")
-
-    assert len(chunks) == 1
-    assert "5000" in chunks[0].content
+    (chunk,) = split("Premium finishing costs 7200 EGP.")
+    assert chunk.content == "Premium finishing costs 7200 EGP."
 
 
-def test_chunks_are_numbered_from_zero_in_order() -> None:
-    chunks = split(PARAGRAPHS)
-
-    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
-
-
-def test_related_paragraphs_are_kept_together_while_they_fit() -> None:
-    """A paragraph break is a boundary, not an instruction to split."""
-    chunks = split(PARAGRAPHS)
-
-    assert len(chunks) == 1
-    assert "4500" in chunks[0].content
-    assert "7200" in chunks[0].content
+def test_a_price_list_without_full_stops_keeps_every_price_whole() -> None:
+    # RAG_SYSTEM_REVIEW.md A.2: cut at "price 13" | ",795 EGP" and glued "\n\n".
+    lines = "\n".join(
+        f"Bookshelf model {n} - price {13 + n},{795 + n} EGP - warranty 3 years" for n in range(40)
+    )
+    chunks = split(lines)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert "\n\n" not in chunk.content
+        for line in chunk.content.split("\n"):
+            assert re.fullmatch(r"Bookshelf model \d+ - price \d+,\d+ EGP - warranty 3 years", line)
 
 
-def test_a_long_document_is_split() -> None:
-    text = "\n\n".join(f"Paragraph {index} about finishing work." * 20 for index in range(12))
-
+def test_arabic_prose_without_full_stops_is_never_cut_inside_a_word() -> None:
+    text = " ".join(ARABIC_WORDS * 120)
     chunks = split(text)
-
     assert len(chunks) > 1
+    for chunk in chunks:
+        assert set(chunk.content.split()) <= set(ARABIC_WORDS)
 
 
-def test_no_chunk_greatly_exceeds_the_budget() -> None:
-    """Overlap adds to a chunk, so the ceiling is the budget plus the overlap."""
-    text = "\n\n".join(f"Paragraph {index}. " * 60 for index in range(10))
+def test_a_page_number_never_becomes_a_passage() -> None:
+    # A.1 case 1: "Page 3" became a chunk of overlap plus "Page 3".
+    long = " ".join(["Refunds are accepted within fourteen days of delivery."] * 20)
+    chunks = split(f"{long}\n\nPage 3\n\n{long}")
+    assert not [c for c in chunks if c.content.strip().endswith("Page 3")]
+    assert all(chunk.heading_path is None for chunk in chunks)
 
+
+def test_a_heading_moves_with_the_section_it_introduces() -> None:
+    # A.1 case 2: "## Refund policy" ended the Shipping chunk on its own.
+    policy = " ".join(
+        ["Customers may return any unused item. The item must be in its original packaging."] * 14
+    )
+    text = f"## Shipping\n\nWe ship within three days.\n\n## Refund policy\n\n{policy}"
+    chunks = split(text, markdown=True)
+    assert not [c for c in chunks if c.content.rstrip().endswith("## Refund policy")]
+    for chunk in chunks:
+        if "Customers may" in chunk.content and "We ship" not in chunk.content:
+            assert chunk.heading_path == "Refund policy"
+
+
+def test_markdown_headings_are_structure_with_breadcrumbs() -> None:
+    body = " ".join(["Premium finishing uses imported materials and a certified crew."] * 30)
+    text = f"# Pricing\n\n## Economy\n\n4500 EGP per square metre.\n\n## Premium\n\n{body}"
+    chunks = split(text, markdown=True)
+    premium = [c for c in chunks if "imported materials" in c.content]
+    assert len(premium) > 1
+    assert {c.heading_path for c in premium} == {"Pricing > Premium"}
+    # Not markdown: the same "#" lines are plain short lines, still sections.
+    assert all(c.heading_path for c in split(text))
+
+
+def test_overlap_is_whole_sentences_or_words() -> None:
+    # A.1 case 6: chunk 1 began "o foxtrot golf.".
+    text = "alpha bravo charlie delta echo foxtrot golf. " * 60
     chunks = split(text)
-
-    ceiling = MAX_CHUNK_CHARACTERS + CHUNK_OVERLAP_CHARACTERS + 8
-    assert all(len(chunk.content) <= ceiling for chunk in chunks)
-
-
-def test_consecutive_chunks_overlap() -> None:
-    """An answer straddling a boundary is otherwise unreachable from either side."""
-    text = "\n\n".join(f"Sentence number {index} about pricing. " * 40 for index in range(6))
-
-    chunks = split(text)
-
     assert len(chunks) > 1
-    # The second chunk opens with text carried from the end of the first.
-    carried = chunks[1].content[:CHUNK_OVERLAP_CHARACTERS].strip()
-    assert carried
-    assert carried[:40] in chunks[0].content
+    assert chunks[1].content.startswith("alpha bravo")
 
 
-def test_a_single_oversized_paragraph_is_broken_at_sentences() -> None:
-    sentence = "Premium finishing costs 7200 EGP per square metre. "
-    chunks = split(sentence * 60)
-
-    assert len(chunks) > 1
-    # Cuts landed on sentence ends, so no chunk starts mid-word.
-    assert all(chunk.content.strip() for chunk in chunks)
-
-
-def test_a_single_sentence_longer_than_the_budget_is_cut_by_length() -> None:
-    """No boundary is left to respect, so length is the only option left."""
-    chunks = split("x" * (MAX_CHUNK_CHARACTERS * 3))
-
-    assert len(chunks) >= 3
+def test_a_question_and_its_answer_stay_together() -> None:
+    pairs = "\n\n".join(
+        f"Q: Can I reschedule slot {n}?\nA: Yes, slot {n} moves up to {n} hours before."
+        for n in range(30)
+    )
+    for chunk in split(pairs):
+        for match in re.finditer(r"Q: Can I reschedule slot (\d+)\?", chunk.content):
+            assert f"A: Yes, slot {match.group(1)} moves" in chunk.content
 
 
-def test_arabic_sentences_split_on_arabic_punctuation() -> None:
-    """The product is Arabic-first, so the Arabic full stop is a boundary."""
-    # The Arabic full stop is the real character here, not a hyphen lookalike.
-    sentence = "سعر التشطيب سبعة آلاف جنيه للمتر المربع۔ "  # noqa: RUF001
-    chunks = split(sentence * 80)
+def test_a_single_unbroken_token_is_cut_but_never_inside_a_digit_run() -> None:
+    token = "x" * 2_000 + "1234567890" * 50 + "y" * 500
+    pieces = [c.content.split("\n")[-1] for c in split(token)]
+    assert len(pieces) >= 3
+    for left, right in itertools.pairwise(pieces):
+        assert not (left[-1].isdigit() and right[0].isdigit())
 
-    assert len(chunks) > 1
 
-
-def test_token_estimates_are_positive() -> None:
-    chunks = split(PARAGRAPHS)
-
-    assert all(chunk.token_estimate > 0 for chunk in chunks)
+def test_token_estimates_are_positive_and_sizes_comparable_across_scripts() -> None:
+    english = split(" ".join(["Premium finishing costs 7200 EGP per metre."] * 200))
+    arabic = split(" ".join(ARABIC_WORDS * 300))
+    assert all(chunk.token_estimate > 0 for chunk in english + arabic)
+    biggest = max(c.token_estimate for c in english + arabic)
+    assert biggest <= MAX_CHUNK_TOKENS + CHUNK_OVERLAP_TOKENS

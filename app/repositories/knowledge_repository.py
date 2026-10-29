@@ -368,6 +368,7 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         content: str,
         token_estimate: int,
         embedding: list[float] | None,
+        heading_path: str | None = None,
     ) -> DocumentChunk:
         return self.add(
             DocumentChunk(
@@ -379,6 +380,7 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 content=content,
                 token_estimate=token_estimate,
                 embedding=embedding,
+                heading_path=heading_path,
             )
         )
 

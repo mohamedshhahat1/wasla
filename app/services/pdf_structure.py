@@ -74,7 +74,8 @@ def _key(line: str) -> str:
     return _ANY_DIGITS.sub("#", line.strip().casefold())
 
 
-def _is_page_number(line: str) -> bool:
+def is_page_number(line: str) -> bool:
+    """Whether a line is nothing but a page number, in any of the forms above."""
     return bool(_PAGE_NUMBER.match(line.strip()))
 
 
@@ -91,7 +92,7 @@ def _running_lines(pages: Sequence[list[str]]) -> set[str]:
 
 def _strip_edges(lines: list[str], running: set[str]) -> list[str]:
     def furniture(line: str) -> bool:
-        return not line.strip() or _is_page_number(line) or _key(line) in running
+        return not line.strip() or is_page_number(line) or _key(line) in running
 
     start, end = 0, len(lines)
     while start < end and start < EDGE_LINES * 2 and furniture(lines[start]):
@@ -136,6 +137,7 @@ __all__ = [
     "DIGITS_GLUED_TO_ARABIC",
     "EXTRACTION_WARNING_CODES",
     "StructuredText",
+    "is_page_number",
     "structure",
     "warnings_for",
 ]
