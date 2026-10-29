@@ -510,3 +510,93 @@ async def test_mutations_carry_the_acting_user_into_the_service(
 
     assert len(knowledge.actors) == 4
     assert all(actor is not None and actor.id == USER_ID for actor in knowledge.actors)
+
+
+# ---------------------------------------------------- search preview and settings (RAG part 2)
+
+
+class StubPreview:
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    async def search(self, request: Any) -> Any:
+        from app.schemas.knowledge import SearchResponse
+
+        self.requests.append(request)
+        return SearchResponse(passages=[], is_empty=True, model_context="none")
+
+
+class StubSwitches:
+    def __init__(self) -> None:
+        self.changes: list[dict[str, Any]] = []
+
+    async def view(self) -> dict[str, Any]:
+        return {"overrides": {}, "effective": {"rerank": False}}
+
+    async def update(self, changes: dict[str, Any], *, actor: Any = None) -> dict[str, Any]:
+        self.changes.append(changes)
+        return {"overrides": changes, "effective": {"rerank": False}}
+
+
+@pytest.fixture
+def preview(app: FastAPI) -> StubPreview:
+    from app.api.dependencies import get_knowledge_preview
+
+    stub = StubPreview()
+    app.dependency_overrides[get_knowledge_preview] = lambda: stub
+    return stub
+
+
+@pytest.fixture
+def switches(app: FastAPI) -> StubSwitches:
+    from app.api.dependencies import get_knowledge_settings_service
+
+    stub = StubSwitches()
+    app.dependency_overrides[get_knowledge_settings_service] = lambda: stub
+    return stub
+
+
+async def test_an_admin_can_preview_a_search(
+    client: AsyncClient, app: FastAPI, preview: StubPreview
+) -> None:
+    _as(app, TenantRole.TENANT_ADMIN)
+    response = await client.post(
+        f"{PATH}/search", json={"query": "premium price", "alternate_query": "premium price"}
+    )
+    assert response.status_code == 200
+    assert response.json()["is_empty"] is True
+    (request,) = preview.requests
+    assert request.query == "premium price"
+
+
+async def test_a_member_cannot_preview_a_search(
+    client: AsyncClient, app: FastAPI, preview: StubPreview
+) -> None:
+    """M-R52: the preview reads every knowledge base; members are refused."""
+    _as(app, TenantRole.MEMBER)
+    response = await client.post(f"{PATH}/search", json={"query": "premium price"})
+    assert response.status_code == 403
+    assert preview.requests == []
+
+
+async def test_the_preview_refuses_more_passages_than_the_tool_offers(
+    client: AsyncClient, app: FastAPI, preview: StubPreview
+) -> None:
+    _as(app, TenantRole.TENANT_ADMIN)
+    response = await client.post(f"{PATH}/search", json={"query": "q", "top_k": 7})
+    assert response.status_code == 422
+
+
+async def test_knowledge_settings_are_admin_only_and_validated(
+    client: AsyncClient, app: FastAPI, switches: StubSwitches
+) -> None:
+    _as(app, TenantRole.MEMBER)
+    assert (await client.get(f"{PATH}/settings")).status_code == 403
+    assert (await client.patch(f"{PATH}/settings", json={"rerank": True})).status_code == 403
+    _as(app, TenantRole.TENANT_ADMIN)
+    assert (await client.patch(f"{PATH}/settings", json={"temperature": 1})).status_code == 422
+    bad = await client.patch(f"{PATH}/settings", json={"number_grounding": "loud"})
+    assert bad.status_code == 422
+    ok = await client.patch(f"{PATH}/settings", json={"number_grounding": "strict"})
+    assert ok.status_code == 200
+    assert switches.changes == [{"number_grounding": "strict"}]

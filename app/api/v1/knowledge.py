@@ -29,7 +29,9 @@ from fastapi import APIRouter, Query, Response, status
 from app.api.dependencies import (
     ActiveWorkspaceDep,
     EntitlementServiceDep,
+    KnowledgePreviewDep,
     KnowledgeServiceDep,
+    KnowledgeSettingsDep,
     TenantAdminDep,
 )
 from app.api.route import CommittingRoute
@@ -44,6 +46,10 @@ from app.schemas.knowledge import (
     KnowledgeBaseCreateRequest,
     KnowledgeBaseRead,
     KnowledgeBaseUpdateRequest,
+    KnowledgeSettingsRead,
+    KnowledgeSettingsUpdate,
+    SearchRequest,
+    SearchResponse,
 )
 
 router = APIRouter(route_class=CommittingRoute, prefix="/knowledge", tags=["knowledge"])
@@ -51,6 +57,47 @@ router = APIRouter(route_class=CommittingRoute, prefix="/knowledge", tags=["know
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=200)]
 NEXT_CURSOR_HEADER = "X-Next-Cursor"
+
+
+@router.post("/search", response_model=SearchResponse)
+async def preview_search(
+    body: SearchRequest,
+    preview: KnowledgePreviewDep,
+    admin: TenantAdminDep,
+) -> SearchResponse:
+    """Run the search an agent of this workspace would run, and show the working (FX-3.9).
+
+    The same service, the same predicates, the same policy the workspace's
+    answering agent searches under - its scope included - and the same JSON the
+    model would read. Every candidate is listed with what became of it, so an
+    administrator can see why a document was not used. Admins only, like every
+    knowledge write: the preview reads every knowledge base of the workspace.
+    Metered like a search: it costs an embedding call.
+    """
+    return await preview.search(body)
+
+
+@router.get("/settings", response_model=KnowledgeSettingsRead)
+async def get_knowledge_settings(
+    switches: KnowledgeSettingsDep, admin: TenantAdminDep
+) -> KnowledgeSettingsRead:
+    """The workspace's retrieval switches, and what is in effect after the defaults."""
+    return KnowledgeSettingsRead(**await switches.view())
+
+
+@router.patch("/settings", response_model=KnowledgeSettingsRead)
+async def update_knowledge_settings(
+    body: KnowledgeSettingsUpdate,
+    switches: KnowledgeSettingsDep,
+    admin: TenantAdminDep,
+) -> KnowledgeSettingsRead:
+    """Override a retrieval switch for this workspace; null returns it to the default.
+
+    Audited: these decide whether answers are re-ranked, whether a price the
+    agent quotes is checked, and whether a search runs before the first round.
+    """
+    view = await switches.update(body.model_dump(exclude_unset=True), actor=admin.user)
+    return KnowledgeSettingsRead(**view)
 
 
 @router.get("/bases", response_model=list[KnowledgeBaseRead])

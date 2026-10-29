@@ -8,11 +8,12 @@ could forge to aim a route at another workspace's data.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Annotated
 
+import httpx
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -30,6 +31,7 @@ from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
 from app.db.models.billing import LimitKey
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.integrations.billing import build_checkout_provider
+from app.integrations.openai.embeddings import build_http_client as build_embeddings_http_client
 from app.integrations.whatsapp.ownership import MetaOwnershipVerifier
 from app.platform.access_audit import PlatformAccessAudit
 from app.platform.hierarchy import require_platform_authority_over
@@ -57,7 +59,9 @@ from app.services.follow_up_service import FollowUpService
 from app.services.inbox_service import InboxService
 from app.services.invitation_service import InvitationService
 from app.services.invoice_service import InvoiceService
+from app.services.knowledge_preview_service import KnowledgePreviewService
 from app.services.knowledge_service import KnowledgeService
+from app.services.knowledge_settings_service import KnowledgeSettingsService
 from app.services.lead_service import LeadService
 from app.services.media_service import MediaService
 from app.services.membership_service import MembershipService
@@ -488,6 +492,42 @@ def get_knowledge_service(
 
 
 KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)]
+
+
+def get_knowledge_settings_service(
+    session: SessionDep, workspace: ActiveWorkspaceDep, settings: SettingsDep
+) -> KnowledgeSettingsService:
+    """Workspace-scoped retrieval switches (G9)."""
+    return KnowledgeSettingsService(
+        session=session, tenant_id=workspace.tenant.id, settings=settings
+    )
+
+
+KnowledgeSettingsDep = Annotated[KnowledgeSettingsService, Depends(get_knowledge_settings_service)]
+
+
+async def get_provider_http() -> AsyncIterator[httpx.AsyncClient]:
+    """One request's HTTP client for a provider call; replaced in tests at the transport."""
+    async with build_embeddings_http_client() as http:
+        yield http
+
+
+ProviderHttpDep = Annotated[httpx.AsyncClient, Depends(get_provider_http)]
+
+
+def get_knowledge_preview(
+    session: SessionDep,
+    workspace: ActiveWorkspaceDep,
+    settings: SettingsDep,
+    http: ProviderHttpDep,
+) -> KnowledgePreviewService:
+    """The admin search preview, workspace-scoped (FX-3.9)."""
+    return KnowledgePreviewService(
+        session=session, tenant_id=workspace.tenant.id, settings=settings, http=http
+    )
+
+
+KnowledgePreviewDep = Annotated[KnowledgePreviewService, Depends(get_knowledge_preview)]
 
 
 def get_lead_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> LeadService:

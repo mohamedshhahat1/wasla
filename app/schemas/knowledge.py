@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -289,19 +289,50 @@ class DocumentSubmission(BaseModel):
 
 
 class PassageRead(BaseModel):
-    """One retrieved passage, for the search preview endpoint."""
+    """One retrieved passage, as the search preview shows it (FX-3.9).
 
+    `source` is the number the model reads; `document_id` the mapping the server
+    keeps (IMP-22). `channels` says which retrieval channel found it.
+    """
+
+    source: int
+    document_id: uuid.UUID | None
     document_title: str
+    section: str | None
     content: str
     distance: float
+    channels: list[str]
+    chunk_ordinals: list[int]
+    updated_at: datetime | None
+
+
+class CandidateRead(BaseModel):
+    """A candidate the search saw, and what became of it."""
+
+    document_id: uuid.UUID
+    document_title: str
+    chunk_ordinal: int
+    distance: float
+    channels: list[str]
+    #: `kept`, `threshold`, `duplicate`, `margin` or `top_k` (past the count asked for,
+    #: including a passage the per-document cap moved behind other documents).
+    outcome: str
 
 
 class SearchRequest(BaseModel):
+    """What the admin preview searches for: exactly what the agent's tool takes."""
+
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1, max_length=2_000)
-    top_k: int = Field(default=4, ge=1, le=10)
+    alternate_query: str | None = Field(default=None, min_length=1, max_length=2_000)
+    top_k: int = Field(default=4, ge=1, le=6)
     knowledge_base_id: uuid.UUID | None = None
+
+    @field_validator("query", "alternate_query")
+    @classmethod
+    def _query(cls, value: str | None) -> str | None:
+        return _storable(value)
 
 
 class SearchResponse(BaseModel):
@@ -314,3 +345,37 @@ class SearchResponse(BaseModel):
 
     passages: list[PassageRead]
     is_empty: bool
+    #: The confidence tier the model would be told, or None while tiers are off.
+    match: str | None = None
+    #: The best distance among all candidates, before any threshold.
+    best_distance: float | None = None
+    #: Candidates per channel, and how many were dropped for each reason.
+    candidates: dict[str, int] = Field(default_factory=dict)
+    dropped: dict[str, int] = Field(default_factory=dict)
+    rerank: str = "disabled"
+    decisions: list[CandidateRead] = Field(default_factory=list)
+    #: Kept passages from two documents with the same title: often an old and
+    #: a new version that should have been a replacement (RV-02).
+    duplicate_version_warnings: list[str] = Field(default_factory=list)
+    #: The JSON the model would read, byte for byte.
+    model_context: str = ""
+
+
+class KnowledgeSettingsRead(BaseModel):
+    """A workspace's retrieval switches: what it set, and what is in effect (G9)."""
+
+    overrides: dict[str, Any]
+    effective: dict[str, Any]
+
+
+class KnowledgeSettingsUpdate(BaseModel):
+    """Overrides of the deployment's defaults; null clears one back to the default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hybrid: bool | None = None
+    rerank: bool | None = None
+    confidence_tiers: bool | None = None
+    number_grounding: Literal["off", "observe", "correct", "strict"] | None = None
+    pre_retrieval: bool | None = None
+    parallel_sentiment: bool | None = None

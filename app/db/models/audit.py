@@ -500,6 +500,9 @@ class AuditAction(StrEnum):
     # A knowledge base renamed, or deleted with what it held (FX-2.4).
     KNOWLEDGE_BASE_UPDATED = "knowledge_base_updated"
     KNOWLEDGE_BASE_DELETED = "knowledge_base_deleted"
+    # A workspace's retrieval switches changed (G9): re-rank, grounding,
+    # pre-retrieval and the rest. `meta` carries the switches and values.
+    KNOWLEDGE_SETTINGS_UPDATED = "knowledge_settings_updated"
 
     # Platform staff reading across workspaces (ADR-095). The one place this
     # vocabulary records a *read*, and the exception is argued rather than
@@ -712,6 +715,8 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "knowledge_document_metadata_updated",
     "knowledge_base_updated",
     "knowledge_base_deleted",
+    # 0134
+    "knowledge_settings_updated",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER
