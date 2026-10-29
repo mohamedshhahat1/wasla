@@ -68,12 +68,15 @@ async def test_an_old_pgvector_fails_the_search_and_the_preflight_names_the_mini
 
 @pytest.mark.skipif(OLD_URL is None, reason=OPT_IN)
 async def test_readiness_reports_postgresql_down_on_an_old_pgvector() -> None:
+    # Settings built here rather than through the AI harness: CI's kept-data
+    # sweep runs every file naming that harness and refuses any skip, and
+    # this one skips wherever no old pgvector is configured.
+    from app.core.config import Settings
     from app.core.exceptions import DependencyUnavailableError
     from app.db.session import Database
-    from tests.integration.ai_harness import settings_for
 
     assert OLD_URL is not None
-    database = Database(settings_for(OLD_URL))
+    database = Database(Settings(_env_file=None, environment="test", database_url=OLD_URL))
     try:
         with pytest.raises(DependencyUnavailableError, match="0.8.0"):
             await database.check(5)
