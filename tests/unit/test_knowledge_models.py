@@ -38,6 +38,8 @@ def test_knowledge_tables_declare_the_indexes_the_migrations_create() -> None:
         "ix_documents_tenant_id",
         "ix_documents_tenant_id_status",
         "ix_documents_knowledge_base_id",
+        # Migration 0129: one document per source key in a knowledge base (RQ-07).
+        "uq_documents_tenant_kb_source_key",
     }
     assert _index_names(as_table(DocumentChunk.__table__)) == {
         "ix_document_chunks_tenant_id",
@@ -206,8 +208,11 @@ def test_chunks_die_with_their_document_generation_and_knowledge_base() -> None:
 
 
 def test_documents_die_with_their_knowledge_base() -> None:
-    (foreign_key,) = as_table(Document.__table__).c.knowledge_base_id.foreign_keys
-    assert foreign_key.column.table.name == "knowledge_bases"
+    (foreign_key,) = [
+        key
+        for key in as_table(Document.__table__).c.knowledge_base_id.foreign_keys
+        if key.column.table.name == "knowledge_bases"
+    ]
     assert foreign_key.ondelete == "CASCADE"
 
 

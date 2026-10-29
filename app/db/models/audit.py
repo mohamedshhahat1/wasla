@@ -492,6 +492,14 @@ class AuditAction(StrEnum):
     # per failed generation, so "why did this document stop updating" has an
     # answer beyond the current row.
     KNOWLEDGE_DOCUMENT_INDEXING_FAILED = "knowledge_document_indexing_failed"
+    # A document's content replaced by a new version, which serves once it is
+    # indexed (RQ-06); and a resubmission or replacement that changed only the
+    # title, filename or media type (RQ-09). `meta` never carries the text.
+    KNOWLEDGE_DOCUMENT_REPLACED = "knowledge_document_replaced"
+    KNOWLEDGE_DOCUMENT_METADATA_UPDATED = "knowledge_document_metadata_updated"
+    # A knowledge base renamed, or deleted with what it held (FX-2.4).
+    KNOWLEDGE_BASE_UPDATED = "knowledge_base_updated"
+    KNOWLEDGE_BASE_DELETED = "knowledge_base_deleted"
 
     # Platform staff reading across workspaces (ADR-095). The one place this
     # vocabulary records a *read*, and the exception is argued rather than
@@ -699,6 +707,11 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     # 0122
     "follow_up_settings_updated",
     "follow_up_stopped_by_person",
+    # 0131
+    "knowledge_document_replaced",
+    "knowledge_document_metadata_updated",
+    "knowledge_base_updated",
+    "knowledge_base_deleted",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

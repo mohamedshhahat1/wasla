@@ -184,6 +184,27 @@ class Document(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "knowledge_base_id",
             name="uq_documents_tenant_id_id_knowledge_base_id",
         ),
+        # One document per source key in a knowledge base (RQ-07).
+        Index(
+            "uq_documents_tenant_kb_source_key",
+            "tenant_id",
+            "knowledge_base_id",
+            "source_key",
+            unique=True,
+            postgresql_where=text("source_key IS NOT NULL"),
+        ),
+        # What a document supersedes is in its own workspace and knowledge base,
+        # by construction; deleting it clears only the link.
+        ForeignKeyConstraint(
+            ["tenant_id", "supersedes_document_id", "knowledge_base_id"],
+            ["documents.tenant_id", "documents.id", "documents.knowledge_base_id"],
+            name="fk_documents_supersedes_same_knowledge_base",
+            ondelete="SET NULL (supersedes_document_id)",
+        ),
+        CheckConstraint(
+            "valid_until IS NULL OR valid_from IS NULL OR valid_until > valid_from",
+            name="validity_window_ordered",
+        ),
     )
 
     knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
@@ -223,6 +244,19 @@ class Document(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # there were none.
     extraction_warnings: Mapped[dict[str, int] | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
+    )
+    # A stable identity for "the same document, updated" (RQ-07): given by the
+    # client, or derived from the filename. Unique per knowledge base when set,
+    # so uploading `pricing.pdf` again is recognised as a new version of it.
+    source_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # When this document's facts apply (RQ-24, FX-2.7). Retrieval leaves out a
+    # document outside its window; NULL is open-ended.
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The document this one replaces as a source of truth, in the same
+    # knowledge base. Informational; deleting it clears the link.
+    supersedes_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
 
     @property
@@ -346,6 +380,35 @@ class DocumentIndexGeneration(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, Time
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # **The content this generation indexes** (RQ-06, FX-2.1). A replacement
+    # carries its own text and metadata here, so the document keeps serving its
+    # current version - and keeps its current text, title and hash - until this
+    # generation publishes, when the swap copies these onto the document in the
+    # same transaction. NULL on a re-index of the stored text and on every
+    # generation made before replacement existed: those index `documents.content`.
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[DocumentSource | None] = mapped_column(DOCUMENT_SOURCE_TYPE, nullable=True)
+    extraction_warnings: Mapped[dict[str, int] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    # The uploaded file in the media object store, tenant-prefixed (RQ-23), so
+    # the text can be extracted again when the extractor improves.
+    original_object_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # When the recovery sweep last put this attempt on the queue (FX-1.9).
+    last_enqueued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    @property
+    def has_snapshot(self) -> bool:
+        """Whether this generation indexes content of its own rather than the document's."""
+        return self.content is not None
 
 
 class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
