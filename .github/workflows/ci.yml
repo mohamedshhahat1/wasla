@@ -188,10 +188,14 @@ jobs:
           # so the exemption granted here cannot become a place for it to go
           # quietly missing.
           #
+          # The old-pgvector guard (RV-03) needs a second, deliberately outdated
+          # PostgreSQL; its supported-version half runs everywhere, the
+          # refusal half where WASLA_TEST_OLD_PGVECTOR_URL names one.
+          #
           # Any other skip - a fixture that started returning None, a marker
           # added to get a red build green - fails here rather than blending
           # into a count.
-          UNEXPECTED=$(grep -E "^SKIPPED" /tmp/pytest.txt             | grep -vE "real-provider tests are opt-in|the model declined to call a tool|schema parity is only meaningful against a migration-built database" || true)
+          UNEXPECTED=$(grep -E "^SKIPPED" /tmp/pytest.txt             | grep -vE "real-provider tests are opt-in|the model declined to call a tool|schema parity is only meaningful against a migration-built database|the old-pgvector lane is opt-in" || true)
           if [ -n "$UNEXPECTED" ]; then
             echo "::error::a test skipped for a reason nobody chose"
             echo "$UNEXPECTED"

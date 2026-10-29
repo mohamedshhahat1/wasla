@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import Settings
 from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
+from app.core.pgvector_version import pgvector_problem
 from app.core.tracing import DB_SYSTEM, DB_SYSTEM_VALUE, span
 
 logger = get_logger(__name__)
@@ -174,6 +175,8 @@ class Database:
         try:
             async with asyncio.timeout(limit):
                 await self._select_one()
+        except DependencyUnavailableError:
+            raise
         except Exception as exc:
             logger.warning(
                 "health.database_unavailable",
@@ -187,6 +190,11 @@ class Database:
     async def _select_one(self) -> None:
         async with self._engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
+            # A database on a pgvector older than knowledge search needs answers
+            # every query but this one and fails every search (RV-03, FX-1.3).
+            problem = await pgvector_problem(connection)
+        if problem is not None:
+            raise DependencyUnavailableError(problem, details={"dependency": "postgresql"})
 
     async def dispose(self) -> None:
         """Close all pooled connections."""
