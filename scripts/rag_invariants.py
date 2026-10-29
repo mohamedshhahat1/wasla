@@ -1,4 +1,4 @@
-"""The knowledge tables' invariants after the RAG remediation (RR-01 .. RR-10).
+"""The knowledge tables' invariants after the RAG remediation (RR-01 .. RR-12).
 
 Run by `python -m scripts.omnichannel_invariants verify` with every other
 invariant, and on its own as
@@ -19,9 +19,11 @@ generation names is there, for a bounded sample - it never lists the bucket
 (ADR-087), so an object no row names is not found here; the upload path
 deletes an original whose document was not committed.
 
-RR-09 belongs to Part 3 and RR-12 to Part 2; the numbers are kept so every id
-keeps one meaning. RR-11 (a document past `valid_until` returned by search) is
-a property of the query, proved by its test, not of stored rows.
+RR-12 (Part 2) counts active chunks the exact-word channel cannot find: zero
+once `reindex-all` has rebuilt what was published before migration 0132. RR-09
+belongs to Part 3; the number is kept so every id keeps one meaning. RR-11 (a
+document past `valid_until` returned by search) is a property of the query,
+proved by its test, not of stored rows.
 """
 
 from __future__ import annotations
@@ -89,6 +91,16 @@ RAG_INVARIANTS: Final[tuple[Check, ...]] = (
         " WHERE c.tenant_id <> d.tenant_id OR c.tenant_id <> g.tenant_id"
         " OR c.knowledge_base_id <> d.knowledge_base_id OR g.document_id <> c.document_id",
     ),
+    Check(
+        # RAG part 2 (RQ-15): every chunk an active generation serves is
+        # searchable by its exact words. NULL only for chunks published before
+        # migration 0132, until `reindex-all` rebuilds them; the vector channel
+        # still finds those.
+        "rr12_active_chunk_without_lexical_text",
+        "SELECT count(*) FROM document_chunks c JOIN document_index_generations g"
+        " ON g.id = c.generation_id WHERE g.state = 'active'"
+        " AND (c.search_text IS NULL OR c.search_tsv IS NULL)",
+    ),
 )
 
 NOT_NORMALISED: Final = "rr07_stored_text_not_normalised"
@@ -97,7 +109,7 @@ BATCH: Final = 200
 
 
 async def rag_violations(connection: AsyncConnection) -> dict[str, int]:
-    """RR-01 .. RR-08: the SQL counts, then the Python half of RR-07."""
+    """RR-01 .. RR-08 and RR-12: the SQL counts, then the Python half of RR-07."""
     found = {
         check.name: int((await connection.execute(text(check.query))).scalar_one())
         for check in RAG_INVARIANTS

@@ -133,6 +133,15 @@ async def _rr08(c: AsyncConnection, ids: dict[str, uuid.UUID]) -> None:
     )
 
 
+async def _rr12(c: AsyncConnection, ids: dict[str, uuid.UUID]) -> None:
+    # A chunk published before migration 0132: served, but not by exact words.
+    await _sql(
+        c,
+        "UPDATE document_chunks SET search_text = NULL, search_tsv = NULL WHERE document_id = :d",
+        d=ids["second"],
+    )
+
+
 CASES: dict[str, Inject] = {
     "rr01_document_with_more_than_one_active_generation": _rr01,
     "rr02_ready_document_not_served_by_one_active_generation_with_chunks": _rr02,
@@ -143,6 +152,7 @@ CASES: dict[str, Inject] = {
     "rr07_content_hash_not_the_hash_of_the_stored_text": _rr07_hash,
     "rr07_stored_text_not_normalised": _rr07_text,
     "rr08_chunk_disagreeing_with_its_parents": _rr08,
+    "rr12_active_chunk_without_lexical_text": _rr12,
 }
 
 
