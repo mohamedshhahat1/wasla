@@ -93,6 +93,8 @@ from app.repositories.conversation_repository import ConversationRepository, Mes
 from app.services.ai_turn_charge import AITurnCharge, SettleResult, record_settlement
 from app.services.entitlement_service import EntitlementService
 from app.services.inbox_service import InboxService
+from app.services.knowledge_rerank import LlmReranker
+from app.services.knowledge_settings_service import KnowledgeSettingsService
 from app.services.messaging_service import MessagingService
 from app.services.sentiment_reader import SentimentAnalyzer
 from app.services.sentiment_service import SentimentService
@@ -153,6 +155,12 @@ QUOTA_HANDOFF_REASON: Final = (
 EMPTY_RESPONSE_HANDOFF_REASON: Final = (
     "AI_EMPTY_RESPONSE: the AI produced no reply, so the customer was told a colleague "
     "will follow up."
+)
+# A reply withheld because it quoted a price or percentage no source of the
+# turn supported, under the strict grounding mode (RQ-19).
+UNGROUNDED_NUMBER_HANDOFF_REASON: Final = (
+    "AI_UNGROUNDED_NUMBER: the AI's reply quoted a figure the knowledge base did not "
+    "support, so it was not sent and the customer was told a colleague would confirm."
 )
 
 # Deliberately shorter than the idempotent queues': the only failures this
@@ -849,7 +857,16 @@ class AgentWorker:
                     await self._record_disclosure(session, job, sent)
                 final = TurnOutcome.REPLIED
             else:
-                await self._answer_emptiness(messaging, session, job)
+                await self._answer_emptiness(
+                    messaging,
+                    session,
+                    job,
+                    reason=(
+                        UNGROUNDED_NUMBER_HANDOFF_REASON
+                        if outcome.grounding_withheld
+                        else EMPTY_RESPONSE_HANDOFF_REASON
+                    ),
+                )
                 final = TurnOutcome.EMPTY_RESPONSE
         await self._complete_turn(job, final, response_id=outcome.response_id)
 
@@ -885,11 +902,27 @@ class AgentWorker:
                     model=self._settings.openai_sentiment_model,
                 ),
             )
+            # The workspace's knowledge switches (G9): the deployment's
+            # defaults with its own overrides, read once for the turn.
+            knowledge = await KnowledgeSettingsService(
+                session=session, tenant_id=job.tenant_id, settings=self._settings
+            ).switches()
+            reranker = (
+                LlmReranker(
+                    client=client,
+                    model=knowledge.rerank_model,
+                    timeout_seconds=knowledge.rerank_timeout_seconds,
+                )
+                if knowledge.policy.rerank and knowledge.rerank_model
+                else None
+            )
             orchestrator = AgentOrchestrator(
                 session=session,
                 tenant_id=job.tenant_id,
                 client=client,
                 registry=self._registry,
+                knowledge=knowledge,
+                reranker=reranker,
                 meter_round=self._round_meter(job),
                 output_ceiling=self._settings.openai_max_output_tokens,
                 embeddings=embeddings,
@@ -954,8 +987,14 @@ class AgentWorker:
         messaging: MessagingService,
         session: AsyncSession,
         job: AgentJob,
+        *,
+        reason: str = EMPTY_RESPONSE_HANDOFF_REASON,
     ) -> None:
         """A model that answered with nothing is not a turn that succeeded (PD-3).
+
+        Also how a reply the strict grounding guard withheld ends (RQ-19): the
+        customer is told a colleague will follow up, and one is asked to, with
+        a reason that says a figure could not be confirmed.
 
         It used to complete as though it had: no reply, no handoff, no signal, a
         customer ignored and every alert green - a provider that began returning
@@ -979,7 +1018,7 @@ class AgentWorker:
         # took the conversation over meanwhile keeps their reason and owns it.
         await InboxService(session=session, tenant_id=job.tenant_id).hand_off(
             conversation_id=job.conversation_id,
-            reason=EMPTY_RESPONSE_HANDOFF_REASON,
+            reason=reason,
             source=AnalyticsSource.SYSTEM,
         )
         logger.warning(

@@ -82,6 +82,17 @@ class SentimentOutcome:
         return self.escalated or self.superseded
 
 
+@dataclass(frozen=True, slots=True)
+class PendingAssessment:
+    """A message ready to classify: what `prepare` read, for `classify` and `apply`."""
+
+    conversation: Conversation
+    conversation_id: uuid.UUID
+    message: Message
+    text: str
+    threshold: SentimentLabel | None
+
+
 class SentimentService:
     """Reads the mood of one workspace's conversations and acts on it."""
 
@@ -129,6 +140,37 @@ class SentimentService:
         it is written in a savepoint of its own, and a database error there
         rolls back the reading and nothing else.
         """
+        prepared = await self.prepare(
+            conversation_id=conversation_id,
+            escalation_sentiment=escalation_sentiment,
+            subject=subject,
+        )
+        if isinstance(prepared, SentimentOutcome):
+            return prepared
+        # The connection goes back to the pool for the length of the call.
+        # Everything `prepare` did only read, so the commit `released` performs
+        # writes nothing; what it buys is that a classification taking a second
+        # does not hold a connection for a second (ADR-080).
+        async with released(self._session):
+            reading = await self.classify(prepared)
+        return await self.apply(prepared, reading)
+
+    async def prepare(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        escalation_sentiment: SentimentLabel | None,
+        subject: Message | None = None,
+    ) -> PendingAssessment | SentimentOutcome:
+        """Everything before the classification: database reads only.
+
+        Returns the outcome directly when there is nothing to classify - a
+        person owns the conversation, the message was judged already, there is
+        no analyzer or no words - and otherwise what `classify` and `apply` need.
+        Split from `assess` so a caller may overlap `classify`, which is HTTP and
+        nothing else, with another HTTP call (RQ-20): the session is touched only
+        here and in `apply`, never concurrently.
+        """
         conversation = await self._conversations.require_by_id(conversation_id)
         if conversation.mode is ConversationMode.HUMAN:
             # A person already owns it. There is nothing left to escalate, and
@@ -159,24 +201,39 @@ class SentimentService:
             # system wrote, not something the customer said, and reading a mood
             # off our own prose would be inventing a signal.
             return SentimentOutcome()
+        return PendingAssessment(
+            conversation=conversation,
+            conversation_id=conversation_id,
+            message=message,
+            text=text,
+            threshold=escalation_sentiment,
+        )
 
+    async def classify(self, pending: PendingAssessment) -> SentimentReading | None:
+        """The provider call, and nothing else: no session, no database (RQ-20).
+
+        A provider failure is contained here - a reading is an enhancement; the
+        reply is the product, and losing the first must not cost the second -
+        and comes back as None.
+        """
+        if self._analyzer is None:
+            return None
         try:
-            # The connection goes back to the pool for the length of the call.
-            # Everything above this line only read, so the commit `released`
-            # performs writes nothing; what it buys is that a classification
-            # taking a second does not hold a connection for a second
-            # (ADR-080).
-            async with released(self._session):
-                reading = await self._analyzer.read(text)
+            return await self._analyzer.read(pending.text)
         except (ExternalServiceError, RateLimitedError):
-            # Contained deliberately. A reading is an enhancement; the reply is
-            # the product, and losing the first must not cost the second.
             logger.warning(
                 "sentiment.unavailable",
-                extra={"conversation_id": str(conversation_id)},
+                extra={"conversation_id": str(pending.conversation_id)},
             )
-            return SentimentOutcome()
+            return None
 
+    async def apply(
+        self, pending: PendingAssessment, reading: SentimentReading | None
+    ) -> SentimentOutcome:
+        """Store the reading and act on it: escalate, prioritise, meter."""
+        if reading is None:
+            return SentimentOutcome()
+        conversation_id = pending.conversation_id
         try:
             # A savepoint of its own, so a failure storing the reading unwinds
             # the reading and leaves the turn's session usable. The flush is
@@ -184,11 +241,11 @@ class SentimentService:
             # it is contained, rather than at a commit three frames away.
             async with self._session.begin_nested():
                 outcome = await self._persist(
-                    conversation,
+                    pending.conversation,
                     conversation_id=conversation_id,
-                    message=message,
+                    message=pending.message,
                     reading=reading,
-                    threshold=escalation_sentiment,
+                    threshold=pending.threshold,
                 )
                 await self._session.flush()
         except (SQLAlchemyError, ConflictError):
