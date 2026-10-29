@@ -199,6 +199,9 @@ class StubAgents:
     async def list_agents(self, *, limit: int = 50) -> list[Any]:
         return []
 
+    async def knowledge_unreachable(self) -> bool:
+        return False
+
 
 async def test_reading_is_never_refused(
     client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements

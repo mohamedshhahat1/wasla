@@ -52,6 +52,10 @@ async def _setup(
     session.add_all([tenant, admin])
     await session.flush()
 
+    # Without the default knowledge grant (RQ-11), so the trail these tests
+    # read holds only the grants they make; the default grant's own audit row
+    # is asserted in test_knowledge_reachability.
+    settings = settings.model_copy(update={"agent_default_knowledge_grant": False})
     service = AgentService(session=session, settings=settings, tenant_id=tenant.id)
     agent = await service.create(name="Sales", system_prompt=PROMPT)
     agent.status = AgentStatus.ACTIVE

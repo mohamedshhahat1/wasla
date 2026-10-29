@@ -46,6 +46,9 @@ class StubAgents:
     async def list_agents(self, *, limit: int = 50) -> list[object]:
         return []
 
+    async def knowledge_unreachable(self) -> bool:
+        return False
+
 
 def _workspace(tenant_id: uuid.UUID) -> ActiveWorkspace:
     return ActiveWorkspace(

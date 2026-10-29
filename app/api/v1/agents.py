@@ -25,13 +25,20 @@ from app.services.agent_service import UNSET
 
 router = APIRouter(route_class=CommittingRoute, prefix="/agents", tags=["agents"])
 
+
+def _read(agent: object, knowledge_unreachable: bool) -> AgentRead:
+    view = AgentRead.model_validate(agent)
+    return view.model_copy(update={"knowledge_unreachable": knowledge_unreachable})
+
+
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 
 
 @router.get("")
 async def list_agents(service: AgentServiceDep, limit: LimitQuery = 50) -> list[AgentRead]:
     agents = await service.list_agents(limit=limit)
-    return [AgentRead.model_validate(agent) for agent in agents]
+    unreachable = await service.knowledge_unreachable()
+    return [_read(agent, unreachable) for agent in agents]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -53,8 +60,9 @@ async def create_agent(
         memory_message_limit=payload.memory_message_limit,
         memory_token_budget=payload.memory_token_budget,
         escalation_sentiment=payload.escalation_sentiment,
+        actor=admin.user,
     )
-    return AgentRead.model_validate(agent)
+    return _read(agent, await service.knowledge_unreachable())
 
 
 @router.get("/available-tools")
@@ -68,7 +76,7 @@ async def list_available_tools(service: AgentServiceDep) -> list[ToolSpecRead]:
 
 @router.get("/{agent_id}")
 async def read_agent(agent_id: uuid.UUID, service: AgentServiceDep) -> AgentRead:
-    return AgentRead.model_validate(await service.get(agent_id))
+    return _read(await service.get(agent_id), await service.knowledge_unreachable())
 
 
 @router.patch("/{agent_id}")
@@ -95,7 +103,7 @@ async def update_agent(
             payload.escalation_sentiment if payload.was_sent("escalation_sentiment") else UNSET
         ),
     )
-    return AgentRead.model_validate(agent)
+    return _read(agent, await service.knowledge_unreachable())
 
 
 @router.post("/{agent_id}/default")
@@ -105,7 +113,8 @@ async def make_default(
     admin: TenantAdminDep,
 ) -> AgentRead:
     """Make this the agent that answers when nothing more specific applies."""
-    return AgentRead.model_validate(await service.make_default(agent_id))
+    agent = await service.make_default(agent_id)
+    return _read(agent, await service.knowledge_unreachable())
 
 
 @router.get("/{agent_id}/tools")

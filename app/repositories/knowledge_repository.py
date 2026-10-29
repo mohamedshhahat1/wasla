@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlalchemy import ColumnElement, and_, delete, false, func, or_, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import ConflictError, ValidationError
@@ -1032,6 +1033,22 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
             duplicate_documents=int(duplicates or 0),
             unreachable_workspaces=int(unreachable or 0),
         )
+
+
+async def knowledge_unreachable(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether this workspace has ready documents no answering agent can search (RC-7).
+
+    Scoped by `tenant_id` in both halves: the documents and the grant.
+    """
+    found = await session.scalar(
+        select(
+            select(Document.id)
+            .where(Document.tenant_id == tenant_id, Document.status == DocumentStatus.READY)
+            .exists()
+            & ~_answering_agent_can_search(tenant_id)
+        )
+    )
+    return bool(found)
 
 
 def _answering_agent_can_search(tenant_id: Any) -> ColumnElement[bool]:

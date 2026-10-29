@@ -506,6 +506,11 @@ class Settings(BaseSettings):
     # names none. A null there previously meant "whatever the provider's own
     # default is", which is an unbounded per-call spend nobody chose.
     openai_max_output_tokens: int = Field(default=2_048, ge=1, le=MAX_AGENT_OUTPUT_TOKENS)
+    # A new agent is created holding an enabled `search_knowledge` grant (RQ-11,
+    # RC-7): an agent created without one answered from its prompt alone while
+    # the workspace's documents sat unread, and nothing said so. Read-only,
+    # which is why it alone is on by default. Existing agents are not changed.
+    agent_default_knowledge_grant: bool = True
 
     # Media
     # Which implementation of `MediaStorage` this deployment uses (ADR-077).

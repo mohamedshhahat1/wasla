@@ -14,7 +14,7 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.registry import ToolRegistry, build_default_registry
+from app.agents.registry import SEARCH_KNOWLEDGE_TOOL, ToolRegistry, build_default_registry
 from app.core.config import Settings
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
@@ -32,6 +32,7 @@ from app.db.models.sentiment import SentimentLabel
 from app.db.models.user import User
 from app.integrations.openai.types import ToolSpec
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
+from app.repositories.knowledge_repository import knowledge_unreachable
 from app.services.audit_service import AuditTrail
 
 logger = get_logger(__name__)
@@ -172,11 +173,16 @@ class AgentService:
         memory_message_limit: int = DEFAULT_MEMORY_MESSAGE_LIMIT,
         memory_token_budget: int = DEFAULT_MEMORY_TOKEN_BUDGET,
         escalation_sentiment: SentimentLabel | None = DEFAULT_ESCALATION_SENTIMENT,
+        actor: User | None = None,
     ) -> Agent:
         """Create an agent as a draft.
 
         Drafts rather than active: an agent that answered customers the moment
         it was created would go live before anyone had read its prompt.
+
+        Granted `search_knowledge` unless the deployment says otherwise (RQ-11):
+        the one read-only tool, so an agent made active can read the documents
+        its workspace uploaded. The grant is audited like any other.
         """
         agent = await self._agents.create(
             name=name.strip(),
@@ -193,7 +199,15 @@ class AgentService:
         # Flushed so the caller can read the generated id.
         await self._session.flush()
         logger.info("agent.created", extra={"agent_id": str(agent.id)})
+        if self._settings.agent_default_knowledge_grant and self._registry.knows(
+            SEARCH_KNOWLEDGE_TOOL
+        ):
+            await self.grant_tool(agent.id, name=SEARCH_KNOWLEDGE_TOOL, actor=actor)
         return agent
+
+    async def knowledge_unreachable(self) -> bool:
+        """Ready documents and no answering agent able to search them (RQ-11, RC-7)."""
+        return await knowledge_unreachable(self._session, tenant_id=self._tenant_id)
 
     async def update(
         self,
