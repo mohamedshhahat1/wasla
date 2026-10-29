@@ -200,6 +200,7 @@ async def test_published_chunks_carry_their_lexical_text(indexing: Indexing) -> 
         (chunk,) = await session.scalars(
             select(DocumentChunk).where(DocumentChunk.tenant_id == tenant_id)
         )
+    assert chunk.search_text is not None
     assert chunk.search_text == chunk.search_text.casefold()
-    assert "bk-35" in (chunk.search_text or "")
+    assert "bk-35" in chunk.search_text
     assert "'bk-35'" in str(chunk.search_tsv)

@@ -81,6 +81,8 @@ RESPOND_SENTIMENT: Final = "respond_sentiment"
 RESPOND_VISION: Final = "respond_vision"
 # An automatic follow-up written from the conversation (FUS-04).
 RESPOND_FOLLOW_UP: Final = "respond_follow_up"
+# The optional re-rank of a knowledge search's candidates (RQ-16).
+RESPOND_RERANK: Final = "respond_rerank"
 REQUEST_TIMEOUT_SECONDS: Final = 60.0
 # What a request carries when its caller named no output ceiling. The deployment
 # default, and deliberately not configurable here: callers are expected to pass

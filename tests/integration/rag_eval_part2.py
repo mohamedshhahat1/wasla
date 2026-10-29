@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -43,6 +44,7 @@ from app.db.models.knowledge import Document, DocumentChunk
 from app.repositories.knowledge_repository import DocumentChunkRepository
 from app.services.retrieval_service import RetrievalService
 from tests.fake_embeddings import FakeEmbeddings, embed_text
+from tests.fakes import as_embeddings
 from tests.integration.rag_eval import EVAL, EvalRun, comparable, ingest, load
 from tests.integration.rag_harness import Indexing
 
@@ -128,7 +130,7 @@ async def _search(
             service = RetrievalService(
                 session=session,
                 tenant_id=tenant_id,
-                embeddings=embeddings or FakeEmbeddings(),
+                embeddings=as_embeddings(embeddings or FakeEmbeddings()),
                 **_policy(hybrid),
             )
             extra: dict[str, Any] = {}
@@ -222,10 +224,10 @@ async def measure_part2(indexing: Indexing, tenant_id: uuid.UUID, run: EvalRun) 
             for d in await session.scalars(select(Document).where(Document.tenant_id == tenant_id))
         }
     pairs = []
-    for _document_id, rows in sorted(
+    for _document_id, chunk_rows in sorted(
         chunks_by_doc.items(), key=lambda item: titles.get(item[0], "")
     ):
-        for first, second in pairwise(rows):
+        for first, second in pairwise(chunk_rows):
             if first.heading_path and first.heading_path == second.heading_path:
                 pairs.append((first, second))
     complete = 0
@@ -233,8 +235,28 @@ async def measure_part2(indexing: Indexing, tenant_id: uuid.UUID, run: EvalRun) 
         head = " ".join(first.content.split()[-12:])
         tail = " ".join(second.content.split()[-8:])
         found = await _search(indexing, tenant_id, head, lifted=True)
-        context = comparable(found.as_context()) if found.passages else ""
-        complete += int(comparable(head) in context and comparable(tail) in context)
+        # What the model reads: the sources' contents, decoded from the JSON.
+        context = (
+            comparable(
+                " ".join(
+                    source["content"]
+                    for source in json.loads(found.as_context())["knowledge_sources"]
+                )
+            )
+            if found.passages
+            else ""
+        )
+        whole = comparable(head) in context and comparable(tail) in context
+        complete += int(whole)
+        if os.environ.get("WASLA_RAG_EVAL_DEBUG") and not whole:
+            print(  # noqa: T201
+                "TWO-CHUNK MISS",
+                titles.get(first.document_id),
+                first.ordinal,
+                comparable(head) in context,
+                comparable(tail) in context,
+                [(p.document_title, p.ordinals) for p in found.passages],
+            )
     result.metrics["two-chunk answers delivered complete"] = f"{complete} / {len(pairs)}"
 
     # Delivered vs requested.

@@ -37,6 +37,8 @@ RRF_K: Final = 60
 # Candidates each channel contributes before fusion (RQ-15).
 CHANNEL_CANDIDATES: Final = 20
 NEAR_DUPLICATE_OVERLAP: Final = 0.8
+# Words per run the near-repeat test compares (see `shingles`).
+SHINGLE: Final = 3
 MAX_PASSAGES_PER_DOCUMENT: Final = 3
 # The fewest characters a Latin word inside an Arabic question needs to count
 # as an identifier - "BK", "TV" are too common to vouch for a passage alone.
@@ -163,7 +165,29 @@ def _digest(text: str) -> str:
     return hashlib.sha256(for_matching(text).encode("utf-8")).hexdigest()
 
 
-def _overlap(first: frozenset[str], second: frozenset[str]) -> float:
+def shingles(text: str) -> frozenset[tuple[str, ...]]:
+    """The text's runs of `SHINGLE` consecutive words, as the near-repeat test compares them.
+
+    Word runs rather than a bag of words (RQ-16's "80 % token overlap", measured
+    on sequences): two rows of one price table share almost every word and
+    differ in their numbers, and as sets they looked like repeats - the
+    structural evaluation lost answers to it - while as runs they are as
+    different as the rows are. The same text extracted twice still overlaps
+    almost completely.
+    """
+    words = _TOKEN.findall(_THOUSANDS.sub("", for_lexical(text)))
+    if len(words) < SHINGLE:
+        return frozenset({tuple(words)}) if words else frozenset()
+    return frozenset(tuple(words[i : i + SHINGLE]) for i in range(len(words) - SHINGLE + 1))
+
+
+def _numbers(text: str) -> frozenset[str]:
+    return frozenset(
+        t for t in _TOKEN.findall(_THOUSANDS.sub("", for_lexical(text))) if _DIGIT.search(t)
+    )
+
+
+def _overlap(first: frozenset[object], second: frozenset[object]) -> float:
     if not first or not second:
         return 0.0
     return len(first & second) / min(len(first), len(second))
@@ -189,16 +213,21 @@ def diversify(
     """
     kept: list[Candidate] = []
     seen: set[str] = set()
-    token_sets: list[tuple[Candidate, frozenset[str]]] = []
+    token_sets: list[tuple[Candidate, frozenset[object], frozenset[str]]] = []
     per: dict[uuid.UUID, int] = {}
     duplicates = capped = 0
     for candidate in candidates:
         digest = _digest(candidate.content)
-        tokens = frozenset(lexical_tokens(candidate.content))
+        tokens: frozenset[object] = frozenset(shingles(candidate.content))
+        numbers = _numbers(candidate.content)
+        # A near repeat that carries a number the kept passage does not is a
+        # different fact - another branch's price, next year's fee - and is
+        # exactly what the model must see; only one that adds nothing goes.
         repeat = digest in seen or any(
             not _neighbours(candidate, other)
+            and numbers <= other_numbers
             and _overlap(tokens, other_tokens) >= NEAR_DUPLICATE_OVERLAP
-            for other, other_tokens in token_sets
+            for other, other_tokens, other_numbers in token_sets
         )
         if repeat:
             duplicates += 1
@@ -207,7 +236,7 @@ def diversify(
             capped += 1
             continue
         seen.add(digest)
-        token_sets.append((candidate, tokens))
+        token_sets.append((candidate, tokens, numbers))
         per[candidate.document_id] = per.get(candidate.document_id, 0) + 1
         kept.append(candidate)
     return Diversified(kept=kept, duplicates=duplicates, capped=capped)
@@ -309,6 +338,7 @@ __all__ = [
     "lexical_tokens",
     "merge_adjacent",
     "rrf_fuse",
+    "shingles",
     "tier_for",
     "tsquery_text",
     "within_margin",

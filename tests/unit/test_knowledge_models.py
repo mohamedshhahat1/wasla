@@ -52,6 +52,8 @@ def test_knowledge_tables_declare_the_indexes_the_migrations_create() -> None:
         "ix_document_chunks_embedding_hnsw",
         # Migration 0063: what a superseded generation's chunks are deleted by.
         "ix_document_chunks_generation_id",
+        # Migration 0133: the exact-word channel's GIN index (RQ-15).
+        "ix_document_chunks_search_tsv",
     }
     assert _index_names(as_table(DocumentIndexGeneration.__table__)) == {
         "ix_document_index_generations_tenant_id",

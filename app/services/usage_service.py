@@ -51,6 +51,8 @@ MAX_WINDOW: Final = timedelta(days=366)
 # classifier?" reads it from here without a second event type to sum.
 AI_PURPOSE_AGENT: Final = "agent"
 AI_PURPOSE_SENTIMENT: Final = "sentiment"
+# The optional re-rank of a knowledge search's candidates (RQ-16).
+AI_PURPOSE_RERANK: Final = "knowledge_rerank"
 # Which side of retrieval an embedding call served (RAG-07).
 EMBEDDING_PURPOSE_INGEST: Final = "ingest"
 EMBEDDING_PURPOSE_QUERY: Final = "query"

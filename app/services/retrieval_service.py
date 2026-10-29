@@ -43,27 +43,39 @@ from typing import Any, Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.memory import estimate_tokens
+from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
-from app.core.telemetry import record_ai_stage, record_retrieval
+from app.core.telemetry import record_ai_stage, record_rerank, record_retrieval
+from app.db.models.knowledge import DocumentChunk
 from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
 from app.repositories.knowledge_repository import DocumentChunkRepository, ScoredChunk
+from app.services.knowledge_rerank import DISABLED, LlmReranker, Reranked
 from app.services.retrieval_policy import RetrievalPolicy
 from app.services.retrieval_ranking import (
     CHANNEL_CANDIDATES,
     LEXICAL,
     VECTOR,
     Candidate,
+    diversify,
     identifier_tokens,
+    join_adjacent,
     keeps,
     lexical_tokens,
+    merge_adjacent,
     rrf_fuse,
+    tier_for,
     tsquery_text,
+    within_margin,
 )
 from app.services.text_normalisation import for_matching
-from app.services.usage_service import EMBEDDING_PURPOSE_QUERY, UsageRecorder
+from app.services.usage_service import (
+    AI_PURPOSE_RERANK,
+    EMBEDDING_PURPOSE_QUERY,
+    UsageRecorder,
+)
 
 logger = get_logger(__name__)
 
@@ -94,6 +106,8 @@ MAX_CONTEXT_TOKENS: Final = MAX_TOP_K * PASSAGE_TOKEN_CEILING + CONTEXT_ENVELOPE
 # A title or section longer than this is clipped in what the model reads; the
 # stored title is untouched. Bounds a passage's cost whatever a title says.
 MODEL_LABEL_CHARACTERS: Final = 120
+# How many of the best passages may be joined with their neighbours (FX-3.11).
+EXPANDED_PASSAGES: Final = 2
 # What of a model-chosen query is embedded. A question is a sentence or two; a
 # longer "query" is a model pasting the conversation into a tool argument.
 MAX_QUERY_CHARACTERS: Final = 2_000
@@ -270,11 +284,13 @@ class RetrievalService:
         tenant_id: uuid.UUID,
         embeddings: EmbeddingsClient,
         policy: RetrievalPolicy | None = None,
+        reranker: LlmReranker | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._embeddings = embeddings
         self._policy = policy or RetrievalPolicy()
+        self._reranker = reranker
         self._chunks = DocumentChunkRepository(session, tenant_id=tenant_id)
         self._usage = UsageRecorder(session, tenant_id=tenant_id)
 
@@ -376,14 +392,43 @@ class RetrievalService:
         )
         identifiers = identifier_tokens(cleaned)
         close = [c for c in fused if keeps(c, threshold=threshold, identifiers=identifiers)]
-        unique = _without_repeats(close)
-        chosen = unique[:limit]
+        diverse = diversify(close)
+        ranked = diverse.kept
+        rerank_outcome = DISABLED
+        if self._policy.rerank and self._reranker is not None:
+            rerank_started = perf_counter()
+            reranked = await self._rerank(
+                self._reranker, cleaned, ranked[:CHANNEL_CANDIDATES], release_session
+            )
+            ranked = reranked.candidates + ranked[CHANNEL_CANDIDATES:]
+            rerank_outcome = reranked.outcome
+            await record_ai_stage("rerank", perf_counter() - rerank_started)
+        await record_rerank(rerank_outcome)
+        within = within_margin(ranked, margin=self._policy.passage_margin)
+        # The best `limit` chunks, then neighbours of one section joined: a
+        # merged passage holds every chunk it replaced, so what was asked for
+        # is what is delivered, in fewer sources.
+        chosen = merge_adjacent(within[:limit])
+        chosen = await self._expanded(chosen, space=space, scope=scope)
         passages = tuple(_passage(candidate) for candidate in chosen)
-        retrieval = Retrieval(passages=passages, query=cleaned)
         best = min((c.distance for c in fused), default=None)
+        tier = (
+            tier_for(
+                best,
+                strong=self._policy.strong_distance or 0.0,
+                partial=self._policy.partial_distance or 0.0,
+            )
+            if self._policy.tiers_active
+            else None
+        )
+        retrieval = Retrieval(passages=passages, query=cleaned, match=tier)
+        budget_dropped = len(passages) - len(retrieval.packed()) if passages else 0
         dropped = {
             "threshold": len(fused) - len(close),
-            "duplicate": len(close) - len(unique),
+            "duplicate": diverse.duplicates,
+            "document_cap": diverse.capped,
+            "margin": len(ranked) - len(within),
+            "budget": budget_dropped,
         }
         await record_retrieval(
             outcome=FOUND if passages else EMPTY,
@@ -396,6 +441,7 @@ class RetrievalService:
             context_tokens=estimate_tokens(retrieval.as_context()) if passages else 0,
             candidates={VECTOR: len(vector_rows), LEXICAL: len(lexical_rows)},
             channel_seconds=seconds,
+            tier=tier,
         )
         logger.info(
             "knowledge.searched",
@@ -411,9 +457,85 @@ class RetrievalService:
                 "best_distance": round(best, 4) if best is not None else None,
                 "dropped_threshold": dropped["threshold"],
                 "dropped_duplicate": dropped["duplicate"],
+                "dropped_document_cap": dropped["document_cap"],
+                "rerank": rerank_outcome,
             },
         )
         return retrieval
+
+    async def _rerank(
+        self,
+        reranker: LlmReranker,
+        query: str,
+        candidates: list[Candidate],
+        release_session: bool,
+    ) -> Reranked:
+        """The re-rank call, with no connection held when the caller asked for that."""
+        if release_session:
+            async with released(self._session):
+                reranked = await reranker.rerank(query, candidates)
+        else:
+            reranked = await reranker.rerank(query, candidates)
+        if reranked.usage is not None:
+            # A model call like any other: metered, never silent (G4's spirit).
+            self._usage.ai_request(
+                input_tokens=reranked.usage.input_tokens,
+                output_tokens=reranked.usage.output_tokens,
+                model=reranker.model,
+                purpose=AI_PURPOSE_RERANK,
+            )
+        return reranked
+
+    async def _expanded(
+        self,
+        chosen: list[Candidate],
+        *,
+        space: EmbeddingSpace,
+        scope: tuple[uuid.UUID, ...] | None,
+    ) -> list[Candidate]:
+        """The top passages joined with the chunks either side of them (FX-3.11).
+
+        Only for the best `EXPANDED_PASSAGES`, only a neighbour of the same
+        served generation and the same section, and only while the whole
+        context still fits the budget - expansion never pushes out a passage
+        the search chose. A failed lookup leaves the passages as they were.
+        """
+        if not chosen:
+            return chosen
+        held = {(c.generation_id, o) for c in chosen for o in (c.ordinals or (c.ordinal,))}
+        try:
+            async with self._session.begin_nested():
+                for candidate in chosen[:EXPANDED_PASSAGES]:
+                    ordinals = candidate.ordinals or (candidate.ordinal,)
+                    wanted = [
+                        o
+                        for o in (ordinals[0] - 1, ordinals[-1] + 1)
+                        if o >= 0 and (candidate.generation_id, o) not in held
+                    ]
+                    for neighbour in await self._chunks.neighbours(
+                        generation_id=candidate.generation_id,
+                        ordinals=wanted,
+                        space=space,
+                        knowledge_base_ids=scope,
+                    ):
+                        if neighbour.heading_path != candidate.heading_path:
+                            continue
+                        before = (candidate.content, candidate.ordinals)
+                        _attach(candidate, neighbour)
+                        trial = Retrieval(passages=tuple(_passage(c) for c in chosen), query="")
+                        if (
+                            len(trial.packed()) < len(chosen)
+                            or estimate_tokens(trial.as_context()) > MAX_CONTEXT_TOKENS
+                        ):
+                            candidate.content, candidate.ordinals = before
+                            continue
+                        held.add((candidate.generation_id, neighbour.ordinal))
+        except Exception as error:
+            logger.warning(
+                "knowledge.neighbours_failed",
+                extra={"tenant_id": str(self._tenant_id), "reason": type(error).__name__},
+            )
+        return chosen
 
     async def _embed(self, cleaned: str, *, release_session: bool) -> EmbeddingBatch:
         """Turn the question into a vector, optionally with no connection held.
@@ -471,6 +593,16 @@ def _candidate(row: ScoredChunk, channel: str, *, asked: frozenset[str] = frozen
         lexical_tokens=(asked & frozenset(lexical_tokens(chunk.content))) if asked else frozenset(),
         updated_at=row.document_updated_at,
     )
+
+
+def _attach(candidate: Candidate, neighbour: DocumentChunk) -> None:
+    ordinals = candidate.ordinals or (candidate.ordinal,)
+    if neighbour.ordinal < ordinals[0]:
+        candidate.content = join_adjacent(neighbour.content, candidate.content)
+        candidate.ordinals = (neighbour.ordinal, *ordinals)
+    else:
+        candidate.content = join_adjacent(candidate.content, neighbour.content)
+        candidate.ordinals = (*ordinals, neighbour.ordinal)
 
 
 def _without_repeats(candidates: list[Candidate]) -> list[Candidate]:
