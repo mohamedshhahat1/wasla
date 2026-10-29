@@ -544,6 +544,16 @@ class MetricsService:
                 "Documents served from an embedding space other than the configured one.",
                 float(indexing.stale_embedding),
             ),
+            (
+                "wasla_knowledge_duplicate_documents",
+                "Ready documents whose exact text another ready document of the workspace holds.",
+                float(indexing.duplicate_documents),
+            ),
+            (
+                "wasla_knowledge_unreachable_workspaces",
+                "Workspaces with ready documents and no answering agent able to search them.",
+                float(indexing.unreachable_workspaces),
+            ),
             # Customer messages an agent engaged a provider for and never
             # finished - never retried, because a reply may already be out
             # (AI-09). Counted only past the longest a healthy turn takes, so a

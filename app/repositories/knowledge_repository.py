@@ -11,12 +11,13 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import ColumnElement, and_, delete, func, or_, select, text, update
 
 from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import ConflictError
+from app.db.models.agent import Agent, AgentStatus, AgentTool
 from app.db.models.enums import TenantStatus
 from app.db.models.knowledge import (
     Document,
@@ -31,6 +32,10 @@ from app.db.models.tenant import Tenant
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 # Why a generation exists. Short constants, stored on the row.
+# The knowledge tool's name, as `app.agents.registry` registers it; restated so
+# the repository layer does not import the agent runtime (a unit test pins the two).
+SEARCH_KNOWLEDGE_TOOL: Final = "search_knowledge"
+
 TRIGGER_SUBMITTED: Final = "submitted"
 TRIGGER_RESUBMITTED: Final = "resubmitted"
 TRIGGER_REINDEX: Final = "reindex"
@@ -517,6 +522,12 @@ class IndexingBacklog:
     failed: int = 0
     exhausted: int = 0
     stale_embedding: int = 0
+    # Ready documents beyond the first with the same text in one workspace
+    # (RV-07): each is a passage served twice. Tenant-free, a total.
+    duplicate_documents: int = 0
+    # Served workspaces with ready documents and no answering agent able to
+    # search them (RC-7).
+    unreachable_workspaces: int = 0
 
 
 def _served_workspace() -> ColumnElement[bool]:
@@ -730,6 +741,23 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
                 or 0
             )
 
+        copies = (
+            select(func.count().label("copies"))
+            .select_from(Document)
+            .where(Document.status == DocumentStatus.READY)
+            .group_by(Document.tenant_id, Document.content_hash)
+            .having(func.count() > 1)
+            .subquery()
+        )
+        duplicates = await self.session.scalar(select(func.sum(copies.c.copies - 1)))
+        unreachable = await self.session.scalar(
+            select(func.count(func.distinct(Document.tenant_id)))
+            .select_from(Document)
+            .join(Tenant, Tenant.id == Document.tenant_id)
+            .where(_served_workspace(), Document.status == DocumentStatus.READY)
+            .where(~_answering_agent_can_search(Document.tenant_id))
+        )
+
         def age(moment: datetime | None) -> float:
             if moment is None:
                 return 0.0
@@ -746,7 +774,30 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
             failed=failed - exhausted,
             exhausted=exhausted,
             stale_embedding=stale,
+            duplicate_documents=int(duplicates or 0),
+            unreachable_workspaces=int(unreachable or 0),
         )
+
+
+def _answering_agent_can_search(tenant_id: Any) -> ColumnElement[bool]:
+    """Whether the workspace's answering agent holds an enabled knowledge grant (RC-7).
+
+    Only the ACTIVE agent marked default answers a workspace (`plan_turn`), so
+    its grant - not any agent's - decides whether knowledge is reachable.
+    """
+    return (
+        select(Agent.id)
+        .join(AgentTool, AgentTool.agent_id == Agent.id)
+        .where(
+            Agent.tenant_id == tenant_id,
+            AgentTool.tenant_id == tenant_id,
+            Agent.status == AgentStatus.ACTIVE,
+            Agent.is_default.is_(True),
+            AgentTool.name == SEARCH_KNOWLEDGE_TOOL,
+            AgentTool.enabled.is_(True),
+        )
+        .exists()
+    )
 
 
 def _not_in(space: EmbeddingSpace) -> ColumnElement[bool]:

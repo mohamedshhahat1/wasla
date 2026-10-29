@@ -220,6 +220,8 @@ class UsageRecorder:
         conversation_id: uuid.UUID | None = None,
         occurred_at: datetime | None = None,
         purpose: str | None = None,
+        cached_input_tokens: int = 0,
+        reasoning_tokens: int = 0,
     ) -> None:
         """Stage the request and its two token counts together.
 
@@ -259,17 +261,20 @@ class UsageRecorder:
             occurred_at=occurred_at,
             meta=line,
         )
+        # How much of each count the provider discounted or spent thinking
+        # (FX-1.13): on the token rows themselves, so cost reports can price
+        # them without a second meter.
         self.record(
             UsageEventType.AI_INPUT_TOKEN,
             quantity=input_tokens,
             occurred_at=occurred_at,
-            meta=line,
+            meta={**meta, "cached_tokens": cached_input_tokens} if cached_input_tokens else line,
         )
         self.record(
             UsageEventType.AI_OUTPUT_TOKEN,
             quantity=output_tokens,
             occurred_at=occurred_at,
-            meta=line,
+            meta={**meta, "reasoning_tokens": reasoning_tokens} if reasoning_tokens else line,
         )
 
     def embedding_request(

@@ -398,6 +398,33 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Knowledge searches by outcome.",
         ("outcome",),
     ),
+    # Why a search's candidate did not reach the model (RV-26): `threshold`
+    # (farther than the cut-off), `duplicate` (the same text as a higher-ranked
+    # passage, RQ-08) or `validity` (outside its document's effective dates,
+    # RQ-24). Closed words; no workspace, no text.
+    "wasla_rag_passages_dropped_total": (
+        "Search candidates dropped before reaching the model, by reason.",
+        ("reason",),
+    ),
+    # Lines an extraction flagged as possibly re-ordered (RQ-04): one of
+    # `EXTRACTION_WARNING_CODES`, counted per line.
+    "wasla_knowledge_extraction_warnings_total": (
+        "Extracted lines flagged as possibly re-ordered, by warning code.",
+        ("code",),
+    ),
+    # Document replacements (RQ-06): published, failed, cancelled (a newer
+    # replacement took its place before it ran), metadata_only (same text).
+    "wasla_knowledge_replacements_total": (
+        "Document content replacements by outcome.",
+        ("outcome",),
+    ),
+    # Input tokens the provider served from its prompt cache (FX-1.13). No
+    # labels: the share is this over `wasla_ai_input_tokens_total`-style totals
+    # already on the usage rows.
+    "wasla_ai_cached_input_tokens_total": (
+        "Input tokens the model provider reported as served from its prompt cache.",
+        (),
+    ),
     # How each inbound attachment ended (MEDIA-15). `outcome` is `ready` or one
     # of the media reason tokens - a closed vocabulary of about two dozen,
     # enforced by `MEDIA_OUTCOMES` below - and nothing identifying: no
@@ -717,6 +744,41 @@ STATUS_RESOLUTION_BUCKETS: Final[tuple[float, ...]] = (
     1.0,
 )
 
+# Cosine distance runs 0 (identical) to 2 (opposite); the interesting band for
+# a cut-off is 0.2 .. 1.0, so it is resolved finely there.
+DISTANCE_BUCKETS: Final[tuple[float, ...]] = (
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.55,
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.85,
+    0.9,
+    1.0,
+    1.2,
+    2.0,
+)
+CONTEXT_CHARACTER_BUCKETS: Final[tuple[float, ...]] = (
+    0.0,
+    500.0,
+    1_000.0,
+    2_000.0,
+    3_000.0,
+    4_000.0,
+    5_000.0,
+    6_000.0,
+    8_000.0,
+)
+STAGES: Final = frozenset({"sentiment", "round", "embedding", "sql"})
+DROP_REASONS: Final = frozenset({"threshold", "duplicate", "validity"})
+REPLACEMENT_OUTCOMES: Final = frozenset({"published", "failed", "cancelled", "metadata_only"})
+
 # Passages per search, one bucket per possible count up to the top-k ceiling.
 RETRIEVED_PASSAGE_BUCKETS: Final[tuple[float, ...]] = (0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
 
@@ -745,6 +807,28 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
     "wasla_rag_retrieval_duration_seconds": (
         "How long a knowledge search took, embedding included.",
         (),
+        PROVIDER_LATENCY_BUCKETS,
+    ),
+    # The closest candidate of every search, before any threshold (RV-26): the
+    # distribution a cut-off is calibrated from. Labelled by the embedding model,
+    # a deployment setting, because distances from two models are not one
+    # distribution.
+    "wasla_rag_best_distance": (
+        "Cosine distance of the closest candidate of each knowledge search.",
+        ("model",),
+        DISTANCE_BUCKETS,
+    ),
+    # Characters of serialized context a search handed the model.
+    "wasla_rag_context_characters": (
+        "Characters of knowledge context a search returned to the model.",
+        (),
+        CONTEXT_CHARACTER_BUCKETS,
+    ),
+    # One stage of an agent turn (FX-1.13): `sentiment`, `round` (each model
+    # round), `embedding` and `sql` (a knowledge search's two halves).
+    "wasla_ai_stage_seconds": (
+        "How long one stage of an agent turn took.",
+        ("stage",),
         PROVIDER_LATENCY_BUCKETS,
     ),
     # How many passages a search handed the model. Bounded by the top-k ceiling,
@@ -974,13 +1058,63 @@ async def record_ingestion_outcome(outcome: str) -> None:
     await _increment("wasla_rag_ingestion_outcomes_total", {"outcome": outcome})
 
 
-async def record_retrieval(*, outcome: str, duration_seconds: float, passages: int) -> None:
-    """One knowledge search: `found`, `empty` or `failed`, how long, how many kept."""
+async def record_retrieval(
+    *,
+    outcome: str,
+    duration_seconds: float,
+    passages: int,
+    model: str | None = None,
+    best_distance: float | None = None,
+    dropped: Mapping[str, int] | None = None,
+    context_characters: int | None = None,
+) -> None:
+    """One knowledge search: `found`, `empty` or `failed`, how long, how many kept.
+
+    And, for a search that reached the database, what it saw (RV-26): the
+    closest distance before any threshold, how many candidates were dropped and
+    why, and how much context it returned - never which workspace, never text.
+    """
     await _increment("wasla_rag_retrievals_total", {"outcome": outcome})
     await _observe(
         "wasla_rag_retrieval_duration_seconds", {}, duration_seconds, PROVIDER_LATENCY_BUCKETS
     )
     await _observe("wasla_rag_retrieved_passages", {}, float(passages), RETRIEVED_PASSAGE_BUCKETS)
+    if best_distance is not None and model is not None:
+        await _observe("wasla_rag_best_distance", {"model": model}, best_distance, DISTANCE_BUCKETS)
+    for reason, count in (dropped or {}).items():
+        if count and reason in DROP_REASONS:
+            await _increment_by("wasla_rag_passages_dropped_total", {"reason": reason}, count)
+    if context_characters is not None:
+        await _observe(
+            "wasla_rag_context_characters", {}, float(context_characters), CONTEXT_CHARACTER_BUCKETS
+        )
+
+
+async def record_ai_stage(stage: str, duration_seconds: float) -> None:
+    """How long one stage of an agent turn took (FX-1.13). `stage` is one of `STAGES`."""
+    if stage in STAGES:
+        await _observe(
+            "wasla_ai_stage_seconds", {"stage": stage}, duration_seconds, PROVIDER_LATENCY_BUCKETS
+        )
+
+
+async def record_cached_input_tokens(tokens: int) -> None:
+    """Input tokens a provider response reported as served from its prompt cache."""
+    if tokens > 0:
+        await _increment_by("wasla_ai_cached_input_tokens_total", {}, tokens)
+
+
+async def record_extraction_warnings(warnings: Mapping[str, int]) -> None:
+    """Lines an extraction flagged, per warning code (RQ-04)."""
+    for code, count in warnings.items():
+        if count:
+            await _increment_by("wasla_knowledge_extraction_warnings_total", {"code": code}, count)
+
+
+async def record_replacement(outcome: str) -> None:
+    """One document content replacement's outcome (RQ-06)."""
+    if outcome in REPLACEMENT_OUTCOMES:
+        await _increment("wasla_knowledge_replacements_total", {"outcome": outcome})
 
 
 async def record_agent_turn_outcome(outcome: str) -> None:

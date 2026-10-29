@@ -38,7 +38,12 @@ from app.channels.policy import ChannelPolicy
 from app.channels.registry import ChannelRegistry, default_registry
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
-from app.core.telemetry import UNKNOWN_TOOL, record_tool_execution
+from app.core.telemetry import (
+    UNKNOWN_TOOL,
+    record_ai_stage,
+    record_cached_input_tokens,
+    record_tool_execution,
+)
 from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent
 from app.db.models.agent_turn import TurnOutcome
 from app.db.models.conversation import Conversation, ConversationMode, Message, MessageDirection
@@ -463,11 +468,13 @@ class AgentOrchestrator:
             # Before a word is composed, not after. An escalation that arrives
             # second means the agent already answered an angry customer, which
             # is the thing this is here to prevent.
+            sentiment_started = perf_counter()
             mood = await self._sentiment.assess(
                 conversation_id=conversation_id,
                 escalation_sentiment=resolved.escalation_sentiment,
                 subject=subject,
             )
+            await record_ai_stage("sentiment", perf_counter() - sentiment_started)
             if mood.superseded:
                 # A colleague took the conversation over while the classifier
                 # was reading it. Their takeover stands and this turn made no
@@ -522,6 +529,8 @@ class AgentOrchestrator:
         input_tokens = 0
         output_tokens = 0
         total_tokens = 0
+        cached_input_tokens = 0
+        reasoning_tokens = 0
         handed_off = False
         pending = False
         text: str | None = None
@@ -552,6 +561,7 @@ class AgentOrchestrator:
                     # not, which is the cheaper mistake to make in a cost ledger.
                     await self._meter_round(resolved.model)
                 rounds = round_number
+                round_started = perf_counter()
                 reply = await self._client.respond(
                     model=resolved.model,
                     instructions=_reply_instructions(resolved.system_prompt, channel_policy),
@@ -561,9 +571,13 @@ class AgentOrchestrator:
                     temperature=resolved.temperature,
                     max_output_tokens=self._max_output_tokens(resolved),
                 )
+                await record_ai_stage("round", perf_counter() - round_started)
             input_tokens += reply.usage.input_tokens
             output_tokens += reply.usage.output_tokens
             total_tokens += reply.usage.total_tokens
+            cached_input_tokens += reply.usage.cached_input_tokens
+            reasoning_tokens += reply.usage.reasoning_tokens
+            await record_cached_input_tokens(reply.usage.cached_input_tokens)
             text = reply.text or text
             response_id = reply.response_id or response_id
 
@@ -636,6 +650,8 @@ class AgentOrchestrator:
                     rounds=round_number,
                     usage=TokenUsage(
                         input_tokens=input_tokens,
+                        cached_input_tokens=cached_input_tokens,
+                        reasoning_tokens=reasoning_tokens,
                         output_tokens=output_tokens,
                         total_tokens=total_tokens,
                     ),
@@ -676,6 +692,8 @@ class AgentOrchestrator:
                 rounds=rounds,
                 usage=TokenUsage(
                     input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    reasoning_tokens=reasoning_tokens,
                     output_tokens=output_tokens,
                     total_tokens=total_tokens,
                 ),
@@ -711,6 +729,8 @@ class AgentOrchestrator:
             tools_run=tuple(tools_run),
             usage=TokenUsage(
                 input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=reasoning_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
             ),

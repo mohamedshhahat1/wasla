@@ -763,6 +763,8 @@ class AgentWorker:
             UsageRecorder(session, tenant_id=job.tenant_id).ai_request(
                 input_tokens=outcome.usage.input_tokens,
                 output_tokens=outcome.usage.output_tokens,
+                cached_input_tokens=outcome.usage.cached_input_tokens,
+                reasoning_tokens=outcome.usage.reasoning_tokens,
                 # Zero, and deliberately: the request meter is written by the
                 # per-round meter before each provider call, so counting them
                 # again here would record every call twice. Tokens are only

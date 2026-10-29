@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
-from app.core.telemetry import record_retrieval
+from app.core.telemetry import record_ai_stage, record_retrieval
 from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
@@ -256,6 +256,7 @@ class RetrievalService:
 
         try:
             batch = await self._embed(cleaned, release_session=release_session)
+            await record_ai_stage("embedding", perf_counter() - started)
         except KnowledgeSearchUnavailableError:
             raise
         except Exception as error:
@@ -276,6 +277,7 @@ class RetrievalService:
             input_tokens=batch.input_tokens,
         )
 
+        searched = perf_counter()
         try:
             async with self._session.begin_nested():
                 scored = await self._chunks.search(
@@ -288,11 +290,20 @@ class RetrievalService:
             await self._failed(started, stage="search", error=error)
             raise KnowledgeSearchUnavailableError() from None
 
-        passages = tuple(_passage(row) for row in scored[:limit] if row.distance <= threshold)
+        await record_ai_stage("sql", perf_counter() - searched)
+
+        candidates = scored[:limit]
+        passages = tuple(_passage(row) for row in candidates if row.distance <= threshold)
+        retrieval = Retrieval(passages=passages, query=cleaned)
+        best = min((row.distance for row in scored), default=None)
         await record_retrieval(
             outcome=FOUND if passages else EMPTY,
             duration_seconds=perf_counter() - started,
             passages=len(passages),
+            model=space.model,
+            best_distance=best,
+            dropped={"threshold": len(candidates) - len(passages)},
+            context_characters=len(retrieval.as_context()) if passages else 0,
         )
         logger.info(
             "knowledge.searched",
@@ -301,9 +312,13 @@ class RetrievalService:
                 # The question itself is a customer's words and is not logged.
                 "candidates": len(scored),
                 "kept": len(passages),
+                # Distances are numbers about the index, not the customer, and
+                # are what calibrating the cut-off needs (RV-26).
+                "best_distance": round(best, 4) if best is not None else None,
+                "dropped_threshold": len(candidates) - len(passages),
             },
         )
-        return Retrieval(passages=passages, query=cleaned)
+        return retrieval
 
     async def _embed(self, cleaned: str, *, release_session: bool) -> EmbeddingBatch:
         """Turn the question into a vector, optionally with no connection held.
