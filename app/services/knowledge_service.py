@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
+from app.core.telemetry import record_extraction_warnings
 from app.core.text_safety import has_visible_content, storable_problem
 from app.db.models.audit import AuditAction
 from app.db.models.knowledge import (
@@ -59,7 +60,7 @@ from app.repositories.knowledge_repository import (
     GenerationRepository,
     KnowledgeBaseRepository,
 )
-from app.services import chunking, extraction
+from app.services import extraction, pdf_structure
 from app.services.audit_service import AuditTrail
 from app.services.document_indexing import (
     ClaimRefusal,
@@ -68,6 +69,7 @@ from app.services.document_indexing import (
     session_units,
 )
 from app.services.knowledge_limits import MAX_EXTRACTED_CHARACTERS, MAX_SUBMITTED_CHARACTERS
+from app.services.text_normalisation import for_storage
 from app.workers.ingestion_queue import IngestionJob, IngestionQueue
 
 logger = get_logger(__name__)
@@ -126,19 +128,32 @@ def _refuse_unstorable(value: str, *, field: str) -> None:
         raise ValidationError(f"The document {field} {problem}.")
 
 
-async def extract(*, raw: str, source: DocumentSource) -> str:
-    """Turn a submitted document into plain, indexable text.
+@dataclass(frozen=True, slots=True)
+class Extracted:
+    """A submission's text as it will be stored, and what extraction flagged."""
 
-    Text and Markdown are already text; Markdown keeps its punctuation because
-    headings and lists are structure the chunker uses.
+    text: str
+    warnings: dict[str, int] | None = None
 
-    A PDF arrives base64-encoded, because this endpoint takes JSON and a PDF is
-    not text. It is parsed in a separate process under hard limits
-    (`extraction.extract_pdf_bounded`), and refused - never truncated - past any
-    of them. A scanned one, with no text layer, is refused rather than stored
-    empty: an empty document looks perfectly ingested from the outside and
-    answers every question with nothing, which is worse than being told the file
-    needs OCR.
+
+async def extract(*, raw: str, source: DocumentSource) -> Extracted:
+    """Turn a submitted document into the text it will be stored, hashed and shown as.
+
+    Every source ends in `for_storage` (RQ-01): NFKC, invisible controls
+    removed, whitespace tidied. That is what makes an Arabic PDF whose text
+    layer is presentation-form glyphs the letters a customer types (RV-01), and
+    what makes a resubmission of the same words the same hash however they
+    were encoded.
+
+    Text and Markdown arrive as text. A PDF arrives base64-encoded, because
+    this endpoint takes JSON and a PDF is not text. It is parsed in a separate
+    process under hard limits (`extraction.extract_pdf_pages_bounded`), and
+    refused - never truncated - past any of them; its pages are then joined
+    with what repeats on every page removed, and lines that may have been
+    re-ordered are counted (`pdf_structure`, RQ-04, RQ-05). A scanned one, with
+    no text layer, is refused rather than stored empty: an empty document looks
+    perfectly ingested from the outside and answers every question with
+    nothing, which is worse than being told the file needs OCR.
     """
     if source is DocumentSource.PDF:
         try:
@@ -146,16 +161,17 @@ async def extract(*, raw: str, source: DocumentSource) -> str:
         except (ValueError, binascii.Error) as error:
             raise ValidationError("Submit a PDF as base64-encoded content.") from error
 
-        text = await extraction.extract_pdf_bounded(content)
-        if not text:
+        pages = await extraction.extract_pdf_pages_bounded(content)
+        structured = pdf_structure.structure(pages)
+        if not structured.text:
             raise ValidationError(
                 "No text could be read from this PDF. It may be a scan, "
                 "which needs to be converted to text first."
             )
-        return chunking.normalise(text)
+        return Extracted(text=structured.text, warnings=structured.warnings or None)
 
     _refuse_unstorable(raw, field="content")
-    return chunking.normalise(raw)
+    return Extracted(text=for_storage(raw))
 
 
 class KnowledgeService:
@@ -275,7 +291,8 @@ class KnowledgeService:
             raise ValidationError("The document title has no visible text.")
 
         await self._bases.require_by_id(knowledge_base_id)
-        text = await extract(raw=raw, source=source)
+        extracted = await extract(raw=raw, source=source)
+        text = extracted.text
         if len(text) > MAX_EXTRACTED_CHARACTERS:
             raise ValidationError(
                 f"That document is too large. The limit is {MAX_EXTRACTED_CHARACTERS} characters."
@@ -300,6 +317,9 @@ class KnowledgeService:
                 byte_size=len(raw.encode("utf-8")),
                 content=text,
             )
+            document.extraction_warnings = extracted.warnings
+            if extracted.warnings:
+                await record_extraction_warnings(extracted.warnings)
             await self._session.flush()
             generation = self._generations.create(
                 document_id=document.id, number=1, trigger=TRIGGER_SUBMITTED
@@ -542,6 +562,7 @@ __all__ = [
     "DEFAULT_KNOWLEDGE_BASE_NAME",
     "MAX_DOCUMENT_CHARACTERS",
     "DocumentView",
+    "Extracted",
     "IngestionResult",
     "KnowledgeService",
     "content_hash",

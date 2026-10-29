@@ -47,7 +47,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -217,6 +217,12 @@ class Document(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     ingested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    # Lines a PDF extraction flagged as possibly re-ordered, counted per warning
+    # code and never copied (RQ-04): `{"digits_glued_to_arabic": 3}`. NULL when
+    # there were none.
+    extraction_warnings: Mapped[dict[str, int] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
     )
 
     @property
@@ -436,6 +442,10 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_estimate: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The headings this passage sits under, outermost first, `"Pricing > Premium"`
+    # (FX-1.2). NULL for a passage outside any heading and for chunks written
+    # before breadcrumbs existed.
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Nullable in the schema and never NULL in practice: a generation's chunks
     # are written in the transaction that publishes it, with validated vectors.
     embedding: Mapped[list[float] | None] = mapped_column(

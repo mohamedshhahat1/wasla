@@ -164,6 +164,11 @@ class DocumentRead(BaseModel):
     # The served generation was embedded with a model this deployment no longer
     # queries with, so it is not searched until it is re-indexed (RAG-06).
     needs_reindex: bool = False
+    # Lines of a PDF the extractor may have re-ordered, counted per code
+    # (`digits_glued_to_arabic`, `arabic_indic_leading_zero`) - never the text.
+    # Such lines are indexed as extracted; re-uploading the file from another
+    # tool, or re-extracting it, is how they are repaired (RQ-04).
+    extraction_warnings: dict[str, int] | None = None
 
     @classmethod
     def from_view(cls, view: DocumentView) -> Self:
@@ -186,6 +191,7 @@ class DocumentRead(BaseModel):
                 DocumentIndexingRead.from_model(view.latest) if view.latest is not None else None
             ),
             needs_reindex=view.needs_reindex,
+            extraction_warnings=document.extraction_warnings,
         )
 
 

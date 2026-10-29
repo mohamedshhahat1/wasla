@@ -25,16 +25,19 @@ pytestmark = pytest.mark.integration
 # Baseline at 7cdf863: intact 250/261, top-5 225, rank-1 152, presentation 2,
 # stale 1, duplicates 25 slots, empty 6, numbers cut 9, words cut 68,
 # headings 9. Each remediation phase that improves a number moves its gate.
+# Phase 3 (normalisation, page structure): presentation 0, intact 252, top-5
+# 241, rank-1 171; words cut 70 - the old fixed-width cuts landing two words
+# differently in the normalised text, which Phase 4's chunker removes.
 CEILINGS = {
-    "presentation": 2,
+    "presentation": 0,
     "stale": 1,
     "duplicates": 25,
     "empty": 6,
     "numbers_cut": 9,
-    "words_cut": 68,
+    "words_cut": 70,
     "headed_without": 9,
 }
-FLOORS = {"intact": 250, "hit": 225, "rank1": 152}
+FLOORS = {"intact": 252, "hit": 241, "rank1": 171}
 
 
 async def test_the_structural_evaluation(indexing: Indexing) -> None:

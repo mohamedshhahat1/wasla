@@ -105,7 +105,10 @@ def extract(data: bytes, *, max_pages: int, max_characters: int) -> dict[str, An
     except MemoryError:
         return {"ok": False, "code": "too_much_text", "pages": 0}
 
-    return {"ok": True, "text": _clean("\n\n".join(parts).strip()), "pages": pages}
+    # Page by page: the parent decides how pages join, because whether a page
+    # ends mid-sentence and what repeats on every page are questions about the
+    # whole document (RQ-05).
+    return {"ok": True, "pages_text": [_clean(part) for part in parts], "pages": pages}
 
 
 def main(argv: list[str]) -> int:
