@@ -18,7 +18,11 @@ from sqlalchemy import select, update
 from app.db.models.knowledge import Document, DocumentIndexGeneration, GenerationState
 from app.services.knowledge_service import KnowledgeService, content_hash
 from app.services.text_normalisation import for_storage
-from app.workers.knowledge_repair import backfill_normalised_content, reindex_all
+from app.workers.knowledge_repair import (
+    backfill_normalised_content,
+    backfill_source_keys,
+    reindex_all,
+)
 from tests.integration.rag_harness import Indexing, respond
 
 pytestmark = pytest.mark.integration
@@ -160,3 +164,54 @@ async def test_reindex_all_rewrites_stored_glyph_documents_into_normalised_chunk
         tenant_id, "\u064a\u0645\u0643\u0646 \u0644\u0644\u0639\u0645\u064a\u0644"
     )
     assert found and not PRESENTATION_FORMS.search(found[0][1])
+
+
+async def test_the_source_key_backfill_keys_unique_filenames_and_lists_the_rest(
+    indexing: Indexing,
+) -> None:
+    tenant_id = await indexing.workspace()
+    async with indexing.database.session() as session:
+        knowledge = KnowledgeService(session=session, tenant_id=tenant_id, queue=indexing.queue())
+        main = await knowledge.ensure_default_knowledge_base()
+        sales = await knowledge.create_knowledge_base(name="Sales")
+        uploads = {}
+        for label, base, filename in (
+            ("unique", main, "Branches.txt"),
+            ("first", main, "Prices.TXT"),
+            # Renamed below: upload refuses a second key now (RQ-07).
+            ("second", main, "placeholder.txt"),
+            ("elsewhere", sales, "Branches.txt"),
+            ("nameless", main, None),
+        ):
+            view, _ = await knowledge.submit(
+                knowledge_base_id=base.id,
+                title=label,
+                raw=f"{label} document\n\nIts own words, {label}.",
+                filename=filename,
+            )
+            uploads[label] = view.document.id
+    # What every document uploaded before source keys existed looks like.
+    await indexing.execute(
+        update(Document).where(Document.tenant_id == tenant_id).values(source_key=None)
+    )
+    await indexing.execute(
+        update(Document).where(Document.id == uploads["second"]).values(filename="prices.txt")
+    )
+
+    dry = await backfill_source_keys(indexing.database, dry_run=True)
+    assert [uploads["first"], uploads["second"]] in dry.collisions
+    assert (await indexing.document(uploads["unique"])).source_key is None  # type: ignore[union-attr]
+
+    report = await backfill_source_keys(indexing.database)
+    keys = {label: (await indexing.document(i)).source_key for label, i in uploads.items()}  # type: ignore[union-attr]
+    assert keys == {
+        "unique": "branches.txt",
+        "first": None,
+        "second": None,
+        "elsewhere": "branches.txt",
+        "nameless": None,
+    }, "keyed only where unique within the knowledge base; nothing merged"
+    assert [uploads["first"], uploads["second"]] in report.collisions
+    await backfill_source_keys(indexing.database)
+    rerun = {label: (await indexing.document(i)).source_key for label, i in uploads.items()}  # type: ignore[union-attr]
+    assert rerun == keys, "a second run changes nothing"

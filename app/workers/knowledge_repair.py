@@ -24,7 +24,14 @@ from. A document with nothing serving and a failed latest attempt is skipped
 and listed: re-trying it is a decision about that document, not part of a
 sweep. Only served workspaces are touched; a suspended one spends nothing.
 
-`EMBEDDING_SCHEMA_VERSION` is not changed by either (RQ-02).
+**The source-key back-fill** (`backfill-source-keys`) gives each document
+uploaded before stable identities existed (RQ-07) the key its filename derives
+to - but only where that key is unique within its knowledge base. Two documents
+whose filenames derive to one key are left keyless and listed: which of them is
+the current version is a decision about the documents, and nothing is merged.
+One short transaction per knowledge base.
+
+`EMBEDDING_SCHEMA_VERSION` is not changed by any of them (RQ-02).
 """
 
 from __future__ import annotations
@@ -35,10 +42,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.logging import get_logger
 from app.db.models.enums import TenantStatus
-from app.db.models.knowledge import Document, DocumentSource, DocumentStatus
+from app.db.models.knowledge import Document, DocumentSource, DocumentStatus, KnowledgeBase
 from app.db.models.tenant import Tenant
 from app.db.session import Database
 from app.repositories.knowledge_repository import TRIGGER_REINDEX
@@ -60,6 +68,15 @@ class BackfillReport:
     # (keep, delete): the older document holds the text; delete the newer.
     collisions: list[tuple[uuid.UUID, uuid.UUID]] = field(default_factory=list)
     reupload: list[uuid.UUID] = field(default_factory=list)
+
+
+@dataclass
+class SourceKeyReport:
+    """What one source-key back-fill keyed and what it left keyless."""
+
+    keyed: int = 0
+    # Documents of one knowledge base whose filenames derive to one key.
+    collisions: list[list[uuid.UUID]] = field(default_factory=list)
 
 
 @dataclass
@@ -145,6 +162,69 @@ async def _backfill_one(
             document.extraction_warnings = warnings
 
 
+async def backfill_source_keys(
+    database: Database, *, batch: int = BATCH, dry_run: bool = False
+) -> SourceKeyReport:
+    """Key every keyless document by its filename where that key is unique (RQ-07)."""
+    from app.services.knowledge_service import derive_source_key
+
+    report = SourceKeyReport()
+    after: uuid.UUID | None = None
+    while True:
+        async with database.session() as session:
+            query = select(KnowledgeBase.id).order_by(KnowledgeBase.id).limit(batch)
+            if after is not None:
+                query = query.where(KnowledgeBase.id > after)
+            bases = list(await session.scalars(query))
+        if not bases:
+            return report
+        for base_id in bases:
+            try:
+                await _key_base(database, base_id, report, derive_source_key, dry_run=dry_run)
+            except IntegrityError:
+                # An upload took one of these keys between the read and the
+                # write. Nothing was written for this base; the next run keys it.
+                logger.warning(
+                    "knowledge.source_key_backfill_raced",
+                    extra={"knowledge_base_id": str(base_id)},
+                )
+        after = bases[-1]
+
+
+async def _key_base(
+    database: Database,
+    base_id: uuid.UUID,
+    report: SourceKeyReport,
+    derive: Callable[[str | None, str | None], str | None],
+    *,
+    dry_run: bool,
+) -> None:
+    async with database.session() as session:
+        documents = list(
+            await session.scalars(
+                select(Document)
+                .where(Document.knowledge_base_id == base_id)
+                .order_by(Document.created_at, Document.id)
+            )
+        )
+        taken = {document.source_key for document in documents if document.source_key}
+        wanted: dict[str, list[Document]] = {}
+        for document in documents:
+            if document.source_key is None:
+                key = derive(None, document.filename)
+                if key is not None:
+                    wanted.setdefault(key, []).append(document)
+        for key, holders in wanted.items():
+            if len(holders) > 1 or key in taken:
+                report.collisions.append([document.id for document in holders])
+                continue
+            report.keyed += 1
+            if not dry_run:
+                holders[0].source_key = key
+        if dry_run:
+            await session.rollback()
+
+
 async def reindex_all(
     database: Database,
     queue: IngestionQueue,
@@ -203,6 +283,8 @@ async def reindex_all(
 __all__ = [
     "BackfillReport",
     "ReindexReport",
+    "SourceKeyReport",
     "backfill_normalised_content",
+    "backfill_source_keys",
     "reindex_all",
 ]

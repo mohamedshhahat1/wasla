@@ -19,6 +19,7 @@ has exactly the audience this should have.
     docker compose exec worker python -m app.workers.queues reindex-stale-embeddings --dry-run
     docker compose exec worker python -m app.workers.queues reindex-document <workspace> <document>
     docker compose exec worker python -m app.workers.queues backfill-normalised-content --dry-run
+    docker compose exec worker python -m app.workers.queues backfill-source-keys --dry-run
     docker compose exec worker python -m app.workers.queues reindex-all --rate 5 [--after <id>]
     docker compose exec worker python -m app.workers.queues unresolved-sends
 
@@ -518,6 +519,19 @@ def _print_generations(
         print(line)  # noqa: T201
 
 
+async def source_keys_command(database: Database, *, dry_run: bool) -> int:
+    """Key documents by filename where unique; list the ones the operator must decide."""
+    from app.workers.knowledge_repair import backfill_source_keys
+
+    report = await backfill_source_keys(database, dry_run=dry_run)
+    verb = "would key" if dry_run else "keyed"
+    print(f"{verb} {report.keyed} document(s)")  # noqa: T201
+    for documents in report.collisions:
+        listed = "  ".join(str(document_id) for document_id in documents)
+        print(f"same filename, left unkeyed  {listed}")  # noqa: T201
+    return 0
+
+
 async def backfill_command(database: Database, *, dry_run: bool) -> int:
     """Run the normalisation back-fill and print what the operator must do next."""
     from app.workers.knowledge_repair import backfill_normalised_content
@@ -680,6 +694,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backfill.add_argument("--dry-run", action="store_true")
 
+    keys = commands.add_parser(
+        "backfill-source-keys",
+        help="key documents uploaded before source keys by filename, where unique (RQ-07)",
+    )
+    keys.add_argument("--dry-run", action="store_true")
+
     everything = commands.add_parser(
         "reindex-all",
         help="re-index every document through the normal path, at a bounded rate (resumable)",
@@ -734,9 +754,11 @@ async def run(argv: Sequence[str] | None = None) -> int:
         finally:
             await database.dispose()
 
-    if arguments.command == "backfill-normalised-content":
+    if arguments.command in {"backfill-normalised-content", "backfill-source-keys"}:
         database = Database(settings)
         try:
+            if arguments.command == "backfill-source-keys":
+                return await source_keys_command(database, dry_run=arguments.dry_run)
             return await backfill_command(database, dry_run=arguments.dry_run)
         finally:
             await database.dispose()
