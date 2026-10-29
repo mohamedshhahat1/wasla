@@ -115,7 +115,13 @@ async def test_a_burst_of_slow_uploads_does_not_exhaust_the_pool(
     peak: list[int] = []
 
     async def watch() -> None:
-        for _ in range(int(DELAY * 4)):
+        # From one second in, when every upload has done its setup query and
+        # is parsing or waiting for a parse slot, until the first parses end.
+        # Before that each upload briefly holds a connection for its own
+        # reads - not what this test is about, and it made the peak depend on
+        # how fast the burst started (7 of 5 once in the migration lane).
+        await asyncio.sleep(1.0)
+        for _ in range(int((DELAY - 1.5) * 4)):
             peak.append(pool.checkedout())  # type: ignore[attr-defined]
             await asyncio.sleep(0.25)
 
