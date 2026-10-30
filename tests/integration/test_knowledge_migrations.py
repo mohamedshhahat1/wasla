@@ -1,4 +1,4 @@
-"""Migrations 0127 .. 0134 refuse a downgrade that would lose data (section 28).
+"""Migrations 0127 .. 0138 refuse a downgrade that would lose data (section 28; Part 3 section 21).
 
 Built from scratch to head on a database of its own, written to through the
 real `KnowledgeService`, then walked down: each migration in turn refuses while
@@ -187,6 +187,99 @@ def test_part_two_migrations_refuse_to_discard_what_only_they_hold(database_url:
             _execute(target, "UPDATE document_chunks SET search_text = NULL, search_tsv = NULL")
         )
         _alembic(target, "downgrade", "0131")
+        _alembic(target, "upgrade", "head")
+    finally:
+        asyncio.run(_admin(admin, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+
+
+async def _seed_part_three(url: str) -> None:
+    """A CSV catalogue, a switch under way with a shadow owed, and a gap row."""
+    from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
+    from app.db.models.knowledge import EMBEDDING_DIMENSIONS, DocumentSource, KnowledgeSearchGap
+    from app.services.embedding_switch import EmbeddingSwitch
+    from tests.fake_embeddings import FAKE_MODEL, FakeEmbeddings
+    from tests.fakes import as_embeddings
+
+    engine = create_async_engine(url)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            tenant = Tenant(timezone=TEST_TIMEZONE, name="Down", slug=f"dn3-{uuid.uuid4().hex[:8]}")
+            session.add(tenant)
+            await session.flush()
+            knowledge = KnowledgeService(session=session, tenant_id=tenant.id, queue=None)
+            base = await knowledge.ensure_default_knowledge_base()
+            view, _ = await knowledge.submit(
+                knowledge_base_id=base.id,
+                title="Prices",
+                raw="SKU,Product,Price\nBK-35,Bookshelf model 35,4500 EGP\n",
+                source=DocumentSource.CSV,
+            )
+            await knowledge.ingest(
+                document_id=view.document.id, embeddings=as_embeddings(FakeEmbeddings())
+            )
+            switch = EmbeddingSwitch(
+                session,
+                tenant_id=tenant.id,
+                default_space=EmbeddingSpace(
+                    provider=OPENAI_PROVIDER, model=FAKE_MODEL, dimensions=EMBEDDING_DIMENSIONS
+                ),
+            )
+            await switch.start(
+                EmbeddingSpace(
+                    provider=OPENAI_PROVIDER,
+                    model="text-embedding-3-large",
+                    dimensions=EMBEDDING_DIMENSIONS,
+                )
+            )
+            assert await switch.request_shadows(limit=10)
+            session.add(
+                KnowledgeSearchGap(tenant_id=tenant.id, query="opening hours", language="en")
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+def test_part_three_migrations_refuse_to_discard_what_only_they_hold(database_url: str) -> None:
+    """0138 (gap rows), 0136 (shadows, query spaces, switch audit rows), 0135 (new formats)."""
+    name = f"wasla_rg3_down_{uuid.uuid4().hex[:10]}"
+    source = make_url(database_url)
+    target = source.set(database=name).render_as_string(hide_password=False)
+    admin = source.set(database="postgres").render_as_string(hide_password=False)
+    asyncio.run(_admin(admin, f"CREATE DATABASE {name}"))
+    try:
+        _alembic(target, "upgrade", "head")
+        asyncio.run(_seed_part_three(target))
+
+        def refuses(migration: str) -> None:
+            with pytest.raises(RuntimeError, match=f"Refusing to downgrade {migration}"):
+                _alembic(target, "downgrade", "0134")
+
+        refuses("0138")
+        asyncio.run(_execute(target, "DELETE FROM knowledge_search_gaps"))
+        refuses("0136")  # the owed shadow, the query-space row and the audit row
+        asyncio.run(
+            _execute(
+                target, "DELETE FROM document_index_generations WHERE trigger = 'embedding_switch'"
+            )
+        )
+        refuses("0136")
+        asyncio.run(_execute(target, "DELETE FROM workspace_embedding_spaces"))
+        refuses("0136")
+        asyncio.run(
+            _execute(
+                target,
+                "DELETE FROM audit_logs WHERE action::text = 'knowledge_embedding_switch'",
+            )
+        )
+        refuses("0135")
+        # A generation that snapshots the CSV it was built from is refused on
+        # its own, after its document no longer is.
+        asyncio.run(_execute(target, "UPDATE documents SET source = 'text'"))
+        asyncio.run(_execute(target, "UPDATE document_index_generations SET source = 'csv'"))
+        refuses("0135")
+        asyncio.run(_execute(target, "UPDATE document_index_generations SET source = NULL"))
+        _alembic(target, "downgrade", "0134")
         _alembic(target, "upgrade", "head")
     finally:
         asyncio.run(_admin(admin, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
