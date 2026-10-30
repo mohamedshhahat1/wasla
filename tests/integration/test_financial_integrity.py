@@ -385,8 +385,16 @@ async def test_collected_money_keeps_what_it_was(db_session: AsyncSession, chang
 
 
 async def test_a_topup_is_not_granted_on_an_unpaid_invoice(db_session: AsyncSession) -> None:
-    """Y35: checked when the purchase becomes granted, at commit."""
+    """Y35: checked when the purchase becomes granted, at commit.
+
+    The grant stamps `granted_at = now()`, and a purchase may only be granted
+    before it expires (`expires_at > granted_at`), so its period is anchored to
+    the real clock. Pinned to NOW it expired on 2026-10-27, and from then on the
+    expiry check refused the grant before the unpaid-invoice trigger was reached.
+    """
     a = await _workspace(db_session)
+    start = datetime.now(UTC) - timedelta(days=1)
+    end = start + timedelta(days=30)
     item = await product(db_session, entitlement=TopupEntitlement.PERIOD_AI_TURNS, quantity=5)
     invoice, purchase = uuid.uuid4(), uuid.uuid4()
     await _accepted(
@@ -395,7 +403,7 @@ async def test_a_topup_is_not_granted_on_an_unpaid_invoice(db_session: AsyncSess
         " amount_paid, currency, period_start, period_end, lines, collection_attempts, revision)"
         " VALUES (:id, :tenant, 'open', 'topup', 'topup', 99.00, 0, 'EGP', :start, :end, '[]',"
         " 0, 1)",
-        {"id": invoice, "tenant": a.tenant.id, "start": NOW, "end": NOW + timedelta(days=30)},
+        {"id": invoice, "tenant": a.tenant.id, "start": start, "end": end},
     )
     await _accepted(
         db_session,
@@ -409,8 +417,8 @@ async def test_a_topup_is_not_granted_on_an_unpaid_invoice(db_session: AsyncSess
             "id": purchase,
             "tenant": a.tenant.id,
             "product": item.id,
-            "start": NOW,
-            "end": NOW + timedelta(days=30),
+            "start": start,
+            "end": end,
             "invoice": invoice,
         },
     )
