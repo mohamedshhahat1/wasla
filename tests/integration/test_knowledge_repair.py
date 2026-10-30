@@ -199,7 +199,10 @@ async def test_the_source_key_backfill_keys_unique_filenames_and_lists_the_rest(
     )
 
     dry = await backfill_source_keys(indexing.database, dry_run=True)
-    assert [uploads["first"], uploads["second"]] in dry.collisions
+    # A group is ordered by (created_at, id); both were created in one
+    # transaction, so the tie falls to random ids (RR-24): compared as a set.
+    pair = {uploads["first"], uploads["second"]}
+    assert pair in [set(group) for group in dry.collisions]
     assert (await indexing.document(uploads["unique"])).source_key is None  # type: ignore[union-attr]
 
     report = await backfill_source_keys(indexing.database)
@@ -211,7 +214,7 @@ async def test_the_source_key_backfill_keys_unique_filenames_and_lists_the_rest(
         "elsewhere": "branches.txt",
         "nameless": None,
     }, "keyed only where unique within the knowledge base; nothing merged"
-    assert [uploads["first"], uploads["second"]] in report.collisions
+    assert pair in [set(group) for group in report.collisions]
     await backfill_source_keys(indexing.database)
     rerun = {label: (await indexing.document(i)).source_key for label, i in uploads.items()}  # type: ignore[union-attr]
     assert rerun == keys, "a second run changes nothing"

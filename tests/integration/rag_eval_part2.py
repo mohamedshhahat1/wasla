@@ -231,9 +231,27 @@ async def measure_part2(indexing: Indexing, tenant_id: uuid.UUID, run: EvalRun) 
             if first.heading_path and first.heading_path == second.heading_path:
                 pairs.append((first, second))
     complete = 0
+    complete_one = 0
     for first, second in pairs:
         head = " ".join(first.content.split()[-12:])
         tail = " ".join(second.content.split()[-8:])
+        # At max_results=1 as well: there the two chunks cannot both arrive as
+        # separate passages, so only merging and neighbour expansion deliver
+        # the continuation (FX-3.11).
+        single = await _search(indexing, tenant_id, head, lifted=True, top_k=1)
+        single_context = (
+            comparable(
+                " ".join(
+                    source["content"]
+                    for source in json.loads(single.as_context())["knowledge_sources"]
+                )
+            )
+            if single.passages
+            else ""
+        )
+        complete_one += int(
+            comparable(head) in single_context and comparable(tail) in single_context
+        )
         found = await _search(indexing, tenant_id, head, lifted=True)
         # What the model reads: the sources' contents, decoded from the JSON.
         context = (
@@ -257,7 +275,12 @@ async def measure_part2(indexing: Indexing, tenant_id: uuid.UUID, run: EvalRun) 
                 comparable(tail) in context,
                 [(p.document_title, p.ordinals) for p in found.passages],
             )
-    result.metrics["two-chunk answers delivered complete"] = f"{complete} / {len(pairs)}"
+    result.metrics["two-chunk answers delivered complete (max_results=5)"] = (
+        f"{complete} / {len(pairs)}"
+    )
+    result.metrics["two-chunk answers delivered complete (max_results=1)"] = (
+        f"{complete_one} / {len(pairs)}"
+    )
 
     # Delivered vs requested.
     top = retrieval_module.MAX_TOP_K

@@ -32,7 +32,6 @@ Rules that matter more than anything else here:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -707,25 +706,6 @@ def _attach(candidate: Candidate, neighbour: DocumentChunk) -> None:
     else:
         candidate.content = join_adjacent(candidate.content, neighbour.content)
         candidate.ordinals = (*ordinals, neighbour.ordinal)
-
-
-def _without_repeats(candidates: list[Candidate]) -> list[Candidate]:
-    """Drop a passage whose text a higher-ranked passage already carries (RQ-08).
-
-    The safety net behind the upload-time refusal: two documents of a workspace
-    holding the same words - stored before the refusal existed, or by a race -
-    would otherwise spend two of the few slots on one fact. Compared as matched
-    text, scoped to this one search's rows, never across workspaces.
-    """
-    seen: set[str] = set()
-    kept: list[Candidate] = []
-    for candidate in candidates:
-        digest = hashlib.sha256(for_matching(candidate.content).encode("utf-8")).hexdigest()
-        if digest in seen:
-            continue
-        seen.add(digest)
-        kept.append(candidate)
-    return kept
 
 
 def _passage(candidate: Candidate) -> Passage:
