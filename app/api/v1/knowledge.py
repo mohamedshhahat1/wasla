@@ -22,7 +22,7 @@ header on the two routes that predate it and still answer a bare list).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Query, Response, UploadFile, status
@@ -37,8 +37,11 @@ from app.api.dependencies import (
 )
 from app.api.route import CommittingRoute
 from app.api.uploads import UPLOAD_CHUNK_BYTES
+from app.core.dependencies import SessionDep, SettingsDep
+from app.core.exceptions import NotFoundError
 from app.db.models.billing import LimitKey
 from app.db.models.knowledge import DocumentSource, DocumentStatus
+from app.repositories.knowledge_repository import KnowledgeGapRepository
 from app.schemas.conversation import CursorPage
 from app.schemas.knowledge import (
     DocumentCreateRequest,
@@ -48,6 +51,8 @@ from app.schemas.knowledge import (
     KnowledgeBaseCreateRequest,
     KnowledgeBaseRead,
     KnowledgeBaseUpdateRequest,
+    KnowledgeGapRead,
+    KnowledgeGapReport,
     KnowledgeSettingsRead,
     KnowledgeSettingsUpdate,
     SearchRequest,
@@ -78,6 +83,41 @@ async def preview_search(
     Metered like a search: it costs an embedding call.
     """
     return await preview.search(body)
+
+
+@router.get("/gaps", response_model=KnowledgeGapReport)
+async def knowledge_gaps(
+    session: SessionDep,
+    settings: SettingsDep,
+    admin: TenantAdminDep,
+    days: Annotated[int, Query(ge=1, le=90)] = 30,
+    limit: LimitQuery = 50,
+) -> KnowledgeGapReport:
+    """What customers asked that the workspace's documents did not answer (RQ-27).
+
+    The queries the agent searched with and found nothing for - never a
+    customer's message - most-asked first, with when each was last asked.
+    Administrators only. `404` while `RAG_GAP_REPORT_ENABLED` is off, which is
+    the default until the Privacy audit has reviewed it.
+    """
+    if not settings.rag_gap_report_enabled:
+        raise NotFoundError("The knowledge-gap report is not enabled.")
+    topics = await KnowledgeGapRepository(session, tenant_id=admin.tenant.id).topics(
+        since=datetime.now(UTC) - timedelta(days=days), limit=limit
+    )
+    return KnowledgeGapReport(
+        days=days,
+        gaps=[
+            KnowledgeGapRead(
+                query=topic.query,
+                language=topic.language,
+                searches=topic.searches,
+                best_distance=topic.best_distance,
+                last_asked_at=topic.last_asked_at,
+            )
+            for topic in topics
+        ],
+    )
 
 
 @router.get("/settings", response_model=KnowledgeSettingsRead)

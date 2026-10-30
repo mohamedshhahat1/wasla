@@ -361,6 +361,23 @@ class SearchResponse(BaseModel):
     model_context: str = ""
 
 
+class KnowledgeGapRead(BaseModel):
+    """One question the workspace's documents did not answer (RQ-27)."""
+
+    query: str
+    language: str
+    searches: int
+    best_distance: float | None
+    last_asked_at: datetime
+
+
+class KnowledgeGapReport(BaseModel):
+    """The most-asked unanswered questions of the last `days` days."""
+
+    days: int
+    gaps: list[KnowledgeGapRead]
+
+
 class KnowledgeSettingsRead(BaseModel):
     """A workspace's retrieval switches: what it set, and what is in effect (G9)."""
 

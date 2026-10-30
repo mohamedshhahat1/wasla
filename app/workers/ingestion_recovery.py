@@ -45,7 +45,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.db.session import Database
-from app.repositories.knowledge_repository import IndexingSweep
+from app.repositories.knowledge_repository import IndexingSweep, KnowledgeGapSweep
 from app.services.document_indexing import CLAIM_LEASE, MAX_INDEXING_ATTEMPTS
 from app.workers.ingestion_queue import IngestionJob, IngestionQueue
 
@@ -100,6 +100,7 @@ class IngestionRecoveryWorker:
         )
         # A job queued within this long is still on its way (FX-1.9).
         self._visibility = timedelta(seconds=settings.queue_visibility_timeout_seconds)
+        self._gap_retention = timedelta(days=settings.rag_gap_retention_days)
         self._running = False
         self._stopping = asyncio.Event()
 
@@ -122,6 +123,23 @@ class IngestionRecoveryWorker:
                 continue
         logger.info("ingestion_recovery.worker_stopped")
 
+    async def _expire_gaps(self, moment: datetime) -> None:
+        """The knowledge-gap report's retention (RQ-27): rows past it, a batch a pass.
+
+        Whether or not the report is enabled now: rows written while it was
+        are kept no longer than the retention either way.
+        """
+        try:
+            async with self._database.session() as session:
+                expired = await KnowledgeGapSweep(session).expire(
+                    older_than=moment - self._gap_retention
+                )
+        except Exception:
+            logger.exception("knowledge.gap_retention_failed")
+            return
+        if expired:
+            logger.info("knowledge.gaps_expired", extra={"rows": expired})
+
     def stop(self) -> None:
         self._running = False
         self._stopping.set()
@@ -142,6 +160,7 @@ class IngestionRecoveryWorker:
         moment = now or datetime.now(UTC)
         queued = still_owing = 0
         sent: list[uuid.UUID] = []
+        await self._expire_gaps(moment)
 
         async with self._database.session() as session:
             due = await IndexingSweep(session).claim_due(

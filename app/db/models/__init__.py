@@ -122,6 +122,7 @@ from .knowledge import (
     DocumentStatus,
     GenerationState,
     KnowledgeBase,
+    KnowledgeSearchGap,
     WorkspaceEmbeddingSpace,
 )
 from .lead import (
@@ -296,6 +297,7 @@ __all__ = [
     "InvoicePurpose",
     "InvoiceStatus",
     "KnowledgeBase",
+    "KnowledgeSearchGap",
     "Lead",
     "LeadActivity",
     "LeadActivityKind",

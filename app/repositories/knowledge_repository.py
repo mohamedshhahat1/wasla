@@ -51,6 +51,7 @@ from app.db.models.knowledge import (
     DocumentStatus,
     GenerationState,
     KnowledgeBase,
+    KnowledgeSearchGap,
     WorkspaceEmbeddingSpace,
 )
 from app.db.models.tenant import Tenant
@@ -1455,6 +1456,79 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
             shadow_generations=shadows,
             bidi_warning_documents=bidi,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class GapTopic:
+    """One unanswered question, as often as it was asked."""
+
+    query: str
+    language: str
+    searches: int
+    best_distance: float | None
+    last_asked_at: datetime
+
+
+class KnowledgeGapRepository(TenantScopedRepository[KnowledgeSearchGap]):
+    """One workspace's knowledge-gap report (RQ-27)."""
+
+    model = KnowledgeSearchGap
+
+    def _tenant_filter(self) -> ColumnElement[bool]:
+        return KnowledgeSearchGap.tenant_id == self.tenant_id
+
+    async def topics(self, *, since: datetime, limit: int) -> list[GapTopic]:
+        """The most-asked unanswered questions since `since`, folded case-insensitively."""
+        folded = func.lower(KnowledgeSearchGap.query)
+        rows = await self.session.execute(
+            select(
+                func.min(KnowledgeSearchGap.query),
+                func.min(KnowledgeSearchGap.language),
+                func.count(KnowledgeSearchGap.id),
+                func.min(KnowledgeSearchGap.best_distance),
+                func.max(KnowledgeSearchGap.created_at),
+            )
+            .where(self._tenant_filter(), KnowledgeSearchGap.created_at >= since)
+            .group_by(folded)
+            .order_by(
+                func.count(KnowledgeSearchGap.id).desc(),
+                func.max(KnowledgeSearchGap.created_at).desc(),
+            )
+            .limit(max(1, min(limit, 100)))
+        )
+        return [
+            GapTopic(
+                query=query,
+                language=language,
+                searches=int(count),
+                best_distance=float(distance) if distance is not None else None,
+                last_asked_at=last,
+            )
+            for query, language, count, distance, last in rows.all()
+        ]
+
+
+class KnowledgeGapSweep(BaseRepository[KnowledgeSearchGap]):
+    """The gap report's retention, across every workspace (RQ-27).
+
+    Unscoped and its own class for the same reason `IndexingSweep` is: it
+    deletes by age, never reads a row's text, and is reachable from no route.
+    """
+
+    model = KnowledgeSearchGap
+
+    async def expire(self, *, older_than: datetime, limit: int = 1_000) -> int:
+        """Delete up to `limit` rows older than `older_than`. Returns how many."""
+        doomed = (
+            select(KnowledgeSearchGap.id)
+            .where(KnowledgeSearchGap.created_at < older_than)
+            .limit(limit)
+            .scalar_subquery()
+        )
+        result = await self.session.execute(
+            delete(KnowledgeSearchGap).where(KnowledgeSearchGap.id.in_(doomed))
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
 
 
 async def knowledge_unreachable(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:

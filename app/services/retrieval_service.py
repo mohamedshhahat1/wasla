@@ -33,6 +33,7 @@ Rules that matter more than anything else here:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -45,8 +46,8 @@ from app.agents.memory import estimate_tokens
 from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
-from app.core.telemetry import record_ai_stage, record_rerank, record_retrieval
-from app.db.models.knowledge import DocumentChunk
+from app.core.telemetry import record_ai_stage, record_gap_search, record_rerank, record_retrieval
+from app.db.models.knowledge import DocumentChunk, KnowledgeSearchGap
 from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
@@ -77,7 +78,7 @@ from app.services.retrieval_ranking import (
     tsquery_text,
     within_margin,
 )
-from app.services.text_normalisation import for_matching
+from app.services.text_normalisation import for_matching, for_storage
 from app.services.usage_service import (
     AI_PURPOSE_RERANK,
     EMBEDDING_PURPOSE_QUERY,
@@ -307,6 +308,18 @@ def _shortened(entry: dict[str, Any]) -> dict[str, Any]:
     return {**entry, "content": content[:low]}
 
 
+_ARABIC = re.compile("[؀-ۿ]")
+_LATIN = re.compile("[A-Za-z]")
+
+
+def query_language(query: str) -> str:
+    """`ar`, `en`, `mixed` or `other`, from the letters a query is written in (RQ-27)."""
+    arabic, latin = bool(_ARABIC.search(query)), bool(_LATIN.search(query))
+    if arabic and latin:
+        return "mixed"
+    return "ar" if arabic else "en" if latin else "other"
+
+
 class RetrievalService:
     """Answers questions from one workspace's own documents."""
 
@@ -340,6 +353,7 @@ class RetrievalService:
         max_distance: float = MAX_DISTANCE,
         release_session: bool = False,
         alternate_query: str | None = None,
+        record_gap: bool = False,
     ) -> Retrieval:
         """Find the passages in this workspace most relevant to a question.
 
@@ -351,6 +365,11 @@ class RetrievalService:
 
         Raises `KnowledgeSearchUnavailableError`, and nothing else, when the
         search cannot be completed.
+
+        `record_gap` lets an empty search be recorded in the knowledge-gap
+        report (RQ-27) when the policy enables it: only the agent's tool asks,
+        because only its query is one the model wrote rather than the
+        customer's message.
 
         `release_session` hands the session's connection back for the embedding
         call (TOOL-09, ADR-080). Off by default, because a request handler's
@@ -540,6 +559,16 @@ class RetrievalService:
                 queries=len(queries),
             ),
         )
+        if record_gap and self._policy.gap_report and not passages:
+            self._session.add(
+                KnowledgeSearchGap(
+                    tenant_id=self._tenant_id,
+                    query=for_storage(query)[:500],
+                    language=query_language(cleaned),
+                    best_distance=best,
+                )
+            )
+            await record_gap_search()
         await record_retrieval(
             outcome=FOUND if passages else EMPTY,
             duration_seconds=perf_counter() - started,

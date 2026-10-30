@@ -39,6 +39,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -482,6 +483,30 @@ class WorkspaceEmbeddingSpace(Base, TenantScopedMixin, TimestampMixin):
     )
     flipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KnowledgeSearchGap(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
+    """One agent search that found nothing, for the workspace's gap report (RQ-27).
+
+    Written only while `RAG_GAP_REPORT_ENABLED` is on, and only for the query
+    the model wrote for the knowledge tool - never the customer's message,
+    which is why pre-retrieval, which searches with the message, writes none.
+    Kept `RAG_GAP_RETENTION_DAYS` (30) by the recovery sweep, erased with the
+    workspace by the purge, read only by its administrators.
+    """
+
+    __tablename__ = "knowledge_search_gaps"
+    __table_args__ = (
+        Index("ix_knowledge_search_gaps_tenant_id", "tenant_id"),
+        Index("ix_knowledge_search_gaps_tenant_id_created_at", "tenant_id", "created_at"),
+        # What the retention pass deletes by, across every workspace.
+        Index("ix_knowledge_search_gaps_created_at", "created_at"),
+    )
+
+    query: Mapped[str] = mapped_column(String(500), nullable=False)
+    # `ar`, `en`, `mixed` or `other`, from the letters the query is written in.
+    language: Mapped[str] = mapped_column(String(8), nullable=False)
+    best_distance: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):

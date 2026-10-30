@@ -996,7 +996,13 @@ class AgentOrchestrator:
         )
         searched = len(context.searches)
         execution = await self._execute(
-            call, context, granted, agent=agent, round_number=1, ordinal=0
+            # The query is the customer's message: never recorded as a gap (RQ-27).
+            call,
+            replace(context, record_gaps=False),
+            granted,
+            agent=agent,
+            round_number=1,
+            ordinal=0,
         )
         if not execution.succeeded or len(context.searches) == searched:
             await record_preretrieval("refused")

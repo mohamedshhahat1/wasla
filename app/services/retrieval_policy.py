@@ -59,6 +59,9 @@ class RetrievalPolicy:
     passage_margin: float | None = None
     #: The knowledge bases the agent may read; None for the whole workspace.
     knowledge_base_ids: tuple[uuid.UUID, ...] | None = None
+    #: Record an empty search in the knowledge-gap report (RQ-27). Off until
+    #: the Privacy audit.
+    gap_report: bool = False
 
     @property
     def tiers_active(self) -> bool:
@@ -123,6 +126,7 @@ def resolve(
             strong_distance=cut_offs[0] if cut_offs else None,
             partial_distance=cut_offs[1] if cut_offs else None,
             passage_margin=settings.rag_passage_margin,
+            gap_report=settings.rag_gap_report_enabled,
         ),
         features=TurnFeatures(
             number_grounding=mode,

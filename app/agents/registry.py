@@ -140,6 +140,9 @@ class ToolContext:
     reranker: LlmReranker | None = None
     #: Query vectors kept per workspace and space (RQ-26), when enabled.
     query_cache: QueryEmbeddingCache | None = None
+    #: Whether an empty search may be recorded in the gap report (RQ-27):
+    #: false for pre-retrieval, whose query is the customer's own message.
+    record_gaps: bool = True
     #: Every search this turn ran, in order: what the grounding guard checks a
     #: reply's numbers against (RQ-19), and what pre-retrieval reads its tier
     #: from (RQ-20). Appended by the knowledge tool; never read by a model.
@@ -559,6 +562,7 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
         alternate_query=str(alternate) if alternate else None,
         top_k=top_k,
         release_session=True,
+        record_gap=context.record_gaps,
     )
     context.searches.append(retrieval)
     logger.info(
