@@ -1194,6 +1194,127 @@ tests:
               runbook: docs/RUNBOOK.md
 
   - interval: 1m
+    name: documents served from a space nobody queries alert after half an hour
+    input_series:
+      - series: 'wasla_documents_stale_embedding{job="wasla-api"}'
+        values: "0x10 3x100"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: KnowledgeStaleEmbeddings
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: KnowledgeStaleEmbeddings
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "Documents are served from an embedding space nobody queries"
+              description: >-
+                Active document generations were embedded in a space other than their workspace's query space, so searches cannot find them. This happens when OPENAI_EMBEDDING_MODEL or EMBEDDING_SCHEMA_VERSION is changed directly instead of through the shadow switch. Restore the setting, then change the model with `python -m app.workers.queues embedding-switch start`.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a switch that keeps progressing is quiet, one stuck below full coverage alerts
+    input_series:
+      - series: 'wasla_rag_space_coverage_ratio{job="wasla-api"}'
+        values: "0.1+0.001x540 0.64x700"
+    alert_rule_test:
+      - eval_time: 9h
+        alertname: EmbeddingSwitchStalled
+        exp_alerts: []
+      - eval_time: 17h
+        alertname: EmbeddingSwitchStalled
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "An embedding-model switch has stopped making progress"
+              description: >-
+                Coverage of an embedding-model switch has stayed below 100 % for six hours. The current space keeps serving, so no search is affected, but no workspace will flip. Run `python -m app.workers.queues embedding-switch status` for the blocking documents and check the shadow re-index loop.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: no switch under way means coverage 1 and no alert
+    input_series:
+      - series: 'wasla_rag_space_coverage_ratio{job="wasla-api"}'
+        values: "1x1500"
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: EmbeddingSwitchStalled
+        exp_alerts: []
+
+  - interval: 1m
+    name: failed shadows blocking a flip alert after an hour
+    input_series:
+      - series: 'wasla_rag_shadow_generations{job="wasla-api", state="failed"}'
+        values: "0x10 2x100"
+      - series: 'wasla_rag_shadow_generations{job="wasla-api", state="shadow"}'
+        values: "50x110"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: EmbeddingSwitchShadowsFailed
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: EmbeddingSwitchShadowsFailed
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "Shadow generations failed and are blocking an embedding-model switch"
+              description: >-
+                Some documents could not be embedded in the switch's target space. Their workspaces will not flip until each is fixed, re-indexed or deleted. Run `python -m app.workers.queues embedding-switch status` for the documents.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a failing query-embedding cache alerts, a healthy one does not
+    input_series:
+      - series: 'wasla_rag_query_embedding_cache_total{job="wasla-api", outcome="hit"}'
+        values: "0+5x120"
+      - series: 'wasla_rag_query_embedding_cache_total{job="wasla-api", outcome="miss"}'
+        values: "0+2x120"
+      - series: 'wasla_rag_query_embedding_cache_total{job="wasla-api", outcome="error"}'
+        values: "0+0x40 0+10x80"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QueryEmbeddingCacheErrors
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: QueryEmbeddingCacheErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "The query-embedding cache is failing"
+              description: >-
+                More than a fifth of the query-embedding cache lookups of the last 15 minutes failed. Searches still work, embedding each query again. Check Redis (DependencyDown) or switch the cache off with RAG_QUERY_EMBEDDING_CACHE=false.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: documents with possibly re-ordered lines alert after a day
+    input_series:
+      - series: 'wasla_knowledge_bidi_warning_documents{job="wasla-api"}'
+        values: "0x10 1x1700"
+    alert_rule_test:
+      - eval_time: 20h
+        alertname: KnowledgeBidiWarnings
+        exp_alerts: []
+      - eval_time: 25h
+        alertname: KnowledgeBidiWarnings
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "Some ready documents may hold re-ordered right-to-left text"
+              description: >-
+                PDF extraction flagged lines of ready documents as possibly re-ordered. Run `python -m scripts.rag_triage` for the documents and ask the workspace to re-upload them from the original source.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
     name: replacements that mostly fail alert, ones that mostly publish do not
     input_series:
       - series: 'wasla_knowledge_replacements_total{job="wasla-api", outcome="published"}'

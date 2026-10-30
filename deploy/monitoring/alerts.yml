@@ -1119,6 +1119,103 @@ groups:
             for the timeout. Check the provider, or switch re-rank off.
           runbook: docs/RUNBOOK.md
 
+      - alert: KnowledgeStaleEmbeddings
+        # Active generations in a space their workspace is not queried in
+        # (RV-11, RR-09). A shadow switch never produces one - the old space
+        # stays the query space until the flip - so this is the embedding
+        # setting changed directly, and those documents are invisible to search.
+        expr: max(wasla_documents_stale_embedding) > 0
+        for: 30m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Documents are served from an embedding space nobody queries"
+          description: >-
+            Active document generations were embedded in a space other than
+            their workspace's query space, so searches cannot find them. This
+            happens when OPENAI_EMBEDDING_MODEL or EMBEDDING_SCHEMA_VERSION is
+            changed directly instead of through the shadow switch. Restore the
+            setting, then change the model with `python -m app.workers.queues
+            embedding-switch start`.
+          runbook: docs/RUNBOOK.md
+
+      - alert: EmbeddingSwitchStalled
+        # An embedding-model switch (RQ-25) whose coverage has not moved for
+        # six hours below 100 %. Nothing is wrong for customers - the old space
+        # keeps serving - but the switch will never flip on its own.
+        expr: |
+          max(wasla_rag_space_coverage_ratio) < 1
+          and
+          max(max_over_time(wasla_rag_space_coverage_ratio[6h])) - max(min_over_time(wasla_rag_space_coverage_ratio[6h])) == 0
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "An embedding-model switch has stopped making progress"
+          description: >-
+            Coverage of an embedding-model switch has stayed below 100 % for
+            six hours. The current space keeps serving, so no search is
+            affected, but no workspace will flip. Run `python -m
+            app.workers.queues embedding-switch status` for the blocking
+            documents and check the shadow re-index loop.
+          runbook: docs/RUNBOOK.md
+
+      - alert: EmbeddingSwitchShadowsFailed
+        # A shadow that failed permanently blocks its workspace's flip (RQ-25).
+        expr: max(wasla_rag_shadow_generations{state="failed"}) > 0
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "Shadow generations failed and are blocking an embedding-model switch"
+          description: >-
+            Some documents could not be embedded in the switch's target space.
+            Their workspaces will not flip until each is fixed, re-indexed or
+            deleted. Run `python -m app.workers.queues embedding-switch status`
+            for the documents.
+          runbook: docs/RUNBOOK.md
+
+      - alert: QueryEmbeddingCacheErrors
+        # The query-embedding cache (RQ-26) falls back to the provider on any
+        # Redis error: answers are unaffected, every search pays for an
+        # embedding call again.
+        expr: |
+          sum(rate(wasla_rag_query_embedding_cache_total{outcome="error"}[15m]))
+          /
+          clamp_min(sum(rate(wasla_rag_query_embedding_cache_total[15m])), 0.001)
+          > 0.2
+        for: 15m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "The query-embedding cache is failing"
+          description: >-
+            More than a fifth of the query-embedding cache lookups of the last
+            15 minutes failed. Searches still work, embedding each query again.
+            Check Redis (DependencyDown) or switch the cache off with
+            RAG_QUERY_EMBEDDING_CACHE=false.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeBidiWarnings
+        # Ready PDFs whose extraction flagged lines it may have re-ordered
+        # (RQ-04): answers from them may quote scrambled Arabic.
+        expr: max(wasla_knowledge_bidi_warning_documents) > 0
+        for: 24h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "Some ready documents may hold re-ordered right-to-left text"
+          description: >-
+            PDF extraction flagged lines of ready documents as possibly
+            re-ordered. Run `python -m scripts.rag_triage` for the documents
+            and ask the workspace to re-upload them from the original source.
+          runbook: docs/RUNBOOK.md
+
       - alert: AgentRepliesQuoteUngroundedNumbers
         # Prices and percentages in replies that no retrieved passage, customer
         # message or agent instruction supports (RQ-19). In observe mode they
