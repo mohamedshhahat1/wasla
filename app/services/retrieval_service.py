@@ -601,31 +601,39 @@ class RetrievalService:
         used = estimate_tokens(
             _serialize([_source(i, _passage(c)) for i, c in enumerate(chosen, start=1)])
         )
+        # Every neighbour asked for in one query, then attached in rank order
+        # (RR-25: one round trip, not one per passage).
+        expanding = [c for c in chosen[:EXPANDED_PASSAGES] if not c.whole]
+        wanted: list[tuple[uuid.UUID, int]] = []
+        for candidate in expanding:
+            ordinals = candidate.ordinals or (candidate.ordinal,)
+            wanted.extend(
+                (candidate.generation_id, o)
+                for o in (ordinals[0] - 1, ordinals[-1] + 1)
+                if o >= 0 and (candidate.generation_id, o) not in held
+            )
         try:
             async with self._session.begin_nested():
-                for candidate in chosen[:EXPANDED_PASSAGES]:
-                    if candidate.whole:
+                found = {
+                    (chunk.generation_id, chunk.ordinal): chunk
+                    for chunk in await self._chunks.neighbours_of(
+                        wanted=wanted, space=space, knowledge_base_ids=scope
+                    )
+                }
+            for candidate in expanding:
+                ordinals = candidate.ordinals or (candidate.ordinal,)
+                for ordinal in (ordinals[0] - 1, ordinals[-1] + 1):
+                    neighbour = found.get((candidate.generation_id, ordinal))
+                    if neighbour is None or (candidate.generation_id, ordinal) in held:
                         continue
-                    ordinals = candidate.ordinals or (candidate.ordinal,)
-                    wanted = [
-                        o
-                        for o in (ordinals[0] - 1, ordinals[-1] + 1)
-                        if o >= 0 and (candidate.generation_id, o) not in held
-                    ]
-                    for neighbour in await self._chunks.neighbours(
-                        generation_id=candidate.generation_id,
-                        ordinals=wanted,
-                        space=space,
-                        knowledge_base_ids=scope,
-                    ):
-                        if neighbour.heading_path != candidate.heading_path:
-                            continue
-                        added = estimate_tokens(json.dumps(neighbour.content, ensure_ascii=False))
-                        if used + added > MAX_CONTEXT_TOKENS:
-                            continue
-                        _attach(candidate, neighbour)
-                        used += added
-                        held.add((candidate.generation_id, neighbour.ordinal))
+                    if neighbour.heading_path != candidate.heading_path:
+                        continue
+                    added = estimate_tokens(json.dumps(neighbour.content, ensure_ascii=False))
+                    if used + added > MAX_CONTEXT_TOKENS:
+                        continue
+                    _attach(candidate, neighbour)
+                    used += added
+                    held.add((candidate.generation_id, neighbour.ordinal))
         except Exception as error:
             logger.warning(
                 "knowledge.neighbours_failed",
