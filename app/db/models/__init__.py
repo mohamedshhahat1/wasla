@@ -122,6 +122,7 @@ from .knowledge import (
     DocumentStatus,
     GenerationState,
     KnowledgeBase,
+    WorkspaceEmbeddingSpace,
 )
 from .lead import (
     AGENT_WRITABLE_FIELDS,
@@ -364,6 +365,7 @@ __all__ = [
     "WhatsAppRateCardMarket",
     "WhatsAppRateCardRate",
     "WhatsAppTemplate",
+    "WorkspaceEmbeddingSpace",
     "clamp_score",
     "count_placeholders",
     "is_at_least",

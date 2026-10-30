@@ -503,6 +503,10 @@ class AuditAction(StrEnum):
     # A workspace's retrieval switches changed (G9): re-rank, grounding,
     # pre-retrieval and the rest. `meta` carries the switches and values.
     KNOWLEDGE_SETTINGS_UPDATED = "knowledge_settings_updated"
+    # An embedding-model switch moved (RQ-25): `meta.step` is started, flipped,
+    # retired or cancelled, `meta.space` the space it concerns. An operator
+    # command, recorded as the system.
+    KNOWLEDGE_EMBEDDING_SWITCH = "knowledge_embedding_switch"
 
     # Platform staff reading across workspaces (ADR-095). The one place this
     # vocabulary records a *read*, and the exception is argued rather than
@@ -717,6 +721,8 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "knowledge_base_deleted",
     # 0134
     "knowledge_settings_updated",
+    # 0136
+    "knowledge_embedding_switch",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

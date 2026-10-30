@@ -98,6 +98,8 @@ def test_generation_states_match_the_migration_literals() -> None:
         "active",
         "superseded",
         "failed",
+        # Migration 0136 (RQ-25).
+        "shadow",
     ]
 
 

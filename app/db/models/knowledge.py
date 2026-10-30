@@ -39,6 +39,7 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -106,6 +107,8 @@ class GenerationState(StrEnum):
     reads, and the ones it used to. `PENDING`, `PROCESSING` and `FAILED` are the
     attempt half. A document holds at most one `ACTIVE` generation and at most
     one in flight, and the database says so (see the partial indexes below).
+    `SHADOW` is a generation built for an embedding-model switch, published and
+    waiting for its workspace to flip (RQ-25).
     """
 
     PENDING = "pending"
@@ -113,6 +116,11 @@ class GenerationState(StrEnum):
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     FAILED = "failed"
+    # Published in an embedding-model switch's target space and not served
+    # (RQ-25, migration 0136): the generation that becomes `ACTIVE` when its
+    # workspace's query space flips. Never read by retrieval, which serves
+    # `ACTIVE` only - and `ACTIVE` keeps its meaning and its unique index.
+    SHADOW = "shadow"
 
 
 #: An attempt that is outstanding - waiting for a worker or held by one.
@@ -359,6 +367,14 @@ class DocumentIndexGeneration(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, Time
             "AND embedding_schema_version IS NOT NULL)",
             name="published_has_identity",
         ),
+        # A published shadow records its space too (RQ-25, migration 0136).
+        CheckConstraint(
+            "state <> 'shadow' OR ("
+            "published_at IS NOT NULL AND embedding_provider IS NOT NULL "
+            "AND embedding_model IS NOT NULL AND embedding_dimensions IS NOT NULL "
+            "AND embedding_schema_version IS NOT NULL)",
+            name="shadow_has_identity",
+        ),
     )
 
     document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -417,6 +433,55 @@ class DocumentIndexGeneration(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, Time
     def has_snapshot(self) -> bool:
         """Whether this generation indexes content of its own rather than the document's."""
         return self.content is not None
+
+
+class WorkspaceEmbeddingSpace(Base, TenantScopedMixin, TimestampMixin):
+    """The embedding space a workspace's knowledge is queried in, and any switch under way.
+
+    One row per workspace that has ever started an embedding-model switch
+    (RQ-25, FX-4.1, RV-11); a workspace without one is queried in the space the
+    deployment is configured with, which is every workspace until a switch. A
+    search embeds its query in the `query_*` space, and serves only active
+    generations made in it.
+
+    While a switch is under way `target_*` is set: shadow generations are built
+    in that space beside the active ones, and the query space flips to it -
+    for this workspace, in one transaction - only once every ready document has
+    one. Until then nothing about what the workspace is served changes, so no
+    search is ever empty for a document that exists. `flipped_at` and
+    `retired_at` record the flip and the deletion of the old space's chunks.
+    """
+
+    __tablename__ = "workspace_embedding_spaces"
+    __table_args__ = (
+        Index("ix_workspace_embedding_spaces_tenant_id", "tenant_id"),
+        CheckConstraint(
+            "(target_provider IS NULL) = (target_model IS NULL)"
+            " AND (target_provider IS NULL) = (target_dimensions IS NULL)"
+            " AND (target_provider IS NULL) = (target_schema_version IS NULL)",
+            name="target_complete_or_absent",
+        ),
+    )
+
+    # The workspace is the key: one query space each.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    query_provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    query_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    query_dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    query_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    target_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    switch_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    flipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
