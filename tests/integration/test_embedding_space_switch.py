@@ -251,7 +251,7 @@ async def test_a_switch_never_leaves_a_document_unfindable(indexing: Indexing) -
 
 
 async def test_a_shadow_is_never_served_before_the_flip(indexing: Indexing) -> None:
-    """M-R54: shadows are a state retrieval does not read, and one active generation each."""
+    """M-R65 (the prompt's M-R54, an ID Part 2 used): a shadow is never served before the flip."""
     indexing.configure(openai_embedding_model_next=LARGE)
     tenant_id, ids = await _seed(indexing)
     await _step(indexing, tenant_id, "start")
