@@ -174,6 +174,9 @@ async def test_a_full_plan_refuses_another_colleague(
 # text is extracted and only when a new document would really be created - a
 # repeat or a replacement needs no free slot. Proved against a refusing slot in
 # `test_document_replacement.py::test_a_replacement_needs_no_free_plan_slot`.
+# The routes' half - a new document refused with 402 on the JSON and the
+# multipart route, a replacement accepted on the same full plan - is driven
+# through the real routes in `test_knowledge_plan_limit_routes.py` (RGM-01).
 
 
 async def test_the_guard_runs_before_the_handler_touches_anything(
