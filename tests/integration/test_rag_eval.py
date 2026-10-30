@@ -18,6 +18,7 @@ import pytest
 
 from tests.integration.rag_eval import evaluate, measure
 from tests.integration.rag_eval_part2 import measure_part2
+from tests.integration.rag_eval_part3 import measure_part3
 from tests.integration.rag_harness import Indexing
 
 pytestmark = pytest.mark.integration
@@ -60,6 +61,9 @@ async def test_the_structural_evaluation(indexing: Indexing) -> None:
     part2 = await measure_part2(indexing, tenant_id, run)
     if out:
         (Path(out) / f"{label}-part2.md").write_text(part2.table(label), encoding="utf-8")
+    part3 = await measure_part3(indexing)
+    if out:
+        (Path(out) / f"{label}-part3.md").write_text(part3.table(label), encoding="utf-8")
 
     # Deterministic: the same corpus asked again is measured the same way.
     again = await measure(indexing, tenant_id, run)

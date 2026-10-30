@@ -20,6 +20,8 @@ earlier one can be defeated in a way the next cannot see:
 - `MAX_CHUNKS_PER_DOCUMENT`: thousands of embedding inputs.
 - `MAX_EMBEDDING_CHARACTERS_PER_DOCUMENT`: the same cost arriving as fewer,
   larger chunks.
+- For catalogues and office files (RQ-21): archive entries, inflated bytes and
+  compression ratio, rows, columns, cell size and sheets.
 
 The chunk and embedding bounds are checked again by the ingestion worker before
 any provider call, not only at submission: a document stored before these limits
@@ -79,14 +81,53 @@ MAX_CHUNKS_PER_DOCUMENT: Final = 1_000
 # own. One and a half times the extracted limit covers the overlap with room.
 MAX_EMBEDDING_CHARACTERS_PER_DOCUMENT: Final = MAX_EXTRACTED_CHARACTERS * 3 // 2
 
+# --- Catalogues and office documents (RQ-21, FX-3.17) -----------------------
+#
+# An Excel or Word file is a zip of XML, so it has two more ways to be larger
+# than it looks: an archive that inflates (a zip bomb) and XML that expands
+# (entity declarations). Each has its own bound, checked in the child process
+# before any parser reads a part.
+
+# The decoded file, whatever its format: the same ceiling a PDF has, because the
+# body that carries it is the same.
+MAX_BINARY_DOCUMENT_BYTES: Final = MAX_PDF_BYTES
+# Parts in the archive. A real workbook or document has a few dozen.
+MAX_ARCHIVE_ENTRIES: Final = 1_000
+# Everything the archive inflates to. A 300 KB workbook of text inflates about
+# tenfold; this is a hundred times the upload.
+MAX_ARCHIVE_UNCOMPRESSED_BYTES: Final = 30 * 1024 * 1024
+# Inflated over compressed, per part. Repetitive XML compresses well - a large
+# shared-strings part reaches about 40 - and a bomb is in the thousands.
+MAX_ARCHIVE_COMPRESSION_RATIO: Final = 200
+
+# One row of a catalogue is one chunk (RQ-21), so the row limit is the chunk
+# limit: a 5,000-row catalogue is refused with this number in the message - and
+# uploaded as five files of 1,000 - rather than indexed to row 1,000.
+MAX_TABLE_ROWS: Final = MAX_CHUNKS_PER_DOCUMENT
+# Columns a row may have. A wider sheet is an export of something that is not
+# a catalogue, and each row would be a chunk nobody could read.
+MAX_TABLE_COLUMNS: Final = 50
+# One cell. Longer text belongs in a document, where it is chunked as prose.
+MAX_CELL_CHARACTERS: Final = 2_000
+# Sheets of a workbook read.
+MAX_SHEETS: Final = 20
+
 __all__ = [
     "EXTRACTION_MEMORY_BYTES",
     "EXTRACTION_TIMEOUT_SECONDS",
+    "MAX_ARCHIVE_COMPRESSION_RATIO",
+    "MAX_ARCHIVE_ENTRIES",
+    "MAX_ARCHIVE_UNCOMPRESSED_BYTES",
+    "MAX_BINARY_DOCUMENT_BYTES",
+    "MAX_CELL_CHARACTERS",
     "MAX_CHUNKS_PER_DOCUMENT",
     "MAX_CONCURRENT_EXTRACTIONS",
     "MAX_EMBEDDING_CHARACTERS_PER_DOCUMENT",
     "MAX_EXTRACTED_CHARACTERS",
     "MAX_PDF_BYTES",
     "MAX_PDF_PAGES",
+    "MAX_SHEETS",
     "MAX_SUBMITTED_CHARACTERS",
+    "MAX_TABLE_COLUMNS",
+    "MAX_TABLE_ROWS",
 ]

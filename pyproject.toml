@@ -44,6 +44,14 @@ dependencies = [
     # parser. Pure Python and dependency-free, which matters for a library that
     # is fed attachments from strangers.
     "pypdf>=5.1,<7",
+    # Excel and Word documents for the knowledge base (RQ-21, FX-3.17). Both
+    # are parsed only in the secret-free child process the PDFs use
+    # (`office_extract_child.py`), under byte, archive, row, time and memory
+    # limits, and both are MIT-licensed. python-docx brings lxml (BSD), whose
+    # parser it builds with entity resolution off; the child also refuses any
+    # part that declares a DOCTYPE before either library reads it.
+    "openpyxl>=3.1.5,<3.2",
+    "python-docx>=1.2,<1.3",
     # Multipart form parsing, for the attachment upload endpoint. Starlette
     # imports it lazily and raises at request time without it, so an undeclared
     # copy that happens to be installed is a 500 waiting for a deployment that
@@ -144,6 +152,13 @@ exclude = "^alembic/versions/"
 # Insurance: the published wheel is typed, but a build without py.typed must
 # not turn into a strict-mode failure across the auth code.
 module = ["argon2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# openpyxl ships no py.typed marker. It is imported only inside the knowledge
+# document child process (`office_extract_child`), which reads values out of it
+# and converts each to text itself.
+module = ["openpyxl.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

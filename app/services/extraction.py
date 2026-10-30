@@ -89,6 +89,7 @@ _extraction_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.
 
 
 def _slots() -> asyncio.Semaphore:
+    """This event loop's share of `MAX_CONCURRENT_EXTRACTIONS`; every bounded parser takes one."""
     loop = asyncio.get_running_loop()
     slots = _extraction_slots.get(loop)
     if slots is None:
@@ -98,6 +99,7 @@ def _slots() -> asyncio.Semaphore:
 
 
 def _child_environment() -> dict[str, str]:
+    """The allow-listed environment a parsing child starts with: no secrets."""
     return {name: os.environ[name] for name in CHILD_ENVIRONMENT if name in os.environ}
 
 

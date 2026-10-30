@@ -446,6 +446,19 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Document content replacements by outcome.",
         ("outcome",),
     ),
+    # Generations published, by the document's format (RQ-21): one of
+    # `DocumentSource`'s seven values. No workspace, no document.
+    "wasla_knowledge_ingested_total": (
+        "Document generations published, by source format.",
+        ("source",),
+    ),
+    # Uploads refused while being read (RQ-21), by format and a closed reason:
+    # `limit` (rows, columns, cells, size, archive, time), `format_mismatch`
+    # (the bytes are another format), `unreadable`.
+    "wasla_knowledge_format_refusals_total": (
+        "Document uploads refused while being read, by source format and reason.",
+        ("source", "reason"),
+    ),
     # Input tokens the provider served from its prompt cache (FX-1.13). No
     # labels: the share is this over `wasla_ai_input_tokens_total`-style totals
     # already on the usage rows.
@@ -823,6 +836,21 @@ RERANK_OUTCOMES: Final = frozenset({"ok", "timeout", "error", "disabled"})
 GROUNDING_OUTCOMES: Final = frozenset({"grounded", "ungrounded", "corrected", "handed_off"})
 PRERETRIEVAL_OUTCOMES: Final = frozenset({"injected", "weak", "skipped", "refused"})
 REPLACEMENT_OUTCOMES: Final = frozenset({"published", "failed", "cancelled", "metadata_only"})
+DOCUMENT_SOURCES: Final = frozenset({"text", "markdown", "pdf", "csv", "xlsx", "docx", "html"})
+FORMAT_REFUSAL_REASONS: Final = frozenset({"limit", "format_mismatch", "unreadable"})
+# Seconds, from a fast text upload to an hour-long backlog.
+TIME_TO_READY_BUCKETS: Final[tuple[float, ...]] = (
+    1.0,
+    5.0,
+    15.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+    1_800.0,
+    3_600.0,
+)
 
 # Passages per search, one bucket per possible count up to the top-k ceiling.
 RETRIEVED_PASSAGE_BUCKETS: Final[tuple[float, ...]] = (0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
@@ -862,6 +890,13 @@ REDIS_HISTOGRAMS: Final[dict[str, tuple[str, tuple[str, ...], tuple[float, ...]]
         "Cosine distance of the closest candidate of each knowledge search.",
         ("model",),
         DISTANCE_BUCKETS,
+    ),
+    # From asking for an index to the generation being searchable (FX-4.8): a
+    # generation's creation to its publish, whatever triggered it.
+    "wasla_knowledge_time_to_ready_seconds": (
+        "Seconds from a generation being requested to it being published.",
+        (),
+        TIME_TO_READY_BUCKETS,
     ),
     # Characters of serialized context a search handed the model.
     "wasla_rag_context_characters": (
@@ -1208,6 +1243,24 @@ async def record_replacement(outcome: str) -> None:
     """One document content replacement's outcome (RQ-06)."""
     if outcome in REPLACEMENT_OUTCOMES:
         await _increment("wasla_knowledge_replacements_total", {"outcome": outcome})
+
+
+async def record_ingested(source: str, *, seconds_to_ready: float | None = None) -> None:
+    """One generation published, by its document's format (RQ-21), and how long it took."""
+    if source in DOCUMENT_SOURCES:
+        await _increment("wasla_knowledge_ingested_total", {"source": source})
+    if seconds_to_ready is not None and seconds_to_ready >= 0:
+        await _observe(
+            "wasla_knowledge_time_to_ready_seconds", {}, seconds_to_ready, TIME_TO_READY_BUCKETS
+        )
+
+
+async def record_format_refusal(source: str, reason: str) -> None:
+    """One upload refused while being read (RQ-21), by format and closed reason."""
+    if source in DOCUMENT_SOURCES and reason in FORMAT_REFUSAL_REASONS:
+        await _increment(
+            "wasla_knowledge_format_refusals_total", {"source": source, "reason": reason}
+        )
 
 
 async def record_agent_turn_outcome(outcome: str) -> None:

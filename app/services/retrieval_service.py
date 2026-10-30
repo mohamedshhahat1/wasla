@@ -51,6 +51,8 @@ from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
 from app.repositories.knowledge_repository import DocumentChunkRepository, ScoredChunk
+from app.services.chunking import is_question_and_answer
+from app.services.document_formats import ROW_SOURCES
 from app.services.knowledge_rerank import DISABLED, LlmReranker, Reranked
 from app.services.retrieval_policy import RetrievalPolicy
 from app.services.retrieval_ranking import (
@@ -579,6 +581,8 @@ class RetrievalService:
         try:
             async with self._session.begin_nested():
                 for candidate in chosen[:EXPANDED_PASSAGES]:
+                    if candidate.whole:
+                        continue
                     ordinals = candidate.ordinals or (candidate.ordinal,)
                     wanted = [
                         o
@@ -661,6 +665,9 @@ def _candidate(row: ScoredChunk, channel: str, *, asked: frozenset[str] = frozen
         # Which of the query's words the chunk holds, for the keep rule.
         lexical_tokens=(asked & frozenset(lexical_tokens(chunk.content))) if asked else frozenset(),
         updated_at=row.document_updated_at,
+        # A catalogue row or a question with its answer is delivered alone
+        # (RR-27): its neighbour is another product, or another question.
+        whole=row.document_source in ROW_SOURCES or is_question_and_answer(chunk.content),
     )
 
 

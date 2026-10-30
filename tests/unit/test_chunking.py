@@ -227,3 +227,59 @@ def test_token_estimates_are_positive_and_sizes_comparable_across_scripts() -> N
     assert all(chunk.token_estimate > 0 for chunk in english + arabic)
     biggest = max(c.token_estimate for c in english + arabic)
     assert biggest <= MAX_CHUNK_TOKENS + CHUNK_OVERLAP_TOKENS
+
+
+# --------------------------------------------------------------- RQ-21 (Part 3)
+
+
+def test_a_catalogue_is_one_chunk_per_row_under_its_sheet() -> None:
+    """RR-14: a row-format document never has a chunk holding two rows."""
+    text = (
+        "## Bookshelves\n"
+        + "\n".join(
+            f"SKU: BK-{n}; Product: Bookshelf model {n}; Price: {4000 + n} EGP" for n in range(30)
+        )
+        + "\n## Desks\nSKU: DS-1; Product: Desk; Price: 3,200 EGP"
+    )
+    chunks = split(text, rows=True)
+    assert len(chunks) == 31
+    assert all(chunk.content.count("SKU:") == 1 for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(31))
+    assert {chunk.heading_path for chunk in chunks[:30]} == {"Bookshelves"}
+    assert chunks[-1].heading_path == "Desks"
+    assert chunks[5].content == "SKU: BK-5; Product: Bookshelf model 5; Price: 4005 EGP"
+
+
+def test_a_row_longer_than_a_chunk_is_cut_into_chunks_of_that_row_alone() -> None:
+    long_row = "SKU: X-1; Notes: " + " ".join(f"word{n}" for n in range(600))
+    chunks = split(f"{long_row}\nSKU: X-2; Notes: short", rows=True)
+    assert len(chunks) > 2
+    assert chunks[-1].content == "SKU: X-2; Notes: short"
+    assert all("X-2" not in chunk.content for chunk in chunks[:-1])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Q: Delivery time?\nA: One day.\n\nQ: Returns?\nA: Fourteen days.\n\n"
+        "Q: Installation?\nA: Free.",
+        "Q: Delivery time?\nA: One day.\nQ: Returns?\nA: Fourteen days.\n"
+        "Q: Installation?\nA: Free.",
+        "Q: Delivery time?\n\nA: One day.\n\nQ: Returns?\n\nA: Fourteen days.\n\n"
+        "Q: Installation?\n\nA: Free.",
+        "1. Delivery time?\nOne day.\n\n2. Returns?\nFourteen days.\n\n3. Installation?\nFree.",
+        "س: مدة التوصيل؟\nج: يوم.\n\n" "س: الاسترجاع؟\nج: أسبوعان.\n\n" "س: التركيب؟\nج: مجاني.",
+    ],
+    ids=["paragraphs", "no-blank-lines", "split-pairs", "numbered", "arabic"],
+)
+def test_each_question_and_answer_pair_is_a_chunk_of_its_own(text: str) -> None:
+    chunks = split(text)
+    assert len(chunks) == 3, [c.content for c in chunks]
+    for chunk in chunks:
+        questions = len(re.findall(r"(?m)^(?:Q:|\d\.|س:)", chunk.content))
+        assert questions == 1, chunk.content
+
+
+def test_a_list_of_numbered_questions_without_answers_is_not_taken_for_pairs() -> None:
+    chunks = split("Questions we hear\n\n1. Delivery time?\n2. Returns?\n3. Installation?")
+    assert len(chunks) == 1

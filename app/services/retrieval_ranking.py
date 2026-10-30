@@ -130,6 +130,9 @@ class Candidate:
     #: Ordinals of the chunks merged into this one, first to last.
     ordinals: tuple[int, ...] = ()
     updated_at: datetime | None = None
+    #: A self-contained chunk - a catalogue row (RQ-21) - delivered alone:
+    #: never merged with a neighbour and never expanded (RR-27).
+    whole: bool = False
 
 
 def rrf_fuse(lists: Sequence[Sequence[Candidate]], *, k: int = RRF_K) -> list[Candidate]:
@@ -289,6 +292,8 @@ def merge_adjacent(candidates: Sequence[Candidate]) -> list[Candidate]:
                 for held in merged
                 if held.generation_id == candidate.generation_id
                 and held.heading_path == candidate.heading_path
+                and not held.whole
+                and not candidate.whole
                 and (
                     candidate.ordinal == held.ordinals[-1] + 1
                     or candidate.ordinal == held.ordinals[0] - 1

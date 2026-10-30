@@ -91,6 +91,12 @@ class DocumentSource(StrEnum):
     TEXT = "text"
     MARKDOWN = "markdown"
     PDF = "pdf"
+    # Catalogues and office documents (RQ-21, migration 0135). CSV and XLSX are
+    # chunked a row at a time; XLSX, DOCX and HTML are parsed in the sandbox.
+    CSV = "csv"
+    XLSX = "xlsx"
+    DOCX = "docx"
+    HTML = "html"
 
 
 class GenerationState(StrEnum):

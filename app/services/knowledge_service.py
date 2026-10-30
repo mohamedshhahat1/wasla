@@ -45,7 +45,11 @@ from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
 from app.core.storage import MediaStorage, build_key, write_object
-from app.core.telemetry import record_extraction_warnings, record_replacement
+from app.core.telemetry import (
+    record_extraction_warnings,
+    record_format_refusal,
+    record_replacement,
+)
 from app.core.text_safety import has_visible_content, storable_problem
 from app.db.models.audit import AuditAction
 from app.db.models.knowledge import (
@@ -71,7 +75,7 @@ from app.repositories.knowledge_repository import (
     KnowledgeBaseRepository,
     Snapshot,
 )
-from app.services import extraction, pdf_structure
+from app.services import document_formats, extraction, pdf_structure
 from app.services.audit_service import AuditTrail
 from app.services.document_indexing import (
     ClaimRefusal,
@@ -188,12 +192,14 @@ class Extracted:
 
 
 def decoded_bytes(*, raw: str, source: DocumentSource) -> bytes:
-    """The file a submission carries: a PDF's decoded bytes, a text's UTF-8 (RV-17)."""
-    if source is DocumentSource.PDF:
+    """The file a submission carries: a binary format's decoded bytes, a text's UTF-8 (RV-17)."""
+    if source in document_formats.BINARY_SOURCES:
         try:
             return base64.b64decode(raw, validate=True)
         except (ValueError, binascii.Error) as error:
-            raise ValidationError("Submit a PDF as base64-encoded content.") from error
+            raise ValidationError(
+                f"Submit a {source.value.upper()} file as base64-encoded content."
+            ) from error
     return raw.encode("utf-8")
 
 
@@ -215,13 +221,23 @@ async def extract(*, raw: str, source: DocumentSource) -> Extracted:
     no text layer, is refused rather than stored empty: an empty document looks
     perfectly ingested from the outside and answers every question with
     nothing, which is worse than being told the file needs OCR.
-    """
-    if source is DocumentSource.PDF:
-        try:
-            content = base64.b64decode(raw, validate=True)
-        except (ValueError, binascii.Error) as error:
-            raise ValidationError("Submit a PDF as base64-encoded content.") from error
 
+    XLSX and DOCX arrive base64-encoded like a PDF, and with HTML are parsed in
+    the same kind of bounded child (`document_formats`); CSV arrives as text
+    and is parsed here. All four refuse past their limits, and refuse bytes
+    that are not the format declared (RQ-21). A refusal is counted by source
+    and reason, never by content.
+    """
+    try:
+        return await _extract(raw=raw, source=source)
+    except ValidationError as error:
+        await record_format_refusal(str(source), document_formats.refusal_code(error))
+        raise
+
+
+async def _extract(*, raw: str, source: DocumentSource) -> Extracted:
+    if source is DocumentSource.PDF:
+        content = decoded_bytes(raw=raw, source=source)
         pages = await extraction.extract_pdf_pages_bounded(content)
         structured = pdf_structure.structure(pages)
         if not structured.text:
@@ -231,7 +247,15 @@ async def extract(*, raw: str, source: DocumentSource) -> Extracted:
             )
         return Extracted(text=structured.text, warnings=structured.warnings or None)
 
+    if source in (DocumentSource.XLSX, DocumentSource.DOCX, DocumentSource.HTML):
+        content = decoded_bytes(raw=raw, source=source)
+        text, warnings = await document_formats.extract_bounded(content, source=source)
+        _refuse_unstorable(text, field="content")
+        return Extracted(text=for_storage(text), warnings=warnings or None)
+
     _refuse_unstorable(raw, field="content")
+    if source is DocumentSource.CSV:
+        return Extracted(text=for_storage(document_formats.extract_csv(raw)))
     return Extracted(text=for_storage(raw))
 
 
@@ -785,7 +809,7 @@ class KnowledgeService:
             raise ValidationError("That document has no text to index.")
         key: str | None = None
         if self._storage is not None:
-            mime = "application/pdf" if source is DocumentSource.PDF else "text/plain"
+            mime = document_formats.MEDIA_TYPES[source]
             candidate = build_key(tenant_id=self._tenant_id, mime_type=mime)
             if await write_object(self._storage, key=candidate, data=original, mime_type=mime):
                 key = candidate

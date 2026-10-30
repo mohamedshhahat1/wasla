@@ -78,14 +78,13 @@ from app.core.exceptions import (
     WaslaError,
 )
 from app.core.logging import get_logger
-from app.core.telemetry import record_replacement
+from app.core.telemetry import record_ingested, record_replacement
 from app.core.text_safety import has_visible_content
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.db.models.enums import TenantStatus
 from app.db.models.knowledge import (
     Document,
     DocumentIndexGeneration,
-    DocumentSource,
     DocumentStatus,
     GenerationState,
 )
@@ -108,6 +107,7 @@ from app.services import chunking
 from app.services.audit_service import AuditTrail
 from app.services.chunking import Chunk
 from app.services.contextual_embedding import embedding_input
+from app.services.document_formats import MARKDOWN_HEADED_SOURCES, ROW_SOURCES
 from app.services.knowledge_limits import (
     MAX_CHUNKS_PER_DOCUMENT,
     MAX_EMBEDDING_CHARACTERS_PER_DOCUMENT,
@@ -209,6 +209,8 @@ class Claim:
     space: EmbeddingSpace
     # Markdown headings are `#` lines; other sources mark them by layout (FX-1.2).
     markdown: bool = False
+    # A catalogue (CSV, XLSX) is chunked a row at a time (RQ-21).
+    rows: bool = False
     # What the chunks are labelled with when embedded (RQ-14): the title this
     # generation will publish under, and the filename for a title that says
     # nothing.
@@ -407,7 +409,8 @@ class DocumentIndexer:
             # first upload, a re-index - the document's stored text (RQ-06).
             content=(generation.content if generation.has_snapshot else document.content) or "",
             space=space,
-            markdown=(generation.source or document.source) is DocumentSource.MARKDOWN,
+            markdown=(generation.source or document.source) in MARKDOWN_HEADED_SOURCES,
+            rows=(generation.source or document.source) in ROW_SOURCES,
             title=(generation.title if generation.has_snapshot else None) or document.title,
             filename=(generation.filename if generation.has_snapshot else document.filename),
         )
@@ -532,6 +535,14 @@ class DocumentIndexer:
         await self._session.flush()
         if generation.trigger == TRIGGER_REPLACED:
             await record_replacement("published")
+        await record_ingested(
+            str(document.source),
+            seconds_to_ready=(
+                (now - generation.created_at).total_seconds()
+                if generation.created_at is not None
+                else None
+            ),
+        )
 
         logger.info(
             "knowledge.document_ingested",
@@ -683,7 +694,9 @@ class DocumentIndexer:
         await self._session.flush()
 
 
-def split_within_limits(content: str, *, markdown: bool = False) -> tuple[Chunk, ...]:
+def split_within_limits(
+    content: str, *, markdown: bool = False, rows: bool = False
+) -> tuple[Chunk, ...]:
     """The document's chunks, refused before any cost if they exceed the limits.
 
     Checked here, at indexing time, and not only when a document is submitted:
@@ -692,7 +705,7 @@ def split_within_limits(content: str, *, markdown: bool = False) -> tuple[Chunk,
     """
     if not has_visible_content(content):
         raise IndexingError(IndexingFailure.DOCUMENT_EMPTY, "That document has no text to index.")
-    pieces = tuple(chunking.split(content, markdown=markdown))
+    pieces = tuple(chunking.split(content, markdown=markdown, rows=rows))
     if not pieces:
         raise IndexingError(
             IndexingFailure.DOCUMENT_EMPTY, "That document produced no passages worth indexing."
@@ -726,7 +739,7 @@ async def prepare(
     of work of its own. A renewal that fails raises `ClaimLostError`, and no
     further batch is paid for.
     """
-    pieces = split_within_limits(claim.content, markdown=claim.markdown)
+    pieces = split_within_limits(claim.content, markdown=claim.markdown, rows=claim.rows)
     vectors: list[list[float]] = []
     for start in range(0, len(pieces), MAX_BATCH):
         if not await renew():

@@ -149,6 +149,9 @@ class ScoredChunk:
     document_updated_at: datetime | None = None
     # The exact-word channel's rank (RQ-15); None for a vector-channel row.
     lexical_rank: float | None = None
+    # The document's format: a catalogue row (CSV, XLSX) is a whole answer,
+    # never joined with its neighbours (RQ-21, RR-27).
+    document_source: DocumentSource | None = None
 
 
 class KnowledgeBaseRepository(TenantScopedRepository[KnowledgeBase]):
@@ -686,7 +689,11 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
             )
         query = (
             self._served_select(
-                DocumentChunk, distance.label("distance"), Document.title, Document.ingested_at
+                DocumentChunk,
+                distance.label("distance"),
+                Document.title,
+                Document.ingested_at,
+                Document.source,
             )
             .where(*self.served_predicates(space=space, knowledge_base_ids=scope))
             .order_by(distance)
@@ -699,8 +706,9 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 distance=float(value),
                 document_title=title,
                 document_updated_at=updated,
+                document_source=source,
             )
-            for chunk, value, title, updated in result.all()
+            for chunk, value, title, updated, source in result.all()
         ]
 
     async def lexical_search(
@@ -733,6 +741,7 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 Document.title,
                 Document.ingested_at,
                 rank.label("rank"),
+                Document.source,
             )
             .where(
                 *self.served_predicates(space=space, knowledge_base_ids=knowledge_base_ids),
@@ -749,8 +758,9 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 document_title=title,
                 document_updated_at=updated,
                 lexical_rank=float(score),
+                document_source=source,
             )
-            for chunk, value, title, updated, score in result.all()
+            for chunk, value, title, updated, score, source in result.all()
         ]
 
     async def neighbours(

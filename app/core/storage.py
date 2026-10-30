@@ -49,6 +49,11 @@ EXTENSIONS: Final[dict[str, str]] = {
     "video/3gpp": ".3gp",
     "application/pdf": ".pdf",
     "text/plain": ".txt",
+    # Knowledge originals (RQ-21, RQ-23).
+    "text/csv": ".csv",
+    "text/html": ".html",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
 }
 
 # A key is built from a UUID, a date and an extension from the table above, so

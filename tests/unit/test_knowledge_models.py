@@ -108,7 +108,16 @@ def test_enum_values_match_the_migration_literals() -> None:
         "ready",
         "failed",
     ]
-    assert [member.value for member in DocumentSource] == ["text", "markdown", "pdf"]
+    # The last four appended by migration 0135 (RQ-21).
+    assert [member.value for member in DocumentSource] == [
+        "text",
+        "markdown",
+        "pdf",
+        "csv",
+        "xlsx",
+        "docx",
+        "html",
+    ]
 
 
 def test_knowledge_base_names_are_unique_per_workspace() -> None:
