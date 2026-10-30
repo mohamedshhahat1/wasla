@@ -77,7 +77,13 @@ async def _turn(
 async def test_an_arabic_question_about_an_english_list_reaches_it_through_the_alternate_query(
     ai_turns: TurnRunner, ai_providers: FakeProviders
 ) -> None:
-    """M-R51: the alternate query is embedded and searched, in one batched request."""
+    """M-R51: the alternate query is embedded and searched, in one batched request.
+
+    With the query-embedding cache off: on (RQ-26), the second turn's Arabic
+    query is a hit and only the alternate is sent - covered by the cache's own
+    tests.
+    """
+    ai_turns.configure(rag_query_embedding_cache=False)
     workspace = await ai_turns.workspace(grants=[SEARCH])
     await _index(ai_turns, workspace.tenant_id, base="General", title="Prices", body=PRICE_LIST)
 

@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **257 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **258 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -578,6 +578,7 @@ Conversations carry identifiers rather than embedded contact objects. The models
 | POST | `/api/v1/knowledge/bases/{knowledge_base_id}/documents/upload` | Admin or owner (`202`; multipart, RQ-22) |
 | PUT | `/api/v1/knowledge/documents/{document_id}/content/upload` | Admin or owner (`202`; multipart, RQ-22) |
 | POST | `/api/v1/knowledge/search` | Admin or owner (search preview, FX-3.9) |
+| GET | `/api/v1/knowledge/gaps` | Admin or owner (`404` while `RAG_GAP_REPORT_ENABLED` is off) |
 | GET | `/api/v1/knowledge/settings` | Admin or owner |
 | PATCH | `/api/v1/knowledge/settings` | Admin or owner (audited) |
 
@@ -597,6 +598,7 @@ Three behaviours worth knowing:
 - **`DocumentRead` adds** `source_key`, `extraction_warnings` (codes and counts of lines the PDF extraction may have re-ordered - re-upload to fix), `valid_from`, `valid_until`, `supersedes_document_id`, `original_available` and, on a resubmission, `metadata_updated`. A document outside its `valid_from`/`valid_until` window is never retrieved. `byte_size` is the size of the uploaded file, not of its base64 text.
 - **Formats** (RQ-21): `source` is `text`, `markdown`, `pdf`, `csv`, `xlsx`, `docx` or `html`. PDF, XLSX and DOCX travel as base64 in the JSON body; CSV and HTML as text. A CSV or XLSX catalogue is indexed one row per passage (`Column: value; …`, the header repeated in each), up to 1,000 rows and 50 columns, cells of up to 2,000 characters; a workbook up to 20 sheets. A formula cell is stored as its formula, never evaluated. XLSX, DOCX and HTML are parsed in the sandboxed child process. Past a limit: `422 document_limit_exceeded`, with the limit in the message - never truncated. Bytes that are not the declared format (an `.xlsx` that is a Word file, a CSV that is a zip, an old binary `.xls`): `422 document_format_mismatch`.
 - **Multipart upload** (RQ-22): `POST …/documents/upload` (form fields `file`, `title`, and optionally `source`, `source_key`, `valid_from`, `valid_until`, `supersedes_document_id`; `?replace=true`) and `PUT /knowledge/documents/{id}/content/upload` (`file`, optional `source`, `title`) take the same limits and give the same answers as the JSON routes. `source` defaults to the file's extension (`.csv`, `.xlsx`, `.docx`, `.html`/`.htm`, `.pdf`, `.md`), else text. A file larger than any document may be (300 KB for binary formats, 1,600 KB for text) is `413 document_too_large`. The base64 JSON routes are unchanged.
+- **Knowledge-gap report** (RQ-27, ADR-183): `GET /knowledge/gaps?days=30&limit=50` answers `{days, gaps: [{query, language, searches, best_distance, last_asked_at}]}`, the most-asked queries the agent searched with and found nothing for in this workspace (the model's query, never a customer's message), `days` 1 .. 90. `404` while the report is off, which is the default until the Privacy audit.
 - **A document read never returns the extracted text.** It reports what was ingested — status, chunk count, size, failure reason. The API is not a document store.
 
 ## Leads

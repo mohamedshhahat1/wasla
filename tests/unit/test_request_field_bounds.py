@@ -70,6 +70,18 @@ EXEMPT: Final[dict[tuple[str, str], str]] = {
         "campaign header upload is: MAX_UPLOAD_BYTES while read, Meta's limit for "
         "its kind, the storage entitlement."
     ),
+    (
+        "Body_upload_document_api_v1_knowledge_bases__knowledge_base_id__documents_upload_post",
+        "file",
+    ): (
+        "A knowledge document, multipart (RQ-22). Read in chunks and refused with 413 past "
+        "MAX_TEXT_UPLOAD_BYTES (_read_upload), then held to the per-format limits of "
+        "knowledge_limits as the JSON route is."
+    ),
+    (
+        "Body_upload_document_content_api_v1_knowledge_documents__document_id__content_upload_put",
+        "file",
+    ): "A knowledge document's replacement, multipart (RQ-22). Bounded as the upload is.",
 }
 
 
