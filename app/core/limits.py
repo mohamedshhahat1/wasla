@@ -107,6 +107,10 @@ UPLOAD_ALLOWANCES: Final[tuple[BodyAllowance, ...]] = (
     BodyAllowance("POST", re.compile(r"/knowledge/bases/[^/]+/documents"), DOCUMENT),
     # A new version of one (RQ-06): the same body, the same cap.
     BodyAllowance("PUT", re.compile(r"/knowledge/documents/[^/]+/content"), DOCUMENT),
+    # The same two as multipart files (RQ-22); read to the document limits
+    # inside (`document_formats.MAX_TEXT_UPLOAD_BYTES` at most).
+    BodyAllowance("POST", re.compile(r"/knowledge/bases/[^/]+/documents/upload"), UPLOAD),
+    BodyAllowance("PUT", re.compile(r"/knowledge/documents/[^/]+/content/upload"), UPLOAD),
 )
 
 _BEARER: Final = "bearer "

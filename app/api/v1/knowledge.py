@@ -22,9 +22,10 @@ header on the two routes that predate it and still answer a bare list).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, File, Form, Query, Response, UploadFile, status
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
@@ -35,6 +36,7 @@ from app.api.dependencies import (
     TenantAdminDep,
 )
 from app.api.route import CommittingRoute
+from app.api.uploads import UPLOAD_CHUNK_BYTES
 from app.db.models.billing import LimitKey
 from app.db.models.knowledge import DocumentSource, DocumentStatus
 from app.schemas.conversation import CursorPage
@@ -51,6 +53,7 @@ from app.schemas.knowledge import (
     SearchRequest,
     SearchResponse,
 )
+from app.services import document_formats
 
 router = APIRouter(route_class=CommittingRoute, prefix="/knowledge", tags=["knowledge"])
 
@@ -320,6 +323,104 @@ async def replace_document_content(
         title=payload.title,
         filename=payload.filename,
         media_type=payload.media_type,
+        actor=admin.user,
+        release_for_extraction=True,
+    )
+    return DocumentSubmission(
+        document=DocumentRead.from_view(document), created=False, outcome=outcome
+    )
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    """The uploaded file, refused with `413` as soon as it passes the largest limit."""
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+        total += len(chunk)
+        if total > document_formats.MAX_TEXT_UPLOAD_BYTES:
+            raise document_formats.UploadTooLargeError()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@router.post(
+    "/bases/{knowledge_base_id}/documents/upload",
+    response_model=DocumentSubmission,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def upload_document(
+    knowledge_base_id: uuid.UUID,
+    file: Annotated[UploadFile, File()],
+    title: Annotated[str, Form(min_length=1, max_length=300)],
+    knowledge: KnowledgeServiceDep,
+    admin: TenantAdminDep,
+    entitlements: EntitlementServiceDep,
+    source: Annotated[DocumentSource | None, Form()] = None,
+    source_key: Annotated[str | None, Form(min_length=1, max_length=300)] = None,
+    valid_from: Annotated[datetime | None, Form()] = None,
+    valid_until: Annotated[datetime | None, Form()] = None,
+    supersedes_document_id: Annotated[uuid.UUID | None, Form()] = None,
+    replace: bool = False,
+) -> DocumentSubmission:
+    """`POST /bases/{id}/documents` as a multipart file (RQ-22).
+
+    The same pipeline, limits and answers as the JSON route; only the transport
+    differs - no base64, so a file is not inflated by a third. `source` is
+    taken from the form, else from the file's extension (`.csv`, `.xlsx`,
+    `.docx`, `.html`, `.pdf`, `.md`), else text. A file larger than any
+    document may be is refused with `413 document_too_large`; one whose bytes
+    are not the declared format with `422 document_format_mismatch`; one past
+    a row, column, cell, archive or time limit with `422
+    document_limit_exceeded` - never truncated.
+    """
+    chosen = document_formats.upload_source(source, file.filename)
+    raw = document_formats.upload_as_submission(await _read_upload(file), source=chosen)
+
+    async def reserve_slot() -> object:
+        return await entitlements.reserve_or_refuse(LimitKey.KNOWLEDGE_DOCUMENTS)
+
+    document, created = await knowledge.submit(
+        knowledge_base_id=knowledge_base_id,
+        title=title,
+        raw=raw,
+        source=chosen,
+        filename=file.filename,
+        media_type=document_formats.MEDIA_TYPES[chosen],
+        actor=admin.user,
+        source_key=source_key,
+        replace=replace,
+        valid_from=valid_from,
+        valid_until=valid_until,
+        supersedes_document_id=supersedes_document_id,
+        reserve_slot=reserve_slot,
+        release_for_extraction=True,
+    )
+    return DocumentSubmission(document=DocumentRead.from_view(document), created=created)
+
+
+@router.put(
+    "/documents/{document_id}/content/upload",
+    response_model=DocumentSubmission,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def upload_document_content(
+    document_id: uuid.UUID,
+    file: Annotated[UploadFile, File()],
+    knowledge: KnowledgeServiceDep,
+    admin: TenantAdminDep,
+    source: Annotated[DocumentSource | None, Form()] = None,
+    title: Annotated[str | None, Form(min_length=1, max_length=300)] = None,
+) -> DocumentSubmission:
+    """`PUT /documents/{id}/content` as a multipart file (RQ-22): replaces, never duplicates."""
+    chosen = document_formats.upload_source(source, file.filename)
+    raw = document_formats.upload_as_submission(await _read_upload(file), source=chosen)
+    document, outcome = await knowledge.replace_content(
+        document_id,
+        raw=raw,
+        source=chosen,
+        title=title,
+        filename=file.filename,
+        media_type=document_formats.MEDIA_TYPES[chosen],
         actor=admin.user,
         release_for_extraction=True,
     )
