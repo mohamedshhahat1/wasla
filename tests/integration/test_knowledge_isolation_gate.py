@@ -8,15 +8,20 @@ to fail.
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
+from sqlalchemy import select, text
 
+from app.db.models.knowledge import DocumentChunk, DocumentSource
 from app.repositories.knowledge_repository import DocumentChunkRepository
+from app.services.knowledge_service import KnowledgeService
 from app.services.retrieval_service import RetrievalService
-from tests.fake_embeddings import FakeEmbeddings, embed_text
+from tests.fake_embeddings import FAKE_MODEL, FakeEmbeddings, embed_text
 from tests.fakes import as_embeddings
-from tests.integration.isolation_gate import MARKER, build_twins
+from tests.integration.isolation_gate import MARKER, Twins, build_twins
 from tests.integration.rag_harness import SMALL, Indexing
 
 pytestmark = pytest.mark.integration
@@ -225,3 +230,160 @@ async def test_the_fused_result_returns_nothing_foreign(indexing: Indexing) -> N
     for found in (shared, marker):
         twins.assert_isolated(found.as_context())
         twins.assert_isolated(found.passages)
+
+
+# ---------------------------------------------------------------- paths added by RAG part 3
+
+MARKER_ROW = ("ZQ-99", "Zephyr quokka chair", "1234 EGP")
+
+
+async def _catalogues(indexing: Indexing, twins: Twins) -> dict[uuid.UUID, dict[str, uuid.UUID]]:
+    """The same price list in every new format in both workspaces; a marker row in the foreign."""
+    from tests.integration.test_knowledge_formats import NEW_FORMATS, _raw
+    from tests.knowledge_files import PRICE_ROWS
+
+    uploaded: dict[uuid.UUID, dict[str, uuid.UUID]] = {}
+    for tenant_id in (twins.viewer, twins.foreign):
+        rows = [*PRICE_ROWS, MARKER_ROW] if tenant_id == twins.foreign else list(PRICE_ROWS)
+        async with indexing.database.session() as session:
+            knowledge = KnowledgeService(
+                session=session, tenant_id=tenant_id, queue=indexing.queue()
+            )
+            base = await knowledge.ensure_default_knowledge_base()
+            for source in NEW_FORMATS:
+                view, _ = await knowledge.submit(
+                    knowledge_base_id=base.id,
+                    title=f"Prices ({source})",
+                    raw=_raw(source, rows),
+                    source=source,
+                )
+                uploaded.setdefault(tenant_id, {})[str(source)] = view.document.id
+    await indexing.drain()
+    twins.foreign_documents.update(
+        {f"catalogue {k}": v for k, v in uploaded[twins.foreign].items()}
+    )
+    async with indexing.database.session() as session:
+        twins.foreign_chunks = set(
+            await session.scalars(
+                select(DocumentChunk.id).where(DocumentChunk.tenant_id == twins.foreign)
+            )
+        )
+    return uploaded
+
+
+async def _search(indexing: Indexing, tenant_id: uuid.UUID, query: str) -> Any:
+    async with indexing.database.session() as session:
+        return await RetrievalService(
+            session=session, tenant_id=tenant_id, embeddings=as_embeddings(FakeEmbeddings())
+        ).search(query=query, top_k=6)
+
+
+async def test_catalogues_of_every_format_and_their_replacement_return_nothing_foreign(
+    indexing: Indexing,
+) -> None:
+    """CSV, XLSX, DOCX, HTML ingestion and replacement (RQ-21): same titles, same rows."""
+    from tests.knowledge_files import PRICE_ROWS
+
+    twins = await build_twins(indexing)
+    uploaded = await _catalogues(indexing, twins)
+    found = await _search(indexing, twins.viewer, "Bookshelf model 35 price")
+    # Non-vacuity: the viewer's own rows are found, in every format.
+    assert {p.document_id for p in found.passages} & set(uploaded[twins.viewer].values())
+    twins.assert_isolated(found.as_context())
+    twins.assert_isolated(found.passages)
+    marker = await _search(indexing, twins.viewer, "Zephyr quokka chair 1234 EGP")
+    twins.assert_isolated(marker.as_context())
+
+    newer = [(s, p, "4,650 EGP" if s == "BK-35" else c) for s, p, c in PRICE_ROWS]
+    from tests.integration.test_knowledge_formats import _raw
+
+    async with indexing.database.session() as session:
+        knowledge = KnowledgeService(
+            session=session, tenant_id=twins.viewer, queue=indexing.queue()
+        )
+        for source, document_id in uploaded[twins.viewer].items():
+            await knowledge.replace_content(
+                document_id, raw=_raw(DocumentSource(source), newer), source=DocumentSource(source)
+            )
+    await indexing.drain()
+    mine = await _search(indexing, twins.viewer, "Bookshelf model 35 price")
+    twins.assert_isolated(mine.as_context())
+    assert "4,650 EGP" in json.dumps(mine.as_context(), ensure_ascii=False)
+    # The foreign workspace's identical documents were not touched by the replacement.
+    theirs = await _search(indexing, twins.foreign, "Bookshelf model 35 price")
+    served = json.dumps(theirs.as_context(), ensure_ascii=False)
+    assert "4,500 EGP" in served and "4,650 EGP" not in served
+
+
+async def test_a_switch_in_one_workspace_builds_and_flips_nothing_in_the_other(
+    indexing: Indexing,
+) -> None:
+    """Shadow generations and the per-workspace query space (RQ-25)."""
+    from tests.integration.test_embedding_space_switch import LARGE, _client, _step
+
+    indexing.configure(openai_embedding_model_next=LARGE)
+    twins = await build_twins(indexing)
+    await _step(indexing, twins.viewer, "start")
+    created = await _step(indexing, twins.viewer, "shadows", limit=50)
+    assert created
+    await indexing.drain()
+    coverage = await _step(indexing, twins.viewer, "coverage")
+    assert coverage.covered == coverage.ready == len(twins.viewer_documents)
+    twins.assert_isolated(coverage)
+    await _step(indexing, twins.viewer, "flip")
+    await _step(indexing, twins.viewer, "retire")
+
+    async with indexing.database.session() as session:
+        foreign_shadows = await session.scalar(
+            text(
+                "SELECT count(*) FROM document_index_generations"
+                " WHERE tenant_id = :t AND trigger = 'shadow'"
+            ),
+            {"t": twins.foreign},
+        )
+        foreign_spaces = await session.scalar(
+            text("SELECT count(*) FROM workspace_embedding_spaces WHERE tenant_id = :t"),
+            {"t": twins.foreign},
+        )
+    assert (foreign_shadows, foreign_spaces) == (0, 0)
+
+    client = _client(indexing)
+    for tenant_id, model in ((twins.viewer, LARGE), (twins.foreign, FAKE_MODEL)):
+        before = len(indexing.provider.requests)
+        async with indexing.database.session() as session:
+            found = await RetrievalService(
+                session=session, tenant_id=tenant_id, embeddings=client
+            ).search(query="7900 EGP premium finishing", top_k=6)
+        assert found.passages
+        assert {str(b["model"]) for b in indexing.provider.requests[before:]} == {model}
+        if tenant_id == twins.viewer:
+            twins.assert_isolated(found.as_context())
+            twins.assert_isolated(found.passages)
+
+
+async def test_the_throttled_rebuild_touches_only_workspaces_that_started_a_switch(
+    indexing: Indexing,
+) -> None:
+    """The background re-index across every workspace (RQ-25, FX-4.1)."""
+    from app.services.embedding_switch import build
+    from tests.integration.test_embedding_space_switch import LARGE, SMALL_SPACE, _step
+
+    indexing.configure(openai_embedding_model_next=LARGE)
+    twins = await build_twins(indexing)
+    await _step(indexing, twins.viewer, "start")
+    report = await build(
+        indexing.database, default_space=SMALL_SPACE, queue=indexing.queue(), rate_per_minute=0
+    )
+    assert report.requested == len(twins.viewer_documents)
+    assert twins.foreign not in report.coverage
+    twins.assert_isolated(list(report.coverage.values()))
+    async with indexing.database.session() as session:
+        assert (
+            await session.scalar(
+                text(
+                    "SELECT count(*) FROM document_index_generations"
+                    " WHERE tenant_id = :t AND trigger = 'shadow'"
+                ),
+                {"t": twins.foreign},
+            )
+        ) == 0
