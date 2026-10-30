@@ -200,6 +200,7 @@ class IngestionWorker:
                 committed_units(self._database, tenant_id=job.tenant_id),
                 document_id=job.document_id,
                 embeddings=embeddings,
+                concurrency=self._settings.rag_embedding_concurrency,
             )
 
         await record_ingestion_outcome(str(run.outcome))

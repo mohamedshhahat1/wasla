@@ -104,6 +104,7 @@ from app.repositories.knowledge_repository import (
     DocumentRepository,
     EmbeddingSpaceRepository,
     GenerationRepository,
+    NewChunk,
     query_space_of,
     target_space_of,
 )
@@ -560,7 +561,7 @@ class DocumentIndexer:
                     "Another document in this knowledge base now holds that exact text.",
                 )
 
-        self._write_chunks(document, generation, prepared)
+        await self._write_chunks(document, generation, prepared)
 
         previous = await self._generations.active(document_id=document.id, lock=True)
         if previous is not None:
@@ -624,24 +625,35 @@ class DocumentIndexer:
         )
         return IndexingOutcome.PUBLISHED
 
-    def _write_chunks(
+    async def _write_chunks(
         self, document: Document, generation: DocumentIndexGeneration, prepared: Prepared
     ) -> None:
-        for piece, vector in zip(prepared.pieces, prepared.vectors, strict=True):
-            self._chunks.add_chunk(
-                document_id=document.id,
-                knowledge_base_id=document.knowledge_base_id,
-                generation_id=generation.id,
-                ordinal=piece.ordinal,
-                content=piece.content,
-                token_estimate=piece.token_estimate,
-                embedding=vector,
-                heading_path=piece.heading_path,
-                # The exact-word channel's text and lexemes (RQ-15), written with
-                # the chunk so a published generation is searchable both ways.
-                search_text=for_lexical(piece.content),
-                lexemes=lexical_tokens(piece.content),
-            )
+        """A generation's chunks in one multi-row insert (FX-4.8).
+
+        One statement for the whole generation rather than one per chunk: a
+        400,000-character document's 612 chunks took 3.6 s to publish one row
+        at a time, and the publish transaction holds the document's lock.
+        """
+        await self._chunks.add_chunks(
+            document_id=document.id,
+            knowledge_base_id=document.knowledge_base_id,
+            generation_id=generation.id,
+            rows=[
+                NewChunk(
+                    ordinal=piece.ordinal,
+                    content=piece.content,
+                    token_estimate=piece.token_estimate,
+                    embedding=vector,
+                    heading_path=piece.heading_path,
+                    # The exact-word channel's text and lexemes (RQ-15), written
+                    # with the chunk so a published generation is searchable
+                    # both ways.
+                    search_text=for_lexical(piece.content),
+                    lexemes=tuple(lexical_tokens(piece.content)),
+                )
+                for piece, vector in zip(prepared.pieces, prepared.vectors, strict=True)
+            ],
+        )
 
     async def _publish_shadow(
         self,
@@ -663,7 +675,7 @@ class DocumentIndexer:
             await self._session.flush()
             return IndexingOutcome.STALE
         await self._retire_shadows(document.id, keep_hash=None, now=now)
-        self._write_chunks(document, generation, prepared)
+        await self._write_chunks(document, generation, prepared)
         generation.state = GenerationState.SHADOW
         generation.chunk_count = len(prepared.pieces)
         generation.published_at = now
@@ -900,38 +912,58 @@ async def prepare(
     *,
     renew: Callable[[], Awaitable[bool]],
     meter: Callable[[EmbeddingBatch], Awaitable[None]],
+    concurrency: int = 1,
 ) -> Prepared:
     """Chunk and embed a claimed document, with no transaction open.
 
-    `renew` runs before each batch and `meter` after it, each in a short unit
-    of work of its own. A renewal that fails raises `ClaimLostError`, and no
-    further batch is paid for.
+    Batches go to the provider `concurrency` at a time (FX-4.8): one wave of
+    up to that many requests in flight together, under **one renewal** taken
+    before the wave and in its own short unit of work, so the lease is never
+    older than one wave and nothing - no transaction, no lock, no pooled
+    connection - is held while the provider works. A renewal that fails raises
+    `ClaimLostError`, and no further wave is paid for. Each batch that came
+    back is metered, even when another of its wave failed; then the failure
+    is raised. Vectors keep their chunks' order whatever order the answers
+    arrive in.
     """
     pieces = split_within_limits(claim.content, markdown=claim.markdown, rows=claim.rows)
+    # Embedded as it will be compared, not as it is shown (RQ-01): digits,
+    # tatweel and diacritics folded the same way a query is, so a customer
+    # typing either digit script reaches the same passage - and labelled with
+    # its document and section (RQ-14), so a chunk that never names its product
+    # still lands near the question that does. The stored chunk keeps its
+    # display text. No schema-version bump: queries are folded the same way, so
+    # old and new vectors stay comparable (RQ-02).
+    inputs = [
+        embedding_input(
+            piece.content,
+            title=claim.title,
+            heading_path=piece.heading_path,
+            filename=claim.filename,
+        )
+        for piece in pieces
+    ]
+    batches = [inputs[start : start + MAX_BATCH] for start in range(0, len(inputs), MAX_BATCH)]
+    width = max(1, concurrency)
     vectors: list[list[float]] = []
-    for start in range(0, len(pieces), MAX_BATCH):
+    for wave_start in range(0, len(batches), width):
         if not await renew():
             raise ClaimLostError
-        # Embedded as it will be compared, not as it is shown (RQ-01): digits,
-        # tatweel and diacritics folded the same way a query is, so a customer
-        # typing either digit script reaches the same passage - and labelled
-        # with its document and section (RQ-14), so a chunk that never names
-        # its product still lands near the question that does. The stored chunk
-        # keeps its display text. No schema-version bump: queries are folded
-        # the same way, so old and new vectors stay comparable (RQ-02).
-        batch = await embeddings.embed_batch(
-            [
-                embedding_input(
-                    piece.content,
-                    title=claim.title,
-                    heading_path=piece.heading_path,
-                    filename=claim.filename,
-                )
-                for piece in pieces[start : start + MAX_BATCH]
-            ]
+        answers = await asyncio.gather(
+            *(embeddings.embed_batch(batch) for batch in batches[wave_start : wave_start + width]),
+            return_exceptions=True,
         )
-        await meter(batch)
-        vectors.extend(batch.vectors)
+        failure: BaseException | None = None
+        for answer in answers:
+            if isinstance(answer, BaseException):
+                failure = failure or answer
+                continue
+            await meter(answer)
+        if failure is not None:
+            raise failure
+        for answer in answers:
+            assert not isinstance(answer, BaseException)  # noqa: S101 - narrowed above
+            vectors.extend(answer.vectors)
     return Prepared(pieces=pieces, vectors=tuple(vectors))
 
 
@@ -995,6 +1027,7 @@ async def run_indexing(
     *,
     document_id: uuid.UUID,
     embeddings: EmbeddingsClient | SpaceClients,
+    concurrency: int = 1,
 ) -> IndexingRun:
     """Claim, embed outside any transaction, and publish or record the failure.
 
@@ -1035,7 +1068,7 @@ async def run_indexing(
             indexer.meter(claim, batch)
 
     try:
-        prepared = await prepare(claim, client, renew=renew, meter=meter)
+        prepared = await prepare(claim, client, renew=renew, meter=meter, concurrency=concurrency)
     except ClaimLostError:
         return await _after_lost_claim(units, claim)
     except asyncio.CancelledError:

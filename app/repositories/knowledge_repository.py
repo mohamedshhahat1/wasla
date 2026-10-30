@@ -9,6 +9,7 @@ is the worst failure this system has available to it (ADR-008).
 from __future__ import annotations
 
 import base64
+import typing
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -17,16 +18,22 @@ from typing import Any, Final
 
 from sqlalchemy import (
     ColumnElement,
+    Table,
     Text,
     and_,
+    bindparam,
+    case,
     cast,
     delete,
     false,
     func,
+    insert,
     literal,
+    null,
     or_,
     select,
     text,
+    tuple_,
     update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, TSQUERY
@@ -624,6 +631,53 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
             )
         )
 
+    async def add_chunks(
+        self,
+        *,
+        document_id: uuid.UUID,
+        knowledge_base_id: uuid.UUID,
+        generation_id: uuid.UUID,
+        rows: Sequence[NewChunk],
+    ) -> None:
+        """One generation's chunks in one multi-row insert (FX-4.8).
+
+        The lexemes travel as one string per row, joined on a separator no
+        lexeme holds, and become the `tsvector` in the statement - so every row
+        binds the same SQL and the driver sends them together. Not re-parsed by
+        `'simple'`, which would split `bk-35` (RR-16).
+        """
+        if not rows:
+            return
+        table = typing.cast(Table, DocumentChunk.__table__)
+        lexemes = func.array_to_tsvector(
+            func.string_to_array(bindparam("lexemes_joined", type_=Text), LEXEME_SEPARATOR)
+        )
+        statement = insert(table).values(
+            search_tsv=case(
+                (bindparam("lexemes_joined", type_=Text).is_(None), null()), else_=lexemes
+            )
+        )
+        await self.session.execute(
+            statement,
+            [
+                {
+                    "id": uuid.uuid4(),
+                    "tenant_id": self.tenant_id,
+                    "document_id": document_id,
+                    "knowledge_base_id": knowledge_base_id,
+                    "generation_id": generation_id,
+                    "ordinal": row.ordinal,
+                    "content": row.content,
+                    "token_estimate": row.token_estimate,
+                    "embedding": row.embedding,
+                    "heading_path": row.heading_path,
+                    "search_text": row.search_text,
+                    "lexemes_joined": (LEXEME_SEPARATOR.join(row.lexemes) if row.lexemes else None),
+                }
+                for row in rows
+            ],
+        )
+
     def served_predicates(
         self,
         *,
@@ -816,6 +870,31 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         )
         return list((await self.session.scalars(query)).all())
 
+    async def neighbours_of(
+        self,
+        *,
+        wanted: Sequence[tuple[uuid.UUID, int]],
+        space: EmbeddingSpace,
+        knowledge_base_ids: Sequence[uuid.UUID] | None = None,
+    ) -> list[DocumentChunk]:
+        """`neighbours` for several passages in one round trip (FX-4.7, RR-25).
+
+        `wanted` is `(generation_id, ordinal)` pairs; the same
+        `served_predicates`, so a neighbour is served on exactly the terms its
+        passage was.
+        """
+        if not wanted:
+            return []
+        query = (
+            self._served_select(DocumentChunk)
+            .where(
+                *self.served_predicates(space=space, knowledge_base_ids=knowledge_base_ids),
+                tuple_(DocumentChunk.generation_id, DocumentChunk.ordinal).in_(list(wanted)),
+            )
+            .order_by(DocumentChunk.generation_id, DocumentChunk.ordinal)
+        )
+        return list((await self.session.scalars(query)).all())
+
     async def _prepare_the_planner(self) -> None:
         """Two settings without which the index below is worse than useless.
 
@@ -860,6 +939,24 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
                 " set_config('plan_cache_mode', 'force_custom_plan', true)"
             )
         )
+
+
+# Joins one chunk's lexemes for `add_chunks`: a control character, which
+# `for_lexical` text never holds.
+LEXEME_SEPARATOR: Final = "\x1f"
+
+
+@dataclass(frozen=True, slots=True)
+class NewChunk:
+    """One chunk to insert with `DocumentChunkRepository.add_chunks`."""
+
+    ordinal: int
+    content: str
+    token_estimate: int
+    embedding: list[float]
+    heading_path: str | None
+    search_text: str | None
+    lexemes: tuple[str, ...]
 
 
 def space_of(provider: str, model: str, dimensions: int, schema_version: int) -> EmbeddingSpace:

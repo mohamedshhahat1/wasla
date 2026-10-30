@@ -449,11 +449,24 @@ async def test_a_workspace_that_is_not_served_spends_nothing(
         assert resumed.state is GenerationState.ACTIVE
 
 
+@pytest.mark.parametrize(("concurrency", "paid"), [(1, 1), (3, 3)])
 async def test_a_workspace_suspended_mid_ingestion_stops_at_the_next_batch(
-    indexing: Indexing,
+    indexing: Indexing, concurrency: int, paid: int
 ) -> None:
+    """Spending stops at the next renewal: the next batch, or the next wave of `concurrency`.
+
+    FX-4.8 embeds up to `RAG_EMBEDDING_CONCURRENCY` batches together under one
+    renewal, so a workspace suspended during one wave pays for that wave and
+    nothing after it - at most `concurrency` requests, of a document that needs
+    more.
+    """
+    indexing.configure(rag_embedding_concurrency=concurrency)
     tenant_id = await indexing.workspace()
-    document_id = await indexing.submit(tenant_id, long_document())
+    # Four batches of 96: more than one wave at either width.
+    body = "\n\n".join(
+        f"Clause {n}. " + " ".join(f"term{n}x{w}" for w in range(60)) for n in range(320)
+    )
+    document_id = await indexing.submit(tenant_id, body)
 
     async def suspend_then_answer(body: JsonObject) -> httpx.Response:
         await indexing.set_workspace(tenant_id, status=TenantStatus.SUSPENDED)
@@ -462,7 +475,7 @@ async def test_a_workspace_suspended_mid_ingestion_stops_at_the_next_batch(
     indexing.provider.handler = suspend_then_answer
     await indexing.drain()
 
-    assert len(indexing.provider.requests) == 1, "the second batch was never paid for"
+    assert len(indexing.provider.requests) == paid, "no batch after the wave was paid for"
     (generation,) = await indexing.generations(document_id)
     assert generation.state is GenerationState.PENDING
     assert generation.last_error_code == "workspace_suspended"
