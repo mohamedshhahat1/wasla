@@ -114,6 +114,13 @@ def test_whitespace_collapses_but_paragraph_breaks_survive() -> None:
     assert normalise("a  b\t c\n\n\n\nd") == "a b c\n\nd"
 
 
+def test_carriage_returns_are_normalised() -> None:
+    # Windows and old Mac line endings are boundaries too (RGM-03: this guard
+    # was dropped with the chunker rewrite and nothing else held it).
+    assert normalise("one\r\n\r\ntwo") == "one\n\ntwo"
+    assert normalise("one\r\rtwo\rthree") == "one\n\ntwo\nthree"
+
+
 def test_text_with_nothing_in_it_produces_no_chunks() -> None:
     assert split("") == []
     assert split("  \n\n \t ") == []
