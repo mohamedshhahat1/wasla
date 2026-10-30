@@ -36,6 +36,7 @@ from typing import Final
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    DDL,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -47,6 +48,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
@@ -629,3 +631,31 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
         Vector(EMBEDDING_DIMENSIONS),
         nullable=True,
     )
+
+
+# Vacuumed and analysed after 2 % of the table changes, and vacuumed after 5 %
+# is newly inserted, so a mass re-index's dead tuples leave the HNSW graph
+# sooner (FX-4.2, ADR-184). Set by migration 0137 with the `tenant_id`
+# statistics target; declared here too so a model-built schema matches.
+CHUNK_STORAGE_PARAMETERS: Final = (
+    "autovacuum_vacuum_scale_factor = 0.02",
+    "autovacuum_vacuum_threshold = 1000",
+    "autovacuum_analyze_scale_factor = 0.02",
+    "autovacuum_analyze_threshold = 1000",
+    "autovacuum_vacuum_insert_scale_factor = 0.05",
+)
+
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        f"ALTER TABLE document_chunks SET ({', '.join(CHUNK_STORAGE_PARAMETERS)})"
+    ),
+)
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "ALTER TABLE document_chunks ALTER COLUMN tenant_id SET STATISTICS 1000"
+    ),
+)

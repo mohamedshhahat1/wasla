@@ -169,6 +169,9 @@ PURGED_TABLES: tuple[str, ...] = (
     "document_index_generations",
     "documents",
     "knowledge_bases",
+    # The space the workspace's knowledge is queried in, and any embedding-model
+    # switch under way (RQ-25). Names no other row.
+    "workspace_embedding_spaces",
     "agent_tools",
     "agents",
     # The workspace's automatic follow-up reminders (FUS-01): a reminder's

@@ -58,6 +58,7 @@ from app.schemas.knowledge import (
     SearchRequest,
     SearchResponse,
 )
+from app.schemas.text import StorableText
 from app.services import document_formats
 
 router = APIRouter(route_class=CommittingRoute, prefix="/knowledge", tags=["knowledge"])
@@ -391,12 +392,12 @@ async def _read_upload(file: UploadFile) -> bytes:
 async def upload_document(
     knowledge_base_id: uuid.UUID,
     file: Annotated[UploadFile, File()],
-    title: Annotated[str, Form(min_length=1, max_length=300)],
+    title: Annotated[StorableText, Form(min_length=1, max_length=300)],
     knowledge: KnowledgeServiceDep,
     admin: TenantAdminDep,
     entitlements: EntitlementServiceDep,
     source: Annotated[DocumentSource | None, Form()] = None,
-    source_key: Annotated[str | None, Form(min_length=1, max_length=300)] = None,
+    source_key: Annotated[StorableText | None, Form(min_length=1, max_length=300)] = None,
     valid_from: Annotated[datetime | None, Form()] = None,
     valid_until: Annotated[datetime | None, Form()] = None,
     supersedes_document_id: Annotated[uuid.UUID | None, Form()] = None,
@@ -449,7 +450,7 @@ async def upload_document_content(
     knowledge: KnowledgeServiceDep,
     admin: TenantAdminDep,
     source: Annotated[DocumentSource | None, Form()] = None,
-    title: Annotated[str | None, Form(min_length=1, max_length=300)] = None,
+    title: Annotated[StorableText | None, Form(min_length=1, max_length=300)] = None,
 ) -> DocumentSubmission:
     """`PUT /documents/{id}/content` as a multipart file (RQ-22): replaces, never duplicates."""
     chosen = document_formats.upload_source(source, file.filename)

@@ -108,14 +108,9 @@ async def test_chunks_are_vacuumed_soon_after_a_reindex_and_workspaces_are_count
 ) -> None:
     """Migration 0137's storage parameters and statistics target, as the catalogue holds them.
 
-    A model-built schema has neither - they are operational settings, not part
-    of the model - so this asserts them only where Alembic built the schema.
+    The model declares the same (`CHUNK_STORAGE_PARAMETERS`), so both schemas
+    carry them and schema parity compares them.
     """
-    version = await db_session.scalar(
-        text("SELECT to_regclass('public.alembic_version') IS NOT NULL")
-    )
-    if not version:
-        pytest.skip("storage parameters come from migration 0137; this schema is model-built")
     options = set(
         await db_session.scalar(
             text("SELECT reloptions FROM pg_class WHERE relname = 'document_chunks'")
