@@ -409,7 +409,11 @@ class RetrievalService:
                     seconds[VECTOR] += perf_counter() - vector_started
                     lists.append([_candidate(row, VECTOR) for row in vector_rows])
                     counted[VECTOR] += len(vector_rows)
-                    lexemes = lexical_tokens(text_query) if self._policy.hybrid else []
+                    lexemes = (
+                        _lexical_query(text_query, every_question=self._policy.lexical_words)
+                        if self._policy.hybrid
+                        else []
+                    )
                     tsquery = tsquery_text(lexemes)
                     if tsquery is None:
                         continue
@@ -566,6 +570,12 @@ class RetrievalService:
         if not chosen:
             return chosen
         held = {(c.generation_id, o) for c in chosen for o in (c.ordinals or (c.ordinal,))}
+        # The context's cost, counted once; each joined neighbour adds at most
+        # its own escaped text (the overlap removed only makes it less), so the
+        # budget is kept without re-serialising the context per neighbour.
+        used = estimate_tokens(
+            _serialize([_source(i, _passage(c)) for i, c in enumerate(chosen, start=1)])
+        )
         try:
             async with self._session.begin_nested():
                 for candidate in chosen[:EXPANDED_PASSAGES]:
@@ -583,15 +593,11 @@ class RetrievalService:
                     ):
                         if neighbour.heading_path != candidate.heading_path:
                             continue
-                        before = (candidate.content, candidate.ordinals)
-                        _attach(candidate, neighbour)
-                        trial = Retrieval(passages=tuple(_passage(c) for c in chosen), query="")
-                        if (
-                            len(trial.packed()) < len(chosen)
-                            or estimate_tokens(trial.as_context()) > MAX_CONTEXT_TOKENS
-                        ):
-                            candidate.content, candidate.ordinals = before
+                        added = estimate_tokens(json.dumps(neighbour.content, ensure_ascii=False))
+                        if used + added > MAX_CONTEXT_TOKENS:
                             continue
+                        _attach(candidate, neighbour)
+                        used += added
                         held.add((candidate.generation_id, neighbour.ordinal))
         except Exception as error:
             logger.warning(
@@ -696,6 +702,23 @@ def _decisions(
             )
         )
     return tuple(decisions)
+
+
+def _lexical_query(query: str, *, every_question: bool) -> list[str]:
+    """The lexemes the exact-word channel asks for.
+
+    A question that names an identifier - a SKU, a model number, a Latin brand
+    inside Arabic - asks for its identifiers only: that is what the channel is
+    for, and an OR with "price" or "the" matches nearly every chunk of a large
+    workspace and ranks them all (measured: +97 ms p95 at 12,000 chunks).
+    A question without an identifier asks for all its words only when
+    `RAG_HYBRID_ALL_QUESTIONS` is on, and otherwise does not use the channel:
+    that cost misses the +15 ms budget (RAG remediation part 2, section 8).
+    """
+    identifiers = identifier_tokens(query)
+    if identifiers:
+        return [token for token in lexical_tokens(query) if token in identifiers]
+    return lexical_tokens(query) if every_question else []
 
 
 def _attach(candidate: Candidate, neighbour: DocumentChunk) -> None:

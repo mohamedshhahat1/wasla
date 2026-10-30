@@ -7,6 +7,7 @@ default the remediation locked (RQ-12 .. RQ-20):
 | Switch | Default | Why |
 |---|---|---|
 | `hybrid` | on | exact identifiers; needs no calibration (RQ-15) |
+| `lexical_words` | off | exact words for questions without an identifier: +97 ms p95 |
 | `rerank` | off | a model call per search; unmeasured on real traffic (RQ-16) |
 | `confidence_tiers` | off | cut-offs come from a real distance distribution (RQ-13) |
 | `number_grounding` | observe | counts, changes nothing (RQ-19) |
@@ -45,6 +46,9 @@ class RetrievalPolicy:
     """The switches and cut-offs one search runs under."""
 
     hybrid: bool = True
+    #: The exact-word channel for questions that name no identifier too. Off:
+    #: an OR of common words ranks most of a large workspace (+97 ms p95).
+    lexical_words: bool = False
     rerank: bool = False
     confidence_tiers: bool = False
     #: Best-distance cut-offs for the tiers of the query's embedding model.
@@ -113,6 +117,7 @@ def resolve(
     return KnowledgeSwitches(
         policy=RetrievalPolicy(
             hybrid=flag("hybrid", settings.rag_hybrid_enabled),
+            lexical_words=settings.rag_hybrid_all_questions,
             rerank=rerank,
             confidence_tiers=flag("confidence_tiers", settings.rag_confidence_tiers_enabled),
             strong_distance=cut_offs[0] if cut_offs else None,

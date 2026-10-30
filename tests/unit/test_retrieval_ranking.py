@@ -229,3 +229,16 @@ def test_the_margin_is_inert_until_set() -> None:
     candidates = [_candidate("a", distance=0.1), _candidate("b", distance=0.9)]
     assert within_margin(candidates, margin=None) == candidates
     assert [c.distance for c in within_margin(candidates, margin=0.2)] == [0.1]
+
+
+def test_a_question_naming_an_identifier_asks_the_exact_word_channel_for_it_alone() -> None:
+    """M-R54: an identifier question queries its identifiers; others only when switched on."""
+    from app.services.retrieval_service import _lexical_query
+
+    assert _lexical_query("WS-0035 sofa price", every_question=False) == ["ws-0035"]
+    assert _lexical_query("sofa price delivery", every_question=False) == []
+    assert _lexical_query("sofa price delivery", every_question=True) == [
+        "sofa",
+        "price",
+        "delivery",
+    ]

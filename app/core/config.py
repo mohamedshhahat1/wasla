@@ -519,6 +519,10 @@ class Settings(BaseSettings):
     #
     # The exact-word channel beside the vector one (RQ-15): needs no calibration.
     rag_hybrid_enabled: bool = True
+    # ... and for questions that name no identifier too. Off: an OR of a
+    # question's common words matches most chunks of a large workspace, and
+    # ranking them cost +97 ms p95 at 12,000 chunks against a +15 ms budget.
+    rag_hybrid_all_questions: bool = False
     # One small-model call scoring each search's candidates (RQ-16). Off: it adds
     # a model call to every search and has not been measured on real traffic.
     # Needs `rag_rerank_model`, which must be an allowed model.
