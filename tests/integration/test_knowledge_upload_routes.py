@@ -115,6 +115,36 @@ async def test_an_oversized_upload_is_refused_with_413_and_nothing_recorded(
     assert await _documents(db_session, victim.tenant.id) == before
 
 
+async def test_an_oversized_upload_is_refused_before_it_is_read_whole(
+    http: AsyncClient,  # noqa: F811
+    victim: Workspace,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-R57: the route stops reading at the largest limit, rather than joining the whole file."""
+    from starlette.datastructures import UploadFile
+
+    from app.api.uploads import UPLOAD_CHUNK_BYTES
+
+    read: list[int] = []
+    original = UploadFile.read
+
+    async def counted(self: UploadFile, size: int = -1) -> bytes:
+        piece = await original(self, size)
+        read.append(len(piece))
+        return piece
+
+    monkeypatch.setattr(UploadFile, "read", counted)
+    response = await http.post(
+        f"{API}/bases/{victim.knowledge_base.id}/documents/upload",
+        files={"file": ("huge.csv", b"a" * (5 * MAX_TEXT_UPLOAD_BYTES), "text/csv")},
+        data={"title": "Huge"},
+        headers=victim.headers,
+    )
+    assert response.status_code == 413
+    assert read, "the route read nothing; the bound would be vacuous"
+    assert sum(read) <= MAX_TEXT_UPLOAD_BYTES + UPLOAD_CHUNK_BYTES
+
+
 async def test_a_file_past_a_row_limit_is_refused_with_its_stable_error(
     http: AsyncClient,  # noqa: F811
     victim: Workspace,  # noqa: F811

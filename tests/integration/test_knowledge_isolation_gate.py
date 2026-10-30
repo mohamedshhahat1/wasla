@@ -354,12 +354,25 @@ async def test_a_switch_in_one_workspace_builds_and_flips_nothing_in_the_other(
 async def test_the_throttled_rebuild_touches_only_workspaces_that_started_a_switch(
     indexing: Indexing,
 ) -> None:
-    """The background re-index across every workspace (RQ-25, FX-4.1)."""
+    """The background re-index across every workspace (RQ-25, FX-4.1).
+
+    The foreign workspace finished a switch of its own earlier, so it holds a
+    query-space row with no target (M-R67): the rebuild neither works through
+    it nor reports it.
+    """
     from app.services.embedding_switch import build
     from tests.integration.test_embedding_space_switch import LARGE, SMALL_SPACE, _step
 
     indexing.configure(openai_embedding_model_next=LARGE)
     twins = await build_twins(indexing)
+    await _step(indexing, twins.foreign, "start")
+    await _step(indexing, twins.foreign, "shadows", limit=50)
+    await indexing.drain()
+    await _step(indexing, twins.foreign, "flip")
+    await _step(indexing, twins.foreign, "retire")
+    finished = await _switch_rows(indexing, twins.foreign)
+    assert finished == (len(twins.foreign_documents), 1)
+
     await _step(indexing, twins.viewer, "start")
     report = await build(
         indexing.database, default_space=SMALL_SPACE, queue=indexing.queue(), rate_per_minute=0
@@ -368,7 +381,7 @@ async def test_the_throttled_rebuild_touches_only_workspaces_that_started_a_swit
     assert twins.foreign not in report.coverage
     twins.assert_isolated(list(report.coverage.values()))
     assert await _switch_rows(indexing, twins.viewer) == (len(twins.viewer_documents), 1)
-    assert await _switch_rows(indexing, twins.foreign) == (0, 0)
+    assert await _switch_rows(indexing, twins.foreign) == finished
 
 
 async def _switch_rows(indexing: Indexing, tenant_id: uuid.UUID) -> tuple[int, int]:
