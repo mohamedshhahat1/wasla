@@ -480,6 +480,13 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
+    # The model an embedding-model switch builds shadow generations in (RQ-25,
+    # FX-4.1). Unset outside a switch. Changing `openai_embedding_model` itself
+    # moves every workspace not yet switched at once and hides its documents
+    # until they are re-indexed (RV-11); the switch is the supported path:
+    # set this, `embedding-switch start`, `build`, `flip` per workspace, and
+    # only once every workspace has flipped make it the model and unset this.
+    openai_embedding_model_next: str | None = None
     # Separate from the chat model on purpose. Describing every photograph a
     # business receives is a recurring cost with its own budget, and a workspace
     # may reasonably want a cheaper model for it than the one that answers.
@@ -550,7 +557,23 @@ class Settings(BaseSettings):
     # the classification (RQ-20, amends AI-04). Off.
     rag_parallel_sentiment_enabled: bool = False
 
-    @field_validator("rag_rerank_model", "rag_passage_margin", mode="before")
+    # The query-embedding cache (RQ-26): a search's query vector kept in Redis
+    # for a day under the workspace, the space and a hash of the folded query,
+    # so a repeated question costs no embedding call. Vectors only - never a
+    # passage - so nothing replaced or deleted can be served from it.
+    rag_query_embedding_cache: bool = True
+    rag_query_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=60, le=7 * 86_400)
+    # The knowledge-gap report (RQ-27): empty and weak searches kept 30 days for
+    # a workspace's admins. Off until the Privacy audit (#18) has reviewed it.
+    rag_gap_report_enabled: bool = False
+    rag_gap_retention_days: int = Field(default=30, ge=1, le=90)
+    # How many embedding batches of one document are in flight at once
+    # (FX-4.8). One is the old, sequential behaviour.
+    rag_embedding_concurrency: int = Field(default=3, ge=1, le=4)
+
+    @field_validator(
+        "rag_rerank_model", "rag_passage_margin", "openai_embedding_model_next", mode="before"
+    )
     @classmethod
     def _blank_is_unset(cls, value: object) -> object:
         """`RAG_RERANK_MODEL=` and `RAG_PASSAGE_MARGIN=` in an env file mean "not set"."""

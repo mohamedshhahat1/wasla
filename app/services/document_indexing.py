@@ -99,15 +99,20 @@ from app.integrations.openai.embeddings import (
 )
 from app.repositories.knowledge_repository import (
     TRIGGER_REPLACED,
+    TRIGGER_SHADOW,
     DocumentChunkRepository,
     DocumentRepository,
+    EmbeddingSpaceRepository,
     GenerationRepository,
+    query_space_of,
+    target_space_of,
 )
 from app.services import chunking
 from app.services.audit_service import AuditTrail
 from app.services.chunking import Chunk
 from app.services.contextual_embedding import embedding_input
 from app.services.document_formats import MARKDOWN_HEADED_SOURCES, ROW_SOURCES
+from app.services.embedding_spaces import SpaceClients
 from app.services.knowledge_limits import (
     MAX_CHUNKS_PER_DOCUMENT,
     MAX_EMBEDDING_CHARACTERS_PER_DOCUMENT,
@@ -151,6 +156,11 @@ class IndexingFailure(StrEnum):
     DEPENDENCY_UNAVAILABLE = "dependency_unavailable"
     WORKSPACE_SUSPENDED = "workspace_suspended"
     INTERNAL_ERROR = "internal_error"
+    # The embedding-model switch (RQ-25).
+    SWITCH_CANCELLED = "switch_cancelled"
+    SPACE_CHANGED = "space_changed"
+    SPACE_UNAVAILABLE = "space_unavailable"
+    SHADOW_STALE = "shadow_stale"
 
 
 class ClaimRefusal(StrEnum):
@@ -165,6 +175,9 @@ class ClaimRefusal(StrEnum):
     NOT_DUE = "not_due"
     SUSPENDED = "suspended"
     EXHAUSTED = "exhausted"
+    # The space this generation must be embedded in has no client: the
+    # workspace was flipped to a model the deployment no longer configures.
+    SPACE_UNAVAILABLE = "space_unavailable"
 
 
 class IndexingOutcome(StrEnum):
@@ -216,6 +229,9 @@ class Claim:
     # nothing.
     title: str | None = None
     filename: str | None = None
+    # A shadow generation of an embedding-model switch (RQ-25): embedded in the
+    # switch's target space and published beside the active one, not over it.
+    shadow: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,14 +337,23 @@ class DocumentIndexer:
         self._documents = DocumentRepository(session, tenant_id=tenant_id)
         self._generations = GenerationRepository(session, tenant_id=tenant_id)
         self._chunks = DocumentChunkRepository(session, tenant_id=tenant_id)
+        self._spaces = EmbeddingSpaceRepository(session, tenant_id=tenant_id)
 
     async def claim(
         self,
         document_id: uuid.UUID,
         *,
         space: EmbeddingSpace,
+        available: Callable[[EmbeddingSpace], bool] | None = None,
     ) -> Claim | ClaimRefusal:
         """Take the document's outstanding generation, or say why not.
+
+        `space` is the deployment's configured space. The generation is embedded
+        in the workspace's query space (RQ-25) - `space` itself unless the
+        workspace has switched - or, for a shadow generation, in the target
+        space of the switch under way. `available` says whether this worker has
+        a client for a space; a generation it cannot embed is left waiting,
+        unspent (`SPACE_UNAVAILABLE`).
 
         Raises `TenantIsolationError` for a document this workspace does not
         have, which the worker's queue retries exactly once: a job can arrive a
@@ -384,6 +409,28 @@ class DocumentIndexer:
             )
             return ClaimRefusal.EXHAUSTED
 
+        workspace_space = await self._spaces.row()
+        shadow = generation.trigger == TRIGGER_SHADOW
+        if shadow:
+            target = target_space_of(workspace_space)
+            if target is None or document.status is not DocumentStatus.READY:
+                # The switch was cancelled or finished, or the document stopped
+                # serving: nothing to shadow any more.
+                self._end_shadow(generation, code=IndexingFailure.SWITCH_CANCELLED, now=now)
+                await self._session.flush()
+                return ClaimRefusal.NOTHING_OUTSTANDING
+            chosen = target
+        else:
+            chosen = query_space_of(workspace_space, space)
+        if available is not None and not available(chosen):
+            generation.last_error_code = str(IndexingFailure.SPACE_UNAVAILABLE)
+            logger.warning(
+                "knowledge.embedding_space_unavailable",
+                extra={"tenant_id": str(self._tenant_id), "document_id": str(document.id)},
+            )
+            return ClaimRefusal.SPACE_UNAVAILABLE
+        space = chosen
+
         generation.state = GenerationState.PROCESSING
         generation.claim_token = uuid.uuid4()
         generation.claimed_at = now
@@ -393,6 +440,10 @@ class DocumentIndexer:
         generation.embedding_model = space.model
         generation.embedding_dimensions = space.dimensions
         generation.embedding_schema_version = space.schema_version
+        if shadow:
+            # What the shadow indexes, so a flip can tell a shadow of the
+            # current text from one a replacement has since overtaken.
+            generation.content_hash = document.content_hash
         if document.status is not DocumentStatus.READY:
             document.status = DocumentStatus.PROCESSING
         await self._session.flush()
@@ -413,6 +464,7 @@ class DocumentIndexer:
             rows=(generation.source or document.source) in ROW_SOURCES,
             title=(generation.title if generation.has_snapshot else None) or document.title,
             filename=(generation.filename if generation.has_snapshot else document.filename),
+            shadow=shadow,
         )
 
     async def renew(self, claim: Claim) -> bool:
@@ -445,7 +497,16 @@ class DocumentIndexer:
         Returns `STALE` and writes nothing when the document is gone, or the
         claim is no longer this worker's; `SUSPENDED` when the workspace stopped
         being served, putting the attempt back to wait for it.
+
+        **Fenced against a flip** (RQ-25): the workspace's space row is read
+        shared *before* the document is locked - the order a flip takes it in,
+        exclusively - and a generation embedded in a space the workspace no
+        longer queries in is put back to be embedded again (`SPACE_CHANGED`,
+        its attempt refunded) rather than published where no search would find
+        it. A shadow generation is published beside the active one, never over
+        it (`_publish_shadow`).
         """
+        workspace_space = await self._spaces.row(lock="share")
         document = await self._documents.lock(claim.document_id)
         if document is None:
             return IndexingOutcome.STALE
@@ -454,6 +515,22 @@ class DocumentIndexer:
         )
         if generation is None:
             return IndexingOutcome.STALE
+        expected = (
+            target_space_of(workspace_space)
+            if claim.shadow
+            else query_space_of(workspace_space, claim.space)
+        )
+        if claim.shadow and expected is None:
+            self._end_shadow(generation, code=IndexingFailure.SWITCH_CANCELLED, now=self._clock())
+            await self._session.flush()
+            return IndexingOutcome.STALE
+        if expected != claim.space:
+            self._release(generation, code=str(IndexingFailure.SPACE_CHANGED))
+            generation.attempts = max(generation.attempts - 1, 0)
+            if document.status is DocumentStatus.PROCESSING:
+                document.status = DocumentStatus.PENDING
+            await self._session.flush()
+            return IndexingOutcome.RETRY_SCHEDULED
 
         now = self._clock()
         served, deleted = await _workspace_served(self._session, self._tenant_id)
@@ -464,6 +541,9 @@ class DocumentIndexer:
                     document.status = DocumentStatus.PENDING
             await self._session.flush()
             return IndexingOutcome.SUSPENDED
+
+        if claim.shadow:
+            return await self._publish_shadow(document, generation, prepared, now=now)
 
         if generation.has_snapshot and generation.content_hash != document.content_hash:
             holder = await self._documents.get_by_hash(
@@ -480,21 +560,7 @@ class DocumentIndexer:
                     "Another document in this knowledge base now holds that exact text.",
                 )
 
-        for piece, vector in zip(prepared.pieces, prepared.vectors, strict=True):
-            self._chunks.add_chunk(
-                document_id=document.id,
-                knowledge_base_id=document.knowledge_base_id,
-                generation_id=generation.id,
-                ordinal=piece.ordinal,
-                content=piece.content,
-                token_estimate=piece.token_estimate,
-                embedding=vector,
-                heading_path=piece.heading_path,
-                # The exact-word channel's text and lexemes (RQ-15), written with
-                # the chunk so a published generation is searchable both ways.
-                search_text=for_lexical(piece.content),
-                lexemes=lexical_tokens(piece.content),
-            )
+        self._write_chunks(document, generation, prepared)
 
         previous = await self._generations.active(document_id=document.id, lock=True)
         if previous is not None:
@@ -533,6 +599,8 @@ class DocumentIndexer:
         document.ingested_at = now
         document.error = None
         await self._session.flush()
+        # A shadow of the text this publish just replaced shadows nothing now.
+        await self._retire_shadows(document.id, keep_hash=document.content_hash, now=now)
         if generation.trigger == TRIGGER_REPLACED:
             await record_replacement("published")
         await record_ingested(
@@ -555,6 +623,90 @@ class DocumentIndexer:
             },
         )
         return IndexingOutcome.PUBLISHED
+
+    def _write_chunks(
+        self, document: Document, generation: DocumentIndexGeneration, prepared: Prepared
+    ) -> None:
+        for piece, vector in zip(prepared.pieces, prepared.vectors, strict=True):
+            self._chunks.add_chunk(
+                document_id=document.id,
+                knowledge_base_id=document.knowledge_base_id,
+                generation_id=generation.id,
+                ordinal=piece.ordinal,
+                content=piece.content,
+                token_estimate=piece.token_estimate,
+                embedding=vector,
+                heading_path=piece.heading_path,
+                # The exact-word channel's text and lexemes (RQ-15), written with
+                # the chunk so a published generation is searchable both ways.
+                search_text=for_lexical(piece.content),
+                lexemes=lexical_tokens(piece.content),
+            )
+
+    async def _publish_shadow(
+        self,
+        document: Document,
+        generation: DocumentIndexGeneration,
+        prepared: Prepared,
+        *,
+        now: datetime,
+    ) -> IndexingOutcome:
+        """A shadow generation published beside the active one, unserved (RQ-25).
+
+        The document is untouched: its active generation keeps serving, in the
+        space the workspace queries in, until the flip. A shadow of text the
+        document no longer holds - replaced while this one embedded - is not
+        published (`SHADOW_STALE`); the builder makes a new one.
+        """
+        if generation.content_hash != document.content_hash:
+            self._end_shadow(generation, code=IndexingFailure.SHADOW_STALE, now=now)
+            await self._session.flush()
+            return IndexingOutcome.STALE
+        await self._retire_shadows(document.id, keep_hash=None, now=now)
+        self._write_chunks(document, generation, prepared)
+        generation.state = GenerationState.SHADOW
+        generation.chunk_count = len(prepared.pieces)
+        generation.published_at = now
+        generation.claim_token = None
+        generation.claimed_at = None
+        generation.next_retry_at = None
+        generation.last_error_code = None
+        generation.error = None
+        await self._session.flush()
+        logger.info(
+            "knowledge.shadow_published",
+            extra={
+                "tenant_id": str(self._tenant_id),
+                "document_id": str(document.id),
+                "generation": generation.number,
+                "chunks": len(prepared.pieces),
+            },
+        )
+        return IndexingOutcome.PUBLISHED
+
+    async def _retire_shadows(
+        self, document_id: uuid.UUID, *, keep_hash: str | None, now: datetime
+    ) -> None:
+        """Supersede a document's published shadows, but one of `keep_hash`'s text."""
+        for shadow in await self._generations.shadows(document_id=document_id):
+            if keep_hash is not None and shadow.content_hash == keep_hash:
+                continue
+            shadow.state = GenerationState.SUPERSEDED
+            shadow.retired_at = now
+            await self._session.flush()
+            await self._chunks.clear_for_generation(generation_id=shadow.id)
+
+    def _end_shadow(
+        self, generation: DocumentIndexGeneration, *, code: IndexingFailure, now: datetime
+    ) -> None:
+        """End a shadow attempt that nothing needs any more. The document is untouched."""
+        generation.state = GenerationState.FAILED
+        generation.claim_token = None
+        generation.claimed_at = None
+        generation.next_retry_at = None
+        generation.last_error_code = str(code)
+        generation.error = "The embedding-model switch this generation was built for moved on."
+        generation.last_error_at = now
 
     async def abandon(self, claim: Claim) -> IndexingOutcome:
         """Give up a claim whose renewal was refused part-way through embedding.
@@ -663,7 +815,12 @@ class DocumentIndexer:
         message: str,
         now: datetime,
     ) -> None:
-        """End a generation terminally. The document keeps any active one."""
+        """End a generation terminally. The document keeps any active one.
+
+        A shadow's failure is the switch's, not the document's: the document is
+        serving and keeps its status and its error; the failed shadow blocks its
+        workspace's flip and is listed by `embedding-switch status` (RQ-25).
+        """
         if generation.trigger == TRIGGER_REPLACED:
             await record_replacement("failed")
         generation.state = GenerationState.FAILED
@@ -673,6 +830,17 @@ class DocumentIndexer:
         generation.last_error_code = code
         generation.error = message[:MAX_ERROR_LENGTH]
         generation.last_error_at = now
+        if generation.trigger == TRIGGER_SHADOW:
+            logger.warning(
+                "knowledge.shadow_failed",
+                extra={
+                    "tenant_id": str(self._tenant_id),
+                    "document_id": str(document.id),
+                    "code": code,
+                },
+            )
+            await self._session.flush()
+            return
         document.error = message[:MAX_ERROR_LENGTH]
         if document.status is not DocumentStatus.READY:
             document.status = DocumentStatus.FAILED
@@ -826,17 +994,26 @@ async def run_indexing(
     units: UnitOfWork,
     *,
     document_id: uuid.UUID,
-    embeddings: EmbeddingsClient,
+    embeddings: EmbeddingsClient | SpaceClients,
 ) -> IndexingRun:
     """Claim, embed outside any transaction, and publish or record the failure.
+
+    `embeddings` is the deployment's client, or its clients during an
+    embedding-model switch (RQ-25): the claim decides the space, and the
+    client of that space embeds.
 
     Returns rather than raises for every outcome the pipeline decided, including
     failures it recorded - the document row says what happened. It raises only
     when it could not record the outcome at all (the database itself failing),
     which leaves the claim to lapse and the recovery sweep to hand it on.
     """
+    clients = SpaceClients.of(embeddings)
     async with units() as indexer:
-        claimed = await indexer.claim(document_id, space=embeddings.space)
+        claimed = await indexer.claim(
+            document_id,
+            space=clients.default_space,
+            available=lambda space: clients.for_space(space) is not None,
+        )
     if isinstance(claimed, ClaimRefusal):
         outcome = {
             ClaimRefusal.SUSPENDED: IndexingOutcome.SUSPENDED,
@@ -845,6 +1022,9 @@ async def run_indexing(
         return IndexingRun(outcome=outcome, refusal=claimed)
 
     claim = claimed
+    client = clients.for_space(claim.space)
+    if client is None:  # pragma: no cover - the claim checked `available`
+        return IndexingRun(outcome=IndexingOutcome.SKIPPED, refusal=ClaimRefusal.SPACE_UNAVAILABLE)
 
     async def renew() -> bool:
         async with units() as indexer:
@@ -855,7 +1035,7 @@ async def run_indexing(
             indexer.meter(claim, batch)
 
     try:
-        prepared = await prepare(claim, embeddings, renew=renew, meter=meter)
+        prepared = await prepare(claim, client, renew=renew, meter=meter)
     except ClaimLostError:
         return await _after_lost_claim(units, claim)
     except asyncio.CancelledError:

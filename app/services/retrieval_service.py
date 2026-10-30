@@ -50,9 +50,14 @@ from app.db.models.knowledge import DocumentChunk
 from app.db.models.usage import UsageEventType
 from app.db.session import released
 from app.integrations.openai.embeddings import EmbeddingBatch, EmbeddingsClient
-from app.repositories.knowledge_repository import DocumentChunkRepository, ScoredChunk
+from app.repositories.knowledge_repository import (
+    DocumentChunkRepository,
+    EmbeddingSpaceRepository,
+    ScoredChunk,
+)
 from app.services.chunking import is_question_and_answer
 from app.services.document_formats import ROW_SOURCES
+from app.services.embedding_spaces import SpaceClients
 from app.services.knowledge_rerank import DISABLED, LlmReranker, Reranked
 from app.services.retrieval_policy import RetrievalPolicy
 from app.services.retrieval_ranking import (
@@ -370,8 +375,27 @@ class RetrievalService:
             if alternate and alternate != cleaned:
                 queries.append(alternate)
 
+        # The space this workspace is queried in (RQ-25): the deployment's,
+        # until the workspace has flipped in an embedding-model switch. Read
+        # before the embedding, so a query is never embedded in one space and
+        # compared with another.
+        clients = SpaceClients.of(self._embeddings)
         try:
-            batch = await self._embed(queries, release_session=release_session)
+            space = await EmbeddingSpaceRepository(
+                self._session, tenant_id=self._tenant_id
+            ).query_space(clients.default_space)
+        except Exception as error:
+            await self._failed(started, stage="search", error=error)
+            raise KnowledgeSearchUnavailableError() from None
+        embeddings = clients.for_space(space)
+        if embeddings is None:
+            # Flipped to a model this deployment no longer configures: an
+            # operator's mistake, failed visibly rather than answered "nothing".
+            await self._failed(started, stage="space", error=LookupError())
+            raise KnowledgeSearchUnavailableError()
+
+        try:
+            batch = await self._embed(embeddings, queries, release_session=release_session)
             await record_ai_stage("embedding", perf_counter() - started)
         except KnowledgeSearchUnavailableError:
             raise
@@ -385,7 +409,6 @@ class RetrievalService:
         # the savepoint below, so a search that fails after this still records
         # the cost it incurred.
         self._usage.record(UsageEventType.RAG_QUERY)
-        space = self._embeddings.space
         self._usage.embedding_request(
             model=space.model,
             purpose=EMBEDDING_PURPOSE_QUERY,
@@ -610,7 +633,9 @@ class RetrievalService:
             )
         return chosen
 
-    async def _embed(self, queries: list[str], *, release_session: bool) -> EmbeddingBatch:
+    async def _embed(
+        self, embeddings: EmbeddingsClient, queries: list[str], *, release_session: bool
+    ) -> EmbeddingBatch:
         """Turn the question into a vector, optionally with no connection held.
 
         Nothing touches the session inside the released block - the embeddings
@@ -619,9 +644,9 @@ class RetrievalService:
         `tests/integration/test_provider_session_lifetime.py` exists to catch.
         """
         if not release_session:
-            return await self._embeddings.embed_batch(queries)
+            return await embeddings.embed_batch(queries)
         async with released(self._session):
-            return await self._embeddings.embed_batch(queries)
+            return await embeddings.embed_batch(queries)
 
     async def _failed(self, started: float, *, stage: str, error: BaseException) -> None:
         await record_retrieval(

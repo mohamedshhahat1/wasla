@@ -68,9 +68,11 @@ from app.repositories.knowledge_repository import (
     TRIGGER_REINDEX,
     TRIGGER_REPLACED,
     TRIGGER_RESUBMITTED,
+    TRIGGER_SHADOW,
     TRIGGER_SUBMITTED,
     DocumentChunkRepository,
     DocumentRepository,
+    EmbeddingSpaceRepository,
     GenerationRepository,
     KnowledgeBaseRepository,
     Snapshot,
@@ -261,6 +263,8 @@ async def _extract(*, raw: str, source: DocumentSource) -> Extracted:
 
 # A failed generation that a newer replacement ended before it ran (RQ-06, D2).
 REPLACED_CODE: Final = "replaced"
+# A switch's shadow set aside for a re-index of the served version (RQ-25).
+SHADOW_PREEMPTED_CODE: Final = "shadow_preempted"
 # A knowledge base deleted with `cascade` takes at most this many documents in
 # one request; more is refused part-way, and the next request continues.
 MAX_DOCUMENTS_PER_DELETE: Final = 500
@@ -1009,6 +1013,21 @@ class KnowledgeService:
         start a new attempt, is left alone.
         """
         outstanding = await self._generations.in_flight(document_id=document.id, lock=True)
+        if outstanding is not None and outstanding.trigger == TRIGGER_SHADOW:
+            if only_after_failure:
+                return await self._generations.latest(document_id=document.id)
+            # A switch's shadow holds the one in-flight slot; a person asking
+            # for a re-index of the served version comes first (RQ-25). The
+            # builder makes the shadow again once this one publishes.
+            outstanding.state = GenerationState.FAILED
+            outstanding.claim_token = None
+            outstanding.claimed_at = None
+            outstanding.next_retry_at = None
+            outstanding.last_error_code = SHADOW_PREEMPTED_CODE
+            outstanding.error = "Set aside for a re-index of the served version."
+            outstanding.last_error_at = datetime.now(UTC)
+            await self._session.flush()
+            outstanding = None
         if outstanding is not None:
             if outstanding.state is GenerationState.PENDING:
                 await self._enqueue(document.id)
@@ -1131,33 +1150,39 @@ class KnowledgeService:
         latest: dict[uuid.UUID, DocumentIndexGeneration] = {}
         active: dict[uuid.UUID, DocumentIndexGeneration] = {}
         for generation in rows:
-            latest[generation.document_id] = generation
+            if generation.trigger != TRIGGER_SHADOW:
+                latest[generation.document_id] = generation
             if generation.state is GenerationState.ACTIVE:
                 active[generation.document_id] = generation
+        # Stale against the space this workspace is queried in, which is the
+        # deployment's own until the workspace has switched (RQ-25).
+        space = (
+            await EmbeddingSpaceRepository(self._session, tenant_id=self._tenant_id).query_space(
+                self._space
+            )
+            if self._space is not None
+            else None
+        )
         return [
             DocumentView(
                 document=document,
                 latest=latest.get(document.id),
                 active=active.get(document.id),
-                needs_reindex=self._is_stale(active.get(document.id)),
+                needs_reindex=_is_stale(active.get(document.id), space),
             )
             for document in documents
         ]
 
-    def _is_stale(self, generation: DocumentIndexGeneration | None) -> bool:
-        if generation is None or self._space is None:
-            return False
-        return (
-            generation.embedding_provider,
-            generation.embedding_model,
-            generation.embedding_dimensions,
-            generation.embedding_schema_version,
-        ) != (
-            self._space.provider,
-            self._space.model,
-            self._space.dimensions,
-            self._space.schema_version,
-        )
+
+def _is_stale(generation: DocumentIndexGeneration | None, space: EmbeddingSpace | None) -> bool:
+    if generation is None or space is None:
+        return False
+    return (
+        generation.embedding_provider,
+        generation.embedding_model,
+        generation.embedding_dimensions,
+        generation.embedding_schema_version,
+    ) != (space.provider, space.model, space.dimensions, space.schema_version)
 
 
 __all__ = [

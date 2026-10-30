@@ -459,6 +459,18 @@ REDIS_COUNTERS: Final[dict[str, tuple[str, tuple[str, ...]]]] = {
         "Document uploads refused while being read, by source format and reason.",
         ("source", "reason"),
     ),
+    # Query embeddings served from the tenant-scoped cache (RQ-26): `hit`,
+    # `miss`, `error` (Redis unavailable; the provider was asked instead).
+    "wasla_rag_query_embedding_cache_total": (
+        "Query-embedding cache lookups by outcome.",
+        ("outcome",),
+    ),
+    # Searches recorded in the knowledge-gap report (RQ-27). Counted only while
+    # the report is enabled, so its absence means "not enabled".
+    "wasla_knowledge_gap_searches_total": (
+        "Empty or weak knowledge searches recorded for the gap report.",
+        (),
+    ),
     # Input tokens the provider served from its prompt cache (FX-1.13). No
     # labels: the share is this over `wasla_ai_input_tokens_total`-style totals
     # already on the usage rows.
@@ -838,6 +850,7 @@ PRERETRIEVAL_OUTCOMES: Final = frozenset({"injected", "weak", "skipped", "refuse
 REPLACEMENT_OUTCOMES: Final = frozenset({"published", "failed", "cancelled", "metadata_only"})
 DOCUMENT_SOURCES: Final = frozenset({"text", "markdown", "pdf", "csv", "xlsx", "docx", "html"})
 FORMAT_REFUSAL_REASONS: Final = frozenset({"limit", "format_mismatch", "unreadable"})
+QUERY_CACHE_OUTCOMES: Final = frozenset({"hit", "miss", "error"})
 # Seconds, from a fast text upload to an hour-long backlog.
 TIME_TO_READY_BUCKETS: Final[tuple[float, ...]] = (
     1.0,
@@ -1261,6 +1274,17 @@ async def record_format_refusal(source: str, reason: str) -> None:
         await _increment(
             "wasla_knowledge_format_refusals_total", {"source": source, "reason": reason}
         )
+
+
+async def record_query_cache(outcome: str) -> None:
+    """One query-embedding cache lookup (RQ-26)."""
+    if outcome in QUERY_CACHE_OUTCOMES:
+        await _increment("wasla_rag_query_embedding_cache_total", {"outcome": outcome})
+
+
+async def record_gap_search() -> None:
+    """One search recorded in the knowledge-gap report (RQ-27)."""
+    await _increment("wasla_knowledge_gap_searches_total", {})
 
 
 async def record_agent_turn_outcome(outcome: str) -> None:

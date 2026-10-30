@@ -264,6 +264,7 @@ class EmbeddingsClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[], float] = random.random,
         operation: str = EMBED_INGEST,
+        next_space: EmbeddingsClient | None = None,
     ) -> None:
         if not api_key:
             # Our misconfiguration, not the caller's mistake.
@@ -278,6 +279,16 @@ class EmbeddingsClient:
         self._sleep = sleep
         self._jitter = jitter
         self._operation = operation
+        self._next_space = next_space
+
+    @property
+    def next_space(self) -> EmbeddingsClient | None:
+        """The client of an embedding-model switch's target space, while one is under way.
+
+        Carried here so everything typed against one client - the tool
+        context, the orchestrator - carries both (`SpaceClients.of`, RQ-25).
+        """
+        return self._next_space
 
     @property
     def dimensions(self) -> int:

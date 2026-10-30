@@ -91,6 +91,7 @@ from app.repositories.agent_turn_repository import (
 )
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.services.ai_turn_charge import AITurnCharge, SettleResult, record_settlement
+from app.services.embedding_spaces import next_space_client
 from app.services.entitlement_service import EntitlementService
 from app.services.inbox_service import InboxService
 from app.services.knowledge_rerank import LlmReranker
@@ -889,6 +890,10 @@ class AgentWorker:
                 model=self._settings.openai_embedding_model,
                 dimensions=EMBEDDING_DIMENSIONS,
                 operation=EMBED_QUERY,
+                # A workspace flipped to the switch's target is queried in it.
+                next_space=next_space_client(
+                    http=http, settings=self._settings, operation=EMBED_QUERY
+                ),
             )
             # Shares the turn's client too. One small classification call
             # runs before the agent composes anything, which is the only

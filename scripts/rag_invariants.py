@@ -21,7 +21,8 @@ deletes an original whose document was not committed.
 
 RR-12 (Part 2) counts active chunks the exact-word channel cannot find: zero
 once `reindex-all` has rebuilt what was published before migration 0132. RR-09
-belongs to Part 3; the number is kept so every id keeps one meaning. RR-11 (a
+(Part 3) counts active generations outside their workspace's query space while
+no embedding-model switch is under way - documents no search can find. RR-11 (a
 document past `valid_until` returned by search) is a property of the query,
 proved by its test, not of stored rows.
 """
@@ -37,7 +38,9 @@ from typing import Final
 from sqlalchemy import NullPool, text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from app.core.embedding_space import EMBEDDING_SCHEMA_VERSION, OPENAI_PROVIDER
 from app.core.storage import MediaStorage
+from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.db.session import utc_connect_args
 from app.services.text_normalisation import for_storage
 from scripts.omnichannel_invariants import Check
@@ -56,9 +59,30 @@ RAG_INVARIANTS: Final[tuple[Check, ...]] = (
         " AND EXISTS (SELECT 1 FROM document_chunks c WHERE c.generation_id = g.id))",
     ),
     Check(
+        # Part 3 (RQ-25): a published shadow's chunks are legitimate, and so are
+        # a superseded generation's in a workspace flipped and not yet retired
+        # - `embedding-switch retire` deletes them.
         "rr03_chunk_of_a_generation_not_active",
         "SELECT count(*) FROM document_chunks c JOIN document_index_generations g"
-        " ON g.id = c.generation_id WHERE g.state <> 'active'",
+        " ON g.id = c.generation_id WHERE g.state NOT IN ('active', 'shadow')"
+        " AND NOT (g.state = 'superseded' AND EXISTS (SELECT 1 FROM workspace_embedding_spaces w"
+        " WHERE w.tenant_id = g.tenant_id AND w.flipped_at IS NOT NULL AND w.retired_at IS NULL))",
+    ),
+    Check(
+        # Part 3 (RQ-25): an active generation outside the space its workspace
+        # is queried in, while no switch is under way - a document no search
+        # finds. The workspace's row when it has one, else the configured space
+        # (`:provider`, `:model`, `:dimensions`, `:schema_version`).
+        "rr09_active_generation_outside_the_query_space",
+        "SELECT count(*) FROM document_index_generations g"
+        " LEFT JOIN workspace_embedding_spaces w ON w.tenant_id = g.tenant_id"
+        " WHERE g.state = 'active' AND (w.target_model IS NULL) AND ("
+        " (w.tenant_id IS NULL AND (g.embedding_provider, g.embedding_model,"
+        " g.embedding_dimensions, g.embedding_schema_version)"
+        " IS DISTINCT FROM (:provider, :model, :dimensions, :schema_version))"
+        " OR (w.tenant_id IS NOT NULL AND (g.embedding_provider, g.embedding_model,"
+        " g.embedding_dimensions, g.embedding_schema_version) IS DISTINCT FROM"
+        " (w.query_provider, w.query_model, w.query_dimensions, w.query_schema_version)))",
     ),
     Check(
         "rr04_ready_text_served_twice_in_a_workspace",
@@ -111,11 +135,27 @@ BATCH: Final = 200
 async def rag_violations(connection: AsyncConnection) -> dict[str, int]:
     """RR-01 .. RR-08 and RR-12: the SQL counts, then the Python half of RR-07."""
     found = {
-        check.name: int((await connection.execute(text(check.query))).scalar_one())
+        check.name: int(
+            (
+                await connection.execute(
+                    text(check.query), configured_space() if ":provider" in check.query else {}
+                )
+            ).scalar_one()
+        )
         for check in RAG_INVARIANTS
     }
     found[NOT_NORMALISED] = await not_normalised(connection)
     return found
+
+
+def configured_space() -> dict[str, object]:
+    """The space a workspace without a switch is queried in, as RR-09 binds it."""
+    return {
+        "provider": OPENAI_PROVIDER,
+        "model": os.environ.get("OPENAI_EMBEDDING_MODEL") or "text-embedding-3-small",
+        "dimensions": EMBEDDING_DIMENSIONS,
+        "schema_version": EMBEDDING_SCHEMA_VERSION,
+    }
 
 
 async def not_normalised(connection: AsyncConnection) -> int:

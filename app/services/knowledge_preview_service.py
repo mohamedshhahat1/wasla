@@ -28,6 +28,7 @@ from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.embeddings import EMBED_QUERY, EmbeddingsClient
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.schemas.knowledge import CandidateRead, PassageRead, SearchRequest, SearchResponse
+from app.services.embedding_spaces import next_space_client
 from app.services.knowledge_rerank import LlmReranker
 from app.services.knowledge_settings_service import KnowledgeSettingsService
 from app.services.retrieval_policy import knowledge_scope
@@ -69,6 +70,7 @@ class KnowledgePreviewService:
             model=settings.openai_embedding_model,
             dimensions=EMBEDDING_DIMENSIONS,
             operation=EMBED_QUERY,
+            next_space=next_space_client(http=http, settings=settings, operation=EMBED_QUERY),
         )
 
     async def search(self, request: SearchRequest) -> SearchResponse:

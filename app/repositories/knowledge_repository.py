@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -44,6 +44,7 @@ from app.db.models.knowledge import (
     DocumentStatus,
     GenerationState,
     KnowledgeBase,
+    WorkspaceEmbeddingSpace,
 )
 from app.db.models.tenant import Tenant
 from app.repositories.base import BaseRepository, TenantScopedRepository
@@ -63,6 +64,8 @@ TRIGGER_STALE_EMBEDDING: Final = "stale_embedding"
 TRIGGER_MIGRATED: Final = "migrated"
 # A new version of the document's content (RQ-06): the generation carries it.
 TRIGGER_REPLACED: Final = "replaced"
+# A shadow generation, built in an embedding-model switch's target space (RQ-25).
+TRIGGER_SHADOW: Final = "embedding_switch"
 GENERATION_TRIGGERS: Final = frozenset(
     {
         TRIGGER_SUBMITTED,
@@ -71,6 +74,7 @@ GENERATION_TRIGGERS: Final = frozenset(
         TRIGGER_STALE_EMBEDDING,
         TRIGGER_MIGRATED,
         TRIGGER_REPLACED,
+        TRIGGER_SHADOW,
     }
 )
 
@@ -412,11 +416,31 @@ class GenerationRepository(TenantScopedRepository[DocumentIndexGeneration]):
         return await self._first(statement)
 
     async def latest(self, *, document_id: uuid.UUID) -> DocumentIndexGeneration | None:
-        """The most recently created generation of a document."""
+        """The most recently created generation of a document, a switch's shadows aside.
+
+        A shadow (RQ-25) is the switch's attempt, not the document's: a failed
+        shadow is not a failed document, and a document's latest word is never
+        one.
+        """
         return await self._first(
             self._select()
-            .where(DocumentIndexGeneration.document_id == document_id)
+            .where(
+                DocumentIndexGeneration.document_id == document_id,
+                DocumentIndexGeneration.trigger != TRIGGER_SHADOW,
+            )
             .order_by(DocumentIndexGeneration.number.desc())
+        )
+
+    async def shadows(self, *, document_id: uuid.UUID) -> list[DocumentIndexGeneration]:
+        """A document's published shadow generations, locked (RQ-25). Normally one."""
+        return await self._all(
+            self._select()
+            .where(
+                DocumentIndexGeneration.document_id == document_id,
+                DocumentIndexGeneration.state == GenerationState.SHADOW,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
 
     async def claimed(
@@ -838,6 +862,94 @@ class DocumentChunkRepository(TenantScopedRepository[DocumentChunk]):
         )
 
 
+def space_of(provider: str, model: str, dimensions: int, schema_version: int) -> EmbeddingSpace:
+    return EmbeddingSpace(
+        provider=provider, model=model, dimensions=dimensions, schema_version=schema_version
+    )
+
+
+def generation_space(generation: DocumentIndexGeneration) -> EmbeddingSpace | None:
+    """The space a generation's vectors were made in, once it has been claimed."""
+    if (
+        generation.embedding_provider is None
+        or generation.embedding_model is None
+        or generation.embedding_dimensions is None
+        or generation.embedding_schema_version is None
+    ):
+        return None
+    return space_of(
+        generation.embedding_provider,
+        generation.embedding_model,
+        generation.embedding_dimensions,
+        generation.embedding_schema_version,
+    )
+
+
+def query_space_of(row: WorkspaceEmbeddingSpace | None, default: EmbeddingSpace) -> EmbeddingSpace:
+    """The space a workspace's searches embed in: its row's, else the deployment's."""
+    if row is None:
+        return default
+    return space_of(
+        row.query_provider, row.query_model, row.query_dimensions, row.query_schema_version
+    )
+
+
+def target_space_of(row: WorkspaceEmbeddingSpace | None) -> EmbeddingSpace | None:
+    """The space a workspace's switch is building in, while one is under way."""
+    if (
+        row is None
+        or row.target_provider is None
+        or row.target_model is None
+        or row.target_dimensions is None
+        or row.target_schema_version is None
+    ):
+        return None
+    return space_of(
+        row.target_provider, row.target_model, row.target_dimensions, row.target_schema_version
+    )
+
+
+class EmbeddingSpaceRepository(TenantScopedRepository[WorkspaceEmbeddingSpace]):
+    """One workspace's query space and its embedding-model switch (RQ-25)."""
+
+    model = WorkspaceEmbeddingSpace
+
+    def _tenant_filter(self) -> ColumnElement[bool]:
+        return WorkspaceEmbeddingSpace.tenant_id == self.tenant_id
+
+    async def row(self, *, lock: str | None = None) -> WorkspaceEmbeddingSpace | None:
+        """The workspace's row; `lock` is `share` (a publish) or `update` (a flip).
+
+        The lock order every writer keeps: this row, then the document, then
+        its generations. A publish takes it shared, so publishes do not wait
+        for one another; a flip takes it exclusively, so no publish lands in
+        the space being left while the flip is deciding.
+        """
+        statement = self._select()
+        if lock == "share":
+            statement = statement.with_for_update(read=True)
+        elif lock == "update":
+            statement = statement.with_for_update()
+        if lock is not None:
+            statement = statement.execution_options(populate_existing=True)
+        return await self._first(statement)
+
+    async def query_space(self, default: EmbeddingSpace) -> EmbeddingSpace:
+        """The space this workspace's searches embed in."""
+        return query_space_of(await self.row(), default)
+
+    def create(self, *, query: EmbeddingSpace) -> WorkspaceEmbeddingSpace:
+        return self.add(
+            WorkspaceEmbeddingSpace(
+                tenant_id=self.tenant_id,
+                query_provider=query.provider,
+                query_model=query.model,
+                query_dimensions=query.dimensions,
+                query_schema_version=query.schema_version,
+            )
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class DueGeneration:
     """One generation the recovery sweep may hand to a worker."""
@@ -869,6 +981,16 @@ class IndexingBacklog:
     # Served workspaces with ready documents and no answering agent able to
     # search them (RC-7).
     unreachable_workspaces: int = 0
+    # Across workspaces with an embedding-model switch under way (RQ-25): ready
+    # documents holding a shadow of their current text, over ready documents.
+    # 1.0 when no switch is under way.
+    switch_coverage: float = 1.0
+    # Shadow generations by state: pending, processing, shadow (published),
+    # failed.
+    shadow_generations: dict[str, int] = field(default_factory=dict)
+    # Ready documents whose extraction flagged lines it may have re-ordered
+    # (RQ-04, FX-4.4).
+    bidi_warning_documents: int = 0
 
 
 def _served_workspace() -> ColumnElement[bool]:
@@ -1026,9 +1148,13 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
         newer = DocumentIndexGeneration.__table__.alias("newer_generation")
         query = (
             self._select()
+            .outerjoin(
+                WorkspaceEmbeddingSpace,
+                WorkspaceEmbeddingSpace.tenant_id == DocumentIndexGeneration.tenant_id,
+            )
             .where(
                 DocumentIndexGeneration.state == GenerationState.ACTIVE,
-                _not_in(space),
+                _not_in_query_space(space),
                 ~select(newer.c.id)
                 .where(
                     newer.c.document_id == DocumentIndexGeneration.document_id,
@@ -1136,12 +1262,60 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
         if space is not None:
             stale = int(
                 await self.session.scalar(
-                    select(func.count(generation.id)).where(
-                        generation.state == GenerationState.ACTIVE, _not_in(space)
+                    select(func.count(generation.id))
+                    .outerjoin(
+                        WorkspaceEmbeddingSpace,
+                        WorkspaceEmbeddingSpace.tenant_id == generation.tenant_id,
                     )
+                    .where(generation.state == GenerationState.ACTIVE, _not_in_query_space(space))
                 )
                 or 0
             )
+        switching = await self.session.execute(
+            select(
+                func.count(Document.id),
+                func.count(Document.id).filter(
+                    select(generation.id)
+                    .where(
+                        generation.document_id == Document.id,
+                        generation.state == GenerationState.SHADOW,
+                        generation.content_hash == Document.content_hash,
+                    )
+                    .exists()
+                ),
+            )
+            .join(WorkspaceEmbeddingSpace, WorkspaceEmbeddingSpace.tenant_id == Document.tenant_id)
+            .where(
+                WorkspaceEmbeddingSpace.target_model.is_not(None),
+                Document.status == DocumentStatus.READY,
+            )
+        )
+        switch_ready, switch_covered = switching.one()
+        shadow_rows = await self.session.execute(
+            select(generation.state, func.count(generation.id))
+            .where(
+                generation.trigger == TRIGGER_SHADOW,
+                generation.state.in_(
+                    (
+                        GenerationState.PENDING,
+                        GenerationState.PROCESSING,
+                        GenerationState.SHADOW,
+                        GenerationState.FAILED,
+                    )
+                ),
+            )
+            .group_by(generation.state)
+        )
+        shadows = {str(state): int(count) for state, count in shadow_rows.all()}
+        bidi = int(
+            await self.session.scalar(
+                select(func.count(Document.id)).where(
+                    Document.status == DocumentStatus.READY,
+                    Document.extraction_warnings.is_not(None),
+                )
+            )
+            or 0
+        )
 
         copies = (
             select(func.count().label("copies"))
@@ -1178,6 +1352,11 @@ class IndexingSweep(BaseRepository[DocumentIndexGeneration]):
             stale_embedding=stale,
             duplicate_documents=int(duplicates or 0),
             unreachable_workspaces=int(unreachable or 0),
+            switch_coverage=(
+                float(switch_covered or 0) / float(switch_ready) if switch_ready else 1.0
+            ),
+            shadow_generations=shadows,
+            bidi_warning_documents=bidi,
         )
 
 
@@ -1215,6 +1394,28 @@ def _answering_agent_can_search(tenant_id: Any) -> ColumnElement[bool]:
             AgentTool.enabled.is_(True),
         )
         .exists()
+    )
+
+
+def _not_in_query_space(default: EmbeddingSpace) -> ColumnElement[bool]:
+    """A generation outside the space its workspace is queried in (RQ-25, RR-09).
+
+    The workspace's own query space when it has a row - joined by the caller -
+    else the deployment's. A workspace mid-switch is queried in its old space,
+    so its active generations are not stale while its shadows build.
+    """
+    row = WorkspaceEmbeddingSpace
+    return or_(
+        and_(row.tenant_id.is_(None), _not_in(default)),
+        and_(
+            row.tenant_id.is_not(None),
+            or_(
+                DocumentIndexGeneration.embedding_provider != row.query_provider,
+                DocumentIndexGeneration.embedding_model != row.query_model,
+                DocumentIndexGeneration.embedding_dimensions != row.query_dimensions,
+                DocumentIndexGeneration.embedding_schema_version != row.query_schema_version,
+            ),
+        ),
     )
 
 
