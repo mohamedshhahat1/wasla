@@ -333,19 +333,9 @@ async def test_a_switch_in_one_workspace_builds_and_flips_nothing_in_the_other(
     await _step(indexing, twins.viewer, "flip")
     await _step(indexing, twins.viewer, "retire")
 
-    async with indexing.database.session() as session:
-        foreign_shadows = await session.scalar(
-            text(
-                "SELECT count(*) FROM document_index_generations"
-                " WHERE tenant_id = :t AND trigger = 'shadow'"
-            ),
-            {"t": twins.foreign},
-        )
-        foreign_spaces = await session.scalar(
-            text("SELECT count(*) FROM workspace_embedding_spaces WHERE tenant_id = :t"),
-            {"t": twins.foreign},
-        )
-    assert (foreign_shadows, foreign_spaces) == (0, 0)
+    # Non-vacuity: the same counts see the viewer's own shadows and space row.
+    assert await _switch_rows(indexing, twins.viewer) == (len(twins.viewer_documents), 1)
+    assert await _switch_rows(indexing, twins.foreign) == (0, 0)
 
     client = _client(indexing)
     for tenant_id, model in ((twins.viewer, LARGE), (twins.foreign, FAKE_MODEL)):
@@ -377,13 +367,24 @@ async def test_the_throttled_rebuild_touches_only_workspaces_that_started_a_swit
     assert report.requested == len(twins.viewer_documents)
     assert twins.foreign not in report.coverage
     twins.assert_isolated(list(report.coverage.values()))
+    assert await _switch_rows(indexing, twins.viewer) == (len(twins.viewer_documents), 1)
+    assert await _switch_rows(indexing, twins.foreign) == (0, 0)
+
+
+async def _switch_rows(indexing: Indexing, tenant_id: uuid.UUID) -> tuple[int, int]:
+    """A workspace's shadow generations (any state) and its query-space rows."""
+    from app.repositories.knowledge_repository import TRIGGER_SHADOW
+
     async with indexing.database.session() as session:
-        assert (
-            await session.scalar(
-                text(
-                    "SELECT count(*) FROM document_index_generations"
-                    " WHERE tenant_id = :t AND trigger = 'shadow'"
-                ),
-                {"t": twins.foreign},
-            )
-        ) == 0
+        shadows = await session.scalar(
+            text(
+                "SELECT count(*) FROM document_index_generations"
+                " WHERE tenant_id = :t AND trigger = :trigger"
+            ),
+            {"t": tenant_id, "trigger": TRIGGER_SHADOW},
+        )
+        spaces = await session.scalar(
+            text("SELECT count(*) FROM workspace_embedding_spaces WHERE tenant_id = :t"),
+            {"t": tenant_id},
+        )
+    return int(shadows or 0), int(spaces or 0)
