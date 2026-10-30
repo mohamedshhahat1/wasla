@@ -59,6 +59,7 @@ from app.services.chunking import is_question_and_answer
 from app.services.document_formats import ROW_SOURCES
 from app.services.embedding_spaces import SpaceClients
 from app.services.knowledge_rerank import DISABLED, LlmReranker, Reranked
+from app.services.query_embedding_cache import QueryEmbeddingCache
 from app.services.retrieval_policy import RetrievalPolicy
 from app.services.retrieval_ranking import (
     CHANNEL_CANDIDATES,
@@ -317,10 +318,14 @@ class RetrievalService:
         embeddings: EmbeddingsClient,
         policy: RetrievalPolicy | None = None,
         reranker: LlmReranker | None = None,
+        cache: QueryEmbeddingCache | None = None,
     ) -> None:
         self._session = session
         self._tenant_id = tenant_id
         self._embeddings = embeddings
+        # Query vectors kept per workspace and space (RQ-26); None: every
+        # search embeds its query.
+        self._cache = cache
         self._policy = policy or RetrievalPolicy()
         self._reranker = reranker
         self._chunks = DocumentChunkRepository(session, tenant_id=tenant_id)
@@ -394,27 +399,41 @@ class RetrievalService:
             await self._failed(started, stage="space", error=LookupError())
             raise KnowledgeSearchUnavailableError()
 
+        cached: list[list[float] | None] = [None] * len(queries)
+        if self._cache is not None:
+            cached = await self._cache.get_many(self._tenant_id, space, queries)
+        missing = [query for query, vector in zip(queries, cached, strict=True) if vector is None]
+        batch: EmbeddingBatch | None = None
         try:
-            batch = await self._embed(embeddings, queries, release_session=release_session)
+            if missing:
+                batch = await self._embed(embeddings, missing, release_session=release_session)
             await record_ai_stage("embedding", perf_counter() - started)
         except KnowledgeSearchUnavailableError:
             raise
         except Exception as error:
             await self._failed(started, stage="embedding", error=error)
             raise KnowledgeSearchUnavailableError() from None
+        fresh = iter(batch.vectors if batch is not None else [])
+        vectors = [vector if vector is not None else next(fresh) for vector in cached]
+        if batch is not None and self._cache is not None:
+            await self._cache.put_many(
+                self._tenant_id, space, list(zip(missing, batch.vectors, strict=True))
+            )
 
         # Counted once the embedding call has been paid for, and regardless of
         # whether anything is found: a search that returns nothing consumed the
         # same provider call as one that returns four passages. Staged outside
         # the savepoint below, so a search that fails after this still records
-        # the cost it incurred.
+        # the cost it incurred. A search answered from the cache made no call
+        # and records none - only the search.
         self._usage.record(UsageEventType.RAG_QUERY)
-        self._usage.embedding_request(
-            model=space.model,
-            purpose=EMBEDDING_PURPOSE_QUERY,
-            characters=batch.characters,
-            input_tokens=batch.input_tokens,
-        )
+        if batch is not None:
+            self._usage.embedding_request(
+                model=space.model,
+                purpose=EMBEDDING_PURPOSE_QUERY,
+                characters=batch.characters,
+                input_tokens=batch.input_tokens,
+            )
 
         searched = perf_counter()
         scope = _scope(knowledge_base_id, self._policy.knowledge_base_ids)
@@ -423,7 +442,7 @@ class RetrievalService:
         counted = {VECTOR: 0, LEXICAL: 0}
         try:
             async with self._session.begin_nested():
-                for text_query, vector in zip(queries, batch.vectors, strict=True):
+                for text_query, vector in zip(queries, vectors, strict=True):
                     vector_started = perf_counter()
                     vector_rows = await self._chunks.search(
                         embedding=vector,

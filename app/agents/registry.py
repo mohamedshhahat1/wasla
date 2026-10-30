@@ -61,6 +61,7 @@ from app.services.lead_service import (
     ExtractedLead,
     LeadService,
 )
+from app.services.query_embedding_cache import QueryEmbeddingCache
 from app.services.retrieval_policy import RetrievalPolicy
 from app.services.retrieval_service import (
     DEFAULT_TOP_K,
@@ -137,6 +138,8 @@ class ToolContext:
     retrieval: RetrievalPolicy | None = None
     #: The optional re-rank model (RQ-16), present only when re-rank is on.
     reranker: LlmReranker | None = None
+    #: Query vectors kept per workspace and space (RQ-26), when enabled.
+    query_cache: QueryEmbeddingCache | None = None
     #: Every search this turn ran, in order: what the grounding guard checks a
     #: reply's numbers against (RQ-19), and what pre-retrieval reads its tier
     #: from (RQ-20). Appended by the knowledge tool; never read by a model.
@@ -534,6 +537,7 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
         embeddings=context.embeddings,
         policy=context.retrieval,
         reranker=context.reranker,
+        cache=context.query_cache,
     )
     # No threshold or context size is taken from the arguments at all; both
     # are the server's (M27). A failed search raises

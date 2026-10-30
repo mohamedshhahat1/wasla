@@ -97,6 +97,7 @@ from app.services.inbox_service import InboxService
 from app.services.knowledge_rerank import LlmReranker
 from app.services.knowledge_settings_service import KnowledgeSettingsService
 from app.services.messaging_service import MessagingService
+from app.services.query_embedding_cache import QueryEmbeddingCache
 from app.services.sentiment_reader import SentimentAnalyzer
 from app.services.sentiment_service import SentimentService
 from app.services.usage_service import AI_PURPOSE_AGENT, UsageRecorder
@@ -241,6 +242,15 @@ class AgentWorker:
         # Whose policy bounds a reply: the conversation's channel's (OMNI-008).
         self._channels = channels or default_registry()
         self._queue = AgentQueue(redis.client)
+        # Query vectors per workspace and space (RQ-26): a repeated question
+        # costs no embedding call. Vectors only, never passages.
+        self._query_cache = (
+            QueryEmbeddingCache(
+                redis.client, ttl_seconds=settings.rag_query_embedding_cache_ttl_seconds
+            )
+            if settings.rag_query_embedding_cache
+            else None
+        )
         self._running = False
 
     @property
@@ -928,6 +938,7 @@ class AgentWorker:
                 registry=self._registry,
                 knowledge=knowledge,
                 reranker=reranker,
+                query_cache=self._query_cache,
                 meter_round=self._round_meter(job),
                 output_ceiling=self._settings.openai_max_output_tokens,
                 embeddings=embeddings,

@@ -75,6 +75,7 @@ from app.repositories.tool_execution_repository import (
 from app.services import number_grounding
 from app.services.follow_up_sequences import SequenceService
 from app.services.knowledge_rerank import LlmReranker
+from app.services.query_embedding_cache import QueryEmbeddingCache
 from app.services.retrieval_policy import KnowledgeSwitches, knowledge_scope
 from app.services.retrieval_ranking import PARTIAL, STRONG
 from app.services.retrieval_service import MAX_QUERY_CHARACTERS
@@ -452,8 +453,10 @@ class AgentOrchestrator:
         channels: ChannelRegistry | None = None,
         knowledge: KnowledgeSwitches | None = None,
         reranker: LlmReranker | None = None,
+        query_cache: QueryEmbeddingCache | None = None,
     ) -> None:
         self._session = session
+        self._query_cache = query_cache
         # Which channel's policy speaks to the agent: the conversation's.
         self._channels = channels or default_registry()
         self._tenant_id = tenant_id
@@ -655,6 +658,7 @@ class AgentOrchestrator:
             embeddings=self._embeddings,
             retrieval=replace(self._knowledge.policy, knowledge_base_ids=scope),
             reranker=self._reranker,
+            query_cache=self._query_cache,
         )
 
         turns = list(window.turns)
