@@ -116,6 +116,20 @@ RAG_INVARIANTS: Final[tuple[Check, ...]] = (
         " OR c.knowledge_base_id <> d.knowledge_base_id OR g.document_id <> c.document_id",
     ),
     Check(
+        # Part 3 (RQ-27): knowledge-gap rows kept past the retention the
+        # recovery sweep enforces (`:gap_retention_days`).
+        "rr13_gap_row_past_its_retention",
+        "SELECT count(*) FROM knowledge_search_gaps"
+        " WHERE created_at < now() - make_interval(days => :gap_retention_days)",
+    ),
+    Check(
+        # Part 3 (RQ-21): a chunk of a catalogue (CSV, XLSX) holding more than
+        # one row. Rows are "Column: value; ..." lines, one per chunk.
+        "rr14_catalogue_chunk_holding_more_than_one_row",
+        "SELECT count(*) FROM document_chunks c JOIN documents d ON d.id = c.document_id"
+        " WHERE d.source::text IN ('csv', 'xlsx') AND position(E'\\n' IN c.content) > 0",
+    ),
+    Check(
         # RAG part 2 (RQ-15): every chunk an active generation serves is
         # searchable by its exact words. NULL only for chunks published before
         # migration 0132, until `reindex-all` rebuilds them; the vector channel
@@ -136,16 +150,20 @@ async def rag_violations(connection: AsyncConnection) -> dict[str, int]:
     """RR-01 .. RR-08 and RR-12: the SQL counts, then the Python half of RR-07."""
     found = {
         check.name: int(
-            (
-                await connection.execute(
-                    text(check.query), configured_space() if ":provider" in check.query else {}
-                )
-            ).scalar_one()
+            (await connection.execute(text(check.query), _parameters(check.query))).scalar_one()
         )
         for check in RAG_INVARIANTS
     }
     found[NOT_NORMALISED] = await not_normalised(connection)
     return found
+
+
+def _parameters(query: str) -> dict[str, object]:
+    if ":provider" in query:
+        return configured_space()
+    if ":gap_retention_days" in query:
+        return {"gap_retention_days": int(os.environ.get("RAG_GAP_RETENTION_DAYS") or 30)}
+    return {}
 
 
 def configured_space() -> dict[str, object]:

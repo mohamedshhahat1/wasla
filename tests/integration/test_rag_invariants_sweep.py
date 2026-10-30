@@ -1,4 +1,4 @@
-"""Every knowledge invariant can fail (RR-01 .. RR-10, section 27 of the Part 1 prompt).
+"""Every knowledge invariant can fail (RR-01 .. RR-14, section 27 of the Part 1 prompt).
 
 A count that is zero because its query cannot see the rows it is about proves
 nothing. Each check here starts from real indexed documents, injects exactly
@@ -142,6 +142,36 @@ async def _rr12(c: AsyncConnection, ids: dict[str, uuid.UUID]) -> None:
     )
 
 
+async def _rr09(c: AsyncConnection, ids: dict[str, uuid.UUID]) -> None:
+    # Served from a space nobody queries in, with no switch under way (RV-11).
+    await _sql(
+        c,
+        "UPDATE document_index_generations SET embedding_model = 'text-embedding-3-large'"
+        " WHERE document_id = :d AND state = 'active'",
+        d=ids["second"],
+    )
+
+
+async def _rr13(c: AsyncConnection, ids: dict[str, uuid.UUID]) -> None:
+    await _sql(
+        c,
+        "INSERT INTO knowledge_search_gaps (id, tenant_id, query, language, created_at)"
+        " VALUES (gen_random_uuid(), :t, 'old question', 'en', now() - interval '45 days')",
+        t=ids["tenant"],
+    )
+
+
+async def _rr14(c: AsyncConnection, ids: dict[str, uuid.UUID]) -> None:
+    # A catalogue chunk packed with two rows (M-R58's shape).
+    await _sql(c, "UPDATE documents SET source = 'csv' WHERE id = :d", d=ids["second"])
+    await _sql(
+        c,
+        "UPDATE document_chunks SET content = 'SKU: A; Price: 1' || chr(10) || 'SKU: B; Price: 2'"
+        " WHERE document_id = :d",
+        d=ids["second"],
+    )
+
+
 CASES: dict[str, Inject] = {
     "rr01_document_with_more_than_one_active_generation": _rr01,
     "rr02_ready_document_not_served_by_one_active_generation_with_chunks": _rr02,
@@ -153,6 +183,9 @@ CASES: dict[str, Inject] = {
     "rr07_stored_text_not_normalised": _rr07_text,
     "rr08_chunk_disagreeing_with_its_parents": _rr08,
     "rr12_active_chunk_without_lexical_text": _rr12,
+    "rr09_active_generation_outside_the_query_space": _rr09,
+    "rr13_gap_row_past_its_retention": _rr13,
+    "rr14_catalogue_chunk_holding_more_than_one_row": _rr14,
 }
 
 
