@@ -284,7 +284,7 @@ A high `empty` rate with a low `failed` rate is not this alert. It can mean work
 
 **Metric:** `wasla_documents_stale_embedding`.
 
-After `OPENAI_EMBEDDING_MODEL` changes, documents indexed with the previous model are **not searched** — a query from one model is not comparable with vectors from another, even at the same width — until they are re-indexed. Each keeps its old generation until the new one publishes.
+The supported way to change the model is the shadow switch ("Changing the embedding model", below), which never produces this. After `OPENAI_EMBEDDING_MODEL` is changed *directly*, documents indexed with the previous model are **not searched** — a query from one model is not comparable with vectors from another, even at the same width — until they are re-indexed. Each keeps its old generation until the new one publishes.
 
 ```
 docker compose exec worker python -m app.workers.queues stale-embeddings
@@ -2592,3 +2592,75 @@ Re-rank calls are timing out or failing; searches fall back to the fused order a
 ### AgentRepliesQuoteUngroundedNumbers
 
 Agents are quoting prices or percentages their searches did not return. Use the search preview on the workspaces' common questions: a missing or stale document is the usual cause. For a workspace that cannot afford a wrong figure, set `number_grounding` to `correct` (one corrective round) or `strict` (hand over instead of sending).
+
+## Knowledge base (RAG remediation Part 3)
+
+### Changing the embedding model
+
+Never change `OPENAI_EMBEDDING_MODEL` or `EMBEDDING_SCHEMA_VERSION` directly: every workspace not yet switched is then queried in the new space and its documents vanish from search until re-indexed (RV-11, `KnowledgeStaleEmbeddings`). Use the shadow switch (ADR-181):
+
+```
+# 1. Name the target, deploy the worker with it. Nothing changes for any search.
+OPENAI_EMBEDDING_MODEL_NEXT=text-embedding-3-large
+# 2. Start, per workspace or every workspace with documents.
+docker compose exec worker python -m app.workers.queues embedding-switch start --all
+# 3. Build shadows in the background, throttled, fair across workspaces, resumable.
+docker compose exec worker python -m app.workers.queues embedding-switch build --rate 120 --until-complete
+# 4. Coverage, blocked documents and what is left.
+docker compose exec worker python -m app.workers.queues embedding-switch status
+# 5. Flip each workspace at 100 % (or build with --flip to flip each as it completes).
+docker compose exec worker python -m app.workers.queues embedding-switch flip --workspace <id>
+```
+
+- **Coverage** is ready documents holding a shadow of their *current* text over ready documents (`wasla_rag_space_coverage_ratio`). A flip below 100 % is refused (exit 1, `refused`).
+- **Blocked**: a shadow that failed permanently is listed under `blocked` with its code and stops its workspace flipping (`EmbeddingSwitchShadowsFailed`). Fix the cause (a document too large for the new model, a key without access), then `build --retry-blocked`; or delete the document.
+- **Flip** supersedes every active generation by its shadow and moves the workspace's query space in one transaction, then deletes the old space's chunks (`retiring chunks`). `retire` repeats the deletion if it was interrupted; `cancel` abandons a switch for a workspace and deletes its shadows - nothing it serves changes.
+- **Rate**: `--rate` is shadows per minute across all workspaces, one document per workspace per turn. Choose it from the embedding account's limits and watch `EmbeddingRateLimited`. The build reads what is owed from the database, so stopping and running it again resumes.
+- **Finishing**: once `status` shows every workspace flipped, set `OPENAI_EMBEDDING_MODEL` to the new model, unset `OPENAI_EMBEDDING_MODEL_NEXT`, and deploy. `python -m scripts.rag_invariants verify` must show RR-09 = 0.
+- The query-embedding cache keys by space, so a flipped workspace never reads a vector of the old model.
+
+### KnowledgeStaleEmbeddings
+
+Active generations are in a space their workspace does not query: the embedding setting was changed directly. Restore the previous `OPENAI_EMBEDDING_MODEL` (the documents are searchable again at once - nothing was deleted), then change the model with the shadow switch above. If the old model is no longer available, `reindex-stale-embeddings` rebuilds them in the new space; they stay unsearchable until each publishes.
+
+### EmbeddingSwitchStalled / EmbeddingSwitchShadowsFailed
+
+Customers are unaffected: the current space keeps serving. `embedding-switch status` names the blocked documents and what is still owed. Owed but not building: the build is not running - start it again. Building for a long time: `RAGDocumentsStuck` and the ingestion worker. Blocked: see "Blocked" above.
+
+### Uploading catalogues
+
+CSV, XLSX, DOCX and HTML are accepted beside text, Markdown and PDF (ADR-179), as base64 JSON or multipart (`POST /knowledge/bases/{id}/documents/upload`). Each catalogue row becomes one passage, `Column: value; …`, the header repeated, so "Bookshelf model 35" finds its own row.
+
+| Refusal | Meaning | What to tell the workspace |
+|---|---|---|
+| `422 document_limit_exceeded` | more than 1,000 rows, 50 columns, 20 sheets, a cell over 2,000 characters, or the archive inflates past its bounds | split the file (five files of 1,000 rows), remove unused columns |
+| `422 document_format_mismatch` | the bytes are not the declared format (an old `.xls`, a renamed file, a CSV that is a zip) | save as `.xlsx` / `.csv` and upload again |
+| `413 document_too_large` | the file is larger than any document may be (300 KB binary, 1,600 KB text) | split it |
+
+A formula cell is stored as its formula, never its value: export values (Paste Special > Values) before uploading a sheet built on formulas. `wasla_knowledge_format_refusals_total{source,reason}` counts refusals; the parser runs in the same killable sandbox as PDFs, so a hostile file is a refusal, never a worker crash.
+
+### Re-index everything (Part 3)
+
+`reindex-all` (above) re-indexes in the current space. To rebuild in a *new* space, use `embedding-switch build`, which is throttled per minute and fair across workspaces. Indexing sends up to `RAG_EMBEDDING_CONCURRENCY` (3) embedding batches of one document at once; lower it to 1 if the provider throttles. After a mass re-index autovacuum runs on `document_chunks` once 2 % of it has changed (migration 0137); if search recall looks low right after one, `VACUUM ANALYZE document_chunks`.
+
+### Search is slow (Part 3)
+
+- **Repeated questions** cost no embedding call: `wasla_rag_query_embedding_cache_total{outcome}`; a low hit rate is normal for varied questions. `QueryEmbeddingCacheErrors` means Redis is failing and every search pays for an embedding again; `RAG_QUERY_EMBEDDING_CACHE=false` switches it off.
+- **Size bands**: on the Part 3 drill corpus the search's exact scan or HNSW path costs are in `RAG_REMEDIATION_PART3_SCALE.md` §8. `hnsw.ef_search` stays at its default until the real-provider evaluation calibrates it; the `tenant_id` statistics target is 1,000 so the planner sees each workspace's size.
+- **Partitioning** is not done; revisit only on ADR-186's trigger (one workspace above 250,000 chunks, p95 above 300 ms on the HNSW path, or 20 million rows).
+
+### QueryEmbeddingCacheErrors
+
+See "Search is slow (Part 3)". Answers are unaffected.
+
+### KnowledgeBidiWarnings
+
+`python -m scripts.rag_triage` lists documents whose PDF extraction flagged possibly re-ordered right-to-left lines. Ask the workspace to upload the document again from its source (a Word export, a CSV of the price list).
+
+### Knowledge gaps
+
+`RAG_GAP_REPORT_ENABLED` is **off** until the Privacy audit (#18) has reviewed it (ADR-183). When on, each empty search the agent's knowledge tool runs stores the query the *model* wrote (never the customer's message), its script, the best distance and the time in `knowledge_search_gaps`. Administrators read their own workspace's at `GET /api/v1/knowledge/gaps?days=30`. Rows are deleted after `RAG_GAP_RETENTION_DAYS` (30) by the ingestion recovery loop whether or not the report is on, and with the workspace by the purge; RR-13 counts any kept longer. To switch it off and erase it: set the flag false; the rows age out within the retention, or delete them with `DELETE FROM knowledge_search_gaps` as the migration role.
+
+### Row-level security
+
+Not applied (ADR-185). Isolation is enforced by the repository predicates and the isolation gate. Applying it needs a second database role with `BYPASSRLS` for the sweeps, gauges and purge; the design is in ADR-185.

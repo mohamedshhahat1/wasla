@@ -441,5 +441,14 @@ None of these carries a workspace or any text as a label (G7).
 | `wasla_knowledge_replacements_total{outcome}` | counter | Replacements `published`, `failed`, `cancelled` (an older attempt ended) or `metadata_only`. |
 | `wasla_knowledge_duplicate_documents` | gauge | Ready documents whose exact text another ready document of the same workspace holds. |
 | `wasla_knowledge_unreachable_workspaces` | gauge | Workspaces with ready documents and no answering agent able to search them. |
+| `wasla_knowledge_ingested_total{source}` | counter | Document generations published, by format (Part 3). |
+| `wasla_knowledge_format_refusals_total{source,reason}` | counter | Uploads refused by format and reason (limit, mismatch). |
+| `wasla_knowledge_time_to_ready_seconds` | histogram | Submission to ready, per document. |
+| `wasla_documents_stale_embedding` | gauge | Active generations in a space their workspace is not queried in (the gauge the prompt calls stale embeddings; RR-09). |
+| `wasla_rag_space_coverage_ratio` | gauge | Across workspaces mid-switch, ready documents with a shadow over ready documents; 1 when no switch is under way. |
+| `wasla_rag_shadow_generations{state}` | gauge | Shadow generations by state: `pending`, `processing`, `shadow`, `failed`. |
+| `wasla_knowledge_bidi_warning_documents` | gauge | Ready documents whose PDF extraction flagged possibly re-ordered lines. |
+| `wasla_rag_query_embedding_cache_total{outcome}` | counter | Query-embedding cache lookups: `hit`, `miss`, `error`. |
+| `wasla_knowledge_gap_searches_total` | counter | Searches recorded in the gap report; 0 while it is off. |
 
-Alerts: `KnowledgeUnreachable` (info, the gauge above 0 for an hour), `KnowledgeDuplicateDocuments` (info, for six hours), `KnowledgeReplacementsFailing` (warning, more than half of finished replacements failing for 30 minutes). Each has a promtool test in `deploy/monitoring/tests/alerts_test.yml`.
+Alerts: `KnowledgeUnreachable` (info, the gauge above 0 for an hour), `KnowledgeDuplicateDocuments` (info, for six hours), `KnowledgeReplacementsFailing` (warning, more than half of finished replacements failing for 30 minutes). Part 3 adds `KnowledgeStaleEmbeddings` (warning, stale generations for 30 minutes), `EmbeddingSwitchStalled` (info, coverage below 1 and unchanged for six hours), `EmbeddingSwitchShadowsFailed` (info, failed shadows for an hour), `QueryEmbeddingCacheErrors` (warning, over a fifth of lookups failing for 15 minutes) and `KnowledgeBidiWarnings` (info, for a day). Each has a promtool test in `deploy/monitoring/tests/alerts_test.yml`.

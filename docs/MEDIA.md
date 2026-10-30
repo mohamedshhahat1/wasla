@@ -329,6 +329,8 @@ Serving a file back goes through the application rather than from a public URL, 
 
 ## Documents in the knowledge base
 
+CSV, XLSX, DOCX and HTML knowledge uploads (RAG remediation Part 3) keep their originals the same way, under the same prefix and lifecycle, whether they arrived as base64 JSON or multipart. XLSX and DOCX are parsed from those bytes in the same kind of killable, secret-free child process as PDFs (ADR-179).
+
 **Originals** (RQ-23): the uploaded bytes of every knowledge upload and replacement are written to this object store under the workspace's own prefix before the document is recorded, and named by the index generation that carries them. An upload that is not committed deletes its object; deleting the document owes its originals a delete through the purge ledger, and the workspace purge erases them with everything else. Documents uploaded before this have no original.
 
 The PDF parser added here also settles a note `KnowledgeService` had carried since phase 6, which refused PDFs for want of one. A PDF is submitted base64-encoded and a **scanned** one — a photograph of a page, no text layer — is refused with a message saying so, rather than ingested empty. An empty document looks perfectly indexed from the outside and answers every question with nothing. See [RAG.md](RAG.md).

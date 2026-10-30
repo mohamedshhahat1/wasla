@@ -772,3 +772,10 @@ Confirmed behaviourally during this audit rather than by reading:
 - **pypdf parses attacker-supplied PDFs in-process.** Byte caps bound the input
   and no image is decoded locally, but a document is still parsed by a library on
   the worker.
+
+## Knowledge formats, the query cache and row-level security (RAG remediation Part 3)
+
+- **XLSX, DOCX and HTML are parsed in the extraction sandbox** (ADR-179): a separate interpreter with no secrets in its environment, an address-space and CPU limit and a wall-clock deadline, like PDFs. Before any XML is parsed the archive's entry count, inflated size and per-part compression ratio are checked (zip bombs) and any `DOCTYPE` or `ENTITY` is refused (entity expansion). Formula cells are stored as text, never evaluated, and their cached values are not read. CSV is parsed in-process by the standard library with the same row, column and cell limits. A hostile file is a refusal, never a truncated document.
+- **The query-embedding cache cannot cross a workspace** (ADR-182, G3): the workspace and the embedding space are in every key, the query text is not stored (a SHA-256 of the folded query is), and the cache holds vectors, never passages.
+- **The knowledge-gap report stores no customer message** (ADR-183): off by default, the model-written query only, tenant-keyed, 30-day retention, erased by the purge, admin-only.
+- **Row-level security is deferred** (ADR-185). In production the runtime role owns nothing and cannot bypass RLS, but the indexing sweeps, gauges, switch and purge read across workspaces on that same role; enabling policies would blind them without a second, `BYPASSRLS` role - a change to the role model. Tenant isolation remains the repository predicates (ADR-008), composite foreign keys and the two-workspace isolation gate, which covers every Part 3 path.

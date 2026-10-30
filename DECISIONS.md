@@ -5641,6 +5641,8 @@ sentiment write is what keeps that case safe meanwhile.
 
 **Consequences.** Changing `OPENAI_EMBEDDING_MODEL` makes existing knowledge unsearchable until re-indexed — deliberately. This amends ADR-018's note that same-width models can be swapped by configuration alone.
 
+**Amended by ADR-181.** The space a search compares within is now its *workspace's* query space; a model change goes through shadow generations, so it no longer hides knowledge - changing the setting directly still does.
+
 ## ADR-108 — Knowledge PDFs Are Parsed In A Killable Process Under Hard Limits, And Refused Rather Than Truncated
 
 **Context.** A 32 KB compressed PDF, inside the submitted-size limit, extracted 7.5 million characters on the API's event loop for six minutes, producing 7,500 chunks (RAG-02); a 60-page PDF was indexed to page 40 and reported ready (RAG-08).
@@ -7753,3 +7755,68 @@ applied while the application is imported (ADR-157, FRM-03).
 2. Sentiment in parallel (`RAG_PARALLEL_SENTIMENT_ENABLED=false`): `SentimentService.assess` is split into `prepare` (reads), `classify` (HTTP only) and `apply` (writes, escalation, metering). In parallel mode round one's call and `classify` run together inside the released session; `apply` runs after both return; an escalation discards round one's reply and runs none of its tool calls, a takeover meanwhile ends the turn `suppressed_human` (CRM-02). The tokens are metered; the escalated turn is not charged as composed, as in serial mode.
 
 **Consequences.** ADR-024's ordering ("before any reply is composed") holds by default. With the flag on, a reply may be composed before the classification but is never sent and no tool runs before it - the property ADR-024 exists for.
+
+## ADR-179 — Catalogues And Office Files Are Knowledge, Parsed In The Sandbox, One Row Per Passage (RQ-21, FX-3.17, IMP-07)
+
+**Decision.** `document_source` gains `csv`, `xlsx`, `docx` and `html` (migration 0135). XLSX, DOCX and HTML are parsed in `office_extract_child`, the same secret-free, resource-limited, killable child process the PDFs use (RAG-02, RAG-08); openpyxl (read-only, MIT) and python-docx (MIT) are pinned. Before any parser reads XML the child checks the archive - entries (1,000), inflated bytes (30 MB), per-part compression ratio (200) - and refuses any `DOCTYPE` or `ENTITY`. CSV is parsed in-process with the standard library (UTF-16 without a BOM recognised). A catalogue (CSV, XLSX) is chunked a row at a time as `Column: value; …` with the header in every row and the sheet as breadcrumb, up to 1,000 rows (the chunk limit), 50 columns, cells of 2,000 characters, 20 sheets. A formula is stored as its text; it is never evaluated and its cached value is never read. A question with its answer is one passage in every format. Every limit lives in `knowledge_limits.py`; past one, `422 document_limit_exceeded`, never truncated; bytes that are not the declared format, `422 document_format_mismatch`.
+
+**Consequences.** A 5,000-row catalogue is refused with the limit in the message and uploaded as five files; raising the row limit is a plan-pricing decision (deferred). OCR for scanned PDFs stays a deferred product decision. Every new format takes the same generation, dedupe, `source_key` and replacement path as text and PDF, and its original is kept in the object store. RR-14 counts a catalogue chunk holding more than one row.
+
+## ADR-180 — Multipart Upload Beside The Base64 Routes (RQ-22, FX-4.5)
+
+**Decision.** `POST /knowledge/bases/{id}/documents/upload` and `PUT /knowledge/documents/{id}/content/upload` take the file as multipart, read it in bounded chunks, and run the same pipeline, limits and answers as the JSON routes. The format comes from the form, else the extension. A file larger than any document may be is `413 document_too_large`. The base64 JSON routes are unchanged.
+
+## ADR-181 — The Embedding Model Changes Through Shadow Generations, Per Workspace (RQ-25, FX-4.1, RV-11) — amends ADR-107
+
+**Context.** ADR-107 made an embedding's space part of its identity, so a changed `OPENAI_EMBEDDING_MODEL` excludes every old vector - correctly, and at the cost of every document being invisible until re-indexed (RV-11).
+
+**Decision.**
+
+1. A workspace has a query space (`workspace_embedding_spaces`, migration 0136): the configured space until it flips. A search embeds its query, and serves only active generations, in that space.
+2. `OPENAI_EMBEDDING_MODEL_NEXT` names a switch's target. `embedding-switch start` records it per workspace; `build` - the throttled background re-index: `--rate` per minute, one document per workspace per turn, resumable from the database - queues shadow generations: state `shadow`, published beside the active one and never served. `active` and both partial unique indexes keep their meaning.
+3. `flip` per workspace only at 100 % coverage (every ready document has a shadow of its current text). A permanently failed shadow blocks the flip and is listed; `--retry-blocked` rebuilds it. The flip supersedes each active generation by its shadow and moves the query space in one transaction; `retire` deletes the old space's chunks.
+4. A generation embedded in a space its workspace has left is put back and its attempt refunded, never published where no search looks. A replacement mid-switch retires the stale shadow.
+
+**Consequences.** No search is empty for a document that exists at any step (rehearsed: 64 documents, 2 workspaces, 8 steps, 0 empty searches, 0 of 98 during the drains). Changing `OPENAI_EMBEDDING_MODEL` directly is still the outage RV-11 described; RR-09 and `KnowledgeStaleEmbeddings` say so. The setting is changed only after every workspace has flipped, and `_NEXT` is then unset.
+
+## ADR-182 — A Query-Embedding Cache, Never A Result Cache (RQ-26, FX-4.6, IMP-19)
+
+**Decision.** The agent tool's query vectors are kept in Redis for 24 h under `wasla:rag:qemb:{tenant}:{space}:{sha256(for_matching(query))}` (`RAG_QUERY_EMBEDDING_CACHE`, default true). Vectors only: which passages a search returns is decided by the database every time, so a deleted, replaced or flipped document cannot be served from the cache. The workspace and the space are in the key, so two workspaces never share an entry and a flipped workspace misses into its new model; the query text is not stored. A Redis failure is a miss. A hit meters the search but no embedding request.
+
+**Consequences.** Twenty identical questions cost one embedding request instead of twenty. A result cache needs a per-workspace knowledge version and is deferred as a later product.
+
+## ADR-183 — A Knowledge-Gap Report, Off Until The Privacy Audit (RQ-27, FX-4.10, IMP-25)
+
+**Decision.** With `RAG_GAP_REPORT_ENABLED` (default false), an empty search the agent's tool ran is recorded in `knowledge_search_gaps` (migration 0138): the query the model wrote (`for_storage`, 500 characters), its script (`ar`, `en`, `mixed`, `other`), the best distance and the time. The customer's message is never stored, so pre-retrieval, which searches with it, records nothing. Rows are tenant-keyed, deleted after `RAG_GAP_RETENTION_DAYS` (30) by the recovery sweep whether or not the report is on now, erased by the workspace purge, and read only through `GET /knowledge/gaps` by the workspace's administrators (`404` while off). RR-13 counts rows past the retention.
+
+**Consequences.** Switching it on is carried to the Privacy audit (#18).
+
+## ADR-184 — Concurrent Embedding Batches Under One Renewal; Autovacuum Sized For A Re-Index (FX-4.8, FX-4.2, FX-4.7)
+
+**Decision.**
+
+1. `prepare()` sends up to `RAG_EMBEDDING_CONCURRENCY` (default 3, at most 4) batches as one wave, after one claim renewal in its own short unit of work. No transaction, lock or pooled connection is held across the provider (ADR-080). Every batch that answered is metered even when another of its wave failed; vectors keep their chunks' order. A suspended workspace stops at the next wave.
+2. A generation's chunks are written in one multi-row INSERT at publish.
+3. Migration 0137: `document_chunks` is autovacuumed and auto-analysed after 2 % of it changes (floor 1,000 rows), vacuumed after 5 % is newly inserted, and the `tenant_id` statistics target is 1,000, so a mass re-index's dead tuples leave the HNSW graph sooner.
+4. Neighbour expansion asks for every passage's neighbours in one query. `plan_cache_mode` and `hnsw.iterative_scan` stay `SET LOCAL` per search in one round trip (ADR-079): set per role or per pool they would change for every other subsystem on the same role. `ef_search` is not tuned: that needs the real-provider evaluation.
+
+**Consequences.** Extraction stays in the request: moving it to the worker changes the API contract and is deferred.
+
+## ADR-185 — Row-Level Security On The Knowledge Tables Is Deferred, With Its Design (RQ-28, FX-4.9, IMP-24)
+
+**Context.** P-R34: in production the application connects as a role that owns nothing and has `NOBYPASSRLS` (`scripts/provision_runtime_db_role.py`, which also refuses a runtime role that is a member of any other role). In compose and CI the application connects as the owner, and an owner bypasses its own tables' policies unless they are `FORCE`d. P-R33: as the runtime role, a query without a tenant predicate returns every workspace's chunks (302 rows of 2 workspaces). In a rolled-back transaction with a policy `USING (tenant_id = current_setting('app.tenant_id', true)::uuid)` the same role reads 0 rows without the setting and 151 rows (one workspace) with it - and the cross-tenant reads the system depends on read 0 as well.
+
+**Blocker.** The indexing sweep and the recovery worker (`IndexingSweep.claim_due`, `list_stale`), the knowledge gauges in `metrics_service`, the embedding switch (`switching_workspaces`, `build`), the gap retention pass, the workspace purge, platform-staff views, `rag_triage` and `rag_invariants` read across workspaces on the same runtime role, in the API and worker processes. Under the policy each would silently see nothing: documents never claimed, gauges at zero, a purge that deletes nothing. Running them under a `BYPASSRLS` role needs a second privileged login credential and a second engine in the API and the worker - a change to the database role model the provisioning script exists to prevent. RQ-28's third condition does not hold: the stop condition.
+
+**Design, for the stage that changes the role model.**
+
+1. A `wasla_maintenance` login role, `BYPASSRLS`, owning nothing, used only by a second engine (`MAINTENANCE_DATABASE_URL`) that the sweeps, gauges, purge, switch and platform views take explicitly; provisioned beside the runtime role.
+2. `ENABLE` and `FORCE ROW LEVEL SECURITY` on `knowledge_bases`, `documents`, `document_index_generations`, `document_chunks`, `knowledge_search_gaps` and `workspace_embedding_spaces`, with the policy above; a missing setting matches nothing.
+3. A SQLAlchemy `after_begin` listener runs `set_config('app.tenant_id', session.info['tenant_id'], true)` for every transaction of a session bound to a workspace - including the one that resumes after `released()` commits; a tenant-scoped repository asserts the binding.
+4. P-R33 re-run as the runtime role returns 0 rows; M-R64 drops the policy on `document_chunks` and must fail it.
+
+**Consequences.** Tenant isolation stays enforced by the repository predicates (ADR-008), the triple predicate on every knowledge query, the composite foreign keys and the isolation gate. FX-4.9 is DEFERRED and M-R64 is not applicable.
+
+## ADR-186 — Partitioning `document_chunks` Waits For A Measured Trigger (FX-4.3, RV-25)
+
+**Decision.** `document_chunks` is not partitioned. Revisit when one workspace holds more than 250,000 chunks, when search p95 for the largest workspace exceeds 300 ms with the HNSW path chosen, or when the table passes 20 million rows. The Part 3 drill corpus numbers are in `RAG_REMEDIATION_PART3_SCALE.md` §8.
