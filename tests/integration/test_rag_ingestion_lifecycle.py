@@ -50,6 +50,7 @@ from app.repositories.knowledge_repository import (
     TRIGGER_STALE_EMBEDDING,
     DocumentChunkRepository,
     IndexingSweep,
+    encode_cursor,
 )
 from app.services.document_indexing import (
     MAX_INDEXING_ATTEMPTS,
@@ -551,9 +552,25 @@ async def test_a_model_change_excludes_old_vectors_until_they_are_reindexed(
 
     indexing.configure(openai_embedding_model=LARGE.model)
     assert await indexing.search(tenant_id, "refund fourteen days", space=LARGE) == []
-    async with indexing.database.session() as session:
-        stale = await IndexingSweep(session).list_stale(space=LARGE, limit=10)
-    assert [generation.document_id for generation in stale] == [document_id]
+
+    async def own_stale() -> list[uuid.UUID]:
+        # The sweep is platform-wide; this workspace's rows are what is under
+        # test. A run that keeps other suites' data (CI's kept-data sweep) has
+        # more stale documents than a page of ten, so every page is read.
+        found: list[uuid.UUID] = []
+        cursor: str | None = None
+        for _ in range(100):
+            async with indexing.database.session() as session:
+                page = await IndexingSweep(session).list_stale(space=LARGE, limit=100, after=cursor)
+            found += [g.document_id for g in page if g.tenant_id == tenant_id]
+            if len(page) < 100:
+                return found
+            published = page[-1].published_at
+            assert published is not None  # an active generation was published
+            cursor = encode_cursor(published, page[-1].id)
+        raise AssertionError("the stale listing never ended")
+
+    assert await own_stale() == [document_id]
 
     await indexing.reindex(tenant_id, document_id, trigger=TRIGGER_STALE_EMBEDDING)
     await indexing.drain()
@@ -561,8 +578,7 @@ async def test_a_model_change_excludes_old_vectors_until_they_are_reindexed(
     assert indexing.provider.requests[-1]["model"] == LARGE.model
     assert await indexing.search(tenant_id, "refund fourteen days", space=LARGE)
     assert await indexing.search(tenant_id, "refund fourteen days", space=SMALL) == []
-    async with indexing.database.session() as session:
-        assert await IndexingSweep(session).list_stale(space=LARGE, limit=10) == []
+    assert await own_stale() == []
 
 
 # ------------------------------------------------------- RAG-07 cost
