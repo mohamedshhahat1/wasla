@@ -19,12 +19,13 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_entitlement_service
 from app.core.config import Settings
 from app.core.dependencies import get_session
+from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.knowledge import KnowledgeSearchGap
 from app.db.models.tenant import Tenant
 from app.main import create_app
@@ -238,6 +239,13 @@ async def test_the_workspace_purge_erases_the_report(indexing: Indexing) -> None
         left = await session.scalar(
             select(func.count(KnowledgeSearchGap.id)).where(
                 KnowledgeSearchGap.tenant_id == tenant_id
+            )
+        )
+        # The purge's committed audit entry would outlive this test and be read
+        # by suites that count purges; the trail itself is not under test here.
+        await session.execute(
+            delete(AuditLog).where(
+                AuditLog.action == AuditAction.WORKSPACE_PURGED, AuditLog.target_id == tenant_id
             )
         )
     assert left == 0
