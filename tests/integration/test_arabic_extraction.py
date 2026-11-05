@@ -19,6 +19,8 @@ from sqlalchemy import select
 
 from app.db.models.knowledge import Document, DocumentSource
 from app.services.knowledge_service import KnowledgeService
+from app.services.retrieval_policy import resolve
+from app.services.retrieval_ranking import VECTOR
 from app.services.retrieval_service import RetrievalService
 from app.services.text_normalisation import for_matching
 from tests.fake_embeddings import FakeEmbeddings
@@ -118,6 +120,9 @@ async def test_page_furniture_is_not_indexed(indexing: Indexing, children: list[
 
 
 async def test_a_query_typed_in_arabic_indic_digits_finds_ascii_digits(indexing: Indexing) -> None:
+    """End to end with the default policy. Hybrid is on there, and the exact-word
+    channel can find the chunk on its own; the vector half is pinned by
+    `test_the_vector_search_reads_the_folded_query_with_hybrid_off` (RGM-08)."""
     tenant_id = await indexing.workspace()
     await indexing.submit(
         tenant_id,
@@ -130,3 +135,36 @@ async def test_a_query_typed_in_arabic_indic_digits_finds_ascii_digits(indexing:
             session=session, tenant_id=tenant_id, embeddings=as_embeddings(FakeEmbeddings())
         ).search(query="\u0633\u0640\u0639\u0631 \u0664\u0665\u0660\u0660", top_k=1)
     assert found.passages and "4500" in found.passages[0].content
+
+
+async def test_the_vector_search_reads_the_folded_query_with_hybrid_off(
+    indexing: Indexing,
+) -> None:
+    """The query is folded for matching before it is embedded, not only for the
+    exact-word channel (RGM-08): with that channel off, a question typed with
+    tatweel and Arabic-Indic digits still finds the passage stored with plain
+    letters and ASCII digits - by the vector search alone."""
+    indexing.configure(rag_hybrid_enabled=False)
+    switches = resolve(
+        indexing.settings, None, embedding_model=indexing.settings.openai_embedding_model
+    )
+    assert (
+        switches.policy.hybrid is False
+    ), "hybrid is off: this test is about the vector query, not the exact-word channel"
+    tenant_id = await indexing.workspace()
+    await indexing.submit(
+        tenant_id,
+        "سعر التشطيب 4500 جنيه\n\n" "Opening hours are nine to five every day except Friday.",
+    )
+    await indexing.drain()
+    async with indexing.database.session() as session:
+        found = await RetrievalService(
+            session=session,
+            tenant_id=tenant_id,
+            embeddings=as_embeddings(FakeEmbeddings()),
+            policy=switches.policy,
+        ).search(query="سـعر ٤٥٠٠", top_k=1)
+    assert found.passages, "the folded query found nothing by vector search"
+    (passage,) = found.passages
+    assert "4500" in passage.content
+    assert passage.channels == (VECTOR,), passage.channels
