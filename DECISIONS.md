@@ -7629,6 +7629,8 @@ applied while the application is imported (ADR-157, FRM-03).
 
 **Consequences.** Two uploads to one workspace during a slow parse both succeed, and no connection is checked out mid-parse (measured). A slot check now happens after extraction, so an upload at the plan limit spends the parse before it is refused.
 
+*Amended 2026-11-05 (ADR-187, RGM-05):* the duplicate checks run under the workspace's upload lock - the lock the slot is reserved under - in the transaction that inserts. Extraction stays before it.
+
 ## ADR-164 — The Last Round Answers; Rounds Are Replayed In Order; Two Searches Per Turn (RQ-10, RV-14, RV-27)
 
 **Context.** The last of three rounds offered every tool and then refused any call for lack of a round to read it, so a model that searched again ended the turn empty - or with "let me check", said alongside a call, sent as the whole reply. Each round's request replayed all preambles first and all tool exchanges after them.
@@ -7820,3 +7822,20 @@ applied while the application is imported (ADR-157, FRM-03).
 ## ADR-186 — Partitioning `document_chunks` Waits For A Measured Trigger (FX-4.3, RV-25)
 
 **Decision.** `document_chunks` is not partitioned. Revisit when one workspace holds more than 250,000 chunks, when search p95 for the largest workspace exceeds 300 ms with the HNSW path chosen, or when the table passes 20 million rows. The Part 3 drill corpus numbers are in `RAG_REMEDIATION_PART3_SCALE.md` §8.
+
+## ADR-187 — An Upload Decides Under The Workspace's Lock; CI Installs The Lock; The Switch Names Every Process (RGM-05, RGM-14, RGM-07, RGM-10)
+
+**Context.** Since ADR-163 the plan's document slot is reserved inside `KnowledgeService.submit`, and only for a new document. The duplicate checks - the same text in this knowledge base, the same source key, the same text in another knowledge base of the workspace - ran before that lock. Two uploads of one text at the same moment both passed them: in one knowledge base the second insert met the unique key and answered `500` (its cleanup wrote into the failed transaction); in two knowledge bases both were stored and the text was served twice. Separately, a refused upload's original stayed in the media store for ever, because its purge row was written in the transaction the refusal rolled back. CI installed `pip install -e ".[dev]"`, which resolved 32 of the 58 locked packages to newer versions than the image ships. The embedding-switch runbook gave the next model to the worker only.
+
+**Decision.**
+
+1. `_record` takes the workspace's upload lock - `hold_limit_lock(tenant, KNOWLEDGE_DOCUMENTS)`, the transaction-scoped advisory lock `reserve_slot` takes - before any duplicate check, and holds it to the commit. The checks under it decide; a workspace-wide lock because one check is workspace-wide. Two workspaces never share it.
+2. Extraction, normalisation, hashing and the original's write stay before the lock (ADR-163): only the checks, the slot and the inserts run under it.
+3. The insert runs in a savepoint. Should it still meet a unique key, the checks run again and the request gets the repeat's answer - never a `5xx`.
+4. On every exception path of `submit` and `replace_content` the request's original is deleted from the store directly; nothing can refer to a key generated for a request whose transaction is rolled back.
+5. Every CI job that installs Python packages installs `requirements.lock` and `requirements-build.lock` by hash first, then the project with its dev extras, and `scripts/check_installed_lock.py` plus `pip check` fail the job on any pinned package at another version.
+6. `docs/RUNBOOK.md` "Changing the embedding model" sets `OPENAI_EMBEDDING_MODEL_NEXT` on the API (the admin search preview), the indexing worker and the agent worker before `start`, and confirms it on each.
+
+**Consequences.** Two concurrent uploads end as two sequential ones: one document, and the other request answered exactly as a second upload a minute later would be (`202` `created: false`, or `409 document_exists_in_other_knowledge_base`) - proved by tests that hold the lock themselves until every request is queued on it, so they fail every time the checks run first. The lock is held for milliseconds, never for a parse. Replacement still asks the plan for nothing (ADR-161). A pinned package can no longer drift under CI unnoticed. `docker-compose.prod.yml` does not forward `OPENAI_EMBEDDING_MODEL_NEXT` or any `RAG_*` setting (RGM-12); until it does, the runbook says to add the variable to the `api` and `worker` environments.
+
+**Amends** ADR-163: the slot is still reserved only for a new document, but the duplicate checks now run under the lock it is reserved under.
