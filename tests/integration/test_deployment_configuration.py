@@ -109,6 +109,17 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # version. This mapping was absent, which is how the API came to serve three
     # send routes in production with no `META_ACCESS_TOKEN` at all.
     "meta_": ("api", "worker"),
+    # The knowledge base. Both: the API's search preview and the worker's agents
+    # resolve the same retrieval switches, and a deployment that set them on one
+    # would preview a search the agents do not run. The cache, retention and
+    # indexing knobs are the worker's; the API is given them so the two never
+    # disagree (as `media_retention_`). This mapping was absent, so none of them
+    # reached production and the first deploy's `RAG_HYBRID_ENABLED=false` did
+    # nothing (RGM-12).
+    "rag_": ("api", "worker"),
+    # The embedding switch's target: the API embeds the preview's query in it,
+    # the worker builds shadows and answers customers in it (RGM-10, RGM-12).
+    "openai_embedding_model_next": ("api", "worker"),
 }
 
 # Fields a mapped prefix picks up that a given service deliberately does not

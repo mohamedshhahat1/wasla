@@ -15,10 +15,10 @@ agent for the length of the re-index - and for ever, if the re-index failed. Now
 the old generation keeps serving while the new one builds, and is replaced in one
 short transaction only once the new one is complete.
 
-Knowledge is workspace-global (PD-RAG-5): an agent granted `search_knowledge`
-searches every active generation in its workspace, whichever knowledge base holds
-it. Knowledge bases organise documents for the people managing them; scoping an
-agent to some of them is a future feature, not a filter that exists today.
+Knowledge is workspace-global by default (PD-RAG-5): an agent granted
+`search_knowledge` searches every active generation in its workspace, whichever
+knowledge base holds it - unless its grant names `knowledge_base_ids` (RQ-18),
+which every search query applies as an `IN` predicate.
 
 `tenant_id` is on all three, including the chunks, even though it could be
 reached by joining through the document. Similarity search reads the chunk table
@@ -36,18 +36,22 @@ from typing import Final
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    DDL,
     BigInteger,
     CheckConstraint,
     DateTime,
+    Float,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -91,6 +95,12 @@ class DocumentSource(StrEnum):
     TEXT = "text"
     MARKDOWN = "markdown"
     PDF = "pdf"
+    # Catalogues and office documents (RQ-21, migration 0135). CSV and XLSX are
+    # chunked a row at a time; XLSX, DOCX and HTML are parsed in the sandbox.
+    CSV = "csv"
+    XLSX = "xlsx"
+    DOCX = "docx"
+    HTML = "html"
 
 
 class GenerationState(StrEnum):
@@ -100,6 +110,8 @@ class GenerationState(StrEnum):
     reads, and the ones it used to. `PENDING`, `PROCESSING` and `FAILED` are the
     attempt half. A document holds at most one `ACTIVE` generation and at most
     one in flight, and the database says so (see the partial indexes below).
+    `SHADOW` is a generation built for an embedding-model switch, published and
+    waiting for its workspace to flip (RQ-25).
     """
 
     PENDING = "pending"
@@ -107,6 +119,11 @@ class GenerationState(StrEnum):
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     FAILED = "failed"
+    # Published in an embedding-model switch's target space and not served
+    # (RQ-25, migration 0136): the generation that becomes `ACTIVE` when its
+    # workspace's query space flips. Never read by retrieval, which serves
+    # `ACTIVE` only - and `ACTIVE` keeps its meaning and its unique index.
+    SHADOW = "shadow"
 
 
 #: An attempt that is outstanding - waiting for a worker or held by one.
@@ -123,8 +140,10 @@ class KnowledgeBase(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
     """A named collection of documents belonging to one workspace.
 
     Exists so a workspace can keep its sales material apart from its support
-    policies and point different agents at different sets. A workspace that does
-    not care keeps one and never thinks about it again.
+    policies. An agent's `search_knowledge` grant may be scoped to some of them
+    (RQ-18); only the default agent answers customers today, so a scope takes
+    effect for every turn once routing exists. A workspace that does not care
+    keeps one and never thinks about it again.
     """
 
     __tablename__ = "knowledge_bases"
@@ -184,6 +203,27 @@ class Document(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
             "knowledge_base_id",
             name="uq_documents_tenant_id_id_knowledge_base_id",
         ),
+        # One document per source key in a knowledge base (RQ-07).
+        Index(
+            "uq_documents_tenant_kb_source_key",
+            "tenant_id",
+            "knowledge_base_id",
+            "source_key",
+            unique=True,
+            postgresql_where=text("source_key IS NOT NULL"),
+        ),
+        # What a document supersedes is in its own workspace and knowledge base,
+        # by construction; deleting it clears only the link.
+        ForeignKeyConstraint(
+            ["tenant_id", "supersedes_document_id", "knowledge_base_id"],
+            ["documents.tenant_id", "documents.id", "documents.knowledge_base_id"],
+            name="fk_documents_supersedes_same_knowledge_base",
+            ondelete="SET NULL (supersedes_document_id)",
+        ),
+        CheckConstraint(
+            "valid_until IS NULL OR valid_from IS NULL OR valid_until > valid_from",
+            name="validity_window_ordered",
+        ),
     )
 
     knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
@@ -217,6 +257,25 @@ class Document(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     ingested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    # Lines a PDF extraction flagged as possibly re-ordered, counted per warning
+    # code and never copied (RQ-04): `{"digits_glued_to_arabic": 3}`. NULL when
+    # there were none.
+    extraction_warnings: Mapped[dict[str, int] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    # A stable identity for "the same document, updated" (RQ-07): given by the
+    # client, or derived from the filename. Unique per knowledge base when set,
+    # so uploading `pricing.pdf` again is recognised as a new version of it.
+    source_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # When this document's facts apply (RQ-24, FX-2.7). Retrieval leaves out a
+    # document outside its window; NULL is open-ended.
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The document this one replaces as a source of truth, in the same
+    # knowledge base. Informational; deleting it clears the link.
+    supersedes_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
 
     @property
@@ -311,6 +370,14 @@ class DocumentIndexGeneration(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, Time
             "AND embedding_schema_version IS NOT NULL)",
             name="published_has_identity",
         ),
+        # A published shadow records its space too (RQ-25, migration 0136).
+        CheckConstraint(
+            "state <> 'shadow' OR ("
+            "published_at IS NOT NULL AND embedding_provider IS NOT NULL "
+            "AND embedding_model IS NOT NULL AND embedding_dimensions IS NOT NULL "
+            "AND embedding_schema_version IS NOT NULL)",
+            name="shadow_has_identity",
+        ),
     )
 
     document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -340,6 +407,108 @@ class DocumentIndexGeneration(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, Time
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # **The content this generation indexes** (RQ-06, FX-2.1). A replacement
+    # carries its own text and metadata here, so the document keeps serving its
+    # current version - and keeps its current text, title and hash - until this
+    # generation publishes, when the swap copies these onto the document in the
+    # same transaction. NULL on a re-index of the stored text and on every
+    # generation made before replacement existed: those index `documents.content`.
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    filename: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[DocumentSource | None] = mapped_column(DOCUMENT_SOURCE_TYPE, nullable=True)
+    extraction_warnings: Mapped[dict[str, int] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    # The uploaded file in the media object store, tenant-prefixed (RQ-23), so
+    # the text can be extracted again when the extractor improves.
+    original_object_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # When the recovery sweep last put this attempt on the queue (FX-1.9).
+    last_enqueued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    @property
+    def has_snapshot(self) -> bool:
+        """Whether this generation indexes content of its own rather than the document's."""
+        return self.content is not None
+
+
+class WorkspaceEmbeddingSpace(Base, TenantScopedMixin, TimestampMixin):
+    """The embedding space a workspace's knowledge is queried in, and any switch under way.
+
+    One row per workspace that has ever started an embedding-model switch
+    (RQ-25, FX-4.1, RV-11); a workspace without one is queried in the space the
+    deployment is configured with, which is every workspace until a switch. A
+    search embeds its query in the `query_*` space, and serves only active
+    generations made in it.
+
+    While a switch is under way `target_*` is set: shadow generations are built
+    in that space beside the active ones, and the query space flips to it -
+    for this workspace, in one transaction - only once every ready document has
+    one. Until then nothing about what the workspace is served changes, so no
+    search is ever empty for a document that exists. `flipped_at` and
+    `retired_at` record the flip and the deletion of the old space's chunks.
+    """
+
+    __tablename__ = "workspace_embedding_spaces"
+    __table_args__ = (
+        Index("ix_workspace_embedding_spaces_tenant_id", "tenant_id"),
+        CheckConstraint(
+            "(target_provider IS NULL) = (target_model IS NULL)"
+            " AND (target_provider IS NULL) = (target_dimensions IS NULL)"
+            " AND (target_provider IS NULL) = (target_schema_version IS NULL)",
+            name="target_complete_or_absent",
+        ),
+    )
+
+    # The workspace is the key: one query space each.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    query_provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    query_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    query_dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    query_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    target_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    switch_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    flipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KnowledgeSearchGap(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
+    """One agent search that found nothing, for the workspace's gap report (RQ-27).
+
+    Written only while `RAG_GAP_REPORT_ENABLED` is on, and only for the query
+    the model wrote for the knowledge tool - never the customer's message,
+    which is why pre-retrieval, which searches with the message, writes none.
+    Kept `RAG_GAP_RETENTION_DAYS` (30) by the recovery sweep, erased with the
+    workspace by the purge, read only by its administrators.
+    """
+
+    __tablename__ = "knowledge_search_gaps"
+    __table_args__ = (
+        Index("ix_knowledge_search_gaps_tenant_id", "tenant_id"),
+        Index("ix_knowledge_search_gaps_tenant_id_created_at", "tenant_id", "created_at"),
+        # What the retention pass deletes by, across every workspace.
+        Index("ix_knowledge_search_gaps_created_at", "created_at"),
+    )
+
+    query: Mapped[str] = mapped_column(String(500), nullable=False)
+    # `ar`, `en`, `mixed` or `other`, from the letters the query is written in.
+    language: Mapped[str] = mapped_column(String(8), nullable=False)
+    best_distance: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
@@ -393,6 +562,14 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # The exact-word channel (RQ-15, migration 0133): a GIN index over the
+        # chunk's lexemes, so a SKU or a model number finds its passage even
+        # when the embedding does not place it near the question.
+        Index(
+            "ix_document_chunks_search_tsv",
+            "search_tsv",
+            postgresql_using="gin",
+        ),
         # Every parent pinned. This is the table a retrieval reads, so a row here
         # claiming a foreign parent is the shape of a cross-tenant answer - and
         # `KnowledgeRepository.search` filters chunks by `knowledge_base_id`
@@ -436,9 +613,49 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_estimate: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The headings this passage sits under, outermost first, `"Pricing > Premium"`
+    # (FX-1.2). NULL for a passage outside any heading and for chunks written
+    # before breadcrumbs existed.
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The chunk as the exact-word channel reads it, `for_lexical` (RQ-15), and
+    # its lexemes as a `tsvector` - written at publish from lexemes Python
+    # tokenised, not by the `'simple'` parser, which splits `bk-35` and `4,500`
+    # (RR-16). NULL for chunks published before migration 0132 until
+    # `reindex-all` rebuilds them; such a chunk is still found by the vector
+    # channel.
+    search_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_tsv: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
     # Nullable in the schema and never NULL in practice: a generation's chunks
     # are written in the transaction that publishes it, with validated vectors.
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBEDDING_DIMENSIONS),
         nullable=True,
     )
+
+
+# Vacuumed and analysed after 2 % of the table changes, and vacuumed after 5 %
+# is newly inserted, so a mass re-index's dead tuples leave the HNSW graph
+# sooner (FX-4.2, ADR-184). Set by migration 0137 with the `tenant_id`
+# statistics target; declared here too so a model-built schema matches.
+CHUNK_STORAGE_PARAMETERS: Final = (
+    "autovacuum_vacuum_scale_factor = 0.02",
+    "autovacuum_vacuum_threshold = 1000",
+    "autovacuum_analyze_scale_factor = 0.02",
+    "autovacuum_analyze_threshold = 1000",
+    "autovacuum_vacuum_insert_scale_factor = 0.05",
+)
+
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        f"ALTER TABLE document_chunks SET ({', '.join(CHUNK_STORAGE_PARAMETERS)})"
+    ),
+)
+event.listen(
+    DocumentChunk.__table__,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "ALTER TABLE document_chunks ALTER COLUMN tenant_id SET STATISTICS 1000"
+    ),
+)

@@ -379,8 +379,11 @@ async def test_the_purge_is_audited_as_a_system_act(db_session: AsyncSession) ->
     )
     await WorkspacePurgeService(db_session).purge(tenant, now=NOW)
 
+    # This workspace's entry: other suites' committed purges share the table.
     rows = await db_session.execute(
-        select(AuditLog).where(AuditLog.action == AuditAction.WORKSPACE_PURGED)
+        select(AuditLog).where(
+            AuditLog.action == AuditAction.WORKSPACE_PURGED, AuditLog.target_id == tenant.id
+        )
     )
     entry = next(iter(rows.scalars()))
     assert entry.actor_kind is AuditActorKind.SYSTEM
@@ -416,7 +419,10 @@ async def test_purging_twice_is_a_no_op(db_session: AsyncSession) -> None:
         await db_session.scalar(
             select(func.count())
             .select_from(AuditLog)
-            .where(AuditLog.action == AuditAction.WORKSPACE_PURGED)
+            .where(
+                AuditLog.action == AuditAction.WORKSPACE_PURGED,
+                AuditLog.target_id == tenant.id,
+            )
         )
     ) == 1
 

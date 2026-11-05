@@ -55,9 +55,17 @@ MAX_CHILD_OUTPUT_BYTES: Final = MAX_EXTRACTED_CHARACTERS * 6 + 4_096
 PDF_TYPE: Final = "application/pdf"
 TEXT_TYPE: Final = "text/plain"
 
-# Text that arrives as bytes has no declared encoding worth trusting. These are
-# tried in order, and the last one cannot fail, so decoding always terminates.
-TEXT_ENCODINGS: Final = ("utf-8", "utf-16", "cp1256", "latin-1")
+# Text that arrives as bytes has no declared encoding worth trusting (RV-20).
+# UTF-8 first; UTF-16 only behind its byte-order mark, because Python's `utf-16`
+# decodes almost any even-length byte string without one - a Windows-1252
+# English file came out as CJK; then the two Windows code pages this product's
+# customers write in, chosen by what the bytes decode to; Latin-1 last, which
+# cannot fail, so decoding always terminates.
+TEXT_ENCODINGS: Final = ("utf-8", "cp1256", "cp1252", "latin-1")
+_UTF16_BOMS: Final = (b"\xff\xfe", b"\xfe\xff")
+# Above this share of Arabic letters among the non-ASCII characters, the bytes
+# are Arabic Windows text; below it they are Western European.
+ARABIC_SHARE_FOR_CP1256: Final = 0.5
 
 
 class UnreadableDocumentError(ValidationError):
@@ -81,6 +89,7 @@ _extraction_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.
 
 
 def _slots() -> asyncio.Semaphore:
+    """This event loop's share of `MAX_CONCURRENT_EXTRACTIONS`; every bounded parser takes one."""
     loop = asyncio.get_running_loop()
     slots = _extraction_slots.get(loop)
     if slots is None:
@@ -90,6 +99,7 @@ def _slots() -> asyncio.Semaphore:
 
 
 def _child_environment() -> dict[str, str]:
+    """The allow-listed environment a parsing child starts with: no secrets."""
     return {name: os.environ[name] for name in CHILD_ENVIRONMENT if name in os.environ}
 
 
@@ -100,7 +110,29 @@ async def extract_pdf_bounded(
     max_characters: int = MAX_EXTRACTED_CHARACTERS,
     timeout_seconds: float = EXTRACTION_TIMEOUT_SECONDS,
 ) -> str:
-    """The text layer of a PDF, parsed in a process that can be killed.
+    """The text layer of a PDF, pages joined by a blank line.
+
+    What the media reader shows an agent for a PDF a customer sent. The
+    knowledge base reads pages (`extract_pdf_pages_bounded`) instead, so it can
+    remove what repeats on every page and join a paragraph across a break.
+    """
+    pages = await extract_pdf_pages_bounded(
+        content,
+        max_pages=max_pages,
+        max_characters=max_characters,
+        timeout_seconds=timeout_seconds,
+    )
+    return "\n\n".join(pages).strip()
+
+
+async def extract_pdf_pages_bounded(
+    content: bytes,
+    *,
+    max_pages: int = MAX_PDF_PAGES,
+    max_characters: int = MAX_EXTRACTED_CHARACTERS,
+    timeout_seconds: float = EXTRACTION_TIMEOUT_SECONDS,
+) -> list[str]:
+    """The text layer of a PDF, page by page, parsed in a process that can be killed.
 
     The only PDF parser this application runs. The knowledge base uses it for
     documents whose text becomes chunks somebody pays to embed (RAG-02), and the
@@ -164,7 +196,7 @@ async def extract_pdf_bounded(
     return _decode_child_answer(output, max_pages=max_pages, max_characters=max_characters)
 
 
-def _decode_child_answer(output: bytes, *, max_pages: int, max_characters: int) -> str:
+def _decode_child_answer(output: bytes, *, max_pages: int, max_characters: int) -> list[str]:
     if not output or len(output) > MAX_CHILD_OUTPUT_BYTES:
         # A crash, an exhausted memory limit or a kill by the operating system.
         logger.warning("knowledge.pdf_extraction_crashed")
@@ -176,14 +208,18 @@ def _decode_child_answer(output: bytes, *, max_pages: int, max_characters: int) 
     if not isinstance(answer, dict):
         raise UnreadableDocumentError()
 
-    if answer.get("ok") is True and isinstance(answer.get("text"), str):
-        text: str = answer["text"]
-        if len(text) > max_characters:
+    pages = answer.get("pages_text")
+    if (
+        answer.get("ok") is True
+        and isinstance(pages, list)
+        and all(isinstance(page, str) for page in pages)
+    ):
+        if sum(len(page) for page in pages) > max_characters:
             raise DocumentTooLargeError(
                 f"That PDF contains more text than can be indexed. "
                 f"The limit is {max_characters} characters."
             )
-        return text
+        return [page for page in pages if page]
 
     code = answer.get("code")
     if code == "too_many_pages":
@@ -213,7 +249,23 @@ def extract_text(content: bytes) -> str:
     Windows software arrives as, and this product's customers send exactly that.
     Latin-1 is last and accepts any byte sequence, so this never raises.
     """
-    for encoding in TEXT_ENCODINGS:
+    if content.startswith(b"\xef\xbb\xbf"):
+        return content.decode("utf-8-sig", errors="replace").strip()
+    if content.startswith(_UTF16_BOMS):
+        return content.decode("utf-16", errors="replace").strip()
+    try:
+        return content.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        pass
+    # Windows-1256 keeps Windows-1252's French accents and punctuation where
+    # they were and puts Arabic letters in the rest, so its decoding says which
+    # of the two the author was using.
+    arabic = content.decode("cp1256", errors="replace")
+    wide = [character for character in arabic if ord(character) > 0x7F]
+    letters = sum(1 for character in wide if "\u0621" <= character <= "\u06ff")
+    if wide and letters / len(wide) > ARABIC_SHARE_FOR_CP1256:
+        return arabic.strip()
+    for encoding in TEXT_ENCODINGS[2:]:
         try:
             return content.decode(encoding).strip()
         except UnicodeDecodeError:

@@ -235,6 +235,10 @@ Those four are the whole tool surface. There is no payment, refund, order, invoi
 
 Planned, in the phase that gives each one something to act on: `create_lead`, `update_lead`, `get_lead`, `assign_lead` (Phase 7), `send_media` (Phase 9), and later `get_product`, `get_price`, `create_ticket`, `get_order`, `check_availability`, `create_appointment`, `cancel_appointment`, `reschedule_appointment`. **None of the high-risk ones may be added yet.** A tool with an external or financial effect needs a provider-level idempotency key derived from a durable execution identity, reconciliation for an outcome nobody can determine, risk classification and an approval path — and the framework has the first of those and not the rest (see `TOOLS_TOOL_EXECUTION_FINDINGS_REMEDIATION.md`, §Future).
 
+### The default knowledge grant (RQ-11, ADR-165)
+
+A new agent is created holding an enabled `search_knowledge` grant - the one read-only tool - unless `AGENT_DEFAULT_KNOWLEDGE_GRANT=false`. Every other tool is opt-in, and no migration changed existing agents. `AgentRead.knowledge_unreachable` is `true` when the workspace has ready documents and its answering agent (the `ACTIVE` default) holds no enabled `search_knowledge` grant: every question is then answered from the prompt alone. The `KnowledgeUnreachable` alert and `scripts/rag_triage.py` report the same workspaces.
+
 ### What bounds a tool call
 
 - **Arguments carry their bounds, and the bounds are published.** Length, range and pattern are declared once on the parameter, emitted into the provider schema as `minimum`/`maximum`/`minLength`/`maxLength`/`pattern`, and enforced server-side on the way in. The schema is advice to the model; `validate_arguments` is what holds (TOOL-16).
@@ -286,3 +290,21 @@ The webhook enqueues one job per conversation that received a message, however m
 The worker owns the transaction. It opens one session per job, runs the orchestrator inside it, sends any reply through `MessagingService`, and commits once — so the outbound message row and the conversation timestamps land together or not at all.
 
 What the worker does not have is a process to run in. `AgentWorker.run_forever()` exists and nothing calls it; the entrypoint and its container service arrive with the Phase 8 worker. Nothing reaps the in-flight list yet either, so a job abandoned by a killed worker stays visible but stalled.
+
+### The last round answers (RV-14, RV-27, RQ-10, ADR-164)
+
+A turn has at most three rounds. When the earlier rounds ran tools, the last round is asked with `tool_choice: "none"` - or, when the agent holds the terminal handoff, `allowed_tools` naming only that tool - and a closing instruction to answer now. The tools described stay the same, so the request prefix and its prompt cache do too. A terminal handoff on the last round still hands off.
+
+Words a model says alongside a tool call ("let me check") are a preamble: carried into the next round, never sent as the reply. A turn whose model ignores the last round's instruction ends `empty_response` rather than sending a preamble.
+
+Each round replays the previous ones in the order they happened - the words of a round, its calls and their outputs, then the next round - so every round's input begins with the previous round's.
+
+`search_knowledge` runs at most twice in one turn; a third call is refused with a fixed message (recorded as `turn_call_limit`) and other tools are unaffected.
+
+**The query contract** (RQ-17, ADR-173). The tool asks for a short, standalone `query` - references resolved from the conversation ("the premium one" becomes the product named before), the product, service or policy named, no greetings - in the customer's language, and an optional `alternate_query` in the language the documents are written in. Both are embedded in one batched request and fused. `max_results` is 1 to 6 and every passage asked for that the search keeps is delivered.
+
+**Knowledge scope** (RQ-18, ADR-174). A `search_knowledge` grant may carry `config: {"knowledge_base_ids": [...]}`; ids are validated against the workspace when the grant is saved (an empty list, an unknown id and another workspace's id are refused with `422`). Every other tool's `config` is still refused. Only the workspace's `ACTIVE` default agent answers customers, so scope is ready for routing rather than a routing feature.
+
+**Number grounding** (RQ-19, ADR-177; `RAG_NUMBER_GROUNDING=observe`). Prices and percentages in a composed reply are checked against the turn's retrieved passages, the customer's messages and the agent's instructions. `observe` counts, `correct` asks once for a corrected reply with no tools, `strict` withholds an ungrounded reply, tells the customer a colleague will confirm, and hands the conversation over (`AI_UNGROUNDED_NUMBER`).
+
+**Pre-retrieval** (`RAG_PRERETRIEVAL_ENABLED=false`) and **sentiment in parallel** (`RAG_PARALLEL_SENTIMENT_ENABLED=false`) (RQ-20, ADR-178). Pre-retrieval searches the customer's message before round one as a recorded `search_knowledge` execution and injects it only for a strong or partial match - so it is inert until confidence tiers are calibrated. Parallel sentiment overlaps only the classifier's and round one's HTTP calls; an escalation discards what round one composed and runs none of its tools. Workspaces override both, and the other knowledge switches, with `PATCH /knowledge/settings`.

@@ -12,9 +12,10 @@ from collections.abc import Iterator
 
 import pytest
 
+from app.agents.memory import estimate_tokens
 from app.services.retrieval_service import (
     DEFAULT_TOP_K,
-    MAX_CONTEXT_CHARACTERS,
+    MAX_CONTEXT_TOKENS,
     MAX_DISTANCE,
     MAX_TOP_K,
     Passage,
@@ -69,25 +70,25 @@ def _passages(count: int, *, size: int, title: str = "Policy") -> tuple[Passage,
 
 
 def test_the_context_budget_counts_the_serialized_whole_and_drops_the_lowest_ranked() -> None:
-    passages = _passages(10, size=1_050)
+    passages = _passages(20, size=1_050)
     # Non-vacuity: the passages together are far over the budget.
-    assert sum(len(passage.content) for passage in passages) > MAX_CONTEXT_CHARACTERS * 1.5
+    assert sum(estimate_tokens(passage.content) for passage in passages) > MAX_CONTEXT_TOKENS * 1.5
 
     context = Retrieval(passages=passages, query="q").as_context()
 
-    assert len(context) <= MAX_CONTEXT_CHARACTERS
+    assert estimate_tokens(context) <= MAX_CONTEXT_TOKENS
     assert "P00" in context and "P01" in context
-    assert "P09" not in context
+    assert "P19" not in context
 
 
 def test_one_passage_that_escapes_past_the_budget_is_shortened_not_dropped() -> None:
     # Quotes and backslashes double when escaped; a chunk of them can pass the
     # budget on its own once serialized.
-    heavy = Passage(document_title="T", content='"\\' * 3_500, distance=0.1)
+    heavy = Passage(document_title="T", content='"\\' * 7_000, distance=0.1)
 
     context = Retrieval(passages=(heavy,), query="q").as_context()
 
-    assert len(context) <= MAX_CONTEXT_CHARACTERS
+    assert estimate_tokens(context) <= MAX_CONTEXT_TOKENS
     assert '"knowledge_sources": [{' in context
 
 

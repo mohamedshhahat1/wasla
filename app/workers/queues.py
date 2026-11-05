@@ -18,6 +18,10 @@ has exactly the audience this should have.
     docker compose exec worker python -m app.workers.queues stale-embeddings
     docker compose exec worker python -m app.workers.queues reindex-stale-embeddings --dry-run
     docker compose exec worker python -m app.workers.queues reindex-document <workspace> <document>
+    docker compose exec worker python -m app.workers.queues backfill-normalised-content --dry-run
+    docker compose exec worker python -m app.workers.queues backfill-source-keys --dry-run
+    docker compose exec worker python -m app.workers.queues reindex-all --rate 5 [--after <id>]
+    docker compose exec worker python -m app.workers.queues embedding-switch status
     docker compose exec worker python -m app.workers.queues unresolved-sends
 
 The database-backed commands are here because this is where an operator already
@@ -67,21 +71,26 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.embedding_space import OPENAI_PROVIDER, EmbeddingSpace
 from app.core.logging import configure_logging, get_logger
 from app.core.redis import RedisClient
+from app.db.models.enums import TenantStatus
 from app.db.models.knowledge import (
     EMBEDDING_DIMENSIONS,
+    Document,
     DocumentIndexGeneration,
+    DocumentSource,
     GenerationState,
 )
+from app.db.models.tenant import Tenant
 from app.db.session import Database
 from app.repositories.conversation_repository import UnresolvedOutboundDirectory
 from app.repositories.knowledge_repository import (
     TRIGGER_REINDEX,
     TRIGGER_STALE_EMBEDDING,
     IndexingSweep,
+    encode_cursor,
 )
 from app.repositories.whatsapp_repository import InboundEventSweep
 from app.workers.inbound_recovery import unprocessed_since
@@ -421,18 +430,20 @@ async def reindex_stale_embeddings(
     space: EmbeddingSpace,
     limit: int,
     dry_run: bool,
+    after: str | None = None,
 ) -> int:
     """Ask for a re-index of every document served from another space.
 
     Coalesced per document like any re-index, so running it twice queues
     nothing twice, and each document keeps serving what it serves until its new
-    generation publishes. Bounded by `--limit`; run it again for the next batch.
+    generation publishes. Bounded by `--limit`: a document already being
+    re-indexed, or whose re-index failed, is not selected again, and the cursor
+    printed at the end is where `--after` continues (RV-12).
     """
     async with database.session() as session:
-        stale = [
-            (generation.tenant_id, generation.document_id)
-            for generation in await IndexingSweep(session).list_stale(space=space, limit=limit)
-        ]
+        generations = await IndexingSweep(session).list_stale(space=space, limit=limit, after=after)
+        stale = [(generation.tenant_id, generation.document_id) for generation in generations]
+        last = generations[-1] if generations else None
     if not stale:
         print(f"no documents outside {space.describe()}")  # noqa: T201
         return 0
@@ -441,6 +452,8 @@ async def reindex_stale_embeddings(
         print(f"{verb}  {tenant_id}  {document_id}")  # noqa: T201
         if not dry_run:
             await _reindex(database, redis, tenant_id, document_id, trigger=TRIGGER_STALE_EMBEDDING)
+    if last is not None and last.published_at is not None and len(stale) == limit:
+        print(f"next page: --after {encode_cursor(last.published_at, last.id)}")  # noqa: T201
     return 0
 
 
@@ -508,6 +521,197 @@ def _print_generations(
                 f"{generation.embedding_dimensions}d/v{generation.embedding_schema_version}"
             )
         print(line)  # noqa: T201
+
+
+async def source_keys_command(database: Database, *, dry_run: bool) -> int:
+    """Key documents by filename where unique; list the ones the operator must decide."""
+    from app.workers.knowledge_repair import backfill_source_keys
+
+    report = await backfill_source_keys(database, dry_run=dry_run)
+    verb = "would key" if dry_run else "keyed"
+    print(f"{verb} {report.keyed} document(s)")  # noqa: T201
+    for documents in report.collisions:
+        listed = "  ".join(str(document_id) for document_id in documents)
+        print(f"same filename, left unkeyed  {listed}")  # noqa: T201
+    return 0
+
+
+async def backfill_command(database: Database, *, dry_run: bool) -> int:
+    """Run the normalisation back-fill and print what the operator must do next."""
+    from app.workers.knowledge_repair import backfill_normalised_content
+
+    report = await backfill_normalised_content(database, dry_run=dry_run)
+    verb = "would update" if dry_run else "updated"
+    print(f"examined {report.examined}, {verb} {report.updated}")  # noqa: T201
+    for keep, drop in report.collisions:
+        print(f"collision  keep {keep}  delete {drop}  then run the back-fill again")  # noqa: T201
+    for document_id in report.reupload:
+        print(f"re-upload  {document_id}  lines may be re-ordered")  # noqa: T201
+    return 1 if report.collisions else 0
+
+
+async def reindex_all_command(
+    database: Database,
+    redis: RedisClient,
+    *,
+    workspace: uuid.UUID | None,
+    source: DocumentSource | None,
+    rate: float,
+    after: uuid.UUID | None,
+    limit: int | None,
+    dry_run: bool,
+) -> int:
+    """Run `reindex-all` and print the cursor to resume from."""
+    from app.workers.knowledge_repair import reindex_all
+
+    report = await reindex_all(
+        database,
+        IngestionQueue(redis.client),
+        workspace=workspace,
+        source=source,
+        rate=rate,
+        after=after,
+        limit=limit,
+        dry_run=dry_run,
+    )
+    verb = "would re-index" if dry_run else "re-index requested for"
+    print(f"{verb} {report.requested} document(s)")  # noqa: T201
+    for document_id in report.skipped_failed:
+        print(f"skipped (failed)  {document_id}  retry with reindex-document")  # noqa: T201
+    if report.next_after is not None:
+        print(f"resume with  --after {report.next_after}")  # noqa: T201
+    else:
+        print("done: every document was visited")  # noqa: T201
+    return 0
+
+
+def _print_coverage(coverage: Any) -> None:
+    target = coverage.target_space.describe() if coverage.target_space else "-"
+    print(  # noqa: T201
+        f"{coverage.tenant_id}  query {coverage.query_space.describe()}  target {target}  "
+        f"covered {coverage.covered}/{coverage.ready} ({coverage.ratio:.0%})  "
+        f"building {coverage.building}  owed {coverage.owed}  blocked {len(coverage.blocked)}  "
+        f"retiring chunks {coverage.retiring_chunks}"
+    )
+    for blocked in coverage.blocked:
+        print(f"    blocked  {blocked.document_id}  {blocked.code}")  # noqa: T201
+
+
+async def embedding_switch_command(
+    database: Database,
+    redis: RedisClient,
+    settings: Settings,
+    *,
+    action: str,
+    workspace: uuid.UUID | None,
+    every: bool,
+    rate: float,
+    limit: int | None,
+    until_complete: bool,
+    flip: bool,
+    retry_blocked: bool = False,
+) -> int:
+    """`embedding-switch start|status|build|flip|retire|cancel` (RQ-25, FX-4.1).
+
+    The supported way to change the embedding model (RV-11); see
+    `docs/RUNBOOK.md` "Changing the embedding model".
+    """
+    from app.services.embedding_switch import (
+        EmbeddingSwitch,
+        SwitchError,
+        build,
+        retire_all,
+        switching_workspaces,
+    )
+
+    default = EmbeddingSpace(
+        provider=OPENAI_PROVIDER,
+        model=settings.openai_embedding_model,
+        dimensions=EMBEDDING_DIMENSIONS,
+    )
+    queue = IngestionQueue(redis.client)
+
+    async def targets() -> list[uuid.UUID]:
+        if workspace is not None:
+            return [workspace]
+        async with database.session() as session:
+            if action == "start" and every:
+                rows = await session.scalars(
+                    select(Tenant.id)
+                    .where(
+                        Tenant.status == TenantStatus.ACTIVE,
+                        Tenant.deleted_at.is_(None),
+                        select(Document.id).where(Document.tenant_id == Tenant.id).exists(),
+                    )
+                    .order_by(Tenant.id)
+                )
+                return list(rows)
+            return await switching_workspaces(session)
+
+    if action == "build":
+        report = await build(
+            database,
+            default_space=default,
+            queue=queue,
+            rate_per_minute=rate,
+            workspace=workspace,
+            limit=limit,
+            flip_when_complete=flip,
+            until_complete=until_complete,
+            retry_blocked=retry_blocked,
+        )
+        print(f"shadows requested {report.requested}, queued {report.queued}")  # noqa: T201
+        for coverage in report.coverage.values():
+            _print_coverage(coverage)
+        for tenant_id in report.flipped:
+            print(f"flipped  {tenant_id}")  # noqa: T201
+        return 0
+
+    tenants = await targets()
+    if action == "start" and not settings.openai_embedding_model_next:
+        print("OPENAI_EMBEDDING_MODEL_NEXT is not set")  # noqa: T201
+        return 2
+    if not tenants:
+        print("no workspace to act on (name one with --workspace)")  # noqa: T201
+        return 0
+    refused = 0
+    for tenant_id in tenants:
+        try:
+            if action == "start":
+                async with database.session() as session:
+                    await EmbeddingSwitch(
+                        session, tenant_id=tenant_id, default_space=default
+                    ).start(
+                        EmbeddingSpace(
+                            provider=OPENAI_PROVIDER,
+                            model=settings.openai_embedding_model_next or "",
+                            dimensions=EMBEDDING_DIMENSIONS,
+                        )
+                    )
+            elif action == "flip":
+                async with database.session() as session:
+                    await EmbeddingSwitch(
+                        session, tenant_id=tenant_id, default_space=default
+                    ).flip()
+            elif action == "cancel":
+                async with database.session() as session:
+                    await EmbeddingSwitch(
+                        session, tenant_id=tenant_id, default_space=default
+                    ).cancel()
+        except SwitchError as error:
+            refused += 1
+            print(f"refused  {tenant_id}  {error.message}")  # noqa: T201
+            continue
+        if action in ("flip", "retire", "cancel"):
+            deleted = await retire_all(database, tenant_id=tenant_id, default_space=default)
+            print(f"{action}  {tenant_id}  old chunks deleted {deleted}")  # noqa: T201
+        async with database.session() as session:
+            _print_coverage(
+                await EmbeddingSwitch(
+                    session, tenant_id=tenant_id, default_space=default
+                ).coverage()
+            )
+    return 1 if refused else 0
 
 
 async def unresolved_sends(database: Database, *, limit: int) -> int:
@@ -611,10 +815,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     restale.add_argument("--limit", type=int, default=100)
     restale.add_argument("--dry-run", action="store_true")
+    restale.add_argument("--after", default=None, help="the cursor a previous run printed")
 
     one = commands.add_parser("reindex-document", help="retry indexing one document")
     one.add_argument("tenant_id", type=uuid.UUID)
     one.add_argument("document_id", type=uuid.UUID)
+
+    backfill = commands.add_parser(
+        "backfill-normalised-content",
+        help="store every document as normalised text with its true hash (RAG repair)",
+    )
+    backfill.add_argument("--dry-run", action="store_true")
+
+    keys = commands.add_parser(
+        "backfill-source-keys",
+        help="key documents uploaded before source keys by filename, where unique (RQ-07)",
+    )
+    keys.add_argument("--dry-run", action="store_true")
+
+    everything = commands.add_parser(
+        "reindex-all",
+        help="re-index every document through the normal path, at a bounded rate (resumable)",
+    )
+    everything.add_argument("--workspace", type=uuid.UUID, default=None)
+    everything.add_argument("--source", choices=[str(s) for s in DocumentSource], default=None)
+    everything.add_argument("--rate", type=float, default=5.0, help="documents per second")
+    everything.add_argument("--after", type=uuid.UUID, default=None, help="resume after this id")
+    everything.add_argument("--limit", type=int, default=None)
+    everything.add_argument("--dry-run", action="store_true")
+
+    switch = commands.add_parser(
+        "embedding-switch",
+        help="change the embedding model through shadow generations, one workspace at a time",
+    )
+    switch.add_argument("action", choices=["start", "status", "build", "flip", "retire", "cancel"])
+    switch.add_argument("--workspace", type=uuid.UUID, default=None)
+    switch.add_argument("--all", dest="every", action="store_true", help="start: every workspace")
+    switch.add_argument("--rate", type=float, default=120.0, help="build: shadows per minute")
+    switch.add_argument("--limit", type=int, default=None, help="build: at most this many")
+    switch.add_argument("--until-complete", action="store_true", help="build: keep going")
+    switch.add_argument("--flip", action="store_true", help="build: flip each workspace at 100%%")
+    switch.add_argument(
+        "--retry-blocked",
+        action="store_true",
+        help="build: rebuild shadows that failed, once their cause is fixed",
+    )
 
     open_sends = commands.add_parser(
         "unresolved-sends",
@@ -659,10 +904,51 @@ async def run(argv: Sequence[str] | None = None) -> int:
         finally:
             await database.dispose()
 
-    if arguments.command in {"reindex-stale-embeddings", "reindex-document"}:
+    if arguments.command in {"backfill-normalised-content", "backfill-source-keys"}:
+        database = Database(settings)
+        try:
+            if arguments.command == "backfill-source-keys":
+                return await source_keys_command(database, dry_run=arguments.dry_run)
+            return await backfill_command(database, dry_run=arguments.dry_run)
+        finally:
+            await database.dispose()
+
+    if arguments.command == "embedding-switch":
         database = Database(settings)
         redis_client = RedisClient(settings)
         try:
+            return await embedding_switch_command(
+                database,
+                redis_client,
+                settings,
+                action=arguments.action,
+                workspace=arguments.workspace,
+                every=arguments.every,
+                rate=arguments.rate,
+                limit=arguments.limit,
+                until_complete=arguments.until_complete,
+                flip=arguments.flip,
+                retry_blocked=arguments.retry_blocked,
+            )
+        finally:
+            await redis_client.close()
+            await database.dispose()
+
+    if arguments.command in {"reindex-stale-embeddings", "reindex-document", "reindex-all"}:
+        database = Database(settings)
+        redis_client = RedisClient(settings)
+        try:
+            if arguments.command == "reindex-all":
+                return await reindex_all_command(
+                    database,
+                    redis_client,
+                    workspace=arguments.workspace,
+                    source=DocumentSource(arguments.source) if arguments.source else None,
+                    rate=arguments.rate,
+                    after=arguments.after,
+                    limit=arguments.limit,
+                    dry_run=arguments.dry_run,
+                )
             if arguments.command == "reindex-document":
                 return await reindex_document(
                     database,
@@ -676,6 +962,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
                 space=space,
                 limit=arguments.limit,
                 dry_run=arguments.dry_run,
+                after=arguments.after,
             )
         finally:
             await redis_client.close()

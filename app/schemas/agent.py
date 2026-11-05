@@ -125,6 +125,10 @@ class AgentRead(BaseModel):
     escalation_sentiment: SentimentLabel | None
     created_at: datetime
     updated_at: datetime
+    #: The workspace has ready documents and its answering agent - the ACTIVE
+    #: default - holds no enabled `search_knowledge` grant, so no customer
+    #: question reaches them (RQ-11, RC-7). A workspace fact, on every agent.
+    knowledge_unreachable: bool = False
 
 
 class ToolGrantRequest(BaseModel):

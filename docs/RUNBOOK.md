@@ -284,7 +284,7 @@ A high `empty` rate with a low `failed` rate is not this alert. It can mean work
 
 **Metric:** `wasla_documents_stale_embedding`.
 
-After `OPENAI_EMBEDDING_MODEL` changes, documents indexed with the previous model are **not searched** — a query from one model is not comparable with vectors from another, even at the same width — until they are re-indexed. Each keeps its old generation until the new one publishes.
+The supported way to change the model is the shadow switch ("Changing the embedding model", below), which never produces this. After `OPENAI_EMBEDDING_MODEL` is changed *directly*, documents indexed with the previous model are **not searched** — a query from one model is not comparable with vectors from another, even at the same width — until they are re-indexed. Each keeps its old generation until the new one publishes.
 
 ```
 docker compose exec worker python -m app.workers.queues stale-embeddings
@@ -2528,3 +2528,160 @@ The audit trail says when and why:
 SELECT created_at, meta FROM audit_logs
 WHERE tenant_id = '<tenant-id>' AND action = 'subscription_past_due';
 ```
+
+## Knowledge base (RAG remediation Part 1)
+
+### An updated document shows old facts
+
+The agent quotes an old price after a new list was uploaded. Usually the new list was uploaded as a **second document** rather than replacing the first - which the API now refuses for the same filename (`document_source_exists`) but not for a differently named file.
+
+1. `python -m scripts.rag_triage` - `duplicate-titles` counts workspaces with two documents of one title in one knowledge base.
+2. `GET /api/v1/knowledge/documents/{id}/similar` for the new document lists the likely older versions.
+3. Delete the old one, or replace it: `PUT /api/v1/knowledge/documents/{old_id}/content` with the new content, then delete the new copy. A replacement keeps the old version serving until the new one is indexed.
+4. `wasla_knowledge_duplicate_documents` above 0 means the same text is ready twice in a workspace; triage's `cross-kb-copies` names the workspaces.
+
+### Arabic PDF not found
+
+1. `python -m scripts.rag_triage` - `presentation-forms` counts documents still stored as glyph forms. After the first-deploy back-fill this is 0; if not, run `backfill-normalised-content` and `reindex-all --workspace <id>`.
+2. `extraction-warnings`, and `extraction_warnings` on the document, mean lines whose digits extraction may have re-ordered. Stored text cannot be repaired: upload the document again from its source (a newer export, or a PDF from another tool). For documents uploaded since originals are kept, re-extracting from the original is possible.
+3. A scanned PDF has no text layer and is refused; there is no OCR.
+
+### Re-index everything
+
+`python -m app.workers.queues reindex-all --rate 5 [--workspace ID] [--source pdf]`. Every document keeps serving its current version until its new generation publishes. The command prints the id to resume from; run it again with `--after <id>`. Documents whose latest attempt failed are skipped and listed - retry each with `reindex-document`. Choose the rate from the embedding account's limits; at 5 a second, 10,000 documents take about half an hour to request.
+
+### pgvector version
+
+Every knowledge search failing with the readiness check or `db_preflight` reporting "pgvector X is older than 0.8.0": the extension is too old for `hnsw.iterative_scan`. Upgrade it (`ALTER EXTENSION vector UPDATE` after installing the newer binaries, or the provider's upgrade path) and re-run `db_preflight verify`. Nothing in the data needs repair.
+
+### Answers ignore a document
+
+1. Is it `ready`? `GET /knowledge/documents/{id}`; `failed-documents` lists failures with their code.
+2. Can the answering agent search? `AgentRead.knowledge_unreachable`, the `KnowledgeUnreachable` alert and triage's `unreachable-knowledge`. Grant `search_knowledge` to the active default agent (`PUT /agents/{id}/tools`).
+3. Is it inside its `valid_from` / `valid_until` window?
+4. Extraction warnings (above). A search preview arrives with Part 2 of the remediation.
+
+### KnowledgeReplacementsFailing
+
+Replacements are failing; each document keeps serving its previous version, so customers see stale facts, not errors. `failed-documents` gives the codes: provider codes are an embedding outage or key problem; `document_too_large` and `invalid_document` are uploads to fix.
+
+### Answers ignore a document: the search preview (RAG part 2)
+
+Run the search the agent would run: `POST /api/v1/knowledge/search` with the customer's question (and, for an Arabic question about English documents, `alternate_query`). The response says, for every candidate, what became of it: `threshold` (farther than 0.75 - the cut-off is not yet calibrated for the production model), `duplicate` (the same text, or a near copy adding no new number, ranked higher), `margin`, `top_k`, or `kept`. `candidates.lexical` of 0 for a question naming a SKU means the document was published before migration 0132 and has no lexical text yet: `python -m scripts.rag_invariants verify` reports it as RR-12, and `reindex-all` rebuilds it. A `duplicate_version_warnings` entry means two documents share a title - replace one with the other's content instead of keeping both. A scoped agent (`knowledge_base_ids` on its grant) never sees other knowledge bases; the preview searches under the answering agent's scope.
+
+### Search is slow
+
+`wasla_rag_search_seconds{channel}` splits a search's database time between the vector and the exact-word channel; `wasla_ai_stage_seconds{stage="sql"}` is their sum, `{stage="embedding"}` the provider. The exact-word query is an indexed `@@` on `ix_document_chunks_search_tsv` (GIN); if it dominates, check the index is valid (`SELECT indisvalid FROM pg_index ... ix_document_chunks_search_tsv`) and the table's statistics. The vector query's behaviour by workspace size is in docs/RAG.md ("Measured behaviour"): the exact scan for small workspaces, HNSW above the planner's crossover, `hnsw.iterative_scan` bounded by `hnsw.max_scan_tuples` (20,000 by default) - revisit `hnsw.ef_search` and the scan bound only when a workspace of millions of chunks shows fewer passages than asked for (RV-25, scale-triggered). Re-rank, when on, adds up to `RAG_RERANK_TIMEOUT_SECONDS` per search (`stage="rerank"`).
+
+### Re-rank, grounding, tiers and pre-retrieval: switching them on
+
+All are off or observe-only by default, deployment-wide (`RAG_*` settings) and per workspace (`PATCH /api/v1/knowledge/settings`, audited):
+
+| Switch | Default | Before switching on | Misbehaving looks like |
+|---|---|---|---|
+| `rerank` | off | set `RAG_RERANK_MODEL` to an allowed small model; check latency on the preview | `KnowledgeRerankFailing`; `wasla_rag_rerank_total{outcome="timeout"}` |
+| `confidence_tiers` | off | calibrate `RAG_CONFIDENCE_TIERS` for the current embedding model from `wasla_rag_best_distance` and the real-provider evaluation | many `none` tiers on answerable questions (`wasla_rag_confidence_tier_total`) |
+| `number_grounding` | observe | read `AgentRepliesQuoteUngroundedNumbers` and the preview for the workspace | `correct` adds a model round to affected turns; `strict` hands them to colleagues (`AI_UNGROUNDED_NUMBER`) |
+| `pre_retrieval` | off | tiers must be on and calibrated, or it does nothing | `wasla_rag_preretrieval_total{outcome="weak"}` dominating: cut-offs too strict |
+| `parallel_sentiment` | off | none; it changes only latency | an escalated turn never sends - if one did, switch it off and report it |
+
+### KnowledgeRerankFailing
+
+Re-rank calls are timing out or failing; searches fall back to the fused order after waiting for the timeout. Check provider status and `wasla_provider_request_duration_seconds{operation="respond_rerank"}`; switch `rerank` off for the affected workspaces (`PATCH /knowledge/settings`) or deployment-wide (`RAG_RERANK_ENABLED=false`) until it recovers.
+
+### AgentRepliesQuoteUngroundedNumbers
+
+Agents are quoting prices or percentages their searches did not return. Use the search preview on the workspaces' common questions: a missing or stale document is the usual cause. For a workspace that cannot afford a wrong figure, set `number_grounding` to `correct` (one corrective round) or `strict` (hand over instead of sending).
+
+## Knowledge base (RAG remediation Part 3)
+
+### Changing the embedding model
+
+Never change `OPENAI_EMBEDDING_MODEL` or `EMBEDDING_SCHEMA_VERSION` directly: every workspace not yet switched is then queried in the new space and its documents vanish from search until re-indexed (RV-11, `KnowledgeStaleEmbeddings`). Use the shadow switch (ADR-181).
+
+**Every process that embeds gives the next model to it, before `start`** (RGM-10, ADR-187). Three readers embed in the target space, and each refuses a workspace it cannot query rather than guess:
+
+| Process | Compose service | What it embeds with the next model | Without it, after a flip |
+|---|---|---|---|
+| API | `api` | the admin search preview (`POST /api/v1/knowledge/search`) | the preview answers `503` for every flipped workspace |
+| Indexing worker | `worker` | shadow generations (`build`) and every re-index of a flipped workspace | shadows are never built; `build` waits for ever |
+| Agent worker | `worker` | `search_knowledge` and the pre-retrieval search of a customer turn | agents of a flipped workspace find nothing |
+
+The `embedding-switch` commands run inside the `worker` container and read the same setting.
+
+`docker-compose.prod.yml` passes `OPENAI_EMBEDDING_MODEL_NEXT` - and every `RAG_*` setting - to both `api` and `worker` (RGM-12), so the deployment's environment file is the one place to set it; step 2 proves each process read it.
+
+```
+# 1. Name the target in the deployment's environment, then redeploy the worker
+#    first and the API second (the deploy order of "Deploy a specific version").
+#    Nothing changes for any search: no workspace is flipped yet.
+OPENAI_EMBEDDING_MODEL_NEXT=text-embedding-3-large
+docker compose -f docker-compose.prod.yml up -d --wait worker
+docker compose -f docker-compose.prod.yml up -d --wait api
+# 2. Confirm each process has it. Both lines must print the target model.
+docker compose -f docker-compose.prod.yml exec worker python -c "from app.core.config import get_settings; print('worker', get_settings().openai_embedding_model_next)"
+docker compose -f docker-compose.prod.yml exec api python -c "from app.core.config import get_settings; print('api', get_settings().openai_embedding_model_next)"
+# 3. Start, per workspace or every workspace with documents.
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch start --all
+# 4. Build shadows in the background, throttled, fair across workspaces, resumable.
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch build --rate 120 --until-complete
+# 5. Coverage, blocked documents and what is left.
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch status
+# 6. Flip each workspace at 100 % (or build with --flip to flip each as it completes).
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch flip --workspace <id>
+```
+
+A process restarted during the switch must start with the same `OPENAI_EMBEDDING_MODEL_NEXT` as the others: a worker scaled out, or an API replica added, without it refuses the flipped workspaces it is asked about.
+
+- **Coverage** is ready documents holding a shadow of their *current* text over ready documents (`wasla_rag_space_coverage_ratio`). A flip below 100 % is refused (exit 1, `refused`).
+- **Blocked**: a shadow that failed permanently is listed under `blocked` with its code and stops its workspace flipping (`EmbeddingSwitchShadowsFailed`). Fix the cause (a document too large for the new model, a key without access), then `build --retry-blocked`; or delete the document.
+- **Flip** supersedes every active generation by its shadow and moves the workspace's query space in one transaction, then deletes the old space's chunks (`retiring chunks`). `retire` repeats the deletion if it was interrupted; `cancel` abandons a switch for a workspace and deletes its shadows - nothing it serves changes.
+- **Rate**: `--rate` is shadows per minute across all workspaces, one document per workspace per turn. Choose it from the embedding account's limits and watch `EmbeddingRateLimited`. The build reads what is owed from the database, so stopping and running it again resumes.
+- **Finishing**: once `status` shows every workspace flipped, set `OPENAI_EMBEDDING_MODEL` to the new model and unset `OPENAI_EMBEDDING_MODEL_NEXT` - for the `api` and the `worker` alike, in one deploy, worker first - and confirm with step 2 that both print `None`. `python -m scripts.rag_invariants verify` must show RR-09 = 0.
+- The query-embedding cache keys by space, so a flipped workspace never reads a vector of the old model.
+
+### KnowledgeStaleEmbeddings
+
+Active generations are in a space their workspace does not query: the embedding setting was changed directly. Restore the previous `OPENAI_EMBEDDING_MODEL` (the documents are searchable again at once - nothing was deleted), then change the model with the shadow switch above. If the old model is no longer available, `reindex-stale-embeddings` rebuilds them in the new space; they stay unsearchable until each publishes.
+
+### EmbeddingSwitchStalled / EmbeddingSwitchShadowsFailed
+
+Customers are unaffected: the current space keeps serving. `embedding-switch status` names the blocked documents and what is still owed. Owed but not building: the build is not running - start it again. Building for a long time: `RAGDocumentsStuck` and the ingestion worker. Blocked: see "Blocked" above.
+
+### Uploading catalogues
+
+CSV, XLSX, DOCX and HTML are accepted beside text, Markdown and PDF (ADR-179), as base64 JSON or multipart (`POST /knowledge/bases/{id}/documents/upload`). Each catalogue row becomes one passage, `Column: value; …`, the header repeated, so "Bookshelf model 35" finds its own row.
+
+| Refusal | Meaning | What to tell the workspace |
+|---|---|---|
+| `422 document_limit_exceeded` | more than 1,000 rows, 50 columns, 20 sheets, a cell over 2,000 characters, or the archive inflates past its bounds | split the file (five files of 1,000 rows), remove unused columns |
+| `422 document_format_mismatch` | the bytes are not the declared format (an old `.xls`, a renamed file, a CSV that is a zip) | save as `.xlsx` / `.csv` and upload again |
+| `413 document_too_large` | the file is larger than any document may be (300 KB binary, 1,600 KB text) | split it |
+
+A formula cell is stored as its formula, never its value: export values (Paste Special > Values) before uploading a sheet built on formulas. `wasla_knowledge_format_refusals_total{source,reason}` counts refusals; the parser runs in the same killable sandbox as PDFs, so a hostile file is a refusal, never a worker crash.
+
+### Re-index everything (Part 3)
+
+`reindex-all` (above) re-indexes in the current space. To rebuild in a *new* space, use `embedding-switch build`, which is throttled per minute and fair across workspaces. Indexing sends up to `RAG_EMBEDDING_CONCURRENCY` (3) embedding batches of one document at once; lower it to 1 if the provider throttles. After a mass re-index autovacuum runs on `document_chunks` once 2 % of it has changed (migration 0137); if search recall looks low right after one, `VACUUM ANALYZE document_chunks`.
+
+### Search is slow (Part 3)
+
+- **Repeated questions** cost no embedding call: `wasla_rag_query_embedding_cache_total{outcome}`; a low hit rate is normal for varied questions. `QueryEmbeddingCacheErrors` means Redis is failing and every search pays for an embedding again; `RAG_QUERY_EMBEDDING_CACHE=false` switches it off.
+- **Size bands**: on the Part 3 drill corpus the search's exact scan or HNSW path costs are in `RAG_REMEDIATION_PART3_SCALE.md` §8. `hnsw.ef_search` stays at its default until the real-provider evaluation calibrates it; the `tenant_id` statistics target is 1,000 so the planner sees each workspace's size.
+- **Partitioning** is not done; revisit only on ADR-186's trigger (one workspace above 250,000 chunks, p95 above 300 ms on the HNSW path, or 20 million rows).
+
+### QueryEmbeddingCacheErrors
+
+See "Search is slow (Part 3)". Answers are unaffected.
+
+### KnowledgeBidiWarnings
+
+`python -m scripts.rag_triage` lists documents whose PDF extraction flagged possibly re-ordered right-to-left lines. Ask the workspace to upload the document again from its source (a Word export, a CSV of the price list).
+
+### Knowledge gaps
+
+`RAG_GAP_REPORT_ENABLED` is **off** until the Privacy audit (#18) has reviewed it (ADR-183). When on, each empty search the agent's knowledge tool runs stores the query the *model* wrote (never the customer's message), its script, the best distance and the time in `knowledge_search_gaps`. Administrators read their own workspace's at `GET /api/v1/knowledge/gaps?days=30`. Rows are deleted after `RAG_GAP_RETENTION_DAYS` (30) by the ingestion recovery loop whether or not the report is on, and with the workspace by the purge; RR-13 counts any kept longer. To switch it off and erase it: set the flag false; the rows age out within the retention, or delete them with `DELETE FROM knowledge_search_gaps` as the migration role.
+
+### Row-level security
+
+Not applied (ADR-185). Isolation is enforced by the repository predicates and the isolation gate. Applying it needs a second database role with `BYPASSRLS` for the sweeps, gauges and purge; the design is in ADR-185.

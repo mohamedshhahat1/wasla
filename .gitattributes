@@ -38,3 +38,8 @@ Dockerfile text eol=lf
 # Byte-exact fixtures: a poison PDF with one line ending changed is a different
 # file, and not the one the audit found.
 tests/media_fixtures/** binary
+
+# The retrieval evaluation corpus and its PDFs: a metric must not change because
+# a checkout rewrote line endings in what it measures (FX-3.1).
+tests/fixtures/rag/** -text
+tests/fixtures/rag/**/*.py text eol=lf

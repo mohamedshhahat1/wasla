@@ -418,3 +418,37 @@ an orchestrator to restart every application container.
   OTLP endpoint when one is configured; no collector is part of this stack.
 - **No log aggregation.** Logs are JSON on stdout, which is what a collector
   wants, and nothing collects them here.
+
+## Knowledge retrieval and the document lifecycle (RAG remediation Part 1)
+
+None of these carries a workspace or any text as a label (G7).
+
+| Metric | Type | What it says |
+| --- | --- | --- |
+| `wasla_rag_best_distance{model}` | histogram | The cosine distance of the best candidate each search saw - what calibrating the 0.75 threshold needs (RV-26). |
+| `wasla_rag_passages_dropped_total{reason}` | counter | Candidates dropped by the distance `threshold`, as a `duplicate` (exact, or a near repeat adding no number), by the per-document cap (`document_cap`), by the passage `margin` (inert until calibrated), or because they did not fit the token `budget`. `scope` and `validity` are applied in SQL and never counted as candidates. |
+| `wasla_rag_context_characters` | histogram | Characters of context a search returned to the model. Kept beside the token histogram so existing dashboards do not go blank. |
+| `wasla_rag_context_tokens` | histogram | Estimated tokens of context a search returned to the model - the unit the budget is counted in (RQ-12; ceiling 3,300). |
+| `wasla_rag_retrieval_candidates_total{channel}` | counter | Candidates each retrieval channel returned: `vector`, `lexical` (RQ-15). |
+| `wasla_rag_search_seconds{channel}` | histogram | Database time of each retrieval channel's queries in one search. |
+| `wasla_rag_confidence_tier_total{tier}` | counter | Searches by confidence tier (`strong`, `partial`, `none`); counted only while tiers are enabled and calibrated. |
+| `wasla_rag_rerank_total{outcome}` | counter | Re-rank attempts: `ok`, `timeout`, `error`, `disabled` (one `disabled` per search while it is off). |
+| `wasla_rag_number_grounding_total{outcome}` | counter | Prices and percentages in agent replies: `grounded`, `ungrounded`, `corrected`, `handed_off` (RQ-19). |
+| `wasla_rag_preretrieval_total{outcome}` | counter | Pre-retrieval decisions: `injected`, `weak`, `skipped`, `refused` (RQ-20). |
+| `wasla_ai_stage_seconds{stage}` | histogram | Time per stage of a turn: `sentiment`, `round`, `embedding`, `sql`. |
+| `wasla_ai_cached_input_tokens_total` | counter | Input tokens the provider served from its prompt cache. Cached and reasoning tokens are also recorded on the usage rows. |
+| `wasla_knowledge_extraction_warnings_total{code}` | counter | Lines a PDF extraction may have re-ordered (`digits_glued_to_arabic`, `arabic_indic_leading_zero`). |
+| `wasla_knowledge_replacements_total{outcome}` | counter | Replacements `published`, `failed`, `cancelled` (an older attempt ended) or `metadata_only`. |
+| `wasla_knowledge_duplicate_documents` | gauge | Ready documents whose exact text another ready document of the same workspace holds. |
+| `wasla_knowledge_unreachable_workspaces` | gauge | Workspaces with ready documents and no answering agent able to search them. |
+| `wasla_knowledge_ingested_total{source}` | counter | Document generations published, by format (Part 3). |
+| `wasla_knowledge_format_refusals_total{source,reason}` | counter | Uploads refused by format and reason (limit, mismatch). |
+| `wasla_knowledge_time_to_ready_seconds` | histogram | Submission to ready, per document. |
+| `wasla_documents_stale_embedding` | gauge | Active generations in a space their workspace is not queried in (the gauge the prompt calls stale embeddings; RR-09). |
+| `wasla_rag_space_coverage_ratio` | gauge | Across workspaces mid-switch, ready documents with a shadow over ready documents; 1 when no switch is under way. |
+| `wasla_rag_shadow_generations{state}` | gauge | Shadow generations by state: `pending`, `processing`, `shadow`, `failed`. |
+| `wasla_knowledge_bidi_warning_documents` | gauge | Ready documents whose PDF extraction flagged possibly re-ordered lines. |
+| `wasla_rag_query_embedding_cache_total{outcome}` | counter | Query-embedding cache lookups: `hit`, `miss`, `error`. |
+| `wasla_knowledge_gap_searches_total` | counter | Searches recorded in the gap report; 0 while it is off. |
+
+Alerts: `KnowledgeUnreachable` (info, the gauge above 0 for an hour), `KnowledgeDuplicateDocuments` (info, for six hours), `KnowledgeReplacementsFailing` (warning, more than half of finished replacements failing for 30 minutes). Part 3 adds `KnowledgeStaleEmbeddings` (warning, stale generations for 30 minutes), `EmbeddingSwitchStalled` (info, coverage below 1 and unchanged for six hours), `EmbeddingSwitchShadowsFailed` (info, failed shadows for an hour), `QueryEmbeddingCacheErrors` (warning, over a fifth of lookups failing for 15 minutes) and `KnowledgeBidiWarnings` (info, for a day). Each has a promtool test in `deploy/monitoring/tests/alerts_test.yml`.

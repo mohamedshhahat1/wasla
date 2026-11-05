@@ -1151,6 +1151,242 @@ tests:
                 An indexing claim has not been renewed for half an hour, so the worker that held it is gone and the recovery sweep has not handed it on. Check the ingestion_recovery loop (WorkerLoopNotBeating) and list the attempts with `python -m app.workers.queues unindexed-documents`.
               runbook: docs/RUNBOOK.md
 
+  - interval: 1m
+    name: a workspace whose agent cannot search its documents alerts after an hour
+    input_series:
+      - series: 'wasla_knowledge_unreachable_workspaces{job="wasla-api"}'
+        values: "0x10 1x120"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: KnowledgeUnreachable
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: KnowledgeUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "A workspace's documents cannot be searched by its answering agent"
+              description: >-
+                At least one workspace has ready documents while its active default agent holds no enabled search_knowledge grant, so no answer uses them. Run `python -m scripts.rag_triage` for the workspaces; the agent's knowledge_unreachable field says the same to the workspace.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 5m
+    name: duplicate documents alert only when they persist
+    input_series:
+      - series: 'wasla_knowledge_duplicate_documents{job="wasla-api"}'
+        values: "0x2 2x100"
+    alert_rule_test:
+      - eval_time: 4h
+        alertname: KnowledgeDuplicateDocuments
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: KnowledgeDuplicateDocuments
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "A workspace holds the same document text more than once"
+              description: >-
+                Ready documents of one workspace share their exact text. Retrieval serves the copy once, but the duplicate still costs index space and hides which version is meant. Run `python -m scripts.rag_triage` and delete the extra copy.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: documents served from a space nobody queries alert after half an hour
+    input_series:
+      - series: 'wasla_documents_stale_embedding{job="wasla-api"}'
+        values: "0x10 3x100"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: KnowledgeStaleEmbeddings
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: KnowledgeStaleEmbeddings
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "Documents are served from an embedding space nobody queries"
+              description: >-
+                Active document generations were embedded in a space other than their workspace's query space, so searches cannot find them. This happens when OPENAI_EMBEDDING_MODEL or EMBEDDING_SCHEMA_VERSION is changed directly instead of through the shadow switch. Restore the setting, then change the model with `python -m app.workers.queues embedding-switch start`.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a switch that keeps progressing is quiet, one stuck below full coverage alerts
+    input_series:
+      - series: 'wasla_rag_space_coverage_ratio{job="wasla-api"}'
+        values: "0.1+0.001x540 0.64x700"
+    alert_rule_test:
+      - eval_time: 9h
+        alertname: EmbeddingSwitchStalled
+        exp_alerts: []
+      - eval_time: 17h
+        alertname: EmbeddingSwitchStalled
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "An embedding-model switch has stopped making progress"
+              description: >-
+                Coverage of an embedding-model switch has stayed below 100 % for six hours. The current space keeps serving, so no search is affected, but no workspace will flip. Run `python -m app.workers.queues embedding-switch status` for the blocking documents and check the shadow re-index loop.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: no switch under way means coverage 1 and no alert
+    input_series:
+      - series: 'wasla_rag_space_coverage_ratio{job="wasla-api"}'
+        values: "1x1500"
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: EmbeddingSwitchStalled
+        exp_alerts: []
+
+  - interval: 1m
+    name: failed shadows blocking a flip alert after an hour
+    input_series:
+      - series: 'wasla_rag_shadow_generations{job="wasla-api", state="failed"}'
+        values: "0x10 2x100"
+      - series: 'wasla_rag_shadow_generations{job="wasla-api", state="shadow"}'
+        values: "50x110"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: EmbeddingSwitchShadowsFailed
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: EmbeddingSwitchShadowsFailed
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "Shadow generations failed and are blocking an embedding-model switch"
+              description: >-
+                Some documents could not be embedded in the switch's target space. Their workspaces will not flip until each is fixed, re-indexed or deleted. Run `python -m app.workers.queues embedding-switch status` for the documents.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a failing query-embedding cache alerts, a healthy one does not
+    input_series:
+      - series: 'wasla_rag_query_embedding_cache_total{job="wasla-api", outcome="hit"}'
+        values: "0+5x120"
+      - series: 'wasla_rag_query_embedding_cache_total{job="wasla-api", outcome="miss"}'
+        values: "0+2x120"
+      - series: 'wasla_rag_query_embedding_cache_total{job="wasla-api", outcome="error"}'
+        values: "0+0x40 0+10x80"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QueryEmbeddingCacheErrors
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: QueryEmbeddingCacheErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "The query-embedding cache is failing"
+              description: >-
+                More than a fifth of the query-embedding cache lookups of the last 15 minutes failed. Searches still work, embedding each query again. Check Redis (DependencyDown) or switch the cache off with RAG_QUERY_EMBEDDING_CACHE=false.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: documents with possibly re-ordered lines alert after a day
+    input_series:
+      - series: 'wasla_knowledge_bidi_warning_documents{job="wasla-api"}'
+        values: "0x10 1x1700"
+    alert_rule_test:
+      - eval_time: 20h
+        alertname: KnowledgeBidiWarnings
+        exp_alerts: []
+      - eval_time: 25h
+        alertname: KnowledgeBidiWarnings
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "Some ready documents may hold re-ordered right-to-left text"
+              description: >-
+                PDF extraction flagged lines of ready documents as possibly re-ordered. Run `python -m scripts.rag_triage` for the documents and ask the workspace to re-upload them from the original source.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: replacements that mostly fail alert, ones that mostly publish do not
+    input_series:
+      - series: 'wasla_knowledge_replacements_total{job="wasla-api", outcome="published"}'
+        values: "0+1x200"
+      - series: 'wasla_knowledge_replacements_total{job="wasla-api", outcome="failed"}'
+        values: "0+0x60 0+3x140"
+      - series: 'wasla_knowledge_replacements_total{job="wasla-api", outcome="metadata_only"}'
+        values: "0+20x200"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: KnowledgeReplacementsFailing
+        exp_alerts: []
+      - eval_time: 180m
+        alertname: KnowledgeReplacementsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "Most document replacements are failing"
+              description: >-
+                More than half of the replacements that finished in the last hour failed, and each document keeps serving its previous version. Run `python -m app.workers.queues failed-documents` for the codes.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: a re-rank that mostly fails alerts, one that is off does not
+    input_series:
+      - series: 'wasla_rag_rerank_total{job="wasla-api", outcome="disabled"}'
+        values: "0+50x120"
+      - series: 'wasla_rag_rerank_total{job="wasla-api", outcome="ok"}'
+        values: "0+0x40 0+1x80"
+      - series: 'wasla_rag_rerank_total{job="wasla-api", outcome="timeout"}'
+        values: "0+0x40 0+3x80"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: KnowledgeRerankFailing
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: KnowledgeRerankFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: rag
+            exp_annotations:
+              summary: "Most knowledge re-rank calls are failing"
+              description: >-
+                More than half of the re-rank calls of the last 15 minutes timed out or failed. Searches use the fused order instead, after waiting for the timeout. Check the provider, or switch re-rank off.
+              runbook: docs/RUNBOOK.md
+
+  - interval: 1m
+    name: replies quoting ungrounded figures alert, grounded ones do not
+    input_series:
+      - series: 'wasla_rag_number_grounding_total{job="wasla-api", outcome="grounded"}'
+        values: "0+10x300"
+      - series: 'wasla_rag_number_grounding_total{job="wasla-api", outcome="ungrounded"}'
+        values: "0+0x100 0+4x200"
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: AgentRepliesQuoteUngroundedNumbers
+        exp_alerts: []
+      - eval_time: 280m
+        alertname: AgentRepliesQuoteUngroundedNumbers
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: rag
+            exp_annotations:
+              summary: "Agent replies often quote figures the knowledge base does not state"
+              description: >-
+                More than one in ten prices or percentages in agent replies over the last hour were not in what the turn retrieved. Check the documents with the search preview, then consider number grounding "correct" or "strict" for the affected workspaces.
+              runbook: docs/RUNBOOK.md
+
   # -------------------------------------------------------- agent tool calls
   - interval: 30s
     name: ordinary refusals do not look like tool failures

@@ -6,7 +6,9 @@ name: wasla
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # Pinned to the digest production runs (pgvector 0.8.6): knowledge search
+    # needs pgvector >= 0.8.0, and a floating tag could resolve to anything (RV-03).
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     # Docker gives a container 64MB of /dev/shm, and PostgreSQL puts a
     # parallel query's shared tuple store there. An aggregate big enough to be
     # worth parallelising then dies with "could not resize shared memory

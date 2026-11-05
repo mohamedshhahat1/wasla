@@ -61,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.sql.compiler import IdentifierPreparer
 
+from app.core.pgvector_version import pgvector_problem
 from app.db.session import utc_connect_args
 
 REQUIRED_EXTENSIONS = ("vector", "pgcrypto")
@@ -202,7 +203,14 @@ async def prerequisite_problems(connection: AsyncConnection) -> list[Problem]:
         await connection.commit()
         if installed is None and not await _can_create(connection, extension):
             problems.append(Problem("extension not installed and not creatable", extension))
-    return problems
+    return problems + await _pgvector_problems(connection)
+
+
+async def _pgvector_problems(connection: AsyncConnection) -> list[Problem]:
+    """A pgvector too old for knowledge search (RV-03, FX-1.3)."""
+    problem = await pgvector_problem(connection)
+    await connection.commit()
+    return [] if problem is None else [Problem("extension too old", problem)]
 
 
 async def verification_problems(
@@ -221,6 +229,7 @@ async def verification_problems(
     ):
         names = (await connection.execute(text(query))).scalars()
         problems += [Problem(kind, name) for name in names]
+    problems += await _pgvector_problems(connection)
     return problems + await missing_problems(connection, declared)
 
 

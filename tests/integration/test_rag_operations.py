@@ -32,7 +32,7 @@ from app.core.telemetry import read_redis_counters, set_counter_sink
 from app.db.models.audit import AuditLog
 from app.db.models.knowledge import GenerationState
 from app.services.document_indexing import committed_units, run_indexing
-from app.services.knowledge_service import KnowledgeService
+from app.services.knowledge_service import KnowledgeService, content_hash
 from app.services.metrics_service import MetricsService
 from app.services.retrieval_service import KnowledgeSearchUnavailableError, RetrievalService
 from app.workers.ingestion_queue import INGESTION_NAMESPACE
@@ -42,9 +42,16 @@ from app.workers.queues import (
     stale_embeddings,
     unindexed_documents,
 )
-from tests.fake_embeddings import BrokenEmbeddings, FakeEmbeddings
+from tests.fake_embeddings import FAKE_MODEL, BrokenEmbeddings, FakeEmbeddings
 from tests.fakes import as_embeddings
-from tests.integration.rag_harness import LARGE, SMALL, Indexing, long_document, respond
+from tests.integration.rag_harness import (
+    LARGE,
+    POLICY,
+    SMALL,
+    Indexing,
+    long_document,
+    respond,
+)
 from tests.integration.rag_invariants import sweep
 
 pytestmark = pytest.mark.integration
@@ -348,3 +355,85 @@ async def test_the_knowledge_tables_hold_every_invariant_after_real_indexing(
     assert result.presence["embedding_usage_rows"] >= 4
     assert result.presence["tenants"] == 2
     assert result.violations == dict.fromkeys(result.violations, 0), result.violations
+
+
+# ---------------------------------------------------------------- distances (RV-26, FX-1.13)
+
+
+async def test_a_search_records_its_best_distance_drops_and_context_without_text(
+    indexing: Indexing, counters: Redis, caplog: pytest.LogCaptureFixture
+) -> None:
+    from app.core.telemetry import read_redis_histograms
+
+    tenant_id = await indexing.workspace()
+    await indexing.submit(tenant_id)
+    await indexing.submit(tenant_id, "Opening hours\n\nThe showroom opens at nine every morning.")
+    await indexing.drain()
+
+    caplog.set_level(logging.INFO, logger="app.services.retrieval_service")
+    async with indexing.database.session() as session:
+        found = await RetrievalService(
+            session=session, tenant_id=tenant_id, embeddings=as_embeddings(FakeEmbeddings())
+        ).search(query="refund policy fourteen days full refund", top_k=4)
+    assert len(found.passages) == 1
+
+    histograms = await read_redis_histograms(counters)
+    best = histograms["wasla_rag_best_distance"]
+    assert [sample.labels for sample in best] == [{"model": FAKE_MODEL}]
+    assert sum(best[0].buckets.values()) == 1
+    assert best[0].total == pytest.approx(0.27, abs=0.01)
+    assert sum(histograms["wasla_rag_context_characters"][0].buckets.values()) == 1
+    collected = await read_redis_counters(counters)
+    dropped = {
+        labels["reason"]: value
+        for labels, value in collected.get("wasla_rag_passages_dropped_total", [])
+    }
+    # The opening-hours passage was a candidate and farther than the cut-off.
+    assert dropped == {"threshold": 1.0}
+    stages = {s.labels["stage"] for s in histograms["wasla_ai_stage_seconds"]}
+    assert stages == {"embedding", "sql"}
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "knowledge.searched"]
+    assert 0.0 <= record.best_distance <= 0.75  # type: ignore[attr-defined]
+    assert record.dropped_threshold == 1  # type: ignore[attr-defined]
+    rendered = JsonFormatter().format(record)
+    assert "refund" not in rendered.lower()
+    assert str(tenant_id) not in str(best[0].labels)
+
+
+async def test_the_duplicate_and_unreachable_gauges_equal_the_databases_truth(
+    indexing: Indexing,
+) -> None:
+    from app.db.models.agent import Agent, AgentStatus, AgentTool
+
+    reachable = await indexing.workspace()
+    unreachable = await indexing.workspace()
+    for tenant_id in (reachable, unreachable):
+        await indexing.submit(tenant_id)
+    async with indexing.database.session() as session:
+        knowledge = KnowledgeService(session=session, tenant_id=reachable, queue=indexing.queue())
+        second = await knowledge.create_knowledge_base(name="Sales")
+        copy, _ = await knowledge.submit(
+            knowledge_base_id=second.id, title="Doc", raw="A placeholder until below."
+        )
+        # A copy in a second knowledge base, as stored before uploads refused
+        # one (RQ-08): the gauge is how such legacy copies are found.
+        copy.document.content = POLICY
+        copy.document.content_hash = content_hash(POLICY)
+        agent = Agent(
+            tenant_id=reachable,
+            name="Default",
+            status=AgentStatus.ACTIVE,
+            is_default=True,
+            model="gpt-4.1-mini",
+            system_prompt="Answer from the knowledge base.",
+        )
+        session.add(agent)
+        await session.flush()
+        session.add(AgentTool(tenant_id=reachable, agent_id=agent.id, name="search_knowledge"))
+    await indexing.drain()
+
+    rendered = await MetricsService(None, database=indexing.database, space=SMALL).render()
+    # One copy in `reachable`'s second knowledge base: one passage served twice.
+    assert _gauge(rendered, "wasla_knowledge_duplicate_documents") == 1
+    assert _gauge(rendered, "wasla_knowledge_unreachable_workspaces") == 1

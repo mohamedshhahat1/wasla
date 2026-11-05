@@ -544,6 +544,16 @@ class MetricsService:
                 "Documents served from an embedding space other than the configured one.",
                 float(indexing.stale_embedding),
             ),
+            (
+                "wasla_knowledge_duplicate_documents",
+                "Ready documents whose exact text another ready document of the workspace holds.",
+                float(indexing.duplicate_documents),
+            ),
+            (
+                "wasla_knowledge_unreachable_workspaces",
+                "Workspaces with ready documents and no answering agent able to search them.",
+                float(indexing.unreachable_workspaces),
+            ),
             # Customer messages an agent engaged a provider for and never
             # finished - never retried, because a reply may already be out
             # (AI-09). Counted only past the longest a healthy turn takes, so a
@@ -558,8 +568,33 @@ class MetricsService:
                 "Age of the oldest agent turn engaged past that threshold.",
                 stranded_age,
             ),
+            # An embedding-model switch (RQ-25): across every workspace with one
+            # under way, ready documents holding a shadow of their current text
+            # over ready documents. 1 when none is under way. Tenant-free.
+            (
+                "wasla_rag_space_coverage_ratio",
+                "Share of ready documents with a shadow, across workspaces mid-switch.",
+                indexing.switch_coverage,
+            ),
+            # Ready documents whose PDF extraction flagged lines it may have
+            # re-ordered (RQ-04, FX-4.4): re-upload candidates.
+            (
+                "wasla_knowledge_bidi_warning_documents",
+                "Ready documents whose extraction flagged possibly re-ordered lines.",
+                float(indexing.bidi_warning_documents),
+            ),
         ):
             lines.extend(render_gauge_lines(name, help_text, [({}, value)]))
+        lines.extend(
+            render_gauge_lines(
+                "wasla_rag_shadow_generations",
+                "Shadow generations of embedding-model switches, by state.",
+                [
+                    ({"state": state}, float(indexing.shadow_generations.get(state, 0)))
+                    for state in ("pending", "processing", "shadow", "failed")
+                ],
+            )
+        )
         lines.extend(
             render_gauge_lines(
                 "wasla_unprocessed_inbound_events_by_channel",

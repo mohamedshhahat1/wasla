@@ -124,3 +124,36 @@ def test_the_unabridged_totals_survive_the_fold() -> None:
     window = UsageWindow(since=NOW - DEFAULT_WINDOW, until=NOW)
     totals = [_total(UsageEventType.RAG_QUERY, 4)]
     assert summarise(totals, window=window).totals == tuple(totals)
+
+
+def test_cached_and_reasoning_tokens_are_read_from_the_usage_details() -> None:
+    from app.integrations.openai.types import TokenUsage
+
+    usage = TokenUsage.from_payload(
+        {
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "total_tokens": 1500,
+            "input_tokens_details": {"cached_tokens": 1024},
+            "output_tokens_details": {"reasoning_tokens": 128},
+        }
+    )
+    assert (usage.cached_input_tokens, usage.reasoning_tokens) == (1024, 128)
+    # Optional, as the provider documents them: absent or unusable is zero.
+    bare = TokenUsage.from_payload({"input_tokens": 5, "output_tokens": 1, "total_tokens": 6})
+    assert (bare.cached_input_tokens, bare.reasoning_tokens) == (0, 0)
+    odd = TokenUsage.from_payload(
+        {
+            "input_tokens": 5,
+            "input_tokens_details": {"cached_tokens": -3},
+            "output_tokens_details": "x",
+        }
+    )
+    assert (odd.cached_input_tokens, odd.reasoning_tokens) == (0, 0)
+
+
+def test_the_repository_names_the_knowledge_tool_as_the_registry_does() -> None:
+    from app.agents import registry
+    from app.repositories import knowledge_repository
+
+    assert knowledge_repository.SEARCH_KNOWLEDGE_TOOL == registry.SEARCH_KNOWLEDGE_TOOL

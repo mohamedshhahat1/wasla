@@ -11,13 +11,16 @@ project and lets a worker decide whether a turn is kept or rolled back.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence, Set
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import perf_counter
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +30,7 @@ from app.agents.memory import build_window
 from app.agents.registry import (
     HANDOFF_TOOL,
     SCHEDULE_FOLLOW_UP_TOOL,
+    SEARCH_KNOWLEDGE_TOOL,
     ToolArgumentError,
     ToolContext,
     ToolDefinition,
@@ -38,7 +42,14 @@ from app.channels.policy import ChannelPolicy
 from app.channels.registry import ChannelRegistry, default_registry
 from app.core.exceptions import WaslaError
 from app.core.logging import get_logger
-from app.core.telemetry import UNKNOWN_TOOL, record_tool_execution
+from app.core.telemetry import (
+    UNKNOWN_TOOL,
+    record_ai_stage,
+    record_cached_input_tokens,
+    record_number_grounding,
+    record_preretrieval,
+    record_tool_execution,
+)
 from app.db.models.agent import DEFAULT_MAX_OUTPUT_TOKENS, Agent
 from app.db.models.agent_turn import TurnOutcome
 from app.db.models.conversation import Conversation, ConversationMode, Message, MessageDirection
@@ -53,7 +64,7 @@ from app.db.models.tool_execution import (
 from app.db.session import released
 from app.integrations.openai.client import ResponsesClient
 from app.integrations.openai.embeddings import EmbeddingsClient
-from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, Turn
+from app.integrations.openai.types import TokenUsage, ToolCall, ToolResult, ToolSpec, Turn
 from app.repositories.agent_repository import AgentRepository, AgentToolRepository
 from app.repositories.conversation_repository import ConversationRepository, MessageRepository
 from app.repositories.media_repository import MediaRepository
@@ -61,8 +72,15 @@ from app.repositories.tool_execution_repository import (
     ToolExecutionRepository,
     terminal_values,
 )
+from app.services import number_grounding
 from app.services.follow_up_sequences import SequenceService
-from app.services.sentiment_service import SentimentService
+from app.services.knowledge_rerank import LlmReranker
+from app.services.query_embedding_cache import QueryEmbeddingCache
+from app.services.retrieval_policy import KnowledgeSwitches, knowledge_scope
+from app.services.retrieval_ranking import PARTIAL, STRONG
+from app.services.retrieval_service import MAX_QUERY_CHARACTERS
+from app.services.sentiment_reader import SentimentReading
+from app.services.sentiment_service import PendingAssessment, SentimentService
 
 logger = get_logger(__name__)
 
@@ -88,6 +106,10 @@ HISTORY_MULTIPLIER: Final = 2
 # out into somebody else's API.
 MAX_TOOL_CALLS_PER_RESPONSE: Final = 8
 MAX_TOOL_CALLS_PER_TURN: Final = 12
+# Knowledge searches one turn may run (RQ-10). A third search in one turn has
+# never found what two did not; it spends an embedding call and a round the
+# model needed for answering.
+MAX_KNOWLEDGE_SEARCHES_PER_TURN: Final = 2
 
 # What the model reads when a call was not run. Fixed sentences: they carry no
 # database state, no exception text and no customer content, and they say enough
@@ -103,6 +125,17 @@ _UNAVAILABLE_NOW_OUTPUT: Final = (
 _ROUND_LIMIT_OUTPUT: Final = (
     "That tool call was not run: there is no round left to read its result. "
     "Answer the customer with what you already know."
+)
+_SEARCH_LIMIT_OUTPUT: Final = (
+    "That search was not run: this turn has already searched the knowledge base "
+    "twice. Answer the customer with what those searches found."
+)
+# Said to the model on the last round of a turn whose earlier rounds ran tools
+# (RV-14). The round offers no tool but a terminal one, so it ends in words.
+_FINAL_ROUND_INSTRUCTION: Final = (
+    "This is the last step of this turn. Do not call any more tools except to "
+    "hand the conversation to a colleague. Reply to the customer now with what "
+    "you already know."
 )
 _DUPLICATE_OUTPUT: Final = "That tool call was already made in this turn; it was not run again."
 _AFTER_HANDOFF_OUTPUT: Final = (
@@ -146,6 +179,10 @@ class AgentOutcome:
     # is then withheld - a colleague took over mid-turn - because the words
     # were generated and the cost was incurred (ENT-02). A `reply` implies it.
     composed: bool = False
+    # The reply quoted a price or percentage no source supported, under the
+    # `strict` grounding mode (RQ-19): withheld, and the worker tells the
+    # customer a colleague will confirm and hands the conversation over.
+    grounding_withheld: bool = False
 
     @property
     def should_send(self) -> bool:
@@ -228,6 +265,8 @@ class _TurnTools:
     #: business effect (TOOL-08, PD-TOOLS-04). The unique index on
     #: `tool_executions` is the backstop behind it.
     seen_call_ids: set[str] = field(default_factory=set)
+    #: Knowledge searches run this turn (RQ-10).
+    searches: int = 0
     #: Set once a handoff has succeeded in the response being executed. Every
     #: later call of that response is recorded and not run (PD-TOOLS-02).
     handed_over: bool = False
@@ -265,6 +304,17 @@ def _reply_instructions(system_prompt: str, policy: ChannelPolicy) -> str:
     return f"{system_prompt}{policy.agent_instructions()}"
 
 
+def _closing_choice(terminal: Sequence[str]) -> str | dict[str, Any]:
+    """The last round's `tool_choice`: a terminal tool if granted, else none (RV-14)."""
+    if not terminal:
+        return "none"
+    return {
+        "type": "allowed_tools",
+        "mode": "auto",
+        "tools": [{"type": "function", "name": name} for name in terminal],
+    }
+
+
 def _nothing(
     *,
     outcome: TurnOutcome,
@@ -281,6 +331,38 @@ def _nothing(
         agent_id=agent_id,
         escalated=escalated,
         outcome=outcome,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Grounded:
+    """What the grounding guard left of a reply, and what it cost."""
+
+    text: str | None
+    withheld: bool = False
+    usage: TokenUsage = field(
+        default_factory=lambda: TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0)
+    )
+    rounds: int = 0
+
+
+#: A greeting or a thank-you is not worth a search before the first round.
+_GREETING: Final = re.compile(
+    r"^\W*(?:hi|hello|hey|thanks?|thank you|ok|okay|good (?:morning|evening)|"
+    "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645|"
+    "\u0627\u0647\u0644\u0627|\u0623\u0647\u0644\u0627|\u0645\u0631\u062d\u0628\u0627|"
+    "\u0634\u0643\u0631\u0627|\u062a\u0645\u0627\u0645)\\W*$",
+    re.IGNORECASE,
+)
+MIN_PRE_RETRIEVAL_CHARACTERS: Final = 12
+
+
+def _worth_a_search(text: str) -> bool:
+    """Not a greeting, not a word or two, not a message that was only a file."""
+    return (
+        len(text) >= MIN_PRE_RETRIEVAL_CHARACTERS
+        and len(text.split()) >= 3
+        and not _GREETING.match(text)
     )
 
 
@@ -369,8 +451,12 @@ class AgentOrchestrator:
         trigger_message_id: uuid.UUID | None = None,
         unit_of_work: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
         channels: ChannelRegistry | None = None,
+        knowledge: KnowledgeSwitches | None = None,
+        reranker: LlmReranker | None = None,
+        query_cache: QueryEmbeddingCache | None = None,
     ) -> None:
         self._session = session
+        self._query_cache = query_cache
         # Which channel's policy speaks to the agent: the conversation's.
         self._channels = channels or default_registry()
         self._tenant_id = tenant_id
@@ -419,6 +505,11 @@ class AgentOrchestrator:
         # database drives the loop without one, and then a lost transaction
         # simply loses the record it could not write.
         self._unit_of_work = unit_of_work
+        # The workspace's knowledge switches (G9), resolved by the worker from
+        # the deployment's settings and the workspace's overrides. None: the
+        # locked defaults - which is what a unit test without a worker gets.
+        self._knowledge = knowledge or KnowledgeSwitches()
+        self._reranker = reranker if self._knowledge.policy.rerank else None
 
     async def answer(
         self,
@@ -459,15 +550,42 @@ class AgentOrchestrator:
         )
 
         subject = _sentiment_subject(history)
-        if self._sentiment is not None and subject is not None:
+        pending_mood: PendingAssessment | None = None
+        if (
+            self._sentiment is not None
+            and subject is not None
+            and self._knowledge.features.parallel_sentiment
+        ):
+            # In parallel with the first round (RQ-20, amends AI-04): only the
+            # provider calls overlap. What is read here is read now, what is
+            # written is written after both calls returned, and *sending* stays
+            # gated on the result - an escalated turn discards what round one
+            # composed and runs none of its tools.
+            prepared = await self._sentiment.prepare(
+                conversation_id=conversation_id,
+                escalation_sentiment=resolved.escalation_sentiment,
+                subject=subject,
+            )
+            if isinstance(prepared, PendingAssessment):
+                pending_mood = prepared
+            elif prepared.blocks_reply:
+                return _nothing(
+                    agent_id=resolved.id,
+                    handed_off=True,
+                    escalated=True,
+                    outcome=TurnOutcome.ESCALATED,
+                )
+        elif self._sentiment is not None and subject is not None:
             # Before a word is composed, not after. An escalation that arrives
             # second means the agent already answered an angry customer, which
             # is the thing this is here to prevent.
+            sentiment_started = perf_counter()
             mood = await self._sentiment.assess(
                 conversation_id=conversation_id,
                 escalation_sentiment=resolved.escalation_sentiment,
                 subject=subject,
             )
+            await record_ai_stage("sentiment", perf_counter() - sentiment_started)
             if mood.superseded:
                 # A colleague took the conversation over while the classifier
                 # was reading it. Their takeover stands and this turn made no
@@ -515,6 +633,33 @@ class AgentOrchestrator:
             offered = [name for name in offered if name != SCHEDULE_FOLLOW_UP_TOOL]
         # Described as the conversation's channel allows (OMNI-039).
         specs = self._registry.specs(offered, policy=channel_policy)
+        # What the last round may still call: only a tool that ends the turn by
+        # itself. Named in `tool_choice` rather than by removing the others, so
+        # the tools described - part of the request prefix - stay the same.
+        terminal = [
+            name
+            for name in offered
+            if (definition := self._registry.get(name)) is not None and definition.terminal
+        ]
+
+        # One context for the whole turn, so the searches of every round are
+        # in one place for the grounding guard (RQ-19). The scope is the
+        # agent's grant's (RQ-18), read at turn start like the grant set.
+        scope = knowledge_scope(
+            next(
+                (getattr(g, "config", None) for g in grants if g.name == SEARCH_KNOWLEDGE_TOOL),
+                None,
+            )
+        )
+        context = ToolContext(
+            tenant_id=self._tenant_id,
+            conversation_id=conversation_id,
+            session=self._session,
+            embeddings=self._embeddings,
+            retrieval=replace(self._knowledge.policy, knowledge_base_ids=scope),
+            reranker=self._reranker,
+            query_cache=self._query_cache,
+        )
 
         turns = list(window.turns)
         results: list[ToolResult] = []
@@ -522,11 +667,21 @@ class AgentOrchestrator:
         input_tokens = 0
         output_tokens = 0
         total_tokens = 0
+        cached_input_tokens = 0
+        reasoning_tokens = 0
         handed_off = False
         pending = False
         text: str | None = None
         rounds = 0
         response_id: str | None = None
+
+        if self._knowledge.features.pre_retrieval and SEARCH_KNOWLEDGE_TOOL in granted:
+            injected = await self._pre_retrieve(
+                subject, context, granted, agent=resolved, after_turns=len(turns)
+            )
+            if injected is not None:
+                results.append(injected)
+                tools_run.append(SEARCH_KNOWLEDGE_TOOL)
 
         for round_number in range(1, self._max_rounds + 1):
             # The turn's connection goes back to the pool here, and stays
@@ -552,36 +707,91 @@ class AgentOrchestrator:
                     # not, which is the cheaper mistake to make in a cost ledger.
                     await self._meter_round(resolved.model)
                 rounds = round_number
-                reply = await self._client.respond(
+                round_started = perf_counter()
+                closing = round_number == self._max_rounds and bool(results)
+                inference = self._client.respond(
                     model=resolved.model,
                     instructions=_reply_instructions(resolved.system_prompt, channel_policy),
-                    turns=turns,
+                    turns=(
+                        [*turns, Turn(role="system", text=_FINAL_ROUND_INSTRUCTION)]
+                        if closing
+                        else turns
+                    ),
                     tools=specs,
                     tool_results=results,
+                    tool_choice=_closing_choice(terminal) if closing and specs else None,
                     temperature=resolved.temperature,
                     max_output_tokens=self._max_output_tokens(resolved),
                 )
+                reading: SentimentReading | None = None
+                if pending_mood is not None and self._sentiment is not None:
+                    # Two HTTP calls at once; neither touches the session,
+                    # which is released for both (ADR-080).
+                    reply, reading = await asyncio.gather(
+                        inference, self._sentiment.classify(pending_mood)
+                    )
+                else:
+                    reply = await inference
+                await record_ai_stage("round", perf_counter() - round_started)
             input_tokens += reply.usage.input_tokens
             output_tokens += reply.usage.output_tokens
             total_tokens += reply.usage.total_tokens
-            text = reply.text or text
+            cached_input_tokens += reply.usage.cached_input_tokens
+            reasoning_tokens += reply.usage.reasoning_tokens
+            await record_cached_input_tokens(reply.usage.cached_input_tokens)
             response_id = reply.response_id or response_id
+
+            if pending_mood is not None and self._sentiment is not None:
+                mood = await self._sentiment.apply(pending_mood, reading)
+                pending_mood = None
+                spent = TokenUsage(
+                    input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                )
+                if mood.superseded:
+                    # A colleague took over while both calls ran (CRM-02).
+                    return replace(
+                        _nothing(agent_id=resolved.id, outcome=TurnOutcome.SUPPRESSED_HUMAN),
+                        usage=spent,
+                        rounds=round_number,
+                        model=resolved.model,
+                    )
+                if mood.blocks_reply:
+                    # What round one composed is discarded and none of its
+                    # tool calls runs: the turn ends as an escalation, exactly
+                    # as when the classifier ran first. The tokens were spent
+                    # and are metered; the turn is not charged as composed.
+                    logger.info(
+                        "agent.escalated_after_parallel_round",
+                        extra={"conversation_id": str(conversation_id)},
+                    )
+                    return replace(
+                        _nothing(
+                            agent_id=resolved.id,
+                            handed_off=True,
+                            escalated=True,
+                            outcome=TurnOutcome.ESCALATED,
+                        ),
+                        usage=spent,
+                        rounds=round_number,
+                        model=resolved.model,
+                    )
 
             pending = reply.wants_tools
             if not pending:
+                text = reply.text
                 break
+            # Words said alongside a tool call are a preamble ("let me check"),
+            # carried into the next round but never the reply (RV-14).
 
             if reply.text:
                 # Tool results replay the call but not the words around it, so
                 # anything it said has to be carried forward explicitly.
                 turns.append(Turn(role="assistant", text=reply.text))
 
-            context = ToolContext(
-                tenant_id=self._tenant_id,
-                conversation_id=conversation_id,
-                session=self._session,
-                embeddings=self._embeddings,
-            )
             self._tools.budget.start_response()
             self._tools.handed_over = False
             for ordinal, call in enumerate(reply.tool_calls, start=1):
@@ -593,7 +803,9 @@ class AgentOrchestrator:
                     round_number=round_number,
                     ordinal=ordinal,
                 )
-                results.append(ToolResult.for_call(call, output=execution.output))
+                results.append(
+                    ToolResult.for_call(call, output=execution.output, after_turns=len(turns))
+                )
                 tools_run.append(call.name)
                 if call.name == HANDOFF_TOOL and execution.succeeded:
                     # From what the server did, never from what the model named
@@ -636,6 +848,8 @@ class AgentOrchestrator:
                     rounds=round_number,
                     usage=TokenUsage(
                         input_tokens=input_tokens,
+                        cached_input_tokens=cached_input_tokens,
+                        reasoning_tokens=reasoning_tokens,
                         output_tokens=output_tokens,
                         total_tokens=total_tokens,
                     ),
@@ -644,12 +858,36 @@ class AgentOrchestrator:
                 )
 
         if pending and not handed_off:
-            # It kept asking for tools until the budget ran out. Whatever text it
-            # produced along the way is still worth sending.
+            # It kept asking for tools even on the last round, which offered
+            # none it could run. What it said alongside those calls was a
+            # preamble, not an answer, and is not sent (RV-14).
             logger.warning(
                 "agent.round_limit_reached",
                 extra={"conversation_id": str(conversation_id), "rounds": rounds},
             )
+
+        withheld = False
+        mode = self._knowledge.features.number_grounding
+        if text and not handed_off and mode != "off":
+            guarded = await self._grounded(
+                text,
+                mode=mode,
+                context=context,
+                history=history,
+                agent=resolved,
+                channel_policy=channel_policy,
+                turns=turns,
+                results=results,
+                specs=specs,
+            )
+            text = guarded.text
+            withheld = guarded.withheld
+            input_tokens += guarded.usage.input_tokens
+            output_tokens += guarded.usage.output_tokens
+            total_tokens += guarded.usage.total_tokens
+            cached_input_tokens += guarded.usage.cached_input_tokens
+            reasoning_tokens += guarded.usage.reasoning_tokens
+            rounds += guarded.rounds
 
         if text and not handed_off and await self._taken_over(conversation_id):
             # A colleague opened this conversation while the model was
@@ -676,6 +914,8 @@ class AgentOrchestrator:
                 rounds=rounds,
                 usage=TokenUsage(
                     input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    reasoning_tokens=reasoning_tokens,
                     output_tokens=output_tokens,
                     total_tokens=total_tokens,
                 ),
@@ -711,6 +951,8 @@ class AgentOrchestrator:
             tools_run=tuple(tools_run),
             usage=TokenUsage(
                 input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=reasoning_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
             ),
@@ -720,7 +962,142 @@ class AgentOrchestrator:
             outcome=ending,
             response_id=response_id,
             composed=bool(text),
+            grounding_withheld=withheld,
         )
+
+    async def _pre_retrieve(
+        self,
+        subject: Message | None,
+        context: ToolContext,
+        granted: Set[str],
+        *,
+        agent: Agent,
+        after_turns: int,
+    ) -> ToolResult | None:
+        """Search the customer's message before the first round (RQ-20, FX-3.14).
+
+        A real `search_knowledge` execution: recorded in `tool_executions` with
+        every gate a model's call passes - grant re-read, serving state, the
+        per-turn search cap - and injected into round one as the call-and-output
+        pair the tool would have produced, so the passages stay inside
+        `function_call_output` (G5). Injected only for a strong or partial
+        match, so **with tiers disabled or uncalibrated it does nothing at all**
+        - not even the search, which would be a cost for no decision.
+        """
+        text = (subject.body or "").strip() if subject is not None else ""
+        if not self._knowledge.policy.tiers_active or not _worth_a_search(text):
+            await record_preretrieval("skipped")
+            return None
+        call = ToolCall(
+            call_id=f"pre_{uuid.uuid4().hex[:24]}",
+            name=SEARCH_KNOWLEDGE_TOOL,
+            arguments={"query": text[:MAX_QUERY_CHARACTERS]},
+            arguments_json=json.dumps({"query": text[:MAX_QUERY_CHARACTERS]}, ensure_ascii=False),
+        )
+        searched = len(context.searches)
+        execution = await self._execute(
+            # The query is the customer's message: never recorded as a gap (RQ-27).
+            call,
+            replace(context, record_gaps=False),
+            granted,
+            agent=agent,
+            round_number=1,
+            ordinal=0,
+        )
+        if not execution.succeeded or len(context.searches) == searched:
+            await record_preretrieval("refused")
+            return None
+        if context.searches[-1].match not in (STRONG, PARTIAL):
+            # Ran, and too weak to put in front of the model; the model may
+            # still search, and this one does not count against its two.
+            self._tools.searches = max(0, self._tools.searches - 1)
+            await record_preretrieval("weak")
+            return None
+        await record_preretrieval("injected")
+        return ToolResult.for_call(call, output=execution.output, after_turns=after_turns)
+
+    async def _grounded(
+        self,
+        text: str,
+        *,
+        mode: str,
+        context: ToolContext,
+        history: Sequence[Message],
+        agent: Agent,
+        channel_policy: ChannelPolicy,
+        turns: Sequence[Turn],
+        results: Sequence[ToolResult],
+        specs: Sequence[ToolSpec],
+    ) -> Grounded:
+        """Check the reply's prices and percentages against the turn's sources (RQ-19).
+
+        `observe` counts; `correct` asks once for a corrected reply, and falls
+        back to `strict` if that is still ungrounded; `strict` withholds the
+        reply, and the worker tells the customer a colleague will confirm and
+        hands the conversation over. Counts by outcome, never the numbers.
+        """
+        retrieved = (
+            [source["content"] for found in context.searches for source in found.packed()]
+            if any(found.passages for found in context.searches)
+            else []
+        )
+        customer = [
+            message.body or ""
+            for message in history
+            if message.direction is MessageDirection.INBOUND
+        ]
+        verdict = number_grounding.check(
+            text, retrieved=retrieved, customer=customer, instructions=agent.system_prompt
+        )
+        await record_number_grounding("grounded", verdict.grounded)
+        if not verdict.ungrounded:
+            return Grounded(text=text)
+        await record_number_grounding("ungrounded", len(verdict.ungrounded))
+        logger.warning(
+            "agent.ungrounded_number",
+            extra={
+                "conversation_id": str(context.conversation_id),
+                "mode": mode,
+                "ungrounded": len(verdict.ungrounded),
+                "checked": len(verdict.checked),
+            },
+        )
+        if mode == "observe":
+            return Grounded(text=text)
+        usage = TokenUsage(input_tokens=0, output_tokens=0, total_tokens=0)
+        rounds = 0
+        if mode == "correct":
+            async with released(self._session):
+                if self._meter_round is not None:
+                    await self._meter_round(agent.model)
+                corrected = await self._client.respond(
+                    model=agent.model,
+                    instructions=_reply_instructions(agent.system_prompt, channel_policy),
+                    turns=[
+                        *turns,
+                        Turn(role="assistant", text=text),
+                        Turn(
+                            role="system",
+                            text=number_grounding.correction_instruction(verdict.ungrounded),
+                        ),
+                    ],
+                    tools=specs,
+                    tool_results=results,
+                    tool_choice="none" if specs else None,
+                    temperature=agent.temperature,
+                    max_output_tokens=self._max_output_tokens(agent),
+                )
+            usage = corrected.usage
+            rounds = 1
+            fixed = corrected.text or ""
+            again = number_grounding.check(
+                fixed, retrieved=retrieved, customer=customer, instructions=agent.system_prompt
+            )
+            if fixed and not again.ungrounded:
+                await record_number_grounding("corrected", len(verdict.ungrounded))
+                return Grounded(text=fixed, usage=usage, rounds=rounds)
+        await record_number_grounding("handed_off", len(verdict.ungrounded))
+        return Grounded(text=None, withheld=True, usage=usage, rounds=rounds)
 
     @staticmethod
     def _suppressed(
@@ -990,6 +1367,15 @@ class AgentOrchestrator:
                 ToolExecutionReason.ROUND_LIMIT,
                 _ROUND_LIMIT_OUTPUT,
             )
+
+        if call.name == SEARCH_KNOWLEDGE_TOOL:
+            if self._tools.searches >= MAX_KNOWLEDGE_SEARCHES_PER_TURN:
+                # The per-turn reason, because that is what it is: a per-turn
+                # cap on one tool, read by counting like the others.
+                return await self._refuse(
+                    record, ToolExecutionReason.TURN_CALL_LIMIT, _SEARCH_LIMIT_OUTPUT
+                )
+            self._tools.searches += 1
 
         try:
             arguments = validate_arguments(definition, call.arguments)

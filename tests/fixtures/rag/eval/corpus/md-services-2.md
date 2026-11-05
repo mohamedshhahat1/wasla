@@ -1,0 +1,29 @@
+# Services catalogue 2
+
+## Spanish Porcelain
+
+Step 0 of the Spanish porcelain service is carried out by a certified team. Step 1 of the Spanish porcelain service is carried out by a certified team. Step 2 of the Spanish porcelain service is carried out by a certified team. Step 3 of the Spanish porcelain service is carried out by a certified team. Step 4 of the Spanish porcelain service is carried out by a certified team. Step 5 of the Spanish porcelain service is carried out by a certified team. Step 6 of the Spanish porcelain service is carried out by a certified team. Step 7 of the Spanish porcelain service is carried out by a certified team. Step 8 of the Spanish porcelain service is carried out by a certified team. Step 9 of the Spanish porcelain service is carried out by a certified team. Step 10 of the Spanish porcelain service is carried out by a certified team. Step 11 of the Spanish porcelain service is carried out by a certified team. Step 12 of the Spanish porcelain service is carried out by a certified team. Step 13 of the Spanish porcelain service is carried out by a certified team. Step 14 of the Spanish porcelain service is carried out by a certified team. Step 15 of the Spanish porcelain service is carried out by a certified team. Step 16 of the Spanish porcelain service is carried out by a certified team. Step 17 of the Spanish porcelain service is carried out by a certified team. The Spanish porcelain package 2-0 includes a site visit and a written quote.
+
+- Duration: 3 weeks
+- Crew: 4 people
+
+## Galala Marble
+
+Step 0 of the Galala marble service is carried out by a certified team. Step 1 of the Galala marble service is carried out by a certified team. Step 2 of the Galala marble service is carried out by a certified team. Step 3 of the Galala marble service is carried out by a certified team. Step 4 of the Galala marble service is carried out by a certified team. Step 5 of the Galala marble service is carried out by a certified team. Step 6 of the Galala marble service is carried out by a certified team. Step 7 of the Galala marble service is carried out by a certified team. Step 8 of the Galala marble service is carried out by a certified team. Step 9 of the Galala marble service is carried out by a certified team. Step 10 of the Galala marble service is carried out by a certified team. Step 11 of the Galala marble service is carried out by a certified team. Step 12 of the Galala marble service is carried out by a certified team. Step 13 of the Galala marble service is carried out by a certified team. Step 14 of the Galala marble service is carried out by a certified team. Step 15 of the Galala marble service is carried out by a certified team. Step 16 of the Galala marble service is carried out by a certified team. Step 17 of the Galala marble service is carried out by a certified team. The Galala marble package 2-1 includes a site visit and a written quote.
+
+- Duration: 4 weeks
+- Crew: 5 people
+
+## Gypsum Board
+
+Step 0 of the gypsum board service is carried out by a certified team. Step 1 of the gypsum board service is carried out by a certified team. Step 2 of the gypsum board service is carried out by a certified team. Step 3 of the gypsum board service is carried out by a certified team. Step 4 of the gypsum board service is carried out by a certified team. Step 5 of the gypsum board service is carried out by a certified team. Step 6 of the gypsum board service is carried out by a certified team. Step 7 of the gypsum board service is carried out by a certified team. Step 8 of the gypsum board service is carried out by a certified team. Step 9 of the gypsum board service is carried out by a certified team. Step 10 of the gypsum board service is carried out by a certified team. Step 11 of the gypsum board service is carried out by a certified team. Step 12 of the gypsum board service is carried out by a certified team. Step 13 of the gypsum board service is carried out by a certified team. Step 14 of the gypsum board service is carried out by a certified team. Step 15 of the gypsum board service is carried out by a certified team. Step 16 of the gypsum board service is carried out by a certified team. Step 17 of the gypsum board service is carried out by a certified team. The gypsum board package 2-2 includes a site visit and a written quote.
+
+- Duration: 5 weeks
+- Crew: 6 people
+
+## Parquet Flooring
+
+Step 0 of the parquet flooring service is carried out by a certified team. Step 1 of the parquet flooring service is carried out by a certified team. Step 2 of the parquet flooring service is carried out by a certified team. Step 3 of the parquet flooring service is carried out by a certified team. Step 4 of the parquet flooring service is carried out by a certified team. Step 5 of the parquet flooring service is carried out by a certified team. Step 6 of the parquet flooring service is carried out by a certified team. Step 7 of the parquet flooring service is carried out by a certified team. Step 8 of the parquet flooring service is carried out by a certified team. Step 9 of the parquet flooring service is carried out by a certified team. Step 10 of the parquet flooring service is carried out by a certified team. Step 11 of the parquet flooring service is carried out by a certified team. Step 12 of the parquet flooring service is carried out by a certified team. Step 13 of the parquet flooring service is carried out by a certified team. Step 14 of the parquet flooring service is carried out by a certified team. Step 15 of the parquet flooring service is carried out by a certified team. Step 16 of the parquet flooring service is carried out by a certified team. Step 17 of the parquet flooring service is carried out by a certified team. The parquet flooring package 2-3 includes a site visit and a written quote.
+
+- Duration: 6 weeks
+- Crew: 7 people

@@ -704,3 +704,40 @@ opening the conversation.
 Run the `recovery` kind somewhere. It is in `WORKER_KINDS` by default; a
 deployment that narrows that variable and leaves it out has no crash recovery
 at all.
+
+## Knowledge: pgvector and the first deploy of the RAG remediation
+
+**pgvector 0.8.0 or newer is required** (RV-03). Knowledge search sets `hnsw.iterative_scan`, which 0.7 and older do not have; on them every search fails and the agent says it has no information. `python -m scripts.db_preflight prerequisites` and `verify`, and the readiness check, refuse an older extension by name ("pgvector 0.7.4 is older than 0.8.0"). `docker-compose.yml` pins the same image digest as production.
+
+The first deploy of migrations `0127`-`0131` runs, in order, after `alembic upgrade head`:
+
+```bash
+python -m scripts.db_preflight verify
+python -m app.workers.queues backfill-normalised-content --dry-run
+python -m app.workers.queues backfill-normalised-content
+python -m app.workers.queues backfill-source-keys
+python -m scripts.rag_triage
+python -m app.workers.queues reindex-all --rate 5
+python -m scripts.rag_invariants verify
+```
+
+The back-fill is a command, not a migration, so no transaction is held across `documents`; it stores each document as normalised text with its true hash, one short transaction each. A **collision** - the knowledge base already holds the normalised text - is printed as `keep <older> delete <newer>`: delete the newer document, then run the back-fill again. Nothing is merged or deleted automatically. Documents listed for **re-upload** have lines the PDF extraction may have re-ordered; stored text cannot repair them. `backfill-source-keys` keys documents by filename where the filename is unique in its knowledge base and lists the rest. `rag_triage` lists, per workspace and by count only, duplicate titles, cross-knowledge-base copies (delete one), presentation-form PDFs and workspaces whose agent cannot search their documents.
+
+`reindex-all` re-indexes every document through the normal generation path at the given rate, in id order, printing the id to resume from with `--after`. Every document keeps serving its current version until its new generation publishes. `EMBEDDING_SCHEMA_VERSION` is not changed. Rehearsed on a database populated by the previous release (40 documents, 2 workspaces): every served document stayed served before, during and after, and every `rag_invariants` check ended at 0.
+
+**Migrations `0132`-`0134` (RAG remediation Part 2)** add `document_chunks.search_text` and `search_tsv` (catalogue-only), the GIN index `ix_document_chunks_search_tsv` (built `CONCURRENTLY`) and `tenants.knowledge_settings` with the `knowledge_settings_updated` audit label. The `reindex-all` above rebuilds every document once, and in that one pass each chunk gains its contextual embedding (title and section) and its exact-word text. **Run it with `RAG_HYBRID_ENABLED=false`, and set it back to `true` once `rag_invariants verify` reports RR-12 = 0.** A chunk not yet rebuilt has no exact-word text, so with hybrid on it appears in one of the two fused lists while its rebuilt neighbours appear in both, and near-identical documents can briefly rank above it: in the rehearsal, 7 of 35 documents dropped out of a top-6 search for their own text at some moment of the drain with hybrid on, and none with it off (RR-17). Every document stays served either way - only the ranking moves. The retrieval switches keep their locked defaults (`RAG_HYBRID_ENABLED=true`, `RAG_NUMBER_GROUNDING=observe`, everything else off); calibrate tiers from the real-provider evaluation before enabling tiers or pre-retrieval.
+
+Do not change `OPENAI_EMBEDDING_MODEL` in a running deployment: every document becomes unsearchable until re-indexed. The supported path is the shadow switch (`OPENAI_EMBEDDING_MODEL_NEXT`, `embedding-switch`; docs/RUNBOOK.md, "Changing the embedding model").
+
+**Migrations `0135`-`0138` (RAG remediation Part 3)** are additive and online: `document_source` gains `csv`, `xlsx`, `docx`, `html` (enum labels cannot be dropped; the downgrade refuses while any document uses them); `document_generation_state` gains `shadow` and `workspace_embedding_spaces` is created (the downgrade refuses while a switch, a shadow or its audit rows exist); `document_chunks` gets autovacuum and statistics storage parameters (catalogue-only, `SHARE UPDATE EXCLUSIVE`); `knowledge_search_gaps` is created (the downgrade refuses while it holds rows). No back-fill. The Part 1 and Part 2 first-deploy steps above cover all three Parts: one `reindex-all` pass builds normalised text, the new chunks, contextual embeddings and lexical text; then `rag_invariants verify` must report RR-01 .. RR-14 at 0. Row-level security is not applied (ADR-185), so no new database role is needed.
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `OPENAI_EMBEDDING_MODEL_NEXT` | unset | Only during an embedding-model switch, on the API and the worker alike (RGM-10); `docker-compose.prod.yml` passes it and every `RAG_*` setting to both (RGM-12) |
+| `RAG_QUERY_EMBEDDING_CACHE` | `true` | Query vectors in Redis, keyed by workspace and space |
+| `RAG_QUERY_EMBEDDING_CACHE_TTL_SECONDS` | `86400` | 60 .. 604800 |
+| `RAG_EMBEDDING_CONCURRENCY` | `3` | Embedding batches of one document in flight, 1 .. 4 |
+| `RAG_GAP_REPORT_ENABLED` | `false` | Off until the Privacy audit (#18) |
+| `RAG_GAP_RETENTION_DAYS` | `30` | 1 .. 90; enforced whether or not the report is on |
+
+New dependencies: `openpyxl` and `python-docx` (MIT), pinned in `pyproject.toml` and `requirements.lock`, used only inside the extraction child process.

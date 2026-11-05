@@ -51,6 +51,8 @@ MAX_WINDOW: Final = timedelta(days=366)
 # classifier?" reads it from here without a second event type to sum.
 AI_PURPOSE_AGENT: Final = "agent"
 AI_PURPOSE_SENTIMENT: Final = "sentiment"
+# The optional re-rank of a knowledge search's candidates (RQ-16).
+AI_PURPOSE_RERANK: Final = "knowledge_rerank"
 # Which side of retrieval an embedding call served (RAG-07).
 EMBEDDING_PURPOSE_INGEST: Final = "ingest"
 EMBEDDING_PURPOSE_QUERY: Final = "query"
@@ -220,6 +222,8 @@ class UsageRecorder:
         conversation_id: uuid.UUID | None = None,
         occurred_at: datetime | None = None,
         purpose: str | None = None,
+        cached_input_tokens: int = 0,
+        reasoning_tokens: int = 0,
     ) -> None:
         """Stage the request and its two token counts together.
 
@@ -259,17 +263,20 @@ class UsageRecorder:
             occurred_at=occurred_at,
             meta=line,
         )
+        # How much of each count the provider discounted or spent thinking
+        # (FX-1.13): on the token rows themselves, so cost reports can price
+        # them without a second meter.
         self.record(
             UsageEventType.AI_INPUT_TOKEN,
             quantity=input_tokens,
             occurred_at=occurred_at,
-            meta=line,
+            meta={**meta, "cached_tokens": cached_input_tokens} if cached_input_tokens else line,
         )
         self.record(
             UsageEventType.AI_OUTPUT_TOKEN,
             quantity=output_tokens,
             occurred_at=occurred_at,
-            meta=line,
+            meta={**meta, "reasoning_tokens": reasoning_tokens} if reasoning_tokens else line,
         )
 
     def embedding_request(

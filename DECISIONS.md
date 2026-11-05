@@ -494,7 +494,7 @@ Date:
 2026-08-22
 
 Status:
-Accepted
+Accepted; amended by ADR-178 (an opt-in parallel mode, sending still gated)
 
 Decision:
 Classify the newest inbound message inside the agent turn, after the agent is resolved and before any reply is composed. Store one reading per message, keyed uniquely on `message_id`. Let a reading raise a conversation's priority and never lower it. Escalate to a human only above a per-agent threshold and above a fixed confidence floor.
@@ -5641,6 +5641,8 @@ sentiment write is what keeps that case safe meanwhile.
 
 **Consequences.** Changing `OPENAI_EMBEDDING_MODEL` makes existing knowledge unsearchable until re-indexed — deliberately. This amends ADR-018's note that same-width models can be swapped by configuration alone.
 
+**Amended by ADR-181.** The space a search compares within is now its *workspace's* query space; a model change goes through shadow generations, so it no longer hides knowledge - changing the setting directly still does.
+
 ## ADR-108 — Knowledge PDFs Are Parsed In A Killable Process Under Hard Limits, And Refused Rather Than Truncated
 
 **Context.** A 32 KB compressed PDF, inside the submitted-size limit, extracted 7.5 million characters on the API's event loop for six minutes, producing 7,500 chunks (RAG-02); a 60-page PDF was indexed to page 40 and reported ready (RAG-08).
@@ -7559,3 +7561,281 @@ Point 6's "the exit signal closes every stream (`server_restart`) before
 uvicorn drains" holds only under `python -m app.serve`, which the entrypoint
 runs: the hook lives in `StreamClosingServer.handle_exit`, not in a patch
 applied while the application is imported (ADR-157, FRM-03).
+
+## ADR-158 — Knowledge Text Is Stored In One Form And Matched In Another (RQ-01, RQ-02, RV-01, RV-23)
+
+**Context.** `RAG_SYSTEM_REVIEW.md` (RV-01) found an Arabic PDF produced by Chromium stored as 104 Arabic presentation-form code points: 0 of 8 words of a normally typed query were in the stored text, 8 of 8 after NFKC. Queries were not normalised either (RV-23), and NFKC does not unify Arabic-Indic digits (`٤٥٠٠`) with ASCII (`4500`).
+
+**Decision.**
+
+1. `app/services/text_normalisation.py`, pure functions. `for_storage`: NFKC, then NUL, zero-width characters, the BOM and bidi controls removed, then the existing whitespace normalisation. `for_matching`: `for_storage` plus tatweel and Arabic diacritics removed, Persian letter forms folded to Arabic, Arabic-Indic and Persian digits mapped to ASCII. `for_lexical`: `for_matching` plus alef, yeh and teh-marbuta folding and casefold, for the lexical channel only.
+2. `documents.content` and every replacement are `for_storage` text; `content_hash` is the SHA-256 of it. Passages are embedded, and queries embedded, as `for_matching` text.
+3. `EMBEDDING_SCHEMA_VERSION` is not bumped (RQ-02): passages and queries are prepared the same way, so old and new vectors stay comparable while documents are re-indexed.
+4. Stored documents are repaired by the operator command `backfill-normalised-content` and `reindex-all`, never by a migration.
+
+**Consequences.** Until the back-fill and re-index run, an old glyph-form document is still found only by glyph-form queries. The Chromium PDF's letters normalise to Persian forms (`U+06CC`, `U+06A9`, `U+06BE`), which matching folds back; storage keeps them.
+
+## ADR-159 — pypdf Stays; Page Furniture Is Removed And Re-ordered Lines Are Flagged, Never Repaired (RQ-03 .. RQ-05, RV-04, RV-22)
+
+**Context.** The review tested one producer. Mixed Arabic and number lines came out re-ordered (RV-04); running headers, footers and page numbers were indexed once per page and pages were joined with a paragraph break (RV-22).
+
+**Decision.**
+
+1. PDFs of the same sources from Chromium, Microsoft Word and WeasyPrint were extracted with pypdf and pdfminer.six. pdfminer.six was better on Arabic order for none of the three producers, so pypdf stays (RQ-03). PyMuPDF is not allowed (AGPL) - a product decision.
+2. After extraction, in documents of three pages or more, a line in the first or last two lines of at least 60 % of pages is dropped; bare page numbers are dropped at page edges; a page ending without a sentence terminator is joined to the next with one newline.
+3. A line where a digit run is glued to Arabic letters, or an Arabic-Indic number has a leading zero, is recorded as `extraction_warnings` (codes and counts only), shown on `DocumentRead` and counted. The stored text is never re-ordered by guesswork.
+
+**Consequences.** Six questions of the evaluation corpus whose prices two producers' PDFs reverse or drop stay unanswered; their lines are flagged for re-upload. Documents uploaded before originals were kept can be repaired only by uploading them again.
+
+## ADR-160 — Chunks Are Cut At Structure, Never Inside A Word, A Number Or A Line (FX-1.2, RV-05, RV-06, RV-08, RV-09)
+
+**Context.** The chunker cut every 1,000 characters inside numbers and words (`13` | `,795 EGP`), ignored newlines, started overlaps mid-word and glued them with a blank line, measured its minimum after the overlap (a chunk of overlap plus `Page 3`), and orphaned headings; Markdown was plain text.
+
+**Decision.** Boundaries in order of preference: heading, blank line, newline, sentence end (including `؟ ۔ ؛`), whitespace; a cut by length only inside a single token longer than a chunk, and never inside a digit run. Sizes are estimated tokens (250 per chunk, 40 of overlap) so Arabic and English compare. List and table lines are atomic, a question stays with its answer, a heading moves with its section and every chunk stores its `heading_path`. Overlap is whole trailing units or words, joined with one newline. The minimum applies to the piece; a short piece is merged into its neighbour. `chunking.py` stays pure. Not a schema-version change.
+
+**Consequences.** More, smaller chunks for list-heavy documents; existing documents get the new chunks on `reindex-all`. `document_chunks.heading_path` is stored for the contextual prefix of Part 2.
+
+## ADR-161 — A Document Is Replaced Through A Generation Snapshot, Never Duplicated (RQ-06, RV-02)
+
+**Context.** There was no update path. An updated price list uploaded again became a second document, and search returned `7900 EGP` and `7200 EGP` together; re-indexing the old one rebuilt the old text, because the claim always read `documents.content`. "Delete, then upload" leaves a window serving neither and consumes a plan slot twice.
+
+**Decision.**
+
+1. `PUT /knowledge/documents/{id}/content` (and `?replace=true` on upload) extracts, normalises and hashes first, then creates a generation carrying a **snapshot**: content, hash, title, filename, media type, byte size, source, warnings and original key (nullable columns, migration 0128).
+2. The claim reads the generation's snapshot when it has one, else `documents.content`; the publish copies the snapshot onto the document in the same transaction as the swap. This amends ADR-106: a generation may now carry its own text.
+3. The same hash as the document's own is a metadata update only; another document's hash in the workspace is `409 document_content_exists`. A pending older attempt ends `failed` with code `replaced`; a processing one is fenced by clearing its claim. A replacement reserves no plan slot.
+4. A re-index snapshots nothing and keeps rebuilding from the current stored text.
+
+**Consequences.** At every moment exactly one version serves. A failed replacement leaves the previous version serving, visible on `DocumentRead.indexing`. The generation state machine gained only the `replaced` failure code (a text code, no enum change).
+
+## ADR-162 — Documents Have A Stable Source Key, And A Text Is Held Once Per Workspace (RQ-07, RQ-08, RV-07, RV-16)
+
+**Context.** Nothing identified "the same file again", and the same text in a second knowledge base was served twice (`7900, 7900, 7200`), because retrieval reads the whole workspace. A resubmission with a corrected title kept the old title.
+
+**Decision.**
+
+1. `documents.source_key`: explicit, or derived from the filename (NFC, casefold, whitespace collapsed); unique per `(tenant_id, knowledge_base_id, source_key)` where not null (migration 0129, index built concurrently). An existing key answers `409 document_source_exists` with the replace URL, or replaces with `?replace=true`. Existing rows are keyed by `backfill-source-keys` only where unique; collisions are listed, never merged.
+2. An upload whose hash another knowledge base of the workspace holds answers `409 document_exists_in_other_knowledge_base`. The lookup is scoped by `tenant_id` only, so it never reveals another workspace's text (G3).
+3. Retrieval drops a passage whose `for_matching` text a higher-ranked passage already carries - the safety net for copies stored before the refusal.
+4. Resubmitting identical text updates a changed title, filename or media type, audited as `knowledge_document_metadata_updated`.
+
+**Consequences.** A workspace that wants the same policy in two knowledge bases keeps one copy; per-agent knowledge scoping (Part 2) is the way to divide what agents read.
+
+## ADR-163 — An Upload Extracts Before It Locks, And Records Its Real Size (RQ-09, RV-10, RV-17)
+
+**Context.** `DocumentSlotDep` took the workspace's plan advisory lock before the handler, and the request held it - and a pooled connection - across PDF parsing, up to the 20-second extraction limit; a second upload to the same workspace waited past `lock_timeout`, and a burst could exhaust the pool. A PDF's `byte_size` was its base64 length.
+
+**Decision.** Extraction, normalisation and hashing happen before the request takes the plan lock or holds a pooled connection (`release_for_extraction` hands the connection back while parsing). The document slot is reserved inside `submit`, only when a new document will be created. `byte_size` is the decoded file's size.
+
+**Consequences.** Two uploads to one workspace during a slow parse both succeed, and no connection is checked out mid-parse (measured). A slot check now happens after extraction, so an upload at the plan limit spends the parse before it is refused.
+
+*Amended 2026-11-05 (ADR-187, RGM-05):* the duplicate checks run under the workspace's upload lock - the lock the slot is reserved under - in the transaction that inserts. Extraction stays before it.
+
+## ADR-164 — The Last Round Answers; Rounds Are Replayed In Order; Two Searches Per Turn (RQ-10, RV-14, RV-27)
+
+**Context.** The last of three rounds offered every tool and then refused any call for lack of a round to read it, so a model that searched again ended the turn empty - or with "let me check", said alongside a call, sent as the whole reply. Each round's request replayed all preambles first and all tool exchanges after them.
+
+**Decision.**
+
+1. A last round that follows tool rounds is asked with `tool_choice: "none"`, or `allowed_tools` naming only the terminal handoff when granted, plus a closing system instruction. The tools described are unchanged, so the request prefix is.
+2. Text that came with a tool call is a preamble: carried forward, never the reply. A turn whose model ignores the instruction ends `empty_response`.
+3. Each `ToolResult` records how many turns preceded it; the client replays turn, then that round's calls and outputs, so every round's input begins with the previous round's.
+4. `search_knowledge` runs at most twice per turn; a third is refused with a fixed message under the existing `turn_call_limit` reason. The per-response limit of 8 and per-turn limit of 12 for other tools are unchanged.
+
+**Consequences.** One existing test asserted that the preamble was the reply - the finding itself - and now asserts its reversal. The terminal handoff and CRM-02 behaviour are unchanged.
+
+## ADR-165 — New Agents Can Read The Knowledge Base, And Workspaces That Cannot Are Told (RQ-11, RC-7)
+
+**Context.** An agent was created with no tools. A workspace that uploaded documents and activated it was answered from the prompt alone, and nothing said so.
+
+**Decision.** `AgentService.create` grants `search_knowledge` (enabled, audited) unless `AGENT_DEFAULT_KNOWLEDGE_GRANT=false`; every other tool stays opt-in; no migration changes existing agents. `AgentRead.knowledge_unreachable` is true when the workspace has ready documents and its `ACTIVE` default agent holds no enabled `search_knowledge` grant - the same predicate as the `wasla_knowledge_unreachable_workspaces` gauge, the `KnowledgeUnreachable` alert and `rag_triage`.
+
+**Consequences.** The API has no workspace readiness view to carry the flag; it is on every `AgentRead`. Existing agents without the grant are reported, not changed.
+
+## ADR-166 — Listings Page By Cursor; Documents Have Effective Dates; Originals Are Kept (FX-2.4 .. FX-2.7, RQ-23, RQ-24, RV-13)
+
+**Context.** Document listings were capped at 100 with no cursor, so the oldest documents - the old versions an administrator needs to find - were unreachable. Nothing said which of two conflicting sources was current, and the uploaded file was discarded after extraction.
+
+**Decision.**
+
+1. Knowledge bases and documents list by keyset cursor (`X-Next-Cursor`), with title, status and source filters and a cross-knowledge-base document listing; `GET /knowledge/documents/{id}/similar` finds likely older versions; knowledge bases can be renamed and deleted (`?cascade=true` while they hold documents).
+2. `documents.valid_from`, `valid_until` and `supersedes_document_id` (same workspace and knowledge base, composite FK added `NOT VALID` then validated; migration 0130). Retrieval excludes a document outside its window; the tool output carries `updated_at` and the section per source, and the tool tells the model to prefer the most recent.
+3. Originals of every new upload and replacement are written to the media object store under the workspace's prefix and named by their generation; deleting the document owes them a delete, and the workspace purge erases them.
+
+**Consequences.** Documents uploaded before this have no original and can be re-extracted only by uploading again.
+
+## ADR-167 — Measured Before Tuned: Telemetry, An Evaluation Harness, The pgvector Floor And Paged Operations (FX-1.3, FX-1.8, FX-1.9, FX-1.12, FX-1.13, FX-3.1)
+
+**Context.** Nothing measured retrieval: no distance, no dropped passages, no cached tokens, no per-stage timing, and no labelled questions. Search needs pgvector 0.8 (`hnsw.iterative_scan`) and nothing checked. `reindex-stale-embeddings` re-selected its first batch for ever, and the recovery sweep re-queued its whole backlog every minute.
+
+**Decision.**
+
+1. Retrieval and turn telemetry without tenant or text labels: best distance, passages dropped by reason, context size, cached and reasoning tokens (also on usage rows), per-stage time.
+2. A committed synthetic evaluation corpus and a deterministic structural harness on fake embeddings; a real-provider harness that runs only with an explicit credential.
+3. A two-workspace isolation test for every new way of reading knowledge, with a mutant per predicate.
+4. `db_preflight` and readiness refuse pgvector below 0.8.0, compared as numbers; the development image is pinned to the production digest.
+5. `reindex-stale-embeddings` skips documents with an attempt in flight or a failed latest attempt and pages by `(published_at, id)` with `--after`; the sweep stamps `last_enqueued_at` and does not re-queue within the queue's visibility timeout.
+
+**Consequences.** Fake-embedding numbers are structural, not semantic; calibrating the 0.75 threshold and every quality metric is external verification with the real model.
+
+## ADR-168 — The Context Budget Is Counted In Tokens, And The Tool Promises Only What It Delivers (RQ-12, RV-15, RV-19)
+
+**Context.** `max_results` advertised 1 to 10 passages; a 6,000-character context fitted 4 to 7 depending on the script, and packing stopped at the first passage that did not fit, so a small rank-2 passage was dropped behind a large rank-1 one. The model also read document UUIDs and chunk ordinals it had no use for.
+
+**Decision.**
+
+1. The budget is estimated tokens (`estimate_tokens`) over the serialised sources: `MAX_CONTEXT_TOKENS = MAX_TOP_K x PASSAGE_TOKEN_CEILING + 60 = 6 x 540 + 60 = 3,300`. 540 is the measured worst case of one source: the chunker's largest piece (250 + 40 + 10 = 300 estimated tokens), newline-heavy so escaping costs most, with title and section at their 120-character clip in Arabic (521). A unit test holds the bound.
+2. `MAX_TOP_K = 6`, published in the tool schema; every advertised count is delivered for English, Arabic and multi-line passages of the largest size.
+3. A passage that does not fit is skipped and the next one tried; a single oversized legacy passage is still shortened rather than answering "nothing found".
+4. The model reads `source`, `title`, `section`, `updated_at`, `match` (tiers only) and `content`; document ids stay on the server-side passages for citations and the admin preview (IMP-22).
+
+**Consequences.** A search may now hand the model more context than before (typical: ~2,000 estimated tokens for six passages, ceiling 3,300); the per-turn search cap (ADR-164) bounds it.
+
+## ADR-169 — Confidence Tiers Exist, Off Until A Real Distribution Calibrates Them (RQ-13, FX-3.12)
+
+**Decision.** `strong / partial / none` from the best distance, with per-embedding-model cut-offs in `RAG_CONFIDENCE_TIERS`; `RAG_CONFIDENCE_TIERS_ENABLED=false`. Enabled without cut-offs for the current model, tiers stay inert (`RetrievalPolicy.tiers_active`). With tiers on, each source carries `match` and the tool tells the model to answer cautiously on `partial`. `MAX_DISTANCE` stays 0.75; its comment no longer claims "unrelated text sits around 0.8" - that was never measured here.
+
+**Consequences.** Pre-retrieval (ADR-178) depends on tiers and is therefore inert until calibration. Calibration is external verification.
+
+## ADR-170 — Chunks Are Embedded With Their Document And Section (RQ-14, FX-3.2, IMP-05)
+
+**Decision.** The embedding input is `for_matching("{title} › {sections}\n\n{chunk}")`; the stored and displayed chunk is unchanged. A title that says nothing - empty, "untitled", a bare filename like `scan_003.pdf` - is replaced by a meaningful filename stem or left out; a heading the chunk opens with is not repeated in the label. `EMBEDDING_SCHEMA_VERSION` is not bumped: queries are embedded as before, so labelled and unlabelled vectors are searched together while `reindex-all` rebuilds documents one by one.
+
+**Consequences.** Every document needs one rebuild to gain the label; the first deploy's `reindex-all` (Part 1) does it together with the lexical columns.
+
+## ADR-171 — Hybrid Retrieval: One Predicate Builder, RRF, And An Identifier Keep Rule (RQ-15, FX-3.3, RC-4)
+
+**Context.** Embeddings are weak at exact tokens - SKUs, model numbers, Latin brand names inside Arabic - and the search had no other channel.
+
+**Decision.**
+
+1. `document_chunks.search_text` (`for_lexical`) and `search_tsv` (migration 0132, nullable, catalogue-only), written at publish; a GIN index built `CONCURRENTLY` (0133). `search_tsv` is a plain column built from lexemes Python tokenised (`retrieval_ranking.lexical_tokens`): PostgreSQL's `'simple'` parser splits `bk-35` into `bk`/`-35` and `4,500` into `4`/`500` (RR-16), and a stored generated column would rewrite the table on PostgreSQL 16.
+2. `DocumentChunkRepository.served_predicates` is the one list of predicates the vector query, the exact-word query and the neighbour lookup apply.
+3. Vector top-20 and lexical top-20 per query, fused by Reciprocal Rank Fusion (k = 60).
+4. A candidate past the distance cut-off is kept only for an exact hit on an identifier of the query: a whole token holding a digit, or a Latin-script word of 3+ letters inside an Arabic question.
+5. `RAG_HYBRID_ENABLED=true`; a workspace may switch it off.
+
+**Consequences.** Chunks published before 0132 are found only by the vector channel until rebuilt (RR-12 counts them). The lexical query adds one indexed statement per query.
+
+## ADR-172 — Repeats Are Dropped, Neighbours Merged, One Document Capped; Re-Rank Is Optional (RQ-16, FX-3.4, FX-3.11)
+
+**Decision.** Always on: an exact repeat is dropped, and a near repeat (80 % of the shorter passage's three-word runs shared) unless it carries a number the kept one lacks; a document's fourth and later passages are moved behind every other document's (deferred, not dropped: a one-document workspace still gets what it asked for); the best `k` chunks are merged where they are neighbours in one generation and one section, with the chunker's overlap removed; the best two passages are joined with their ordinal ± 1 neighbours from the same served generation and section while the context fits. Off by default (`RAG_RERANK_ENABLED`): one small-model call to the provider in use scores the fused candidates under a 1.5 s timeout, falling back to the fused order on a timeout, an error or a malformed answer; metered as `knowledge_rerank`. Hosted or self-hosted re-rankers are a product decision.
+
+**Consequences.** Near repeats are measured on word runs because, as bags of words, two rows of one price table looked like repeats and the structural evaluation lost answers to it; the number rule keeps sibling documents that differ only in a price.
+
+## ADR-173 — The Query Contract: Standalone, With An Optional Query In The Documents' Language (RQ-17, FX-3.5, RC-5)
+
+**Decision.** The `query` parameter asks for a short standalone query - references resolved from the conversation, the product named, no greetings - in the customer's language; optional `alternate_query` in the language the documents are written in. Both are embedded in one batched request and searched by both channels; all lists are fused by RRF. Only whether an alternate query was sent is logged, never either query.
+
+**Consequences.** The model's translation quality and its adherence to the contract are measured only against the real provider (external verification).
+
+## ADR-174 — An Agent's Knowledge Scope (RQ-18, FX-3.6, RC-6)
+
+**Decision.** `agent_tools.config` for `search_knowledge` accepts `{"knowledge_base_ids": [...]}`, validated against the workspace when the grant is saved; an empty list, an unknown id and another workspace's id are refused with one 422 wording. Every other tool's config is still refused (TOOL-14). The scope reaches the repository through `ToolContext` as an `IN` predicate in `served_predicates`; a value written by hand that is not a list scopes to nothing.
+
+**Consequences.** Only the workspace's `ACTIVE` default agent answers customers today; the scope matters for every turn once routing exists (a separate stage).
+
+## ADR-175 — An Admin Search Preview (FX-3.9, RV-21, IMP-26)
+
+**Decision.** `POST /knowledge/search`, administrators only, runs the answering agent's search - the workspace's switches, the agent's scope, the same budget - and returns passages with distance, channels and chunk ordinals, every candidate with its outcome, per-channel counts, drops per reason, the re-rank outcome, the tier, a duplicate-title warning and the exact model-facing JSON. Metered like a search; under the workspace rate limit like every workspace route.
+
+## ADR-176 — A Workspace's Knowledge Switches (G9)
+
+**Decision.** `tenants.knowledge_settings` (JSONB, nullable; migration 0134) holds a workspace's overrides of `hybrid`, `rerank`, `confidence_tiers`, `number_grounding`, `pre_retrieval` and `parallel_sentiment`, written by `PATCH /knowledge/settings` (administrators, audited `knowledge_settings_updated`); `null` returns a switch to the deployment default. Cut-offs and the re-rank model remain deployment settings. The worker resolves the switches once per turn.
+
+## ADR-177 — Numbers In A Reply Are Checked Against What The Turn Retrieved (RQ-19, FX-3.13, IMP-14)
+
+**Decision.** `RAG_NUMBER_GROUNDING = off | observe | correct | strict`, default `observe`. Currency amounts and percentages in the composed reply, after digit folding, must equal a number in this turn's retrieved passages, the customer's messages or the agent's instructions - or be a sum, difference or product of grounded numbers (to a fixed point, so a total built on a derived figure is grounded). `observe` counts; `correct` runs one corrective round with `tool_choice: "none"` and sends the correction if it is grounded; `strict`, or a correction still ungrounded, withholds the reply - the worker sends the fallback line and hands over with `AI_UNGROUNDED_NUMBER`. The agent's instructions are a third source, a deviation from RQ-19 recorded here: without it every fee a business writes into its prompt is a false positive.
+
+**Consequences.** A withheld turn ends `empty_response` (no new turn-outcome label, which would be a native-enum migration); the handoff reason distinguishes it.
+
+## ADR-178 — Pre-Retrieval And Sentiment In Parallel, Both Off (RQ-20, FX-3.14, FX-3.15) — amends ADR-024
+
+**Decision.**
+
+1. Pre-retrieval (`RAG_PRERETRIEVAL_ENABLED=false`): for an agent granted `search_knowledge`, a message that is not a greeting, a word or two, or only a file is searched before round one through the executor - a `tool_executions` row (round 1, ordinal 0) with every gate - and injected as the tool's call-and-output pair only for a `strong` or `partial` match. With tiers off it does nothing, not even the search. A weak result does not count against the per-turn search cap.
+2. Sentiment in parallel (`RAG_PARALLEL_SENTIMENT_ENABLED=false`): `SentimentService.assess` is split into `prepare` (reads), `classify` (HTTP only) and `apply` (writes, escalation, metering). In parallel mode round one's call and `classify` run together inside the released session; `apply` runs after both return; an escalation discards round one's reply and runs none of its tool calls, a takeover meanwhile ends the turn `suppressed_human` (CRM-02). The tokens are metered; the escalated turn is not charged as composed, as in serial mode.
+
+**Consequences.** ADR-024's ordering ("before any reply is composed") holds by default. With the flag on, a reply may be composed before the classification but is never sent and no tool runs before it - the property ADR-024 exists for.
+
+## ADR-179 — Catalogues And Office Files Are Knowledge, Parsed In The Sandbox, One Row Per Passage (RQ-21, FX-3.17, IMP-07)
+
+**Decision.** `document_source` gains `csv`, `xlsx`, `docx` and `html` (migration 0135). XLSX, DOCX and HTML are parsed in `office_extract_child`, the same secret-free, resource-limited, killable child process the PDFs use (RAG-02, RAG-08); openpyxl (read-only, MIT) and python-docx (MIT) are pinned. Before any parser reads XML the child checks the archive - entries (1,000), inflated bytes (30 MB), per-part compression ratio (200) - and refuses any `DOCTYPE` or `ENTITY`. CSV is parsed in-process with the standard library (UTF-16 without a BOM recognised). A catalogue (CSV, XLSX) is chunked a row at a time as `Column: value; …` with the header in every row and the sheet as breadcrumb, up to 1,000 rows (the chunk limit), 50 columns, cells of 2,000 characters, 20 sheets. A formula is stored as its text; it is never evaluated and its cached value is never read. A question with its answer is one passage in every format. Every limit lives in `knowledge_limits.py`; past one, `422 document_limit_exceeded`, never truncated; bytes that are not the declared format, `422 document_format_mismatch`.
+
+**Consequences.** A 5,000-row catalogue is refused with the limit in the message and uploaded as five files; raising the row limit is a plan-pricing decision (deferred). OCR for scanned PDFs stays a deferred product decision. Every new format takes the same generation, dedupe, `source_key` and replacement path as text and PDF, and its original is kept in the object store. RR-14 counts a catalogue chunk holding more than one row.
+
+## ADR-180 — Multipart Upload Beside The Base64 Routes (RQ-22, FX-4.5)
+
+**Decision.** `POST /knowledge/bases/{id}/documents/upload` and `PUT /knowledge/documents/{id}/content/upload` take the file as multipart, read it in bounded chunks, and run the same pipeline, limits and answers as the JSON routes. The format comes from the form, else the extension. A file larger than any document may be is `413 document_too_large`. The base64 JSON routes are unchanged.
+
+## ADR-181 — The Embedding Model Changes Through Shadow Generations, Per Workspace (RQ-25, FX-4.1, RV-11) — amends ADR-107
+
+**Context.** ADR-107 made an embedding's space part of its identity, so a changed `OPENAI_EMBEDDING_MODEL` excludes every old vector - correctly, and at the cost of every document being invisible until re-indexed (RV-11).
+
+**Decision.**
+
+1. A workspace has a query space (`workspace_embedding_spaces`, migration 0136): the configured space until it flips. A search embeds its query, and serves only active generations, in that space.
+2. `OPENAI_EMBEDDING_MODEL_NEXT` names a switch's target. `embedding-switch start` records it per workspace; `build` - the throttled background re-index: `--rate` per minute, one document per workspace per turn, resumable from the database - queues shadow generations: state `shadow`, published beside the active one and never served. `active` and both partial unique indexes keep their meaning.
+3. `flip` per workspace only at 100 % coverage (every ready document has a shadow of its current text). A permanently failed shadow blocks the flip and is listed; `--retry-blocked` rebuilds it. The flip supersedes each active generation by its shadow and moves the query space in one transaction; `retire` deletes the old space's chunks.
+4. A generation embedded in a space its workspace has left is put back and its attempt refunded, never published where no search looks. A replacement mid-switch retires the stale shadow.
+
+**Consequences.** No search is empty for a document that exists at any step (rehearsed: 64 documents, 2 workspaces, 8 steps, 0 empty searches, 0 of 98 during the drains). Changing `OPENAI_EMBEDDING_MODEL` directly is still the outage RV-11 described; RR-09 and `KnowledgeStaleEmbeddings` say so. The setting is changed only after every workspace has flipped, and `_NEXT` is then unset.
+
+## ADR-182 — A Query-Embedding Cache, Never A Result Cache (RQ-26, FX-4.6, IMP-19)
+
+**Decision.** The agent tool's query vectors are kept in Redis for 24 h under `wasla:rag:qemb:{tenant}:{space}:{sha256(for_matching(query))}` (`RAG_QUERY_EMBEDDING_CACHE`, default true). Vectors only: which passages a search returns is decided by the database every time, so a deleted, replaced or flipped document cannot be served from the cache. The workspace and the space are in the key, so two workspaces never share an entry and a flipped workspace misses into its new model; the query text is not stored. A Redis failure is a miss. A hit meters the search but no embedding request.
+
+**Consequences.** Twenty identical questions cost one embedding request instead of twenty. A result cache needs a per-workspace knowledge version and is deferred as a later product.
+
+## ADR-183 — A Knowledge-Gap Report, Off Until The Privacy Audit (RQ-27, FX-4.10, IMP-25)
+
+**Decision.** With `RAG_GAP_REPORT_ENABLED` (default false), an empty search the agent's tool ran is recorded in `knowledge_search_gaps` (migration 0138): the query the model wrote (`for_storage`, 500 characters), its script (`ar`, `en`, `mixed`, `other`), the best distance and the time. The customer's message is never stored, so pre-retrieval, which searches with it, records nothing. Rows are tenant-keyed, deleted after `RAG_GAP_RETENTION_DAYS` (30) by the recovery sweep whether or not the report is on now, erased by the workspace purge, and read only through `GET /knowledge/gaps` by the workspace's administrators (`404` while off). RR-13 counts rows past the retention.
+
+**Consequences.** Switching it on is carried to the Privacy audit (#18).
+
+## ADR-184 — Concurrent Embedding Batches Under One Renewal; Autovacuum Sized For A Re-Index (FX-4.8, FX-4.2, FX-4.7)
+
+**Decision.**
+
+1. `prepare()` sends up to `RAG_EMBEDDING_CONCURRENCY` (default 3, at most 4) batches as one wave, after one claim renewal in its own short unit of work. No transaction, lock or pooled connection is held across the provider (ADR-080). Every batch that answered is metered even when another of its wave failed; vectors keep their chunks' order. A suspended workspace stops at the next wave.
+2. A generation's chunks are written in one multi-row INSERT at publish.
+3. Migration 0137: `document_chunks` is autovacuumed and auto-analysed after 2 % of it changes (floor 1,000 rows), vacuumed after 5 % is newly inserted, and the `tenant_id` statistics target is 1,000, so a mass re-index's dead tuples leave the HNSW graph sooner.
+4. Neighbour expansion asks for every passage's neighbours in one query. `plan_cache_mode` and `hnsw.iterative_scan` stay `SET LOCAL` per search in one round trip (ADR-079): set per role or per pool they would change for every other subsystem on the same role. `ef_search` is not tuned: that needs the real-provider evaluation.
+
+**Consequences.** Extraction stays in the request: moving it to the worker changes the API contract and is deferred.
+
+## ADR-185 — Row-Level Security On The Knowledge Tables Is Deferred, With Its Design (RQ-28, FX-4.9, IMP-24)
+
+**Context.** P-R34: in production the application connects as a role that owns nothing and has `NOBYPASSRLS` (`scripts/provision_runtime_db_role.py`, which also refuses a runtime role that is a member of any other role). In compose and CI the application connects as the owner, and an owner bypasses its own tables' policies unless they are `FORCE`d. P-R33: as the runtime role, a query without a tenant predicate returns every workspace's chunks (302 rows of 2 workspaces). In a rolled-back transaction with a policy `USING (tenant_id = current_setting('app.tenant_id', true)::uuid)` the same role reads 0 rows without the setting and 151 rows (one workspace) with it - and the cross-tenant reads the system depends on read 0 as well.
+
+**Blocker.** The indexing sweep and the recovery worker (`IndexingSweep.claim_due`, `list_stale`), the knowledge gauges in `metrics_service`, the embedding switch (`switching_workspaces`, `build`), the gap retention pass, the workspace purge, platform-staff views, `rag_triage` and `rag_invariants` read across workspaces on the same runtime role, in the API and worker processes. Under the policy each would silently see nothing: documents never claimed, gauges at zero, a purge that deletes nothing. Running them under a `BYPASSRLS` role needs a second privileged login credential and a second engine in the API and the worker - a change to the database role model the provisioning script exists to prevent. RQ-28's third condition does not hold: the stop condition.
+
+**Design, for the stage that changes the role model.**
+
+1. A `wasla_maintenance` login role, `BYPASSRLS`, owning nothing, used only by a second engine (`MAINTENANCE_DATABASE_URL`) that the sweeps, gauges, purge, switch and platform views take explicitly; provisioned beside the runtime role.
+2. `ENABLE` and `FORCE ROW LEVEL SECURITY` on `knowledge_bases`, `documents`, `document_index_generations`, `document_chunks`, `knowledge_search_gaps` and `workspace_embedding_spaces`, with the policy above; a missing setting matches nothing.
+3. A SQLAlchemy `after_begin` listener runs `set_config('app.tenant_id', session.info['tenant_id'], true)` for every transaction of a session bound to a workspace - including the one that resumes after `released()` commits; a tenant-scoped repository asserts the binding.
+4. P-R33 re-run as the runtime role returns 0 rows; M-R64 drops the policy on `document_chunks` and must fail it.
+
+**Consequences.** Tenant isolation stays enforced by the repository predicates (ADR-008), the triple predicate on every knowledge query, the composite foreign keys and the isolation gate. FX-4.9 is DEFERRED and M-R64 is not applicable.
+
+## ADR-186 — Partitioning `document_chunks` Waits For A Measured Trigger (FX-4.3, RV-25)
+
+**Decision.** `document_chunks` is not partitioned. Revisit when one workspace holds more than 250,000 chunks, when search p95 for the largest workspace exceeds 300 ms with the HNSW path chosen, or when the table passes 20 million rows. The Part 3 drill corpus numbers are in `RAG_REMEDIATION_PART3_SCALE.md` §8.
+
+## ADR-187 — An Upload Decides Under The Workspace's Lock; CI Installs The Lock; The Switch Names Every Process (RGM-05, RGM-14, RGM-07, RGM-10)
+
+**Context.** Since ADR-163 the plan's document slot is reserved inside `KnowledgeService.submit`, and only for a new document. The duplicate checks - the same text in this knowledge base, the same source key, the same text in another knowledge base of the workspace - ran before that lock. Two uploads of one text at the same moment both passed them: in one knowledge base the second insert met the unique key and answered `500` (its cleanup wrote into the failed transaction); in two knowledge bases both were stored and the text was served twice. Separately, a refused upload's original stayed in the media store for ever, because its purge row was written in the transaction the refusal rolled back. CI installed `pip install -e ".[dev]"`, which resolved 32 of the 58 locked packages to newer versions than the image ships. The embedding-switch runbook gave the next model to the worker only.
+
+**Decision.**
+
+1. `_record` takes the workspace's upload lock - `hold_limit_lock(tenant, KNOWLEDGE_DOCUMENTS)`, the transaction-scoped advisory lock `reserve_slot` takes - before any duplicate check, and holds it to the commit. The checks under it decide; a workspace-wide lock because one check is workspace-wide. Two workspaces never share it.
+2. Extraction, normalisation, hashing and the original's write stay before the lock (ADR-163): only the checks, the slot and the inserts run under it.
+3. The insert runs in a savepoint. Should it still meet a unique key, the checks run again and the request gets the repeat's answer - never a `5xx`.
+4. On every exception path of `submit` and `replace_content` the request's original is deleted from the store directly; nothing can refer to a key generated for a request whose transaction is rolled back.
+5. Every CI job that installs Python packages installs `requirements.lock` and `requirements-build.lock` by hash first, then the project with its dev extras, and `scripts/check_installed_lock.py` plus `pip check` fail the job on any pinned package at another version.
+6. `docs/RUNBOOK.md` "Changing the embedding model" sets `OPENAI_EMBEDDING_MODEL_NEXT` on the API (the admin search preview), the indexing worker and the agent worker before `start`, and confirms it on each.
+
+**Consequences.** Two concurrent uploads end as two sequential ones: one document, and the other request answered exactly as a second upload a minute later would be (`202` `created: false`, or `409 document_exists_in_other_knowledge_base`) - proved by tests that hold the lock themselves until every request is queued on it, so they fail every time the checks run first. The lock is held for milliseconds, never for a parse. Replacement still asks the plan for nothing (ADR-161). A pinned package can no longer drift under CI unnoticed. `docker-compose.prod.yml` now passes `OPENAI_EMBEDDING_MODEL_NEXT` and every `RAG_*` setting to `api` and `worker` with their `Settings` defaults (RGM-12: it passed none of them, so the first deploy's `RAG_HYBRID_ENABLED=false` and the switch's target never reached a container), and `test_deployment_configuration.py` maps both prefixes, so a new knowledge setting cannot be left out again.
+
+**Amends** ADR-163: the slot is still reserved only for a new document, but the duplicate checks now run under the lock it is reserved under.

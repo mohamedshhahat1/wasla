@@ -1042,6 +1042,202 @@ groups:
             unindexed-documents`.
           runbook: docs/RUNBOOK.md
 
+      - alert: KnowledgeUnreachable
+        # Ready documents and an answering agent without the search_knowledge
+        # grant (RC-7, RQ-11): every customer question is answered from the
+        # prompt alone. Not an outage, a configuration a person has to fix.
+        expr: max(wasla_knowledge_unreachable_workspaces) > 0
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "A workspace's documents cannot be searched by its answering agent"
+          description: >-
+            At least one workspace has ready documents while its active default
+            agent holds no enabled search_knowledge grant, so no answer uses
+            them. Run `python -m scripts.rag_triage` for the workspaces; the
+            agent's knowledge_unreachable field says the same to the workspace.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeDuplicateDocuments
+        # The same text ready twice in one workspace: stored before upload
+        # refused it (RQ-08), so a search spends two of its passages on one fact.
+        expr: max(wasla_knowledge_duplicate_documents) > 0
+        for: 6h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "A workspace holds the same document text more than once"
+          description: >-
+            Ready documents of one workspace share their exact text. Retrieval
+            serves the copy once, but the duplicate still costs index space and
+            hides which version is meant. Run `python -m scripts.rag_triage`
+            and delete the extra copy.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeReplacementsFailing
+        # Replacing a document's content keeps the old version serving when
+        # the new one fails (RQ-06), so customers see stale facts, not errors.
+        expr: |
+          sum(rate(wasla_knowledge_replacements_total{outcome="failed"}[1h]))
+          /
+          clamp_min(sum(rate(wasla_knowledge_replacements_total{outcome=~"published|failed"}[1h])), 0.001)
+          > 0.5
+        for: 30m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Most document replacements are failing"
+          description: >-
+            More than half of the replacements that finished in the last hour
+            failed, and each document keeps serving its previous version. Run
+            `python -m app.workers.queues failed-documents` for the codes.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeRerankFailing
+        # The optional re-rank (RQ-16) falls back to the fused order on any
+        # failure, so answers keep their passages - but every failed attempt
+        # still waited up to its timeout. Silent while re-rank is off: the
+        # `disabled` outcome is not in either side of the ratio.
+        expr: |
+          sum(rate(wasla_rag_rerank_total{outcome=~"timeout|error"}[15m]))
+          /
+          clamp_min(sum(rate(wasla_rag_rerank_total{outcome=~"ok|timeout|error"}[15m])), 0.001)
+          > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Most knowledge re-rank calls are failing"
+          description: >-
+            More than half of the re-rank calls of the last 15 minutes timed
+            out or failed. Searches use the fused order instead, after waiting
+            for the timeout. Check the provider, or switch re-rank off.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeStaleEmbeddings
+        # Active generations in a space their workspace is not queried in
+        # (RV-11, RR-09). A shadow switch never produces one - the old space
+        # stays the query space until the flip - so this is the embedding
+        # setting changed directly, and those documents are invisible to search.
+        expr: max(wasla_documents_stale_embedding) > 0
+        for: 30m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "Documents are served from an embedding space nobody queries"
+          description: >-
+            Active document generations were embedded in a space other than
+            their workspace's query space, so searches cannot find them. This
+            happens when OPENAI_EMBEDDING_MODEL or EMBEDDING_SCHEMA_VERSION is
+            changed directly instead of through the shadow switch. Restore the
+            setting, then change the model with `python -m app.workers.queues
+            embedding-switch start`.
+          runbook: docs/RUNBOOK.md
+
+      - alert: EmbeddingSwitchStalled
+        # An embedding-model switch (RQ-25) whose coverage has not moved for
+        # six hours below 100 %. Nothing is wrong for customers - the old space
+        # keeps serving - but the switch will never flip on its own.
+        expr: |
+          max(wasla_rag_space_coverage_ratio) < 1
+          and
+          max(max_over_time(wasla_rag_space_coverage_ratio[6h])) - max(min_over_time(wasla_rag_space_coverage_ratio[6h])) == 0
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "An embedding-model switch has stopped making progress"
+          description: >-
+            Coverage of an embedding-model switch has stayed below 100 % for
+            six hours. The current space keeps serving, so no search is
+            affected, but no workspace will flip. Run `python -m
+            app.workers.queues embedding-switch status` for the blocking
+            documents and check the shadow re-index loop.
+          runbook: docs/RUNBOOK.md
+
+      - alert: EmbeddingSwitchShadowsFailed
+        # A shadow that failed permanently blocks its workspace's flip (RQ-25).
+        expr: max(wasla_rag_shadow_generations{state="failed"}) > 0
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "Shadow generations failed and are blocking an embedding-model switch"
+          description: >-
+            Some documents could not be embedded in the switch's target space.
+            Their workspaces will not flip until each is fixed, re-indexed or
+            deleted. Run `python -m app.workers.queues embedding-switch status`
+            for the documents.
+          runbook: docs/RUNBOOK.md
+
+      - alert: QueryEmbeddingCacheErrors
+        # The query-embedding cache (RQ-26) falls back to the provider on any
+        # Redis error: answers are unaffected, every search pays for an
+        # embedding call again.
+        expr: |
+          sum(rate(wasla_rag_query_embedding_cache_total{outcome="error"}[15m]))
+          /
+          clamp_min(sum(rate(wasla_rag_query_embedding_cache_total[15m])), 0.001)
+          > 0.2
+        for: 15m
+        labels:
+          severity: warning
+          component: rag
+        annotations:
+          summary: "The query-embedding cache is failing"
+          description: >-
+            More than a fifth of the query-embedding cache lookups of the last
+            15 minutes failed. Searches still work, embedding each query again.
+            Check Redis (DependencyDown) or switch the cache off with
+            RAG_QUERY_EMBEDDING_CACHE=false.
+          runbook: docs/RUNBOOK.md
+
+      - alert: KnowledgeBidiWarnings
+        # Ready PDFs whose extraction flagged lines it may have re-ordered
+        # (RQ-04): answers from them may quote scrambled Arabic.
+        expr: max(wasla_knowledge_bidi_warning_documents) > 0
+        for: 24h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "Some ready documents may hold re-ordered right-to-left text"
+          description: >-
+            PDF extraction flagged lines of ready documents as possibly
+            re-ordered. Run `python -m scripts.rag_triage` for the documents
+            and ask the workspace to re-upload them from the original source.
+          runbook: docs/RUNBOOK.md
+
+      - alert: AgentRepliesQuoteUngroundedNumbers
+        # Prices and percentages in replies that no retrieved passage, customer
+        # message or agent instruction supports (RQ-19). In observe mode they
+        # were sent; this says how often.
+        expr: |
+          sum(rate(wasla_rag_number_grounding_total{outcome="ungrounded"}[1h]))
+          /
+          clamp_min(sum(rate(wasla_rag_number_grounding_total{outcome=~"grounded|ungrounded"}[1h])), 0.001)
+          > 0.1
+        for: 1h
+        labels:
+          severity: info
+          component: rag
+        annotations:
+          summary: "Agent replies often quote figures the knowledge base does not state"
+          description: >-
+            More than one in ten prices or percentages in agent replies over
+            the last hour were not in what the turn retrieved. Check the
+            documents with the search preview, then consider number grounding
+            "correct" or "strict" for the affected workspaces.
+          runbook: docs/RUNBOOK.md
+
   # ------------------------------------------------------------------ media
   # Inbound attachments (MEDIA-15). Every rule reads a closed-label counter or
   # an unlabelled gauge: no workspace, file, key or URL. None fires on a single

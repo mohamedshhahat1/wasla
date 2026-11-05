@@ -35,6 +35,7 @@ lose up to a second of Redis writes, including a published ingestion job.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -44,7 +45,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.redis import RedisClient
 from app.db.session import Database
-from app.repositories.knowledge_repository import IndexingSweep
+from app.repositories.knowledge_repository import IndexingSweep, KnowledgeGapSweep
 from app.services.document_indexing import CLAIM_LEASE, MAX_INDEXING_ATTEMPTS
 from app.workers.ingestion_queue import IngestionJob, IngestionQueue
 
@@ -97,6 +98,9 @@ class IngestionRecoveryWorker:
             redis.client,
             visibility_timeout_seconds=settings.queue_visibility_timeout_seconds,
         )
+        # A job queued within this long is still on its way (FX-1.9).
+        self._visibility = timedelta(seconds=settings.queue_visibility_timeout_seconds)
+        self._gap_retention = timedelta(days=settings.rag_gap_retention_days)
         self._running = False
         self._stopping = asyncio.Event()
 
@@ -119,6 +123,23 @@ class IngestionRecoveryWorker:
                 continue
         logger.info("ingestion_recovery.worker_stopped")
 
+    async def _expire_gaps(self, moment: datetime) -> None:
+        """The knowledge-gap report's retention (RQ-27): rows past it, a batch a pass.
+
+        Whether or not the report is enabled now: rows written while it was
+        are kept no longer than the retention either way.
+        """
+        try:
+            async with self._database.session() as session:
+                expired = await KnowledgeGapSweep(session).expire(
+                    older_than=moment - self._gap_retention
+                )
+        except Exception:
+            logger.exception("knowledge.gap_retention_failed")
+            return
+        if expired:
+            logger.info("knowledge.gaps_expired", extra={"rows": expired})
+
     def stop(self) -> None:
         self._running = False
         self._stopping.set()
@@ -126,17 +147,20 @@ class IngestionRecoveryWorker:
     async def run_once(self, *, now: datetime | None = None) -> IngestionRecoveryOutcome:
         """Claim what is owed an attempt and publish as much as Redis allows.
 
-        The claim's transaction ends without marking anything, and that is
-        correct rather than an omission: the generation's own state is the
-        durable record, and the worker's claim is what advances it. A sweep that
-        marked rows itself would be inventing a second state machine beside the
-        one the consumer already owns.
+        The generation's own state stays the durable record, and the worker's
+        claim is what advances it. The sweep stamps only `last_enqueued_at` on
+        what it queued - not a state, a "sent at" the claim clears - so the next
+        pass does not queue it again while the job is still within the queue's
+        visibility timeout (FX-1.9, RV-18). Once that window passes unclaimed,
+        the job is presumed lost and the generation is owed a send again.
 
-        A generation Redis still refuses is claimed again next pass, which is
-        exactly what should happen; the gauges keep it visible meanwhile.
+        A generation Redis still refuses is not stamped and is claimed again next
+        pass, which is exactly what should happen; the gauges keep it visible.
         """
         moment = now or datetime.now(UTC)
         queued = still_owing = 0
+        sent: list[uuid.UUID] = []
+        await self._expire_gaps(moment)
 
         async with self._database.session() as session:
             due = await IndexingSweep(session).claim_due(
@@ -145,6 +169,7 @@ class IngestionRecoveryWorker:
                 lease_expired_before=moment - CLAIM_LEASE,
                 max_attempts=MAX_INDEXING_ATTEMPTS,
                 limit=self._batch_limit,
+                requeue_before=moment - self._visibility,
             )
             if not due:
                 return IngestionRecoveryOutcome()
@@ -160,6 +185,10 @@ class IngestionRecoveryWorker:
                     still_owing += 1
                     continue
                 queued += 1
+                sent.append(generation.generation_id)
+            # Stamped in the transaction that holds the rows, so the next pass
+            # does not queue them again while the job is still on its way.
+            await IndexingSweep(session).mark_enqueued(sent, now=moment)
 
         outcome = IngestionRecoveryOutcome(
             claimed=len(due),

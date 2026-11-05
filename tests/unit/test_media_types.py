@@ -236,10 +236,13 @@ def test_every_extension_the_store_knows_belongs_to_a_supported_type() -> None:
 
     An extension for a type nothing can store is dead, and worse, it is a
     suggestion that the type is supported to whoever reads the table next.
+    Knowledge originals (RQ-21, RQ-23) are the store's second writer: their
+    formats are supported there and nowhere else - HTML is not customer media.
     """
     from app.core.storage import EXTENSIONS
+    from app.services.document_formats import MEDIA_TYPES
 
-    unknown = sorted(set(EXTENSIONS) - set(CANONICAL_TYPES))
+    unknown = sorted(set(EXTENSIONS) - set(CANONICAL_TYPES) - set(MEDIA_TYPES.values()))
 
     assert not unknown, f"the store maps extensions for unsupported types: {unknown}"
 

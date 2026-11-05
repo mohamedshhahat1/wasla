@@ -29,6 +29,10 @@ Two properties are deliberate and both are tested. The limiter **fails open**: i
 
 ## Tenant isolation
 
+**One predicate set for every knowledge query** (RAG remediation Part 2, RQ-15). The vector search, the exact-word search and the neighbour lookup apply `DocumentChunkRepository.served_predicates` - tenant on the chunk, the generation and the document, the active generation, the embedding space, the validity window and the agent's knowledge scope - so a new query path cannot write a shorter list. The exact-word query binds an OR of quoted lexemes as a parameter, never interpolated. The fused, merged, neighbour-expanded, re-ranked, alternate-query, scoped, preview and pre-retrieval paths each have a two-workspace isolation test, and mutants removing each path's predicate are killed. A knowledge scope is validated against the workspace when it is saved; an unknown id and another workspace's id are refused with the same words. The optional re-rank uses the provider already in use with `store: false` and sends only one search's already-filtered candidates - no new data processor; hosted or self-hosted re-rankers would be one and are a product decision. The search preview is administrators only.
+
+**Every new way of reading knowledge passes an isolation gate** (FX-1.12, RAG remediation Part 1). Replacement, source-key and duplicate lookups, cross-knowledge-base listings, similar documents, originals in the object store, the retrieval-time duplicate filter and the triage command are each tested with two workspaces holding the same titles, text, hashes and filenames: no foreign id, title, text, count or object key appears in any result, refusal or listing, and a duplicate refusal never reveals that **another** workspace holds the same text - the lookups are scoped by `tenant_id`, never global. Mutants that remove each predicate are killed by those tests.
+
 Isolation is a security control, not a filter convenience. Every tenant-owned query is scoped by `tenant_id` in repositories and services; frontend filtering is never trusted. A client-provided tenant identifier is honoured only after membership verification. Cross-tenant access attempts are explicitly tested for conversations, contacts, leads, messages, documents, embeddings, WhatsApp accounts, agents, analytics, usage, and settings.
 
 ## Input and transport
@@ -768,3 +772,10 @@ Confirmed behaviourally during this audit rather than by reading:
 - **pypdf parses attacker-supplied PDFs in-process.** Byte caps bound the input
   and no image is decoded locally, but a document is still parsed by a library on
   the worker.
+
+## Knowledge formats, the query cache and row-level security (RAG remediation Part 3)
+
+- **XLSX, DOCX and HTML are parsed in the extraction sandbox** (ADR-179): a separate interpreter with no secrets in its environment, an address-space and CPU limit and a wall-clock deadline, like PDFs. Before any XML is parsed the archive's entry count, inflated size and per-part compression ratio are checked (zip bombs) and any `DOCTYPE` or `ENTITY` is refused (entity expansion). Formula cells are stored as text, never evaluated, and their cached values are not read. CSV is parsed in-process by the standard library with the same row, column and cell limits. A hostile file is a refusal, never a truncated document.
+- **The query-embedding cache cannot cross a workspace** (ADR-182, G3): the workspace and the embedding space are in every key, the query text is not stored (a SHA-256 of the folded query is), and the cache holds vectors, never passages.
+- **The knowledge-gap report stores no customer message** (ADR-183): off by default, the model-written query only, tenant-keyed, 30-day retention, erased by the purge, admin-only.
+- **Row-level security is deferred** (ADR-185). In production the runtime role owns nothing and cannot bypass RLS, but the indexing sweeps, gauges, switch and purge read across workspaces on that same role; enabling policies would blind them without a second, `BYPASSRLS` role - a change to the role model. Tenant isolation remains the repository predicates (ADR-008), composite foreign keys and the two-workspace isolation gate, which covers every Part 3 path.

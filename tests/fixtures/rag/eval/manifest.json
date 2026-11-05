@@ -1,0 +1,310 @@
+[
+ {
+  "id": "en-prices-0",
+  "file": "en-prices-0.txt",
+  "title": "Furniture price list 0",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "en-prices-1",
+  "file": "en-prices-1.txt",
+  "title": "Furniture price list 1",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "en-prices-2",
+  "file": "en-prices-2.txt",
+  "title": "Furniture price list 2",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "ar-prices-0",
+  "file": "ar-prices-0.txt",
+  "title": "قائمة أسعار التشطيب 0",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "ar-prices-1",
+  "file": "ar-prices-1.txt",
+  "title": "قائمة أسعار التشطيب 1",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "ar-prices-2",
+  "file": "ar-prices-2.txt",
+  "title": "قائمة أسعار التشطيب 2",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "ar-policy-0",
+  "file": "ar-policy-0.txt",
+  "title": "سياسة الاسترجاع 0",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "ar-policy-1",
+  "file": "ar-policy-1.txt",
+  "title": "سياسة الاسترجاع 1",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "ar-policy-2",
+  "file": "ar-policy-2.txt",
+  "title": "سياسة الاسترجاع 2",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "en-shipping",
+  "file": "en-shipping.txt",
+  "title": "Shipping policy",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "en-warranty",
+  "file": "en-warranty.txt",
+  "title": "Warranty policy",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "en-returns",
+  "file": "en-returns.txt",
+  "title": "Returns policy",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "md-services-0",
+  "file": "md-services-0.md",
+  "title": "Services catalogue 0",
+  "source": "markdown",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "md-services-1",
+  "file": "md-services-1.md",
+  "title": "Services catalogue 1",
+  "source": "markdown",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "md-services-2",
+  "file": "md-services-2.md",
+  "title": "Services catalogue 2",
+  "source": "markdown",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "faq-ar-0",
+  "file": "faq-ar-0.txt",
+  "title": "الأسئلة الشائعة 0",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "faq-en-0",
+  "file": "faq-en-0.txt",
+  "title": "FAQ 0",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "faq-ar-1",
+  "file": "faq-ar-1.txt",
+  "title": "الأسئلة الشائعة 1",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "faq-en-1",
+  "file": "faq-en-1.txt",
+  "title": "FAQ 1",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "csv-0",
+  "file": "csv-0.txt",
+  "title": "Stock catalogue 0",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "csv-1",
+  "file": "csv-1.txt",
+  "title": "Stock catalogue 1",
+  "source": "text",
+  "kb": "General",
+  "role": "document"
+ },
+ {
+  "id": "price-v1",
+  "file": "price-v1.txt",
+  "title": "Price list",
+  "source": "text",
+  "kb": "General",
+  "role": "version-1"
+ },
+ {
+  "id": "price-v2",
+  "file": "price-v2.txt",
+  "title": "Price list",
+  "source": "text",
+  "kb": "General",
+  "role": "version-2"
+ },
+ {
+  "id": "en-shipping-copy",
+  "file": "en-shipping-copy.txt",
+  "title": "Shipping policy",
+  "source": "text",
+  "kb": "Sales",
+  "role": "copy"
+ },
+ {
+  "id": "injection",
+  "file": "injection.txt",
+  "title": "Supplier notes",
+  "source": "text",
+  "kb": "General",
+  "role": "injection"
+ },
+ {
+  "id": "pdf-chromium-AR-1",
+  "file": "../../pdf/chromium-AR-1.pdf",
+  "title": "AR-1 (chromium)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "chromium"
+ },
+ {
+  "id": "pdf-chromium-AR-2",
+  "file": "../../pdf/chromium-AR-2.pdf",
+  "title": "AR-2 (chromium)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "chromium"
+ },
+ {
+  "id": "pdf-chromium-EN-1",
+  "file": "../../pdf/chromium-EN-1.pdf",
+  "title": "EN-1 (chromium)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "chromium"
+ },
+ {
+  "id": "pdf-chromium-MX-1",
+  "file": "../../pdf/chromium-MX-1.pdf",
+  "title": "MX-1 (chromium)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "chromium"
+ },
+ {
+  "id": "pdf-word-AR-1",
+  "file": "../../pdf/word-AR-1.pdf",
+  "title": "AR-1 (word)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "word"
+ },
+ {
+  "id": "pdf-word-AR-2",
+  "file": "../../pdf/word-AR-2.pdf",
+  "title": "AR-2 (word)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "word"
+ },
+ {
+  "id": "pdf-word-EN-1",
+  "file": "../../pdf/word-EN-1.pdf",
+  "title": "EN-1 (word)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "word"
+ },
+ {
+  "id": "pdf-word-MX-1",
+  "file": "../../pdf/word-MX-1.pdf",
+  "title": "MX-1 (word)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "word"
+ },
+ {
+  "id": "pdf-weasyprint-AR-1",
+  "file": "../../pdf/weasyprint-AR-1.pdf",
+  "title": "AR-1 (weasyprint)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "weasyprint"
+ },
+ {
+  "id": "pdf-weasyprint-AR-2",
+  "file": "../../pdf/weasyprint-AR-2.pdf",
+  "title": "AR-2 (weasyprint)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "weasyprint"
+ },
+ {
+  "id": "pdf-weasyprint-EN-1",
+  "file": "../../pdf/weasyprint-EN-1.pdf",
+  "title": "EN-1 (weasyprint)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "weasyprint"
+ },
+ {
+  "id": "pdf-weasyprint-MX-1",
+  "file": "../../pdf/weasyprint-MX-1.pdf",
+  "title": "MX-1 (weasyprint)",
+  "source": "pdf",
+  "kb": "General",
+  "role": "document",
+  "producer": "weasyprint"
+ }
+]

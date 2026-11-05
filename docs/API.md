@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **247 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **258 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -570,13 +570,35 @@ Conversations carry identifiers rather than embedded contact objects. The models
 | GET | `/api/v1/knowledge/documents/{document_id}` | Any workspace member |
 | POST | `/api/v1/knowledge/documents/{document_id}/ingest` | Admin or owner (`202`) |
 | DELETE | `/api/v1/knowledge/documents/{document_id}` | Admin or owner (`204`) |
+| PATCH | `/api/v1/knowledge/bases/{knowledge_base_id}` | Admin or owner |
+| DELETE | `/api/v1/knowledge/bases/{knowledge_base_id}` | Admin or owner (`204`; `?cascade=true` to delete its documents) |
+| GET | `/api/v1/knowledge/documents` | Any workspace member (across knowledge bases; cursor, `title`, `status`, `source`) |
+| GET | `/api/v1/knowledge/documents/{document_id}/similar` | Any workspace member |
+| PUT | `/api/v1/knowledge/documents/{document_id}/content` | Admin or owner (`202`) |
+| POST | `/api/v1/knowledge/bases/{knowledge_base_id}/documents/upload` | Admin or owner (`202`; multipart, RQ-22) |
+| PUT | `/api/v1/knowledge/documents/{document_id}/content/upload` | Admin or owner (`202`; multipart, RQ-22) |
+| POST | `/api/v1/knowledge/search` | Admin or owner (search preview, FX-3.9) |
+| GET | `/api/v1/knowledge/gaps` | Admin or owner (`404` while `RAG_GAP_REPORT_ENABLED` is off) |
+| GET | `/api/v1/knowledge/settings` | Admin or owner |
+| PATCH | `/api/v1/knowledge/settings` | Admin or owner (audited) |
 
 Reading is open to any member — the people staffing an inbox need to see what their agents can answer from. Writing is administrators only, because a document added here is something the AI will state to customers as fact.
 
 Three behaviours worth knowing:
 
 - **Submitting a document answers `202`, not `201`.** The document exists but is not yet retrievable; ingestion runs in the background. Poll `GET /knowledge/documents/{id}` until `status` is `ready`. A `failed` document carries the reason in `error`, and `POST .../ingest` queues it again once the cause is fixed.
-- **Submitting the same text twice is not an error.** It returns the existing document with `created: false`, keyed on a hash of the extracted text. The upload was recognised, not duplicated.
+- **Submitting the same text twice is not an error.** It returns the existing document with `created: false`, keyed on a hash of the normalised extracted text, and updates a changed title, filename or media type (`metadata_updated: true`). The upload was recognised, not duplicated.
+- **Updating a document is `PUT …/content`, never a second upload** (RV-02). Same body as a submission (`title?`, `content`, `source`, `filename?`, `media_type?`). The previous version keeps serving until the new one is indexed, then only the new one serves; a replacement consumes no plan slot. Text identical to the document's own is a metadata update; text another document of the workspace holds is `409 document_content_exists`.
+- **A second upload of the same source is refused** (RQ-07): a `source_key` (given, or derived from the filename) already in the knowledge base answers `409 document_source_exists` with `details.document_id` and `details.replace_url`; `POST …/documents?replace=true` replaces it instead.
+- **The same text in another knowledge base of the workspace is refused** (RQ-08): `409 document_exists_in_other_knowledge_base`, naming it. Agents search every knowledge base, so it would be served twice.
+- **The search preview** (`POST /knowledge/search`, RV-21): `{query, alternate_query?, top_k (1-6), knowledge_base_id?}` runs the answering agent's search and returns `passages` (`source`, `document_id`, `document_title`, `section`, `content`, `distance`, `channels`, `chunk_ordinals`, `updated_at`), `is_empty`, `match`, `best_distance`, `candidates` per channel, `dropped` per reason, `rerank`, `decisions` (every candidate and its outcome), `duplicate_version_warnings` and `model_context` - the JSON the model would read. A member gets `403`. Metered like a search.
+- **Knowledge settings** (`GET`/`PATCH /knowledge/settings`): `{hybrid, rerank, confidence_tiers, number_grounding (off|observe|correct|strict), pre_retrieval, parallel_sentiment}`, each optional; `null` clears an override. Answers `{overrides, effective}`. An unknown field or value is `422`.
+- **`search_knowledge` grant scope** (`PUT /agents/{id}/tools/search_knowledge`): `config: {"knowledge_base_ids": [...]}`; an empty list, an unknown or foreign id, or another key is `422`.
+- **Listings are cursor-paged** (RV-13): `limit` and `cursor`, newest first; the next page's cursor, when there is one, is in the `X-Next-Cursor` header. `GET /knowledge/documents/{id}/similar` lists the likely older versions of a document (same source key, title or filename) for a "replace existing?" prompt.
+- **`DocumentRead` adds** `source_key`, `extraction_warnings` (codes and counts of lines the PDF extraction may have re-ordered - re-upload to fix), `valid_from`, `valid_until`, `supersedes_document_id`, `original_available` and, on a resubmission, `metadata_updated`. A document outside its `valid_from`/`valid_until` window is never retrieved. `byte_size` is the size of the uploaded file, not of its base64 text.
+- **Formats** (RQ-21): `source` is `text`, `markdown`, `pdf`, `csv`, `xlsx`, `docx` or `html`. PDF, XLSX and DOCX travel as base64 in the JSON body; CSV and HTML as text. A CSV or XLSX catalogue is indexed one row per passage (`Column: value; …`, the header repeated in each), up to 1,000 rows and 50 columns, cells of up to 2,000 characters; a workbook up to 20 sheets. A formula cell is stored as its formula, never evaluated. XLSX, DOCX and HTML are parsed in the sandboxed child process. Past a limit: `422 document_limit_exceeded`, with the limit in the message - never truncated. Bytes that are not the declared format (an `.xlsx` that is a Word file, a CSV that is a zip, an old binary `.xls`): `422 document_format_mismatch`.
+- **Multipart upload** (RQ-22): `POST …/documents/upload` (form fields `file`, `title`, and optionally `source`, `source_key`, `valid_from`, `valid_until`, `supersedes_document_id`; `?replace=true`) and `PUT /knowledge/documents/{id}/content/upload` (`file`, optional `source`, `title`) take the same limits and give the same answers as the JSON routes. `source` defaults to the file's extension (`.csv`, `.xlsx`, `.docx`, `.html`/`.htm`, `.pdf`, `.md`), else text. A file larger than any document may be (300 KB for binary formats, 1,600 KB for text) is `413 document_too_large`. The base64 JSON routes are unchanged.
+- **Knowledge-gap report** (RQ-27, ADR-183): `GET /knowledge/gaps?days=30&limit=50` answers `{days, gaps: [{query, language, searches, best_distance, last_asked_at}]}`, the most-asked queries the agent searched with and found nothing for in this workspace (the model's query, never a customer's message), `days` 1 .. 90. `404` while the report is off, which is the default until the Privacy audit.
 - **A document read never returns the extracted text.** It reports what was ingested — status, chunk count, size, failure reason. The API is not a document store.
 
 ## Leads

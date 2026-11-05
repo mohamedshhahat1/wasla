@@ -40,7 +40,19 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # What the image installs (the Dockerfile's builder): the lock, by
+        # hash, first; then the project and the dev-only tools, which leaves
+        # every locked package at its pin. Resolving pyproject.toml afresh
+        # tested whatever was newest that day - pypdf drifted CI red three
+        # times that way (CPM-05, RGM-07).
+        run: |
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
+
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
 
       - name: Ruff
         run: ruff check .
@@ -121,7 +133,19 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # What the image installs (the Dockerfile's builder): the lock, by
+        # hash, first; then the project and the dev-only tools, which leaves
+        # every locked package at its pin. Resolving pyproject.toml afresh
+        # tested whatever was newest that day - pypdf drifted CI red three
+        # times that way (CPM-05, RGM-07).
+        run: |
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
+
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
 
       - name: Start an object store for the media suites
         # Exact mirrors of quay.io/minio/minio and quay.io/minio/mc at these
@@ -188,10 +212,14 @@ jobs:
           # so the exemption granted here cannot become a place for it to go
           # quietly missing.
           #
+          # The old-pgvector guard (RV-03) needs a second, deliberately outdated
+          # PostgreSQL; its supported-version half runs everywhere, the
+          # refusal half where WASLA_TEST_OLD_PGVECTOR_URL names one.
+          #
           # Any other skip - a fixture that started returning None, a marker
           # added to get a red build green - fails here rather than blending
           # into a count.
-          UNEXPECTED=$(grep -E "^SKIPPED" /tmp/pytest.txt             | grep -vE "real-provider tests are opt-in|the model declined to call a tool|schema parity is only meaningful against a migration-built database" || true)
+          UNEXPECTED=$(grep -E "^SKIPPED" /tmp/pytest.txt             | grep -vE "real-provider tests are opt-in|the model declined to call a tool|schema parity is only meaningful against a migration-built database|the old-pgvector lane is opt-in" || true)
           if [ -n "$UNEXPECTED" ]; then
             echo "::error::a test skipped for a reason nobody chose"
             echo "$UNEXPECTED"
@@ -301,7 +329,19 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # What the image installs (the Dockerfile's builder): the lock, by
+        # hash, first; then the project and the dev-only tools, which leaves
+        # every locked package at its pin. Resolving pyproject.toml afresh
+        # tested whatever was newest that day - pypdf drifted CI red three
+        # times that way (CPM-05, RGM-07).
+        run: |
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
+
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
 
       - name: Model and database enums agree
         # Runs first and on its own, so a parity failure is legible as a parity

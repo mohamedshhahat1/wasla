@@ -37,6 +37,7 @@ from app.integrations.openai.embeddings import (
     build_http_client,
 )
 from app.services.document_indexing import IndexingOutcome, committed_units, run_indexing
+from app.services.embedding_spaces import next_space_client
 from app.workers.dispatch import (
     SUCCEEDED,
     JobIdentity,
@@ -189,11 +190,17 @@ class IngestionWorker:
                 model=self._settings.openai_embedding_model,
                 dimensions=EMBEDDING_DIMENSIONS,
                 operation=EMBED_INGEST,
+                # During an embedding-model switch (RQ-25): the target space's
+                # client, which shadow generations are embedded with.
+                next_space=next_space_client(
+                    http=http, settings=self._settings, operation=EMBED_INGEST
+                ),
             )
             run = await run_indexing(
                 committed_units(self._database, tenant_id=job.tenant_id),
                 document_id=job.document_id,
                 embeddings=embeddings,
+                concurrency=self._settings.rag_embedding_concurrency,
             )
 
         await record_ingestion_outcome(str(run.outcome))

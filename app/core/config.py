@@ -480,6 +480,13 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
+    # The model an embedding-model switch builds shadow generations in (RQ-25,
+    # FX-4.1). Unset outside a switch. Changing `openai_embedding_model` itself
+    # moves every workspace not yet switched at once and hides its documents
+    # until they are re-indexed (RV-11); the switch is the supported path:
+    # set this, `embedding-switch start`, `build`, `flip` per workspace, and
+    # only once every workspace has flipped make it the model and unset this.
+    openai_embedding_model_next: str | None = None
     # Separate from the chat model on purpose. Describing every photograph a
     # business receives is a recurring cost with its own budget, and a workspace
     # may reasonably want a cheaper model for it than the one that answers.
@@ -506,6 +513,71 @@ class Settings(BaseSettings):
     # names none. A null there previously meant "whatever the provider's own
     # default is", which is an unbounded per-call spend nobody chose.
     openai_max_output_tokens: int = Field(default=2_048, ge=1, le=MAX_AGENT_OUTPUT_TOKENS)
+    # A new agent is created holding an enabled `search_knowledge` grant (RQ-11,
+    # RC-7): an agent created without one answered from its prompt alone while
+    # the workspace's documents sat unread, and nothing said so. Read-only,
+    # which is why it alone is on by default. Existing agents are not changed.
+    agent_default_knowledge_grant: bool = True
+
+    # Knowledge retrieval (RAG remediation part 2, G9). Every behaviour that
+    # changes what an agent retrieves or says and needs a calibration this
+    # deployment does not have yet ships off; a workspace may override each one
+    # (`tenants.knowledge_settings`, `PATCH /knowledge/settings`).
+    #
+    # The exact-word channel beside the vector one (RQ-15): needs no calibration.
+    rag_hybrid_enabled: bool = True
+    # ... and for questions that name no identifier too. Off: an OR of a
+    # question's common words matches most chunks of a large workspace, and
+    # ranking them cost +97 ms p95 at 12,000 chunks against a +15 ms budget.
+    rag_hybrid_all_questions: bool = False
+    # One small-model call scoring each search's candidates (RQ-16). Off: it adds
+    # a model call to every search and has not been measured on real traffic.
+    # Needs `rag_rerank_model`, which must be an allowed model.
+    rag_rerank_enabled: bool = False
+    rag_rerank_model: str | None = None
+    rag_rerank_timeout_seconds: float = Field(default=1.5, gt=0, le=10)
+    # strong / partial / none from the best distance (RQ-13). Off until a real
+    # distance distribution calibrates the cut-offs, which are per embedding
+    # model: `{"text-embedding-3-small": [0.35, 0.55]}`. Enabled with no entry
+    # for the current model, tiers stay inert.
+    rag_confidence_tiers_enabled: bool = False
+    rag_confidence_tiers: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    # Stop adding passages this much farther than the best one (FX-3.16). None:
+    # inert until calibrated.
+    rag_passage_margin: float | None = Field(default=None, gt=0, le=2)
+    # Currency amounts and percentages in a reply checked against what the turn
+    # retrieved (RQ-19): off | observe (count only) | correct (one corrective
+    # round) | strict (withhold, hand to a colleague).
+    rag_number_grounding: Literal["off", "observe", "correct", "strict"] = "observe"
+    # A search on the customer's message before the first round (RQ-20). Off,
+    # and inert until tiers are calibrated: only strong or partial matches are
+    # injected.
+    rag_preretrieval_enabled: bool = False
+    # The sentiment classifier and the first round in parallel, sending gated on
+    # the classification (RQ-20, amends AI-04). Off.
+    rag_parallel_sentiment_enabled: bool = False
+
+    # The query-embedding cache (RQ-26): a search's query vector kept in Redis
+    # for a day under the workspace, the space and a hash of the folded query,
+    # so a repeated question costs no embedding call. Vectors only - never a
+    # passage - so nothing replaced or deleted can be served from it.
+    rag_query_embedding_cache: bool = True
+    rag_query_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=60, le=7 * 86_400)
+    # The knowledge-gap report (RQ-27): empty and weak searches kept 30 days for
+    # a workspace's admins. Off until the Privacy audit (#18) has reviewed it.
+    rag_gap_report_enabled: bool = False
+    rag_gap_retention_days: int = Field(default=30, ge=1, le=90)
+    # How many embedding batches of one document are in flight at once
+    # (FX-4.8). One is the old, sequential behaviour.
+    rag_embedding_concurrency: int = Field(default=3, ge=1, le=4)
+
+    @field_validator(
+        "rag_rerank_model", "rag_passage_margin", "openai_embedding_model_next", mode="before"
+    )
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        """`RAG_RERANK_MODEL=` and `RAG_PASSAGE_MARGIN=` in an env file mean "not set"."""
+        return None if isinstance(value, str) and not value.strip() else value
 
     # Media
     # Which implementation of `MediaStorage` this deployment uses (ADR-077).

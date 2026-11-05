@@ -49,5 +49,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX}")
+    # In the run's transaction, as 0091's does: `CONCURRENTLY` in an autocommit
+    # block commits every downgrade step above this one, so a refusal further
+    # down would leave the database stamped part-way (MIG-0091). Latent while
+    # 0126 was head; exposed by 0127 .. 0131 (RAG Part 1, RR-14).
+    op.execute("SET LOCAL lock_timeout = '15s'")
+    op.execute(f"DROP INDEX IF EXISTS {INDEX}")

@@ -50,6 +50,7 @@ from app.repositories.knowledge_repository import (
     TRIGGER_STALE_EMBEDDING,
     DocumentChunkRepository,
     IndexingSweep,
+    encode_cursor,
 )
 from app.services.document_indexing import (
     MAX_INDEXING_ATTEMPTS,
@@ -448,11 +449,24 @@ async def test_a_workspace_that_is_not_served_spends_nothing(
         assert resumed.state is GenerationState.ACTIVE
 
 
+@pytest.mark.parametrize(("concurrency", "paid"), [(1, 1), (3, 3)])
 async def test_a_workspace_suspended_mid_ingestion_stops_at_the_next_batch(
-    indexing: Indexing,
+    indexing: Indexing, concurrency: int, paid: int
 ) -> None:
+    """Spending stops at the next renewal: the next batch, or the next wave of `concurrency`.
+
+    FX-4.8 embeds up to `RAG_EMBEDDING_CONCURRENCY` batches together under one
+    renewal, so a workspace suspended during one wave pays for that wave and
+    nothing after it - at most `concurrency` requests, of a document that needs
+    more.
+    """
+    indexing.configure(rag_embedding_concurrency=concurrency)
     tenant_id = await indexing.workspace()
-    document_id = await indexing.submit(tenant_id, long_document())
+    # Four batches of 96: more than one wave at either width.
+    body = "\n\n".join(
+        f"Clause {n}. " + " ".join(f"term{n}x{w}" for w in range(60)) for n in range(320)
+    )
+    document_id = await indexing.submit(tenant_id, body)
 
     async def suspend_then_answer(body: JsonObject) -> httpx.Response:
         await indexing.set_workspace(tenant_id, status=TenantStatus.SUSPENDED)
@@ -461,7 +475,7 @@ async def test_a_workspace_suspended_mid_ingestion_stops_at_the_next_batch(
     indexing.provider.handler = suspend_then_answer
     await indexing.drain()
 
-    assert len(indexing.provider.requests) == 1, "the second batch was never paid for"
+    assert len(indexing.provider.requests) == paid, "no batch after the wave was paid for"
     (generation,) = await indexing.generations(document_id)
     assert generation.state is GenerationState.PENDING
     assert generation.last_error_code == "workspace_suspended"
@@ -551,9 +565,25 @@ async def test_a_model_change_excludes_old_vectors_until_they_are_reindexed(
 
     indexing.configure(openai_embedding_model=LARGE.model)
     assert await indexing.search(tenant_id, "refund fourteen days", space=LARGE) == []
-    async with indexing.database.session() as session:
-        stale = await IndexingSweep(session).list_stale(space=LARGE, limit=10)
-    assert [generation.document_id for generation in stale] == [document_id]
+
+    async def own_stale() -> list[uuid.UUID]:
+        # The sweep is platform-wide; this workspace's rows are what is under
+        # test. A run that keeps other suites' data (CI's kept-data sweep) has
+        # more stale documents than a page of ten, so every page is read.
+        found: list[uuid.UUID] = []
+        cursor: str | None = None
+        for _ in range(100):
+            async with indexing.database.session() as session:
+                page = await IndexingSweep(session).list_stale(space=LARGE, limit=100, after=cursor)
+            found += [g.document_id for g in page if g.tenant_id == tenant_id]
+            if len(page) < 100:
+                return found
+            published = page[-1].published_at
+            assert published is not None  # an active generation was published
+            cursor = encode_cursor(published, page[-1].id)
+        raise AssertionError("the stale listing never ended")
+
+    assert await own_stale() == [document_id]
 
     await indexing.reindex(tenant_id, document_id, trigger=TRIGGER_STALE_EMBEDDING)
     await indexing.drain()
@@ -561,8 +591,7 @@ async def test_a_model_change_excludes_old_vectors_until_they_are_reindexed(
     assert indexing.provider.requests[-1]["model"] == LARGE.model
     assert await indexing.search(tenant_id, "refund fourteen days", space=LARGE)
     assert await indexing.search(tenant_id, "refund fourteen days", space=SMALL) == []
-    async with indexing.database.session() as session:
-        assert await IndexingSweep(session).list_stale(space=LARGE, limit=10) == []
+    assert await own_stale() == []
 
 
 # ------------------------------------------------------- RAG-07 cost

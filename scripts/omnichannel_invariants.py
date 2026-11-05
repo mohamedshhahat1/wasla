@@ -1111,7 +1111,12 @@ async def _run(command: str, url: str, redis_url: str | None = None) -> int:
             if command == "census":
                 found = await census(connection)
             else:
+                from scripts.rag_invariants import rag_violations
+
                 found = await violations(connection)
+                # The knowledge invariants (RR-01 .. RR-08), in the same
+                # read-only transaction.
+                found |= await rag_violations(connection)
                 if redis_url:
                     # RT-I01 reads the realtime streams too, when there is a
                     # Redis to read them from.

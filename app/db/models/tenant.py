@@ -7,7 +7,7 @@ of business data in the platform.
 from __future__ import annotations
 
 from datetime import datetime, time
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import (
     Boolean,
@@ -122,6 +122,10 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # (`{"en": ..., "ar": ...}`), where it has replaced Wasla's (OMNI-041).
     # Only the wording: the obligation itself cannot be switched off.
     automation_disclosure: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
+    # The workspace's overrides of the deployment's knowledge-retrieval
+    # switches (G9, migration 0134): `KnowledgeSettingsUpdate`'s fields.
+    # NULL, and any field missing, means the deployment's default.
+    knowledge_settings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     @property
     def is_purged(self) -> bool:

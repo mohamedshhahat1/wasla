@@ -169,16 +169,14 @@ async def test_a_full_plan_refuses_another_colleague(
     assert exhausted.asked == [LimitKey.TEAM_MEMBERS]
 
 
-async def test_a_full_plan_refuses_another_document(
-    client: AsyncClient, app: FastAPI, exhausted: ExhaustedEntitlements
-) -> None:
-    response = await client.post(
-        f"/api/v1/knowledge/bases/{uuid.uuid4()}/documents",
-        json={"title": "Prices", "content": "Everything costs money."},
-    )
-
-    assert response.status_code == 402
-    assert exhausted.asked == [LimitKey.KNOWLEDGE_DOCUMENTS]
+# Knowledge documents are no longer refused here, before the handler: RQ-09
+# (RV-10) moved the document limit inside `KnowledgeService.submit`, after the
+# text is extracted and only when a new document would really be created - a
+# repeat or a replacement needs no free slot. Proved against a refusing slot in
+# `test_document_replacement.py::test_a_replacement_needs_no_free_plan_slot`.
+# The routes' half - a new document refused with 402 on the JSON and the
+# multipart route, a replacement accepted on the same full plan - is driven
+# through the real routes in `test_knowledge_plan_limit_routes.py` (RGM-01).
 
 
 async def test_the_guard_runs_before_the_handler_touches_anything(
@@ -203,6 +201,9 @@ class StubAgents:
 
     async def list_agents(self, *, limit: int = 50) -> list[Any]:
         return []
+
+    async def knowledge_unreachable(self) -> bool:
+        return False
 
 
 async def test_reading_is_never_refused(

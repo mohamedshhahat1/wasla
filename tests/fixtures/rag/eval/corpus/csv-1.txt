@@ -1,0 +1,46 @@
+sku,item,price_egp,stock
+WS-1000,Sofa 0,"8,369",0
+WS-1001,Bookshelf 1,"5,288",1
+WS-1002,Dining table 2,"2,207",2
+WS-1003,Armchair 3,"10,126",3
+WS-1004,Bed frame 4,"7,045",4
+WS-1005,Wardrobe 5,"3,964",5
+WS-1006,Desk 6,"11,883",6
+WS-1007,Sofa 7,"8,802",7
+WS-1008,Bookshelf 8,"5,721",8
+WS-1009,Dining table 9,"2,640",0
+WS-1010,Armchair 10,"10,559",1
+WS-1011,Bed frame 11,"7,478",2
+WS-1012,Wardrobe 12,"4,397",3
+WS-1013,Desk 13,"1,316",4
+WS-1014,Sofa 14,"9,235",5
+WS-1015,Bookshelf 15,"6,154",6
+WS-1016,Dining table 16,"3,073",7
+WS-1017,Armchair 17,"10,992",8
+WS-1018,Bed frame 18,"7,911",0
+WS-1019,Wardrobe 19,"4,830",1
+WS-1020,Desk 20,"1,749",2
+WS-1021,Sofa 21,"9,668",3
+WS-1022,Bookshelf 22,"6,587",4
+WS-1023,Dining table 23,"3,506",5
+WS-1024,Armchair 24,"11,425",6
+WS-1025,Bed frame 25,"8,344",7
+WS-1026,Wardrobe 26,"5,263",8
+WS-1027,Desk 27,"2,182",0
+WS-1028,Sofa 28,"10,101",1
+WS-1029,Bookshelf 29,"7,020",2
+WS-1030,Dining table 30,"3,939",3
+WS-1031,Armchair 31,"11,858",4
+WS-1032,Bed frame 32,"8,777",5
+WS-1033,Wardrobe 33,"5,696",6
+WS-1034,Desk 34,"2,615",7
+WS-1035,Sofa 35,"10,534",8
+WS-1036,Bookshelf 36,"7,453",0
+WS-1037,Dining table 37,"4,372",1
+WS-1038,Armchair 38,"1,291",2
+WS-1039,Bed frame 39,"9,210",3
+WS-1040,Wardrobe 40,"6,129",4
+WS-1041,Desk 41,"3,048",5
+WS-1042,Sofa 42,"10,967",6
+WS-1043,Bookshelf 43,"7,886",7
+WS-1044,Dining table 44,"4,805",8

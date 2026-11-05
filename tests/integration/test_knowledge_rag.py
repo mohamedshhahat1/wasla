@@ -138,7 +138,9 @@ async def test_the_nearest_passage_comes_first(db_session: AsyncSession) -> None
     await _ingested(db_session, tenant=tenant, title="Prices", text=FINISHING_PRICES)
     await _ingested(db_session, tenant=tenant, title="Returns", text=RETURNS_POLICY)
 
-    found = await _service(db_session, tenant).search(query="refund payment card warehouse")
+    found = await _service(db_session, tenant).search(
+        query="refunds reach the original payment card warehouse"
+    )
 
     assert found.passages[0].document_title == "Returns"
     distances = [passage.distance for passage in found.passages]

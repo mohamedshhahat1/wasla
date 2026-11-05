@@ -161,11 +161,17 @@ PURGED_TABLES: tuple[str, ...] = (
     "contact_channel_consents",
     "contacts",
     "document_chunks",
+    # The knowledge-gap report (RQ-27): queries the model wrote from customers'
+    # questions.
+    "knowledge_search_gaps",
     # Indexing attempts, their errors and embedding identity. Between the chunks
     # that reference them and the documents they reference.
     "document_index_generations",
     "documents",
     "knowledge_bases",
+    # The space the workspace's knowledge is queried in, and any embedding-model
+    # switch under way (RQ-25). Names no other row.
+    "workspace_embedding_spaces",
     "agent_tools",
     "agents",
     # The workspace's automatic follow-up reminders (FUS-01): a reminder's
@@ -273,6 +279,29 @@ _MEDIA_WITH_LEDGER = """
     """
 
 
+# A knowledge document's uploaded originals (RQ-23) are named by its index
+# generations, and owed a delete the same way: captured from the rows the
+# DELETE removed. Written whole, so nothing in a write path is pending.
+ORIGINALS_TABLE = "document_index_generations"
+_ORIGINALS_WITH_LEDGER = """
+    WITH gone AS (
+        DELETE FROM document_index_generations WHERE tenant_id = :tenant_id
+        RETURNING original_object_key
+    ),
+    recorded AS (
+        INSERT INTO media_purge_objects
+            (id, tenant_id, storage_key, not_before, attempts, created_at, updated_at)
+        SELECT gen_random_uuid(), CAST(:tenant_id AS uuid), original_object_key,
+               CAST(:now AS timestamptz), 0, CAST(:now AS timestamptz), CAST(:now AS timestamptz)
+        FROM gone
+        WHERE original_object_key IS NOT NULL
+        ON CONFLICT (storage_key) DO NOTHING
+        RETURNING 1
+    )
+    SELECT (SELECT count(*) FROM gone), (SELECT count(*) FROM recorded)
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PurgeOutcome:
     """What one workspace's purge removed."""
@@ -355,6 +384,15 @@ class WorkspacePurgeService:
         deleted = 0
         recorded = 0
         for table in PURGED_TABLES:
+            if table == ORIGINALS_TABLE:
+                gone, kept = (
+                    await self._session.execute(
+                        text(_ORIGINALS_WITH_LEDGER), {"tenant_id": tenant.id, "now": moment}
+                    )
+                ).one()
+                deleted += int(gone)
+                recorded += int(kept)
+                continue
             if table in MEDIA_TABLES:
                 gone, kept = (
                     await self._session.execute(

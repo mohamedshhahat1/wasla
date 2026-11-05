@@ -42,6 +42,8 @@ class _WorkerSettings:
     openai_api_key = None
     openai_embedding_model = "text-embedding-3-small"
     openai_sentiment_model = "gpt-4.1-mini"
+    rag_query_embedding_cache = False
+    rag_query_embedding_cache_ttl_seconds = 86_400
 
 
 def build_worker(redis: FakeQueueRedis) -> AgentWorker:

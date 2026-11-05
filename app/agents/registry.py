@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any, Final, Literal
 
@@ -51,6 +51,7 @@ from app.integrations.openai.types import ToolSpec
 from app.services.audit_service import AuditTrail
 from app.services.follow_up_service import MAX_DELAY, MIN_DELAY, FollowUpService
 from app.services.inbox_service import InboxService
+from app.services.knowledge_rerank import LlmReranker
 from app.services.lead_service import (
     MAX_BUDGET,
     MAX_EMAIL_LENGTH,
@@ -60,10 +61,13 @@ from app.services.lead_service import (
     ExtractedLead,
     LeadService,
 )
+from app.services.query_embedding_cache import QueryEmbeddingCache
+from app.services.retrieval_policy import RetrievalPolicy
 from app.services.retrieval_service import (
     DEFAULT_TOP_K,
     MAX_QUERY_CHARACTERS,
     MAX_TOP_K,
+    Retrieval,
     RetrievalService,
     effective_top_k,
 )
@@ -128,6 +132,21 @@ class ToolContext:
     conversation_id: uuid.UUID
     session: AsyncSession
     embeddings: EmbeddingsClient | None = None
+    #: What a knowledge search may do (G9): the workspace's resolved switches and
+    #: the agent's knowledge scope (RQ-18). None: the locked defaults, the
+    #: whole workspace.
+    retrieval: RetrievalPolicy | None = None
+    #: The optional re-rank model (RQ-16), present only when re-rank is on.
+    reranker: LlmReranker | None = None
+    #: Query vectors kept per workspace and space (RQ-26), when enabled.
+    query_cache: QueryEmbeddingCache | None = None
+    #: Whether an empty search may be recorded in the gap report (RQ-27):
+    #: false for pre-retrieval, whose query is the customer's own message.
+    record_gaps: bool = True
+    #: Every search this turn ran, in order: what the grounding guard checks a
+    #: reply's numbers against (RQ-19), and what pre-retrieval reads its tier
+    #: from (RQ-20). Appended by the knowledge tool; never read by a model.
+    searches: list[Retrieval] = field(default_factory=list)
 
 
 ToolHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[str]]
@@ -507,6 +526,7 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
         )
 
     query = str(arguments["query"])
+    alternate = arguments.get("alternate_query")
     # Bounded by the service whatever the model asked for (M07): a count the
     # model chooses is a count the model can make enormous.
     top_k = effective_top_k(arguments.get("max_results"))
@@ -514,9 +534,13 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
     service = RetrievalService(
         session=context.session,
         # From the context, never from the arguments: a tenant id the model
-        # could supply is a tenant id the model could change.
+        # could supply is a tenant id the model could change. So is the scope:
+        # it comes from the agent's grant, never from a tool argument.
         tenant_id=context.tenant_id,
         embeddings=context.embeddings,
+        policy=context.retrieval,
+        reranker=context.reranker,
+        cache=context.query_cache,
     )
     # No threshold or context size is taken from the arguments at all; both
     # are the server's (M27). A failed search raises
@@ -533,12 +557,21 @@ async def _search_knowledge(context: ToolContext, arguments: dict[str, Any]) -> 
     # Releasing commits, so the previous tool's finished work becomes durable
     # here. That is the price and it is the right one: the alternative is
     # holding a write lock across somebody else's API.
-    retrieval = await service.search(query=query, top_k=top_k, release_session=True)
+    retrieval = await service.search(
+        query=query,
+        alternate_query=str(alternate) if alternate else None,
+        top_k=top_k,
+        release_session=True,
+        record_gap=context.record_gaps,
+    )
+    context.searches.append(retrieval)
     logger.info(
         "agent.knowledge_searched",
         extra={
             "conversation_id": str(context.conversation_id),
             "passages": len(retrieval.passages),
+            # Whether the model wrote a second query, never what it wrote.
+            "alternate_query": alternate is not None,
         },
     )
     return retrieval.as_context()
@@ -550,16 +583,35 @@ SEARCH_KNOWLEDGE_DEFINITION: Final = ToolDefinition(
         "Search the company's own documents for information before answering. "
         "Use it for any question about products, prices, policies, services or "
         "procedures. Answer only from what it returns; if it returns nothing, "
-        "say you do not have that information."
+        "say you do not have that information. Quote prices, fees and "
+        "percentages exactly as a source states them. When two sources "
+        "disagree, prefer the one with the most recent updated_at. If the "
+        "result carries match: partial, answer cautiously or ask one clarifying "
+        "question; match: none means it is not covered."
     ),
     parameters=(
         ToolParameter(
             name="query",
             type="string",
             description=(
-                "What to look up, in the customer's own words. Include the "
-                "specific product, service or policy they asked about."
+                "A short, standalone search query. Resolve references from the "
+                'conversation ("the premium one" becomes the product the '
+                "customer named before), name the specific product, service or "
+                "policy, and leave out greetings. In the customer's language."
             ),
+            min_length=1,
+            max_length=MAX_QUERY_CHARACTERS,
+        ),
+        ToolParameter(
+            name="alternate_query",
+            type="string",
+            description=(
+                "Optional: the same query in the language the company's documents "
+                "are written in, when that differs from the customer's - for "
+                "example in English for an Arabic question about an English "
+                "price list."
+            ),
+            required=False,
             min_length=1,
             max_length=MAX_QUERY_CHARACTERS,
         ),
@@ -567,8 +619,8 @@ SEARCH_KNOWLEDGE_DEFINITION: Final = ToolDefinition(
             name="max_results",
             type="integer",
             description=(
-                f"How many passages to return, {MIN_TOP_K} to {MAX_TOP_K}. "
-                f"Defaults to {DEFAULT_TOP_K}."
+                f"How many passages to return, {MIN_TOP_K} to {MAX_TOP_K}; every "
+                f"one asked for that is found is delivered. Defaults to {DEFAULT_TOP_K}."
             ),
             required=False,
             # The clamp the service applies, published. `effective_top_k` still

@@ -1,0 +1,48 @@
+Bookshelf model 60 - price 8,769 EGP - warranty 2 years
+Dining table model 61 - price 5,688 EGP - warranty 3 years
+Armchair model 62 - price 2,607 EGP - warranty 4 years
+Bed frame model 63 - price 10,526 EGP - warranty 2 years
+Wardrobe model 64 - price 7,445 EGP - warranty 3 years
+Desk model 65 - price 4,364 EGP - warranty 4 years
+Sofa model 66 - price 1,283 EGP - warranty 2 years
+Bookshelf model 67 - price 9,202 EGP - warranty 3 years
+Dining table model 68 - price 6,121 EGP - warranty 4 years
+Armchair model 69 - price 3,040 EGP - warranty 2 years
+Bed frame model 70 - price 10,959 EGP - warranty 3 years
+Wardrobe model 71 - price 7,878 EGP - warranty 4 years
+Desk model 72 - price 4,797 EGP - warranty 2 years
+Sofa model 73 - price 1,716 EGP - warranty 3 years
+Bookshelf model 74 - price 9,635 EGP - warranty 4 years
+Dining table model 75 - price 6,554 EGP - warranty 2 years
+Armchair model 76 - price 3,473 EGP - warranty 3 years
+Bed frame model 77 - price 11,392 EGP - warranty 4 years
+Wardrobe model 78 - price 8,311 EGP - warranty 2 years
+Desk model 79 - price 5,230 EGP - warranty 3 years
+Sofa model 80 - price 2,149 EGP - warranty 4 years
+Bookshelf model 81 - price 10,068 EGP - warranty 2 years
+Dining table model 82 - price 6,987 EGP - warranty 3 years
+Armchair model 83 - price 3,906 EGP - warranty 4 years
+Bed frame model 84 - price 11,825 EGP - warranty 2 years
+Wardrobe model 85 - price 8,744 EGP - warranty 3 years
+Desk model 86 - price 5,663 EGP - warranty 4 years
+Sofa model 87 - price 2,582 EGP - warranty 2 years
+Bookshelf model 88 - price 10,501 EGP - warranty 3 years
+Dining table model 89 - price 7,420 EGP - warranty 4 years
+Armchair model 90 - price 4,339 EGP - warranty 2 years
+Bed frame model 91 - price 1,258 EGP - warranty 3 years
+Wardrobe model 92 - price 9,177 EGP - warranty 4 years
+Desk model 93 - price 6,096 EGP - warranty 2 years
+Sofa model 94 - price 3,015 EGP - warranty 3 years
+Bookshelf model 95 - price 10,934 EGP - warranty 4 years
+Dining table model 96 - price 7,853 EGP - warranty 2 years
+Armchair model 97 - price 4,772 EGP - warranty 3 years
+Bed frame model 98 - price 1,691 EGP - warranty 4 years
+Wardrobe model 99 - price 9,610 EGP - warranty 2 years
+Desk model 100 - price 6,529 EGP - warranty 3 years
+Sofa model 101 - price 3,448 EGP - warranty 4 years
+Bookshelf model 102 - price 11,367 EGP - warranty 2 years
+Dining table model 103 - price 8,286 EGP - warranty 3 years
+Armchair model 104 - price 5,205 EGP - warranty 4 years
+Bed frame model 105 - price 2,124 EGP - warranty 2 years
+Wardrobe model 106 - price 10,043 EGP - warranty 3 years
+Desk model 107 - price 6,962 EGP - warranty 4 years

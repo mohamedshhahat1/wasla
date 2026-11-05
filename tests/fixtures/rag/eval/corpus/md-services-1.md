@@ -1,0 +1,29 @@
+# Services catalogue 1
+
+## Kitchen Finishing
+
+Step 0 of the kitchen finishing service is carried out by a certified team. Step 1 of the kitchen finishing service is carried out by a certified team. Step 2 of the kitchen finishing service is carried out by a certified team. Step 3 of the kitchen finishing service is carried out by a certified team. Step 4 of the kitchen finishing service is carried out by a certified team. Step 5 of the kitchen finishing service is carried out by a certified team. Step 6 of the kitchen finishing service is carried out by a certified team. Step 7 of the kitchen finishing service is carried out by a certified team. Step 8 of the kitchen finishing service is carried out by a certified team. Step 9 of the kitchen finishing service is carried out by a certified team. Step 10 of the kitchen finishing service is carried out by a certified team. Step 11 of the kitchen finishing service is carried out by a certified team. Step 12 of the kitchen finishing service is carried out by a certified team. Step 13 of the kitchen finishing service is carried out by a certified team. Step 14 of the kitchen finishing service is carried out by a certified team. Step 15 of the kitchen finishing service is carried out by a certified team. Step 16 of the kitchen finishing service is carried out by a certified team. Step 17 of the kitchen finishing service is carried out by a certified team. The kitchen finishing package 1-0 includes a site visit and a written quote.
+
+- Duration: 3 weeks
+- Crew: 4 people
+
+## Jotun Paint
+
+Step 0 of the Jotun paint service is carried out by a certified team. Step 1 of the Jotun paint service is carried out by a certified team. Step 2 of the Jotun paint service is carried out by a certified team. Step 3 of the Jotun paint service is carried out by a certified team. Step 4 of the Jotun paint service is carried out by a certified team. Step 5 of the Jotun paint service is carried out by a certified team. Step 6 of the Jotun paint service is carried out by a certified team. Step 7 of the Jotun paint service is carried out by a certified team. Step 8 of the Jotun paint service is carried out by a certified team. Step 9 of the Jotun paint service is carried out by a certified team. Step 10 of the Jotun paint service is carried out by a certified team. Step 11 of the Jotun paint service is carried out by a certified team. Step 12 of the Jotun paint service is carried out by a certified team. Step 13 of the Jotun paint service is carried out by a certified team. Step 14 of the Jotun paint service is carried out by a certified team. Step 15 of the Jotun paint service is carried out by a certified team. Step 16 of the Jotun paint service is carried out by a certified team. Step 17 of the Jotun paint service is carried out by a certified team. The Jotun paint package 1-1 includes a site visit and a written quote.
+
+- Duration: 4 weeks
+- Crew: 5 people
+
+## Sipes Paint
+
+Step 0 of the Sipes paint service is carried out by a certified team. Step 1 of the Sipes paint service is carried out by a certified team. Step 2 of the Sipes paint service is carried out by a certified team. Step 3 of the Sipes paint service is carried out by a certified team. Step 4 of the Sipes paint service is carried out by a certified team. Step 5 of the Sipes paint service is carried out by a certified team. Step 6 of the Sipes paint service is carried out by a certified team. Step 7 of the Sipes paint service is carried out by a certified team. Step 8 of the Sipes paint service is carried out by a certified team. Step 9 of the Sipes paint service is carried out by a certified team. Step 10 of the Sipes paint service is carried out by a certified team. Step 11 of the Sipes paint service is carried out by a certified team. Step 12 of the Sipes paint service is carried out by a certified team. Step 13 of the Sipes paint service is carried out by a certified team. Step 14 of the Sipes paint service is carried out by a certified team. Step 15 of the Sipes paint service is carried out by a certified team. Step 16 of the Sipes paint service is carried out by a certified team. Step 17 of the Sipes paint service is carried out by a certified team. The Sipes paint package 1-2 includes a site visit and a written quote.
+
+- Duration: 5 weeks
+- Crew: 6 people
+
+## Cleopatra Ceramic
+
+Step 0 of the Cleopatra ceramic service is carried out by a certified team. Step 1 of the Cleopatra ceramic service is carried out by a certified team. Step 2 of the Cleopatra ceramic service is carried out by a certified team. Step 3 of the Cleopatra ceramic service is carried out by a certified team. Step 4 of the Cleopatra ceramic service is carried out by a certified team. Step 5 of the Cleopatra ceramic service is carried out by a certified team. Step 6 of the Cleopatra ceramic service is carried out by a certified team. Step 7 of the Cleopatra ceramic service is carried out by a certified team. Step 8 of the Cleopatra ceramic service is carried out by a certified team. Step 9 of the Cleopatra ceramic service is carried out by a certified team. Step 10 of the Cleopatra ceramic service is carried out by a certified team. Step 11 of the Cleopatra ceramic service is carried out by a certified team. Step 12 of the Cleopatra ceramic service is carried out by a certified team. Step 13 of the Cleopatra ceramic service is carried out by a certified team. Step 14 of the Cleopatra ceramic service is carried out by a certified team. Step 15 of the Cleopatra ceramic service is carried out by a certified team. Step 16 of the Cleopatra ceramic service is carried out by a certified team. Step 17 of the Cleopatra ceramic service is carried out by a certified team. The Cleopatra ceramic package 1-3 includes a site visit and a written quote.
+
+- Duration: 6 weeks
+- Crew: 7 people

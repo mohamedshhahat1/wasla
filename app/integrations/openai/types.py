@@ -28,6 +28,14 @@ MAX_REPORTED_TOKENS: Final = 2_000_000
 _USAGE_FIELDS: Final = ("input_tokens", "output_tokens", "total_tokens")
 
 
+def _detail(payload: dict[str, Any], group: str, field: str) -> int:
+    """An optional nested count such as `input_tokens_details.cached_tokens`, or 0."""
+    details = payload.get(group)
+    if not isinstance(details, dict):
+        return 0
+    return _count(details.get(field)) or 0
+
+
 def _count(value: object) -> int | None:
     """A provider-reported count this system can bill, or None if it is not one.
 
@@ -144,14 +152,19 @@ class ToolResult:
     name: str
     arguments_json: str
     output: str
+    #: How many turns preceded this call, so the request replays the exchange
+    #: in the order it happened (RV-27): the words a round said, then its calls
+    #: and their outputs, then the next round. `None` sends it after every turn.
+    after_turns: int | None = None
 
     @classmethod
-    def for_call(cls, call: ToolCall, *, output: str) -> Self:
+    def for_call(cls, call: ToolCall, *, output: str, after_turns: int | None = None) -> Self:
         return cls(
             call_id=call.call_id,
             name=call.name,
             arguments_json=call.arguments_json,
             output=output,
+            after_turns=after_turns,
         )
 
     def to_input(self) -> list[dict[str, Any]]:
@@ -183,6 +196,11 @@ class TokenUsage:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    # Optional detail fields (FX-1.13, IMP-02): input tokens the provider served
+    # from its prompt cache (billed at a discount) and output tokens spent on
+    # reasoning. Zero when the provider did not say.
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
 
     @classmethod
     def from_payload(cls, payload: object) -> Self:
@@ -210,6 +228,8 @@ class TokenUsage:
             input_tokens=counts["input_tokens"] or 0,
             output_tokens=counts["output_tokens"] or 0,
             total_tokens=counts["total_tokens"] or 0,
+            cached_input_tokens=_detail(payload, "input_tokens_details", "cached_tokens"),
+            reasoning_tokens=_detail(payload, "output_tokens_details", "reasoning_tokens"),
         )
 
 
