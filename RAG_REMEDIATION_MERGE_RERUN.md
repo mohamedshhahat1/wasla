@@ -18,8 +18,8 @@ Every retrieval number is **structural** (fake embeddings at the transport); the
 | Part B: every gate at 4bae08d | done (RGM-19 accepted by the user) | 09:15–21:35 | — |
 | Merge (one normal merge commit), tree equality | done | 21:36 | **52af1a5** |
 | Gates on the final canonical tree | done, green | 21:39–22:47 | — |
-| Report commit, push, GitHub Actions | see §29–30 | | |
-| Part C cleanup | see §34 | | |
+| Report commit, push, GitHub Actions | done — CI GREEN | 22:48–23:38 | 79de696 pushed; run 42124575540 |
+| Part C cleanup | done, items left for review | 23:40– | 42 items removed; branches kept |
 
 ## 1. Executive Summary
 
@@ -394,12 +394,25 @@ drift guard 64 / 0, pip check clean, pypdf 6.19.0; starred files 69 ×3; concurr
 
 ## 29. Push
 
-This report is committed on the canonical branch on top of 52af1a5 and pushed without force once origin is confirmed still at
-7cdf863; the result is recorded in the addendum (section 30).
+Report commit **79de696** (one file) on 52af1a5. Before the push origin was still 7cdf863 (fast-forward). `git push origin
+worktree-billing-google-auth` (no force) at 22:48 UTC: `7cdf863..79de696`; afterwards origin = local = 79de696. Nothing else pushed.
 
-## 30. First GitHub Actions Run
+## 30. First GitHub Actions Run (addendum)
 
-Recorded in the addendum commit that follows this one.
+CI run **42124575540** (https://github.com/mohamedshhahat1/wasla/actions/runs/42124575540) on 79de696, 22:48–23:38 UTC
+(00:48–01:38 Cairo, inside quiet hours) — **success**, the first green run on this branch since 2026-10-27:
+
+| Job | Conclusion | Time |
+|---|---|---|
+| Lint, format, types | success | 1 min 41 s — drift guard "64 pinned packages checked, 0 differ", pip check clean, ruff, black (1117), mypy (963) |
+| Tests and migrations | success | 49 min 51 s — **7,907 passed, 17 skipped**, 0 failed (skips: real-provider 11, parity 4, old-pgvector 2 — all allowed); store gate, app factory, upgrade → base → head, preflight, check green |
+| Migration-built schema | success | 45 min 1 s — 4,336 passed (enums 4, parity 4, integration + e2e 3,968, kept-data 360), 95 skipped (no object store in that job; old-pgvector), 0 failed |
+| Alert rules and receivers | success | 3 min 3 s |
+| Docker build | success | 1 min 41 s |
+
+GitHub installed the lock: pypdf 6.19.0, openpyxl 3.1.5, python-docx 1.2.0, lxml 6.1.3, uvloop 0.22.1; the drift guard reported 0
+differences in every job that installs Python. test_the_chromium_pdf_flags_its_reordered_price_line, the dedupe concurrency tests,
+the two vector-only tests and RGM-19's planner test all passed there. security.yml did not run (not triggered by this branch).
 
 ## 31. Findings
 
@@ -441,9 +454,18 @@ images wasla-rgm:ci, wasla-rgm:4b0c4e9; worktrees E:\wasla-rgm-fix (branch), -ve
 the last attempt's -mut2, -dates, -evalb4, -report; E:\wasla-rgm-notes (venv, rerun\ draft, logs, evidence, proof, mutation, e2e,
 upgrade — the throwaway values are generated, none real).
 
-## 34. Part C — Cleanup
+## 34. Part C — Cleanup (addendum; full record E:\wasla-cleanup\CLEANUP_rag_20261106.md)
 
-Runs only if the first GitHub Actions run is green; recorded in the addendum.
+CI_GREEN_HEAD = 79de696 = origin. Rescued first: 478 files of E:\wasla-rgm-notes (scripts, harnesses, proof plugins, mutation
+runners, the RGM-05 reproduction and the RGM-08 probe, guard.env — no secret — logs and evidence; not the venv, the throwaway
+credential files or media stores) to E:\wasla-verification-scripts\rag-merge\, every file SHA-256 verified. E:\wasla-rag-notes kept,
+MANIFEST.sha256 (251 files) added. Removed, by exact name, one per command: 18 worktrees (rg1-base, rg1-mut, rg2-base, rg2-eval,
+rg2-mut, rg3-eval, rg3-lane, rg3-mut and wasla-rgm-verify, -lane, -origin, -mut, -mut2, -dates, -evalb4, -report, -fix, -final; each
+clean, each HEAD in CI_GREEN_HEAD's history except -report's, whose branch stays), 21 containers (wasla-rg1-*, -rg2-*, -rg3-*,
+wasla-rgm-*), network wasla-rgm-net, images wasla-rgm:ci and wasla-rgm:4b0c4e9. E:\wasla-rgm-notes removed after this addendum
+is pushed. Branches before = after (53). Development stack, its volumes (wasla_postgres-data) and every other stage untouched.
+**Left for review (ASK):** E:\wasla-rag-p1, -p2, -p3 (the Parts' worktrees on their branches, each with an untracked audit\ folder);
+the removed PostgreSQL containers' anonymous data volumes (dangling, not identifiable by name beside other stages' volumes).
 
 ## 35. Remaining External Actions
 
@@ -462,5 +484,13 @@ Runs only if the first GitHub Actions run is green; recorded in the addendum.
 
 ## 36. Final Verdict
 
-Every local gate is green at RFX_HEAD and on the merged tree; the verdict depends on the first GitHub Actions run and is given in the
-addendum.
+**RAG REMEDIATION MERGED AND PUSHED, CI GREEN** — **CLEANUP COMPLETE WITH ITEMS LEFT FOR REVIEW** (the three Part worktrees with
+untracked audit\ folders; dangling anonymous volumes).
+
+The final question: deployed tomorrow from GitHub onto yesterday's database by DEPLOYMENT.md and the RUNBOOK — every document stayed
+findable at every sample of the back-fills and the rebuild (gate 0 gaps); two colleagues uploading one price list at the same second
+get one document and the answer a second upload gets, never a 500 or a price served twice; a replaced price list serves one price at
+a time; an Arabic PDF is found by the typed words with the exact-word channel off; the embedding switch keeps the preview and every
+reply working at every step now that the Compose file passes the next model to the API and the worker; nothing of one workspace reached
+another (K-8, isolation gate); the deploy messaged no one; and GitHub's CI, installing exactly the packages the image ships, agrees.
+Every retrieval number is structural; how well the real model ranks a real Arabic question is still the unrun real-provider evaluation.
