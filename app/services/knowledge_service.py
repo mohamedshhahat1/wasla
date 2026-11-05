@@ -39,19 +39,22 @@ from typing import Final
 from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.embedding_space import EmbeddingSpace
 from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
-from app.core.storage import MediaStorage, build_key, write_object
+from app.core.storage import MediaStorage, StorageError, build_key, write_object
 from app.core.telemetry import (
     record_extraction_warnings,
     record_format_refusal,
     record_replacement,
 )
 from app.core.text_safety import has_visible_content, storable_problem
+from app.db.errors import is_unique_violation
 from app.db.models.audit import AuditAction
+from app.db.models.billing import LimitKey
 from app.db.models.knowledge import (
     Document,
     DocumentIndexGeneration,
@@ -85,6 +88,7 @@ from app.services.document_indexing import (
     run_indexing,
     session_units,
 )
+from app.services.entitlement_service import hold_limit_lock
 from app.services.knowledge_limits import MAX_EXTRACTED_CHARACTERS, MAX_SUBMITTED_CHARACTERS
 from app.services.text_normalisation import for_storage
 from app.workers.ingestion_queue import IngestionJob, IngestionQueue
@@ -407,9 +411,13 @@ class KnowledgeService:
 
         Nothing is embedded here, and the text is extracted, normalised and
         hashed before anything is locked (RQ-09): `release_for_extraction`
-        hands the request's connection back while a PDF is parsed, and the plan
-        slot - `reserve_slot`, the workspace's advisory lock - is taken only
-        when a new document will really be created (RV-10).
+        hands the request's connection back while a PDF is parsed. Only then is
+        the workspace's upload lock taken - the advisory lock the plan's slot
+        is reserved under - and every duplicate check below runs under it, in
+        the transaction that inserts, so two uploads of one text at the same
+        moment end as they would one after the other (RGM-05). The plan slot
+        itself - `reserve_slot` - is asked for only when a new document will
+        really be created (RV-10).
 
         A repeat of identical text in the same knowledge base is not a second
         document: it updates a changed title, filename or media type (audited,
@@ -445,7 +453,7 @@ class KnowledgeService:
                 reserve_slot=reserve_slot,
             )
         except BaseException:
-            await self._discard_original(upload.original_key)
+            await self._delete_unrecorded_original(upload.original_key)
             raise
         if not view.active or view.active.original_object_key != upload.original_key:
             latest = view.latest
@@ -478,6 +486,98 @@ class KnowledgeService:
                     "A document can only supersede one in its own knowledge base."
                 )
 
+        # The checks decide only under this lock: a check that ran before it
+        # could pass for two requests at once, and both would insert (RGM-05).
+        # Workspace-wide, because one of them looks across knowledge bases.
+        await hold_limit_lock(
+            self._session, tenant_id=self._tenant_id, key=LimitKey.KNOWLEDGE_DOCUMENTS
+        )
+        decided = await self._existing_answer(
+            knowledge_base_id=knowledge_base_id,
+            title=title,
+            upload=upload,
+            source=source,
+            filename=filename,
+            media_type=media_type,
+            actor=actor,
+            key=key,
+            replace=replace,
+        )
+        if decided is not None:
+            return decided
+
+        if reserve_slot is not None:
+            # Only now, and only for a document that will really be created:
+            # a repeat or a replacement consumes no slot (RV-10, RQ-06).
+            await reserve_slot()
+        try:
+            async with self._session.begin_nested():
+                document = self._documents.create(
+                    knowledge_base_id=knowledge_base_id,
+                    title=title.strip(),
+                    content_hash=upload.digest,
+                    source=source,
+                    filename=filename,
+                    media_type=media_type,
+                    byte_size=upload.byte_size,
+                    content=upload.text,
+                )
+                document.extraction_warnings = upload.warnings
+                document.source_key = key
+                document.valid_from = valid_from
+                document.valid_until = valid_until
+                document.supersedes_document_id = supersedes_document_id
+                await self._session.flush()
+        except IntegrityError as error:
+            # Unreachable while every writer takes the lock above; should one
+            # not, the request answers as the repeat it is, never as a 500.
+            if not is_unique_violation(error):
+                raise
+            decided = await self._existing_answer(
+                knowledge_base_id=knowledge_base_id,
+                title=title,
+                upload=upload,
+                source=source,
+                filename=filename,
+                media_type=media_type,
+                actor=actor,
+                key=key,
+                replace=replace,
+            )
+            if decided is None:
+                raise
+            return decided
+        generation = self._generations.create(
+            document_id=document.id, number=1, trigger=TRIGGER_SUBMITTED
+        )
+        generation.original_object_key = upload.original_key
+        await self._session.flush()
+        if upload.warnings:
+            await record_extraction_warnings(upload.warnings)
+        await self._enqueue(document.id)
+        self._audit_submitted(
+            document, actor=actor, source=source, created=True, generation=generation
+        )
+        (view,) = await self._views([document])
+        return view, True
+
+    async def _existing_answer(
+        self,
+        *,
+        knowledge_base_id: uuid.UUID,
+        title: str,
+        upload: Upload,
+        source: DocumentSource,
+        filename: str | None,
+        media_type: str | None,
+        actor: User | None,
+        key: str | None,
+        replace: bool,
+    ) -> tuple[DocumentView, bool] | None:
+        """The answer to an upload of text or a source this workspace already holds.
+
+        None when the upload is new. Asked under the workspace's upload lock.
+        """
         existing = await self._documents.get_by_hash(
             knowledge_base_id=knowledge_base_id, content_hash=upload.digest
         )
@@ -533,39 +633,7 @@ class KnowledgeService:
                 },
             )
 
-        if reserve_slot is not None:
-            # Only now, and only for a document that will really be created:
-            # a repeat or a replacement consumes no slot (RV-10, RQ-06).
-            await reserve_slot()
-        document = self._documents.create(
-            knowledge_base_id=knowledge_base_id,
-            title=title.strip(),
-            content_hash=upload.digest,
-            source=source,
-            filename=filename,
-            media_type=media_type,
-            byte_size=upload.byte_size,
-            content=upload.text,
-        )
-        document.extraction_warnings = upload.warnings
-        document.source_key = key
-        document.valid_from = valid_from
-        document.valid_until = valid_until
-        document.supersedes_document_id = supersedes_document_id
-        await self._session.flush()
-        generation = self._generations.create(
-            document_id=document.id, number=1, trigger=TRIGGER_SUBMITTED
-        )
-        generation.original_object_key = upload.original_key
-        await self._session.flush()
-        if upload.warnings:
-            await record_extraction_warnings(upload.warnings)
-        await self._enqueue(document.id)
-        self._audit_submitted(
-            document, actor=actor, source=source, created=True, generation=generation
-        )
-        (view,) = await self._views([document])
-        return view, True
+        return None
 
     async def _resubmitted(
         self,
@@ -644,7 +712,7 @@ class KnowledgeService:
                 actor=actor,
             )
         except BaseException:
-            await self._discard_original(upload.original_key)
+            await self._delete_unrecorded_original(upload.original_key)
             raise
         if outcome == REPLACEMENT_OUTCOME_METADATA_ONLY:
             await self._discard_original(upload.original_key)
@@ -830,6 +898,26 @@ class KnowledgeService:
         if key is None:
             return
         await _owe_deletes(self._session, tenant_id=self._tenant_id, keys=[key])
+
+    async def _delete_unrecorded_original(self, key: str | None) -> None:
+        """Delete an original whose request is failing, straight from the store.
+
+        A refused upload - a duplicate, a full plan, a source that already
+        exists - rolls its transaction back, and a purge row written in it would
+        go with it, leaving the file in the store for ever (RGM-14). Nothing can
+        refer to the key: it was generated for this request, and whatever was
+        written with it is being rolled back too. A store that cannot be reached
+        leaves the file behind, which is logged - never the refusal's answer.
+        """
+        if key is None or self._storage is None:
+            return
+        try:
+            await self._storage.delete(key)
+        except StorageError:
+            logger.warning(
+                "knowledge.original_left_behind",
+                extra={"tenant_id": str(self._tenant_id), "storage_key": key},
+            )
 
     def _audit_submitted(
         self,
