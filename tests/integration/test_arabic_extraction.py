@@ -168,3 +168,32 @@ async def test_the_vector_search_reads_the_folded_query_with_hybrid_off(
     (passage,) = found.passages
     assert "4500" in passage.content
     assert passage.channels == (VECTOR,), passage.channels
+
+
+async def test_the_vector_search_reads_the_folded_alternate_query_with_hybrid_off(
+    indexing: Indexing,
+) -> None:
+    """The alternate query is folded like the query (RGM-15): asked in words the
+    document does not hold, with the price question as the alternate - typed
+    with tatweel and Arabic-Indic digits - the vector search alone finds it."""
+    indexing.configure(rag_hybrid_enabled=False)
+    switches = resolve(
+        indexing.settings, None, embedding_model=indexing.settings.openai_embedding_model
+    )
+    assert (
+        switches.policy.hybrid is False
+    ), "hybrid is off: this test is about the vector query, not the exact-word channel"
+    tenant_id = await indexing.workspace()
+    await indexing.submit(tenant_id, "سعر التشطيب 4500 جنيه")
+    await indexing.drain()
+    async with indexing.database.session() as session:
+        found = await RetrievalService(
+            session=session,
+            tenant_id=tenant_id,
+            embeddings=as_embeddings(FakeEmbeddings()),
+            policy=switches.policy,
+        ).search(query="warranty claims", alternate_query="سـعر ٤٥٠٠", top_k=1)
+    assert found.passages, "the folded alternate query found nothing by vector search"
+    (passage,) = found.passages
+    assert "4500" in passage.content
+    assert passage.channels == (VECTOR,), passage.channels
