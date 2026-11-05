@@ -2597,26 +2597,47 @@ Agents are quoting prices or percentages their searches did not return. Use the 
 
 ### Changing the embedding model
 
-Never change `OPENAI_EMBEDDING_MODEL` or `EMBEDDING_SCHEMA_VERSION` directly: every workspace not yet switched is then queried in the new space and its documents vanish from search until re-indexed (RV-11, `KnowledgeStaleEmbeddings`). Use the shadow switch (ADR-181):
+Never change `OPENAI_EMBEDDING_MODEL` or `EMBEDDING_SCHEMA_VERSION` directly: every workspace not yet switched is then queried in the new space and its documents vanish from search until re-indexed (RV-11, `KnowledgeStaleEmbeddings`). Use the shadow switch (ADR-181).
+
+**Every process that embeds gives the next model to it, before `start`** (RGM-10, ADR-187). Three readers embed in the target space, and each refuses a workspace it cannot query rather than guess:
+
+| Process | Compose service | What it embeds with the next model | Without it, after a flip |
+|---|---|---|---|
+| API | `api` | the admin search preview (`POST /api/v1/knowledge/search`) | the preview answers `503` for every flipped workspace |
+| Indexing worker | `worker` | shadow generations (`build`) and every re-index of a flipped workspace | shadows are never built; `build` waits for ever |
+| Agent worker | `worker` | `search_knowledge` and the pre-retrieval search of a customer turn | agents of a flipped workspace find nothing |
+
+The `embedding-switch` commands run inside the `worker` container and read the same setting.
+
+**`docker-compose.prod.yml` does not yet forward `OPENAI_EMBEDDING_MODEL_NEXT`** (RGM-12): it enumerates each service's environment, and the variable is in neither `api`'s nor `worker`'s list, so setting it in `.env` alone changes nothing. Until the Compose file carries it, add `OPENAI_EMBEDDING_MODEL_NEXT: ${OPENAI_EMBEDDING_MODEL_NEXT:-}` to the `environment` of both `api` and `worker` before step 1, and check step 2's output.
 
 ```
-# 1. Name the target, deploy the worker with it. Nothing changes for any search.
+# 1. Name the target in the deployment's environment, then redeploy the worker
+#    first and the API second (the deploy order of "Deploy a specific version").
+#    Nothing changes for any search: no workspace is flipped yet.
 OPENAI_EMBEDDING_MODEL_NEXT=text-embedding-3-large
-# 2. Start, per workspace or every workspace with documents.
-docker compose exec worker python -m app.workers.queues embedding-switch start --all
-# 3. Build shadows in the background, throttled, fair across workspaces, resumable.
-docker compose exec worker python -m app.workers.queues embedding-switch build --rate 120 --until-complete
-# 4. Coverage, blocked documents and what is left.
-docker compose exec worker python -m app.workers.queues embedding-switch status
-# 5. Flip each workspace at 100 % (or build with --flip to flip each as it completes).
-docker compose exec worker python -m app.workers.queues embedding-switch flip --workspace <id>
+docker compose -f docker-compose.prod.yml up -d --wait worker
+docker compose -f docker-compose.prod.yml up -d --wait api
+# 2. Confirm each process has it. Both lines must print the target model.
+docker compose -f docker-compose.prod.yml exec worker python -c "from app.core.config import get_settings; print('worker', get_settings().openai_embedding_model_next)"
+docker compose -f docker-compose.prod.yml exec api python -c "from app.core.config import get_settings; print('api', get_settings().openai_embedding_model_next)"
+# 3. Start, per workspace or every workspace with documents.
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch start --all
+# 4. Build shadows in the background, throttled, fair across workspaces, resumable.
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch build --rate 120 --until-complete
+# 5. Coverage, blocked documents and what is left.
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch status
+# 6. Flip each workspace at 100 % (or build with --flip to flip each as it completes).
+docker compose -f docker-compose.prod.yml exec worker python -m app.workers.queues embedding-switch flip --workspace <id>
 ```
+
+A process restarted during the switch must start with the same `OPENAI_EMBEDDING_MODEL_NEXT` as the others: a worker scaled out, or an API replica added, without it refuses the flipped workspaces it is asked about.
 
 - **Coverage** is ready documents holding a shadow of their *current* text over ready documents (`wasla_rag_space_coverage_ratio`). A flip below 100 % is refused (exit 1, `refused`).
 - **Blocked**: a shadow that failed permanently is listed under `blocked` with its code and stops its workspace flipping (`EmbeddingSwitchShadowsFailed`). Fix the cause (a document too large for the new model, a key without access), then `build --retry-blocked`; or delete the document.
 - **Flip** supersedes every active generation by its shadow and moves the workspace's query space in one transaction, then deletes the old space's chunks (`retiring chunks`). `retire` repeats the deletion if it was interrupted; `cancel` abandons a switch for a workspace and deletes its shadows - nothing it serves changes.
 - **Rate**: `--rate` is shadows per minute across all workspaces, one document per workspace per turn. Choose it from the embedding account's limits and watch `EmbeddingRateLimited`. The build reads what is owed from the database, so stopping and running it again resumes.
-- **Finishing**: once `status` shows every workspace flipped, set `OPENAI_EMBEDDING_MODEL` to the new model, unset `OPENAI_EMBEDDING_MODEL_NEXT`, and deploy. `python -m scripts.rag_invariants verify` must show RR-09 = 0.
+- **Finishing**: once `status` shows every workspace flipped, set `OPENAI_EMBEDDING_MODEL` to the new model and unset `OPENAI_EMBEDDING_MODEL_NEXT` - for the `api` and the `worker` alike, in one deploy, worker first - and confirm with step 2 that both print `None`. `python -m scripts.rag_invariants verify` must show RR-09 = 0.
 - The query-embedding cache keys by space, so a flipped workspace never reads a vector of the old model.
 
 ### KnowledgeStaleEmbeddings
