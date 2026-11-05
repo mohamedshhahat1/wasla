@@ -733,7 +733,7 @@ Do not change `OPENAI_EMBEDDING_MODEL` in a running deployment: every document b
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `OPENAI_EMBEDDING_MODEL_NEXT` | unset | Only during an embedding-model switch, on the API and the worker alike (RGM-10); not yet forwarded by `docker-compose.prod.yml` (RGM-12) |
+| `OPENAI_EMBEDDING_MODEL_NEXT` | unset | Only during an embedding-model switch, on the API and the worker alike (RGM-10); `docker-compose.prod.yml` passes it and every `RAG_*` setting to both (RGM-12) |
 | `RAG_QUERY_EMBEDDING_CACHE` | `true` | Query vectors in Redis, keyed by workspace and space |
 | `RAG_QUERY_EMBEDDING_CACHE_TTL_SECONDS` | `86400` | 60 .. 604800 |
 | `RAG_EMBEDDING_CONCURRENCY` | `3` | Embedding batches of one document in flight, 1 .. 4 |

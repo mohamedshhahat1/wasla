@@ -2609,7 +2609,7 @@ Never change `OPENAI_EMBEDDING_MODEL` or `EMBEDDING_SCHEMA_VERSION` directly: ev
 
 The `embedding-switch` commands run inside the `worker` container and read the same setting.
 
-**`docker-compose.prod.yml` does not yet forward `OPENAI_EMBEDDING_MODEL_NEXT`** (RGM-12): it enumerates each service's environment, and the variable is in neither `api`'s nor `worker`'s list, so setting it in `.env` alone changes nothing. Until the Compose file carries it, add `OPENAI_EMBEDDING_MODEL_NEXT: ${OPENAI_EMBEDDING_MODEL_NEXT:-}` to the `environment` of both `api` and `worker` before step 1, and check step 2's output.
+`docker-compose.prod.yml` passes `OPENAI_EMBEDDING_MODEL_NEXT` - and every `RAG_*` setting - to both `api` and `worker` (RGM-12), so the deployment's environment file is the one place to set it; step 2 proves each process read it.
 
 ```
 # 1. Name the target in the deployment's environment, then redeploy the worker
