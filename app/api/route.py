@@ -39,6 +39,7 @@ from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import SESSION_STATE_ATTRIBUTE
+from app.db.after_commit import run_committed
 
 
 class CommittingRoute(APIRoute):
@@ -67,6 +68,9 @@ class CommittingRoute(APIRoute):
                 # only worse answer than a failed request is a successful one
                 # describing a write that did not land.
                 await session.commit()
+                # What the handler deferred until its rows were durable - an
+                # indexing job, for one (RGM-16). Never raises.
+                await run_committed(session)
             return response
 
         return commit_after

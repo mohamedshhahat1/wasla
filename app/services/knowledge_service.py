@@ -52,6 +52,7 @@ from app.core.telemetry import (
     record_replacement,
 )
 from app.core.text_safety import has_visible_content, storable_problem
+from app.db.after_commit import defer
 from app.db.errors import is_unique_violation
 from app.db.models.audit import AuditAction
 from app.db.models.billing import LimitKey
@@ -295,6 +296,27 @@ async def _owe_deletes(session: AsyncSession, *, tenant_id: uuid.UUID, keys: lis
         )
         .on_conflict_do_nothing(index_elements=["storage_key"])
     )
+
+
+async def _publish(queue: IngestionQueue, job: IngestionJob) -> bool:
+    """Hand a committed generation's job to Redis. Returns whether it was queued.
+
+    A queue failure is logged and swallowed, not raised. The generation is
+    already committed as pending, which is the truth: it exists and is not yet
+    searchable. Failing the request instead would discard a document the
+    customer successfully uploaded because Redis was briefly unavailable, and
+    `IngestionRecoveryWorker` re-publishes anything committed and never queued
+    (EQ-02, EQ-03).
+    """
+    try:
+        await queue.enqueue(job)
+    except RedisError:
+        logger.warning(
+            "knowledge.enqueue_failed",
+            extra={"document_id": str(job.document_id)},
+        )
+        return False
+    return True
 
 
 class KnowledgeService:
@@ -1137,28 +1159,25 @@ class KnowledgeService:
         await self._enqueue(document.id)
         return generation
 
-    async def _enqueue(self, document_id: uuid.UUID) -> bool:
-        """Ask a worker to index this document. Returns whether it was queued.
+    async def _enqueue(self, document_id: uuid.UUID) -> None:
+        """Ask a worker to index this document, once this transaction has committed.
 
-        A queue failure is logged and swallowed, not raised. The generation is
-        already recorded as pending, which is the truth: it exists and is not
-        yet searchable. Failing the request instead would discard a document the
-        customer successfully uploaded because Redis was briefly unavailable,
-        and `IngestionRecoveryWorker` finds anything stranded.
+        Deferred, never published here (RGM-16): a job published inside the
+        transaction could be claimed before the generation it names is visible -
+        the worker then fails "not found" and retries - and a request that rolls
+        back after the publish would leave a job for a document that never
+        existed. `app.db.after_commit` runs `_publish` after the commit of the
+        request (`CommittingRoute`) or of the unit of work (`Database.session`),
+        and drops it on a rollback.
         """
         if self._queue is None:
-            return False
-        try:
-            await self._queue.enqueue(
-                IngestionJob(tenant_id=self._tenant_id, document_id=document_id)
-            )
-        except RedisError:
-            logger.warning(
-                "knowledge.enqueue_failed",
-                extra={"document_id": str(document_id)},
-            )
-            return False
-        return True
+            return
+        queue, tenant_id = self._queue, self._tenant_id
+
+        async def publish() -> None:
+            await _publish(queue, IngestionJob(tenant_id=tenant_id, document_id=document_id))
+
+        defer(self._session, publish)
 
     async def ingest(
         self,
