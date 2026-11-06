@@ -7839,3 +7839,64 @@ applied while the application is imported (ADR-157, FRM-03).
 **Consequences.** Two concurrent uploads end as two sequential ones: one document, and the other request answered exactly as a second upload a minute later would be (`202` `created: false`, or `409 document_exists_in_other_knowledge_base`) - proved by tests that hold the lock themselves until every request is queued on it, so they fail every time the checks run first. The lock is held for milliseconds, never for a parse. Replacement still asks the plan for nothing (ADR-161). A pinned package can no longer drift under CI unnoticed. `docker-compose.prod.yml` now passes `OPENAI_EMBEDDING_MODEL_NEXT` and every `RAG_*` setting to `api` and `worker` with their `Settings` defaults (RGM-12: it passed none of them, so the first deploy's `RAG_HYBRID_ENABLED=false` and the switch's target never reached a container), and `test_deployment_configuration.py` maps both prefixes, so a new knowledge setting cannot be left out again.
 
 **Amends** ADR-163: the slot is still reserved only for a new document, but the duplicate checks now run under the lock it is reserved under.
+
+## ADR-188 — Index Jobs After The Commit; The Re-ordered-Line Signal; The Scan Audits What Ships; The 2026-11 Advisories; Stable Ties (RGM-16, RGM-13, RGM-21, RGM-17, RGM-25, RGM-22)
+
+**Status.** Accepted, 2026-11-06.
+
+**Context.** The RAG merge re-run (RAG_REMEDIATION_MERGE_RERUN.md) deferred four items and the owner found a fifth:
+the knowledge service published indexing jobs inside the request's transaction (RGM-16); pypdf 6.21 still extracts the
+Chromium fixture's price line in visual order but no longer trips the re-ordered-line warning (RGM-13); `security.yml`
+installed and audited whatever pip resolved on the day, not the lock (RGM-21); pip-audit reported 24 advisories in five
+locked packages; and RRF ties were ordered by a per-ingest random chunk id (RGM-17).
+
+**Decision.**
+
+1. *After-commit publish (EQ-01..EQ-08).* `app/db/after_commit.py`: `defer(session, action)` parks an action on the
+   session; the session's `after_commit` event releases it only for the outermost transaction (a savepoint's release is
+   not a commit, its rollback drops nothing deferred before it), `after_rollback` drops it, and the code that committed
+   runs it — `CommittingRoute` for a request, `Database.session` for a worker or command. `KnowledgeService._enqueue`
+   defers; every knowledge path publishes through it. A publish failing after the commit is logged and swallowed and the
+   request answers as before. No new sweep: `IngestionRecoveryWorker` already re-publishes a pending generation never
+   queued once its five-minute grace has passed, never one with a live lease or one it queued within the visibility
+   timeout (EQ-02). Rejected: a transactional outbox (a migration, and the sweep already gives the no-lost-job
+   guarantee); a sleep or a raised retry delay; a worker that waits for the generation to appear.
+2. *The re-ordered-line signal (PD-01..PD-06).* `digits_glued_to_arabic` fires on a digit touching an Arabic letter
+   directly **or through a full stop**: a visual-order text layer moves the line's final full stop to the junction of the
+   reversed runs, whatever spacing the extractor puts on the number's other side. A colon is not part of the signal.
+   Proved on the PDF corpus as each pypdf version extracts it (tests/fixtures/rag/pdf/extracted_lines.json): exactly
+   the visual-order lines are flagged. Same warning, same consequences. Rejected: version-aware tests; pinning pypdf.
+3. *The scan installs and audits what ships (SY-01..SY-07).* Both installing jobs of `security.yml` install the locks by
+   hash, then `-e ".[dev]"`, and run the drift guard and `pip check`; the dependency job prints the audited versions,
+   audits the locks with `-r … --no-deps --disable-pip` and then the installed environment (the dev tools), with
+   pip-audit 2.10.1 in its own venv. A finding still fails the job; an ignore is allowed only for an advisory with no
+   fixed release, with its record. Triggers, permissions and the secret and container scans are unchanged.
+4. *The 2026-11 advisories (DH-01..DH-10).* One family per commit, regenerated with the lock's own command (`uv pip
+   compile … --generate-hashes`, uv 0.12.10) and `--upgrade-package` only: certifi 2026.10.23, dnspython 2.9.0,
+   pyjwt 2.15.1, opentelemetry 1.45.1 / semantic conventions 0.66b1 (the resolver adds
+   `opentelemetry-exporter-http-transport` and `opentelemetry-exporter-otlp-common` 0.66b1, which the exporter now
+   requires), pypdf 6.21.4. No other pin moved; `requirements-build.lock` unchanged. pypdf 6.21.4 was nine days old,
+   below the 14-day rule, and is the only release fixing all 18 pypdf advisories: taken on the owner's decision.
+   pip-audit on both locks: 0.
+5. *Stable ties (RK-01..RK-04).* `stable_key` (chunk text, title, section, ordinal, then id) breaks RRF ties, and
+   `by_distance` re-orders each vector list by (distance, `stable_key`) after the fetch, because the query orders by
+   distance alone (what the HNSW index serves) and equidistant rows arrived in scan order (RGM-25, exposed by pypdf
+   6.21.4: two Arabic fixtures now hold passages identical after normalisation). Only exact ties move.
+
+6. *Tests that measured the machine (PL, TB, DT).* RGM-02 compares the publish date with the document's own stamp;
+   RGM-19 writes its own backlog and takes `ANALYZE` before reading the plan. RGM-18's amplifying-PDF tests are left
+   unchanged (TB-04): under load on Windows the one long gap is the extraction child being spawned on the loop, which a
+   calibrated bound would hide, and on Linux the original 1.0 s bound holds under the same load (RGM-26, a
+   recommendation). FRM-07's bounds and RGM-18's `[word]` case did not fail at 12 or 36 load processes and are left for
+   audit #24; CPM-06 was already closed by RT-08.
+
+**Consequences.** No worker chases a generation that is not committed, and a failed upload leaves no job. The weekly
+scan reports what the image ships. **RGM-22:** pypdf 6.21.4 extracts some Arabic PDFs differently, the content hash is
+over the extracted text and re-indexing reuses the stored text, so an Arabic PDF stored before the bump is not matched
+as a repeat by an identical re-upload after it (`409 document_source_exists` under the same filename, a second document
+under another) — an operator action before the first real deploy (docs/DEPLOYMENT.md). The scan stays red for two
+reasons this decision does not address: black 26.5.1 in the dev extras (RGM-23) and the secret scan's findings in test
+fixtures (RGM-24).
+
+**Amends** ADR-187 (2026-11-06): CL-03's "security.yml unchanged" is superseded — the scan now installs from the lock
+as CI does. The dependency-hygiene deferral of RR-38 (RAG_REMEDIATION_PART3_SCALE.md) is closed by item 4.
