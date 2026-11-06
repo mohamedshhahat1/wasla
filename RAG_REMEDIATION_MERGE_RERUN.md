@@ -18,8 +18,8 @@ Every retrieval number is **structural** (fake embeddings at the transport); the
 | Part B: every gate at 4bae08d | done (RGM-19 accepted by the user) | 09:15–21:35 | — |
 | Merge (one normal merge commit), tree equality | done | 21:36 | **52af1a5** |
 | Gates on the final canonical tree | done, green | 21:39–22:47 | — |
-| Report commit, push, GitHub Actions | done — CI GREEN | 22:48–23:38 | 79de696 pushed; run 42124575540 |
-| Part C cleanup | done, items left for review | 23:40– | 42 items removed; branches kept |
+| Report commit, push, GitHub Actions | done — runs green / red (RGM-20) / green | 22:48–02:54 | 79de696, 4fe6ea1, d494447 pushed; runs 42124575540, 42132987621, 42147707746 |
+| Part C cleanup | done (ran before the addendum's run finished — see §34), items left for review | 23:40– | 42 items removed; branches kept |
 
 ## 1. Executive Summary
 
@@ -414,6 +414,23 @@ GitHub installed the lock: pypdf 6.19.0, openpyxl 3.1.5, python-docx 1.2.0, lxml
 differences in every job that installs Python. test_the_chromium_pdf_flags_its_reordered_price_line, the dedupe concurrency tests,
 the two vector-only tests and RGM-19's planner test all passed there. security.yml did not run (not triggered by this branch).
 
+**Addendum run** (4fe6ea1, report only): CI **42132987621** (https://github.com/mohamedshhahat1/wasla/actions/runs/42132987621),
+00:02–00:43 UTC — **failure** in Migration-built schema, step "AI and tool invariants over the data their suites kept":
+`tests/integration/test_ai_invariants.py::test_a_hold_nothing_settled_released_or_expired_is_counted` (`assert {} == {STRANDED_HOLDS: 1}`);
+every other job green. **RGM-20 (test defect, pre-existing, file unchanged since origin):** the stranded-hold rule compares
+`held_at < now() - cutoff`, and PostgreSQL's `now()` is the transaction's start; the test aged its hold by Python's clock with a
+one-second margin, so a runner that left the transaction open more than a second before that line saw the hold one second too young.
+Not re-run. Reproduced deterministically (the transaction held 2 s before that line: 3/3 fail at the old test, 3/3 pass at the new).
+Fixed under section 30 in **d494447** (`test(ai-invariants): age the stranded hold by the database's clock (RGM-20)`, test only: the hold
+is aged from the database's own now()). Section 29's gates on d494447 (containers recreated for them): static clean; alembic from empty
+138 steps; MIGRATION-BUILT lane 7,907 passed / 0 failed / 19 skipped (02:52–04:01 Cairo); kept-data sweep 360 / 0 skipped ×3; the
+knowledge / switch / cache / concurrency / AI-invariant selection 197 passed; Linux (new install) drift guard 0, starred 69 ×3,
+concurrency 15, AI invariants 34. Tree difference from RFX_HEAD: the report and that one test file.
+
+**Fix run** (d494447): CI **42147707746** (https://github.com/mohamedshhahat1/wasla/actions/runs/42147707746), 02:02–02:54 UTC —
+**success** in every job: tests 7,907 passed / 17 skipped / 0 failed; migration-built schema 4,336 passed / 95 skipped / 0 failed (the
+kept-data sweep included); drift guard 0 in both; lint, Docker, alert rules green.
+
 ## 31. Findings
 
 | ID | Finding | Status |
@@ -436,7 +453,8 @@ the two vector-only tests and RGM-19's planner test all passed there. security.y
 | RGM-16 | indexing job enqueued before the upload commits; first claim fails, retry publishes | DEFERRED (recommendation: enqueue after commit) |
 | RGM-17 | eval "as typed" follow-up ±1 between runs | ACCEPTED RESIDUAL (RR-20 mechanism) |
 | RGM-18 | two timing bounds failed under heavy concurrent load; pass isolated | DEFERRED (audit #24, FRM-07 class) |
-| RGM-19 | planner-dependent assertion in test_webhook_payload_retention failed once in the Linux tests job | ACCEPTED RESIDUAL (user decision; passed in both full lanes, parity and isolation) |
+| RGM-19 | planner-dependent assertion in test_webhook_payload_retention failed once in the Linux tests job | ACCEPTED RESIDUAL (user decision; passed in both full lanes, parity, isolation and three GitHub runs) |
+| RGM-20 | stranded-hold test aged its hold by Python's clock against PostgreSQL's transaction-start now() (1 s margin) — red on GitHub run 42132987621 | **CLOSED** (d494447, test only; run 42147707746 green) |
 
 ## 32. Decisions Ledger
 
@@ -455,6 +473,10 @@ the last attempt's -mut2, -dates, -evalb4, -report; E:\wasla-rgm-notes (venv, re
 upgrade — the throwaway values are generated, none real).
 
 ## 34. Part C — Cleanup (addendum; full record E:\wasla-cleanup\CLEANUP_rag_20261106.md)
+
+**Ordering error (mine):** Part C ran while the addendum's run was still in progress; section 32 runs it only after that run is green
+too. That run then failed (RGM-20). The removals could not affect GitHub's result, everything was rescued first, and the disposable
+containers were recreated under the same names to gate the fix; they are removed again after the fix run went green.
 
 CI_GREEN_HEAD = 79de696 = origin. Rescued first: 478 files of E:\wasla-rgm-notes (scripts, harnesses, proof plugins, mutation
 runners, the RGM-05 reproduction and the RGM-08 probe, guard.env — no secret — logs and evidence; not the venv, the throwaway
@@ -484,7 +506,7 @@ the removed PostgreSQL containers' anonymous data volumes (dangling, not identif
 
 ## 36. Final Verdict
 
-**RAG REMEDIATION MERGED AND PUSHED, CI GREEN** — **CLEANUP COMPLETE WITH ITEMS LEFT FOR REVIEW** (the three Part worktrees with
+**RAG REMEDIATION MERGED AND PUSHED, CI GREEN** (run 42124575540 on 79de696; the addendum's run 42132987621 red on RGM-20, fixed test-only in d494447, run 42147707746 green) — **CLEANUP COMPLETE WITH ITEMS LEFT FOR REVIEW** (the three Part worktrees with
 untracked audit\ folders; dangling anonymous volumes).
 
 The final question: deployed tomorrow from GitHub onto yesterday's database by DEPLOYMENT.md and the RUNBOOK — every document stayed
