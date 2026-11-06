@@ -436,8 +436,14 @@ async def test_each_source_carries_its_publish_date_and_section(indexing: Indexi
         found = await RetrievalService(
             session=session, tenant_id=tenant_id, embeddings=as_embeddings(FakeEmbeddings())
         ).search(query=QUERY)
+        stamped = await session.scalar(
+            select(Document.ingested_at).where(Document.tenant_id == tenant_id)
+        )
     (source,) = json.loads(found.as_context())["knowledge_sources"]
-    assert source["updated_at"] == datetime.now(UTC).date().isoformat()
+    # The publish date is the document's own stamp, which PostgreSQL wrote; the
+    # test's clock can already be on the next day when it reads it (RGM-02).
+    assert stamped is not None
+    assert source["updated_at"] == stamped.date().isoformat()
     assert source["section"] == "Price list 2026"
 
 
