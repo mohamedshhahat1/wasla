@@ -2543,7 +2543,7 @@ The agent quotes an old price after a new list was uploaded. Usually the new lis
 ### Arabic PDF not found
 
 1. `python -m scripts.rag_triage` - `presentation-forms` counts documents still stored as glyph forms. After the first-deploy back-fill this is 0; if not, run `backfill-normalised-content` and `reindex-all --workspace <id>`.
-2. `extraction-warnings`, and `extraction_warnings` on the document, mean lines whose digits extraction may have re-ordered. Stored text cannot be repaired: upload the document again from its source (a newer export, or a PDF from another tool). For documents uploaded since originals are kept, re-extracting from the original is possible.
+2. `extraction-warnings`, and `extraction_warnings` on the document, mean lines whose digits extraction may have re-ordered (a digit touching an Arabic letter directly or through a full stop, RGM-13). Stored text cannot be repaired: upload the document again from its source (a newer export, or a PDF from another tool). For documents uploaded since originals are kept, re-extracting from the original is possible.
 3. A scanned PDF has no text layer and is refused; there is no OCR.
 
 ### Re-index everything
@@ -2659,6 +2659,8 @@ CSV, XLSX, DOCX and HTML are accepted beside text, Markdown and PDF (ADR-179), a
 | `413 document_too_large` | the file is larger than any document may be (300 KB binary, 1,600 KB text) | split it |
 
 A formula cell is stored as its formula, never its value: export values (Paste Special > Values) before uploading a sheet built on formulas. `wasla_knowledge_format_refusals_total{source,reason}` counts refusals; the parser runs in the same killable sandbox as PDFs, so a hostile file is a refusal, never a worker crash.
+
+**An identical Arabic PDF refused or doubled after the 2026-11 dependency bump (RGM-22).** pypdf 6.21.4 extracts some Arabic PDFs differently from 6.19.0, and the content hash is over the extracted text, so a PDF stored before the bump is not matched as a repeat by its re-upload: `409 document_source_exists` under the same filename (tell the workspace to use *Replace content*, `PUT /knowledge/documents/{id}/content/upload`), a second document under another filename (delete one). It does not affect English or mixed PDFs of the test corpus, text uploads or any other format.
 
 ### Re-index everything (Part 3)
 

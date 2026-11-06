@@ -306,3 +306,28 @@ def test_a_pull_request_is_not_failed_by_an_unfixable_finding() -> None:
     assert blocking[0]["with"]["ignore-unfixed"] is True
     assert len(reporting) == 1
     assert reporting[0]["with"]["ignore-unfixed"] is False
+
+
+def test_the_security_scan_installs_and_audits_what_the_image_ships() -> None:
+    """RGM-21: the scan once resolved pyproject.toml afresh and audited that day's
+    versions - 36 of 64 packages were not the lock's, and none of the 24
+    advisories in the image were reported. Every job that installs Python
+    packages installs both locks by hash first and checks the result before it
+    audits or tests anything; the dependency job audits the locks themselves."""
+    jobs = _load("security.yml")["jobs"]
+    installing = [name for name, job in jobs.items() if "pip install" in _text(job)]
+    assert set(installing) == {"auth-regressions", "dependencies"}
+    for name in installing:
+        runs = [str(step.get("run", "")) for step in _steps(_load("security.yml"), name)]
+        locked = next(i for i, run in enumerate(runs) if "--require-hashes" in run)
+        assert "-r requirements.lock -r requirements-build.lock" in runs[locked], name
+        project = next(i for i, run in enumerate(runs) if '-e ".[dev]"' in run)
+        guard = next(i for i, run in enumerate(runs) if "scripts.check_installed_lock" in run)
+        checked = next(i for i, run in enumerate(runs) if "pip check" in run)
+        first_use = next(i for i, run in enumerate(runs) if 'pip-audit"' in run or "pytest" in run)
+        assert locked <= project <= guard <= checked < first_use, (name, runs)
+        assert not any(re.search(r'pip install "?\.\[dev\]', run) for run in runs), name
+    audits = [str(s.get("run", "")) for s in _steps(_load("security.yml"), "dependencies")]
+    lock_audit = [run for run in audits if "pip-audit" in run and "-r requirements.lock" in run]
+    assert lock_audit and "-r requirements-build.lock" in lock_audit[0]
+    assert "--no-deps" in lock_audit[0]

@@ -58,7 +58,16 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # What the image installs, exactly as ci.yml does: the lock, by hash,
+        # first; then the project and the dev-only tools (RGM-21).
+        run: |
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
+
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
       - name: Run authentication security suite without skips
         run: >-
           pytest -q
@@ -84,20 +93,56 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install project and audit tool
-        # pip-audit inspects the environment it runs in, so the project and the
-        # tool share one environment. The development extra is included on
-        # purpose: build and test tooling is part of the supply chain that
-        # produces the image.
+      - name: Install dependencies
+        # What the image ships, installed exactly as ci.yml and the Dockerfile
+        # install it: the lock, by hash, first; then the project and the
+        # dev-only tools, which leaves every locked package at its pin. The old
+        # step resolved pyproject.toml afresh, so the weekly scan audited
+        # whatever pip found that morning - 36 of 64 packages away from the
+        # lock, and none of the 24 advisories in what ships (RGM-21).
         run: |
           python -m pip install --upgrade pip
-          pip install ".[dev]" pip-audit
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
 
-      - name: Audit dependencies for known vulnerabilities
-        # --strict is omitted deliberately: the local wasla distribution is not
-        # on PyPI and would be reported as unauditable. Real advisories still
-        # fail this step.
-        run: pip-audit --progress-spinner=off --desc
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
+
+      - name: Show the versions this scan audits
+        run: >-
+          python -c "import importlib.metadata as m;
+          [print(p, m.version(p)) for p in ('pypdf', 'pyjwt', 'certifi', 'dnspython',
+          'opentelemetry-api', 'opentelemetry-sdk', 'openpyxl', 'python-docx', 'lxml',
+          'uvloop')]"
+
+      - name: Install the audit tool in its own environment
+        # Outside the audited environment, so installing it cannot move a
+        # locked package.
+        run: |
+          python -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/pip" install pip-audit==2.10.1
+
+      - name: Audit the lock for known vulnerabilities
+        # What ships: every pinned package of both locks, by its pinned version.
+        # --no-deps because the locks are complete; --disable-pip because no
+        # resolution is needed. A real advisory fails this step.
+        run: >-
+          "$RUNNER_TEMP/audit/bin/pip-audit"
+          -r requirements.lock -r requirements-build.lock
+          --no-deps --disable-pip --progress-spinner=off --desc
+
+      - name: Audit the installed environment for known vulnerabilities
+        # Adds the development tools (pytest, ruff, black, mypy), which build
+        # and test the image and so are part of its supply chain. --strict is
+        # omitted deliberately: the local wasla distribution is not on PyPI and
+        # would be reported as unauditable. Real advisories still fail it.
+        if: always()
+        run: >-
+          "$RUNNER_TEMP/audit/bin/pip-audit"
+          --path "$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          --progress-spinner=off --desc
 
   secrets:
     name: Secret scan

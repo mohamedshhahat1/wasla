@@ -741,3 +741,19 @@ Do not change `OPENAI_EMBEDDING_MODEL` in a running deployment: every document b
 | `RAG_GAP_RETENTION_DAYS` | `30` | 1 .. 90; enforced whether or not the report is on |
 
 New dependencies: `openpyxl` and `python-docx` (MIT), pinned in `pyproject.toml` and `requirements.lock`, used only inside the extraction child process.
+
+### Dependency bump of 2026-11 (ADR-188): pypdf 6.21.4 and identical Arabic PDFs
+
+The lock moved certifi 2026.10.23, dnspython 2.9.0, pyjwt 2.15.1, the
+opentelemetry packages 1.45.1 / 0.66b1 and pypdf 6.21.4, closing every advisory
+on it. **pypdf 6.21.4 extracts some Arabic PDFs differently** (spacing around
+numbers, and price lines 6.19 dropped from some PDFs). A document's content hash
+is over its extracted text, and re-indexing reuses the stored text, so **an
+Arabic PDF uploaded before this deploy is not recognised as a repeat when the
+identical file is uploaded again after it (RGM-22)**: under the same filename the
+upload is refused with `409 document_source_exists` (replace its content
+instead), under another filename it becomes a second document. Before the first
+real deploy, decide how to handle the Arabic PDFs already stored - re-upload
+them through the content replacement, or accept a second upload being refused -
+and tell the workspaces that keep catalogues as PDFs. English and mixed PDFs of
+the test corpus extract identically.

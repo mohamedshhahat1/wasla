@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -15,6 +16,7 @@ from app.services.retrieval_ranking import (
     STRONG,
     VECTOR,
     Candidate,
+    by_distance,
     diversify,
     identifier_tokens,
     join_adjacent,
@@ -242,3 +244,32 @@ def test_a_question_naming_an_identifier_asks_the_exact_word_channel_for_it_alon
         "price",
         "delivery",
     ]
+
+
+def _ingest(texts: list[str], ids: list[uuid.UUID]) -> list[Candidate]:
+    """One ingest of a corpus whose chunks tie: same distance, one list each."""
+    return [
+        replace(_candidate(text, content=text), chunk_id=chunk_id)
+        for text, chunk_id in zip(texts, ids, strict=True)
+    ]
+
+
+def test_tied_chunks_keep_one_order_whatever_ids_an_ingest_gave_them() -> None:
+    # RGM-17: chunk ids are random per ingest, so ordering ties by id moved a
+    # tied passage across the top-k cut between two ingests of one corpus.
+    texts = [f"tied passage {n}" for n in range(6)]
+    ids = sorted(uuid.uuid4() for _ in texts)
+    first = rrf_fuse([[c] for c in _ingest(texts, ids)])
+    second = rrf_fuse([[c] for c in _ingest(texts, list(reversed(ids)))])
+    assert [c.content for c in first] == [c.content for c in second]
+
+
+def test_the_stable_key_only_breaks_ties() -> None:
+    near, far = _candidate("zz", distance=0.1), _candidate("aa", distance=0.9)
+    assert rrf_fuse([[near], [far]])[0].chunk_id == near.chunk_id
+
+
+def test_equidistant_vector_rows_rank_the_same_whatever_order_they_arrive_in() -> None:
+    rows = [_candidate(f"r{n}", distance=0.3, content=f"twin {n}") for n in range(4)]
+    assert [c.content for c in by_distance(rows)] == [c.content for c in by_distance(rows[::-1])]
+    assert [c.distance for c in by_distance([rows[0], _candidate("n", distance=0.1)])] == [0.1, 0.3]

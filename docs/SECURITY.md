@@ -68,6 +68,22 @@ dependency resolution or build isolation. The Python, PostgreSQL/pgvector,
 Redis, nginx, Prometheus, and Alertmanager production inputs use registry
 digests. `security.yml` continues to run pip-audit, secret scanning, and Trivy.
 
+**The scheduled scan audits what ships (RGM-21, ADR-188).** Its jobs install
+exactly as `ci.yml` and the Dockerfile do - both locks by hash, then the
+project and the dev tools - and run `scripts/check_installed_lock.py` and
+`pip check` before anything else, so a scan never runs on versions the image
+does not carry. The dependency job prints the audited versions, then audits the
+locks themselves (`pip-audit -r requirements.lock -r requirements-build.lock
+--no-deps --disable-pip`) and, separately, the installed environment, which adds
+the development tools. pip-audit is pinned and installed in its own virtual
+environment so it cannot move a locked package. An advisory with a published fix
+is fixed by a lock bump, never ignored; an advisory with no fixed release may be
+listed with `--ignore-vuln <ID>` only with a comment naming the package, the
+reason, the date reviewed and the report that decided it. Before 2026-11 the
+scan resolved `pyproject.toml` afresh and audited that environment: 36 of 64
+packages were not the lock's, and none of the 24 advisories in the image were
+reported.
+
 Review updates at least monthly and promptly after a relevant advisory. With
 uv, regenerate both locks using the command recorded at the top of each lock
 file (Python 3.12, Linux x86-64), review the complete version and hash diff,

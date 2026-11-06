@@ -200,7 +200,26 @@ async def test_a_payload_disappears_only_by_redaction(db_session: AsyncSession) 
 
 
 async def test_the_sweep_reads_its_backlog_by_index(db_session: AsyncSession) -> None:
-    """The partial index keeps the sweep off the whole event log."""
+    """The partial index keeps the sweep off the whole event log.
+
+    The plan is read on statistics this test takes itself, over a backlog it
+    writes itself: what earlier tests left in the table, and when autovacuum
+    last looked at it, chose the plan before - once on GitHub's runner the
+    planner preferred `ix_whatsapp_events_tenant_id_state` (RGM-19).
+    """
+    tenant, account = await _workspace(db_session)
+    for _ in range(20):
+        await _event(db_session, tenant, account)
+    for _ in range(20):
+        redacted = await _event(db_session, tenant, account)
+        redacted.payload = None
+        redacted.payload_redacted_at = EPOCH
+    for _ in range(20):
+        await _event(
+            db_session, tenant, account, state=WhatsAppEventState.RECEIVED, processed_at=None
+        )
+    await db_session.flush()
+    await db_session.execute(text("ANALYZE whatsapp_events"))
     await db_session.execute(text("SET LOCAL enable_seqscan = off"))
     plan = "\n".join(
         row[0]

@@ -139,8 +139,8 @@ def rrf_fuse(lists: Sequence[Sequence[Candidate]], *, k: int = RRF_K) -> list[Ca
     """Fuse ranked lists of candidates by Reciprocal Rank Fusion.
 
     A chunk found by several lists keeps its smallest distance and the union of
-    its channels. Ties break by distance, then by chunk id, so the order is a
-    function of the inputs and nothing else.
+    its channels. Ties break by distance, then by `stable_key`, so the order is a
+    function of the corpus and nothing else.
     """
     fused: dict[uuid.UUID, Candidate] = {}
     for ranked in lists:
@@ -154,7 +154,36 @@ def rrf_fuse(lists: Sequence[Sequence[Candidate]], *, k: int = RRF_K) -> list[Ca
                 held.distance = min(held.distance, candidate.distance)
                 held.lexical_tokens = held.lexical_tokens | candidate.lexical_tokens
             held.score += 1.0 / (k + rank)
-    return sorted(fused.values(), key=lambda c: (-c.score, c.distance, str(c.chunk_id)))
+    return sorted(fused.values(), key=lambda c: (-c.score, c.distance, *stable_key(c)))
+
+
+def stable_key(candidate: Candidate) -> tuple[str, str, str, int, str]:
+    """What orders two candidates that tie on everything that ranks them (RGM-17).
+
+    The chunk's text, its document's title, its section and its place in the
+    document are the same in every ingest of the same corpus; a chunk id is
+    random per ingest. Ordering ties by the id moved a tied passage across the
+    top-k cut between two ingests, and the order the database happened to
+    return two equidistant chunks in moved it between two reads of one ingest.
+    The id stays last, for chunks identical in all of these.
+    """
+    return (
+        candidate.content,
+        candidate.title,
+        candidate.heading_path or "",
+        candidate.ordinal,
+        str(candidate.chunk_id),
+    )
+
+
+def by_distance(candidates: Sequence[Candidate]) -> list[Candidate]:
+    """A vector channel's rows in rank order: nearest first, ties by `stable_key`.
+
+    The query orders by distance alone - what the HNSW index serves - so rows
+    at equal distance arrive in whatever order the scan produced, and their
+    rank, which is what fusion scores, followed it.
+    """
+    return sorted(candidates, key=lambda c: (c.distance, *stable_key(c)))
 
 
 def keeps(candidate: Candidate, *, threshold: float, identifiers: frozenset[str]) -> bool:
@@ -346,6 +375,7 @@ __all__ = [
     "VECTOR",
     "Candidate",
     "Diversified",
+    "by_distance",
     "diversify",
     "identifier_tokens",
     "join_adjacent",
@@ -354,6 +384,7 @@ __all__ = [
     "merge_adjacent",
     "rrf_fuse",
     "shingles",
+    "stable_key",
     "tier_for",
     "tsquery_text",
     "within_margin",

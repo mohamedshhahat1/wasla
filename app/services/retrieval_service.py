@@ -67,6 +67,7 @@ from app.services.retrieval_ranking import (
     LEXICAL,
     VECTOR,
     Candidate,
+    by_distance,
     diversify,
     identifier_tokens,
     join_adjacent,
@@ -470,7 +471,7 @@ class RetrievalService:
                         knowledge_base_ids=scope,
                     )
                     seconds[VECTOR] += perf_counter() - vector_started
-                    lists.append([_candidate(row, VECTOR) for row in vector_rows])
+                    lists.append(by_distance([_candidate(row, VECTOR) for row in vector_rows]))
                     counted[VECTOR] += len(vector_rows)
                     lexemes = (
                         _lexical_query(text_query, every_question=self._policy.lexical_words)

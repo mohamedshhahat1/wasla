@@ -25,6 +25,7 @@ from app.core.exceptions import DependencyUnavailableError
 from app.core.logging import get_logger
 from app.core.pgvector_version import pgvector_problem
 from app.core.tracing import DB_SYSTEM, DB_SYSTEM_VALUE, span
+from app.db.after_commit import run_committed
 
 logger = get_logger(__name__)
 
@@ -164,6 +165,10 @@ class Database:
             except Exception:
                 await session.rollback()
                 raise
+            else:
+                # After the commit, outside the rollback: what was deferred until
+                # this unit of work was durable (RGM-16). Never raises.
+                await run_committed(session)
             finally:
                 await session.close()
 
