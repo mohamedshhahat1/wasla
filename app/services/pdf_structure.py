@@ -42,7 +42,14 @@ RUNNING_LINE_SHARE: Final = 0.6
 EDGE_LINES: Final = 2
 
 _ARABIC_LETTER: Final = "[\u0621-\u064a\u066e-\u06d3\u06fa-\u06ff]"
-_GLUED: Final = re.compile(f"[0-9]{_ARABIC_LETTER}|{_ARABIC_LETTER}[0-9]")
+# A digit touching an Arabic letter, directly or through a full stop only
+# (RGM-13). In logical order a number is set apart from Arabic words by a space,
+# and a full stop never sits between a word and a number. A visual-order text
+# layer joins the reversed runs at the number (`<word>4500<word>`) and moves the
+# line's final full stop to that junction (`<word>.4500 <word>`), whether or not
+# the extractor puts a space on the number's other side (pypdf 6.19 did not,
+# 6.21 does). A colon is not included: `<word>:4500` is ordinary logical text.
+_GLUED: Final = re.compile(f"[0-9]\\.?{_ARABIC_LETTER}|{_ARABIC_LETTER}\\.?[0-9]")
 # A multi-digit Arabic-Indic (or Persian) number that starts with zero: what a
 # reversed `٧٢٠٠` looks like. Leading zeros are rare in prices and quantities.
 _INDIC_DIGIT: Final = "[\\u0660-\\u0669\\u06f0-\\u06f9]"

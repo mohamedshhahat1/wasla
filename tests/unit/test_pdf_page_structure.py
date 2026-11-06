@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from app.services.pdf_structure import (
     ARABIC_INDIC_LEADING_ZERO,
     DIGITS_GLUED_TO_ARABIC,
@@ -85,5 +90,56 @@ def test_correct_lines_raise_no_warning() -> None:
         "\u0633\u0639\u0631 \u0627\u0644\u0645\u062a\u0631 \u0667\u0662\u0660\u0660 \u062c\u0646\u064a\u0647",  # noqa: E501
         "Starter 1,500 EGP 2",
         "Room 101, floor 0",
+    ):
+        assert warnings_for(line) == {}, line
+
+
+# ------------------------------------------------------------------ RGM-13
+# The Chromium fixture's price line as each pypdf version extracts it
+# (tests/fixtures/rag/pdf/chromium-AR-1.pdf, through pdf_extract_child.extract
+# and structure). 6.21.4 is also the version the dependency bump installs. The
+# line is in visual order either way; only the space after the number moved.
+CHROMIUM_PRICE_LINE = {
+    "6.19.0": "جنیھ للمتر المربع.4500سعر التشطیب الاقتصادي",
+    "6.21.4": "جنیھ للمتر المربع.4500 سعر التشطیب الاقتصادي",
+}
+EXTRACTED = json.loads(
+    (Path(__file__).parents[1] / "fixtures/rag/pdf/extracted_lines.json").read_text("utf-8")
+)["lines"]
+#: Every line of the corpus that is in visual order, per version (read by eye).
+REORDERED = {
+    "6.19.0": {"chromium-AR-1.pdf": 1, "chromium-AR-2.pdf": 4},
+    "6.21.4": {
+        "chromium-AR-1.pdf": 1,
+        "chromium-AR-2.pdf": 4,
+        "weasyprint-AR-1.pdf": 1,
+        "weasyprint-AR-2.pdf": 4,
+    },
+}
+
+
+@pytest.mark.parametrize("version", sorted(CHROMIUM_PRICE_LINE))
+def test_the_chromium_price_line_is_flagged_whatever_pypdfs_spacing(version: str) -> None:
+    line = CHROMIUM_PRICE_LINE[version]
+    assert line in EXTRACTED[version]["chromium-AR-1.pdf"]
+    assert warnings_for(line) == {DIGITS_GLUED_TO_ARABIC: 1}
+
+
+@pytest.mark.parametrize("version", sorted(REORDERED))
+def test_the_corpus_flags_its_reordered_lines_and_nothing_else(version: str) -> None:
+    flagged = {
+        name: sum(1 for line in lines if DIGITS_GLUED_TO_ARABIC in warnings_for(line))
+        for name, lines in EXTRACTED[version].items()
+    }
+    assert {name: n for name, n in flagged.items() if n} == REORDERED[version]
+
+
+def test_a_full_stop_or_a_colon_in_logical_order_raises_no_warning() -> None:
+    for line in (
+        "السعر:4500 جنيه",
+        "السعر: 4500 جنيه.",
+        "سعر التشطيب 4500 .جنيه",
+        "البند 3. الشروط",
+        "المساحة 3.5 متر",
     ):
         assert warnings_for(line) == {}, line
