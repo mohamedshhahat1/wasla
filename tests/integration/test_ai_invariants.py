@@ -616,7 +616,11 @@ async def test_a_hold_nothing_settled_released_or_expired_is_counted(
     db_session: AsyncSession,
 ) -> None:
     _tenant_id, (trigger, *_), before = await _legal(db_session)
-    held_at = datetime.now(UTC) - timedelta(seconds=hold_cutoff_seconds() + 1)
+    # From the clock the rule reads: PostgreSQL's now() is this transaction's
+    # start, which a loaded runner can leave more than the one-second margin
+    # behind Python's clock (RGM-20).
+    database_now = (await db_session.execute(text("SELECT now()"))).scalar_one()
+    held_at = database_now - timedelta(seconds=hold_cutoff_seconds() + 1)
 
     db_session.add(_turn(trigger, charge_state=AITurnChargeState.HELD, held_at=held_at))
 
