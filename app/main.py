@@ -14,6 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.api import health, metrics
+from app.api.openapi import install_error_envelope
 from app.api.v1 import api_router
 from app.core.config import Settings, get_settings
 from app.core.events import drain as drain_events
@@ -128,6 +129,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved
+    # The document declares the error envelope the handlers below write
+    # (FEB-02). Production serves no document; this is what the export reads.
+    install_error_envelope(app)
 
     # Ordering matters and is deliberate. Middleware added later runs first,
     # so the body limit is outermost: an oversized request is refused before

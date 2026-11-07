@@ -20,6 +20,8 @@ htmlcov
 
 tests
 docs
+# The frontend's packages: never part of the backend image (FEB-02, plan risk D-04).
+frontend
 nginx
 ARCHITECTURE.md
 TASKS.md

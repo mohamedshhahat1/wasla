@@ -43,3 +43,9 @@ tests/media_fixtures/** binary
 # a checkout rewrote line endings in what it measures (FX-3.1).
 tests/fixtures/rag/** -text
 tests/fixtures/rag/**/*.py text eol=lf
+
+# The exported API contract and its fixtures (FEB-02, ADR-191). The backend's
+# freshness test compares these byte for byte with what the code exports, on
+# Windows and on Linux, so a checkout must never rewrite their line endings.
+frontend/packages/api-client/*.json text eol=lf
+frontend/packages/api-client/fixtures/*.json text eol=lf
