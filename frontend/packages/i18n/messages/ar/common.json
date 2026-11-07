@@ -1,0 +1,21 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "appName": "وصلة",
+  "close": "إغلاق",
+  "goHome": "الانتقال إلى الصفحة الرئيسية",
+  "tryAgain": "حاول مرة أخرى",
+  "skipToContent": "تخطَّ إلى المحتوى",
+  "requestIdLabel": "المرجع:",
+  "languageLabel": "اللغة",
+  "retryIn": "{seconds, plural, zero {حاول مرة أخرى الآن} one {حاول مرة أخرى بعد ثانية واحدة} two {حاول مرة أخرى بعد ثانيتين} few {حاول مرة أخرى بعد # ثوانٍ} many {حاول مرة أخرى بعد # ثانية} other {حاول مرة أخرى بعد # ثانية}}",
+  "messagesCount": "{count, plural, zero {لا رسائل} one {رسالة واحدة} two {رسالتان} few {# رسائل} many {# رسالة} other {# رسالة}}",
+  "languages": {
+    "en": "English",
+    "ar": "العربية",
+    "fr": "Français",
+    "tr": "Türkçe"
+  }
+}

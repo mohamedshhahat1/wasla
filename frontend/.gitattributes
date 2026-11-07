@@ -1,0 +1,8 @@
+# The frontend is checked out with LF everywhere, so Prettier, the generator's
+# drift check and the lockfile read the same bytes on Windows and on Linux.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

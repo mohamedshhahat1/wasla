@@ -1,0 +1,33 @@
+{
+  "name": "@wasla/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The typed client generated from the backend's exported OpenAPI document, the error normaliser, the stream's event types and the query-key factory.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./events": "./src/events.ts",
+    "./query": "./src/query.ts",
+    "./schema": "./src/schema.d.ts",
+    "./msw": "./test/msw.ts"
+  },
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "drift": "node scripts/generate.mjs && git diff --exit-code -- src/schema.d.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0 && wasla-check-files --kind package .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@wasla/config": "workspace:*",
+    "eslint": "9.39.5",
+    "msw": "3.0.4",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

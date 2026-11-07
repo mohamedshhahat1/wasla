@@ -80,6 +80,17 @@ which is the old per-tier bucket, not a refusal.
 values for every secret, `SESSION_FORWARD_SECRET` included, into the file on
 purpose. It is never deployed.
 
+### The browser applications (FE-1, ADR-192)
+
+The customer app and the console send the CSP of FRONTEND_PLAN.md section 18 on every page with a per-request
+script nonce (`'strict-dynamic'`), `connect-src` limited to their own origin and the API origin, `frame-ancestors
+'none'`, and no third-party origin; the marketing site's static policy allows no inline script or style at all (its
+build refuses a page that has one). All three send `Referrer-Policy`, `Permissions-Policy` and
+`X-Content-Type-Options`, and HSTS outside development. No token is stored anywhere: the only cookie any app sets is
+the `wasla_locale` preference (set by a form post, never by script), and web storage stays empty - lint rules and the
+e2e suite hold both. The forward signer lives in `@wasla/session/server`, server-only by lint rule; FE-2's route
+handlers use it.
+
 ## Tenant isolation
 
 **One predicate set for every knowledge query** (RAG remediation Part 2, RQ-15). The vector search, the exact-word search and the neighbour lookup apply `DocumentChunkRepository.served_predicates` - tenant on the chunk, the generation and the document, the active generation, the embedding space, the validity window and the agent's knowledge scope - so a new query path cannot write a shorter list. The exact-word query binds an OR of quoted lexemes as a parameter, never interpolated. The fused, merged, neighbour-expanded, re-ranked, alternate-query, scoped, preview and pre-retrieval paths each have a two-workspace isolation test, and mutants removing each path's predicate are killed. A knowledge scope is validated against the workspace when it is saved; an unknown id and another workspace's id are refused with the same words. The optional re-rank uses the provider already in use with `store: false` and sends only one search's already-filtered candidates - no new data processor; hosted or self-hosted re-rankers would be one and are a product decision. The search preview is administrators only.

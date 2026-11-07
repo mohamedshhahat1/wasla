@@ -1,0 +1,2 @@
+/* margin-left: 4px is only a comment */
+.box { margin-inline-start: var(--spacing-2); color: var(--color-text); }

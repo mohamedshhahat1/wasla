@@ -1,0 +1,119 @@
+/*
+ * Wasla's design tokens - the ONLY place raw colour, size, spacing, radius, shadow and motion
+ * values live (DS-01). Placeholders from FRONTEND_PLAN.md section 19; the owner replaces them
+ * here, never in a screen.
+ *
+ * The block is Tailwind CSS 4's @theme, so every token is also a utility (bg-surface,
+ * text-text-muted, p-4, rounded-md ...) and `--*: initial` removes Tailwind's own palette and
+ * scales: a utility that is not a token does not exist. `static` emits every token on :root,
+ * so plain CSS and the contrast test can read them too.
+ *
+ * Names follow Tailwind's namespaces; the plan's names map as:
+ *   --font-size-*  → --text-*        --space-*  → --spacing-*
+ *   --motion-*, --ease-standard, --z-* are kept as the plan named them.
+ */
+@theme static {
+  --*: initial;
+
+  /* Colour - surfaces and text */
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f5f6f8;
+  --color-text: #14171f;
+  --color-text-muted: #5b6270;
+  --color-text-inverse: #ffffff;
+
+  /* Colour - brand and status (each status has a -subtle background) */
+  --color-primary: #0f766e;
+  --color-primary-hover: #0b5e58;
+  --color-on-primary: #ffffff;
+  --color-danger: #b42318;
+  --color-danger-subtle: #fef3f2;
+  --color-warning: #b54708;
+  --color-warning-subtle: #fffaeb;
+  --color-success: #067647;
+  --color-success-subtle: #ecfdf3;
+  --color-info: #1d4ed8;
+  --color-info-subtle: #eff6ff;
+
+  /* Colour - lines and focus */
+  --color-border: #e3e6eb;
+  --color-border-strong: #c4c9d2;
+  --color-focus: #2563eb;
+
+  /* Colour - the console's accent (applied below, AP-01) */
+  --color-console: #6d28d9;
+  --color-console-hover: #5b21b6;
+
+  /* Type */
+  --font-sans: "IBM Plex Sans", "IBM Plex Sans Arabic", system-ui, sans-serif;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-md: 16px;
+  --text-lg: 18px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+  --leading-latin: 1.5;
+  --leading-arabic: 1.7;
+
+  /* Space (the plan's --space-0..10) */
+  --spacing-0: 0px;
+  --spacing-1: 2px;
+  --spacing-2: 4px;
+  --spacing-3: 8px;
+  --spacing-4: 12px;
+  --spacing-5: 16px;
+  --spacing-6: 20px;
+  --spacing-7: 24px;
+  --spacing-8: 32px;
+  --spacing-9: 40px;
+  --spacing-10: 48px;
+  --spacing-target: 40px;
+  --spacing-full: 100%;
+  --spacing-prose: 640px;
+  --spacing-page: 1120px;
+
+  /* Shape and depth */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-md: 0 4px 8px -2px rgb(16 24 40 / 0.1), 0 2px 4px -2px rgb(16 24 40 / 0.06);
+  --shadow-lg: 0 12px 16px -4px rgb(16 24 40 / 0.08), 0 4px 6px -2px rgb(16 24 40 / 0.03);
+
+  /* Motion (set to 0 under prefers-reduced-motion in styles.css) */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --default-transition-duration: 120ms;
+  --default-transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layers */
+  --z-dropdown: 1000;
+  --z-sticky: 1100;
+  --z-overlay: 1200;
+  --z-modal: 1300;
+  --z-toast: 1400;
+
+  /* Breakpoints */
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+}
+
+/* The console: one accent override so staff always see they are in the console (AP-01). */
+:root[data-app="console"] {
+  --color-primary: var(--color-console);
+  --color-primary-hover: var(--color-console-hover);
+}
+
+/* Dark theme (FEQ-09: later). Every component reads tokens, so dark mode is this block.
+[data-theme="dark"] {
+}
+*/

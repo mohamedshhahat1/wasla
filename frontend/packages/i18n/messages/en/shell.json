@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "reviewed": true,
+    "note": "source"
+  },
+  "tagline": "Omnichannel AI customer service and sales",
+  "signIn": "Sign in",
+  "comingSoon": "coming soon",
+  "signedOutTitle": "Welcome to Wasla",
+  "signedOutBody": "Signing in opens here soon.",
+  "consoleName": "Wasla Console",
+  "consoleTagline": "Platform administration",
+  "aboutWasla": "About Wasla",
+  "apiStatusUp": "API reachable (development)",
+  "apiStatusDown": "API not reachable (development)",
+  "notFoundTitle": "Page not found",
+  "notFoundBody": "Check the address, or go back to the home page.",
+  "errorTitle": "Something went wrong",
+  "errorBody": "Try again. If it keeps happening, contact support with the reference below."
+}

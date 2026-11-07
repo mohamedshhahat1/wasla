@@ -1,0 +1,32 @@
+{
+  "name": "@wasla/marketing",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The marketing site (Astro 7, static). FE-1: one placeholder home per locale and the 404; no script at all.",
+  "scripts": {
+    "dev": "ASTRO_TELEMETRY_DISABLED=1 astro dev --port 4321",
+    "prebuild": "node ../../packages/ui/scripts/copy-licences.mjs public/licenses",
+    "build": "ASTRO_TELEMETRY_DISABLED=1 astro build && node scripts/write-headers.mjs dist",
+    "preview": "wrangler dev --port 4321 --local",
+    "typecheck": "ASTRO_TELEMETRY_DISABLED=1 astro check --minimumFailingSeverity warning && tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0 && wasla-check-files --kind app src",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@wasla/config": "workspace:*",
+    "@wasla/i18n": "workspace:*",
+    "@wasla/ui": "workspace:*",
+    "astro": "7.4.7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.12",
+    "@tailwindcss/vite": "4.3.5",
+    "@types/node": "24.19.2",
+    "eslint": "9.39.5",
+    "tailwindcss": "4.3.5",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0",
+    "wrangler": "4.158.0"
+  }
+}

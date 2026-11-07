@@ -1,0 +1,17 @@
+node_modules/
+.next/
+.turbo/
+dist/
+.wrangler/
+.open-next/
+.astro/
+storybook-static/
+playwright-report/
+test-results/
+blob-report/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.dev.vars
+# Copied from packages/ui/licenses at build time.
+apps/*/public/licenses/

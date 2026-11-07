@@ -1,0 +1,200 @@
+{
+  "source": "FE0_BACKEND_PREREQUISITES.md section 10 (OA-05): the 14 real error bodies FE-0 validated against the exported schemas. Codes, statuses and shapes as recorded there; request ids and sentences are representative.",
+  "cases": [
+    {
+      "name": "malformed multipart upload",
+      "method": "post",
+      "path": "/api/v1/knowledge/bases/{knowledge_base_id}/documents/upload",
+      "status": 400,
+      "body": {
+        "error": {
+          "code": "bad_request",
+          "message": "There was an error parsing the body",
+          "request_id": "fe0-oa05-400"
+        }
+      }
+    },
+    {
+      "name": "no bearer",
+      "method": "get",
+      "path": "/api/v1/auth/me",
+      "status": 401,
+      "body": {
+        "error": {
+          "code": "unauthenticated",
+          "message": "Authentication credentials were not provided.",
+          "request_id": "fe0-oa05-401a"
+        }
+      }
+    },
+    {
+      "name": "spent refresh token",
+      "method": "post",
+      "path": "/api/v1/auth/refresh",
+      "status": 401,
+      "body": {
+        "error": {
+          "code": "unauthenticated",
+          "message": "The email address or password is incorrect.",
+          "request_id": "fe0-oa05-401b"
+        }
+      }
+    },
+    {
+      "name": "unverified account",
+      "method": "get",
+      "path": "/api/v1/conversations",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "email_verification_required",
+          "message": "Verify your email address to continue.",
+          "request_id": "fe0-oa05-403a"
+        }
+      }
+    },
+    {
+      "name": "member reads audit logs",
+      "method": "get",
+      "path": "/api/v1/audit-logs",
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "permission_denied",
+          "message": "You do not have permission to perform this action.",
+          "request_id": "fe0-oa05-403b"
+        }
+      }
+    },
+    {
+      "name": "unknown conversation",
+      "method": "get",
+      "path": "/api/v1/conversations/{conversation_id}",
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "not_found",
+          "message": "Conversation not found.",
+          "request_id": "fe0-oa05-404a"
+        }
+      }
+    },
+    {
+      "name": "unknown route",
+      "method": "get",
+      "path": "/api/v1/conversations",
+      "status": 404,
+      "body": {
+        "error": { "code": "not_found", "message": "Not Found", "request_id": "fe0-oa05-404b" }
+      }
+    },
+    {
+      "name": "wrong method",
+      "method": "post",
+      "path": "/api/v1/auth/login",
+      "status": 405,
+      "body": {
+        "error": {
+          "code": "method_not_allowed",
+          "message": "Method Not Allowed",
+          "request_id": "fe0-oa05-405"
+        }
+      }
+    },
+    {
+      "name": "taken slug",
+      "method": "post",
+      "path": "/api/v1/workspaces",
+      "status": 409,
+      "body": {
+        "error": {
+          "code": "conflict",
+          "message": "A workspace with this slug already exists.",
+          "request_id": "fe0-oa05-409"
+        }
+      }
+    },
+    {
+      "name": "body too large",
+      "method": "post",
+      "path": "/api/v1/auth/login",
+      "status": 413,
+      "body": {
+        "error": { "code": "payload_too_large", "message": "The request body is too large." }
+      }
+    },
+    {
+      "name": "missing field",
+      "method": "post",
+      "path": "/api/v1/auth/login",
+      "status": 422,
+      "body": {
+        "error": {
+          "code": "validation_error",
+          "message": "The request payload is invalid.",
+          "details": {
+            "errors": [{ "type": "missing", "loc": ["body", "password"], "msg": "Field required" }]
+          },
+          "request_id": "fe0-oa05-422a"
+        }
+      }
+    },
+    {
+      "name": "unknown field",
+      "method": "post",
+      "path": "/api/v1/auth/login",
+      "status": 422,
+      "body": {
+        "error": {
+          "code": "validation_error",
+          "message": "The request payload is invalid.",
+          "details": {
+            "errors": [
+              {
+                "type": "extra_forbidden",
+                "loc": ["body", "remember"],
+                "msg": "Extra inputs are not permitted"
+              }
+            ]
+          },
+          "request_id": "fe0-oa05-422b"
+        }
+      }
+    },
+    {
+      "name": "bad query",
+      "method": "get",
+      "path": "/api/v1/conversations",
+      "status": 422,
+      "body": {
+        "error": {
+          "code": "validation_error",
+          "message": "The request payload is invalid.",
+          "details": {
+            "errors": [
+              {
+                "type": "int_parsing",
+                "loc": ["query", "limit"],
+                "msg": "Input should be a valid integer"
+              }
+            ]
+          },
+          "request_id": "fe0-oa05-422c"
+        }
+      }
+    },
+    {
+      "name": "past the bucket",
+      "method": "post",
+      "path": "/api/v1/auth/login",
+      "status": 429,
+      "body": {
+        "error": {
+          "code": "rate_limited",
+          "message": "Try again in 50 seconds.",
+          "request_id": "fe0-oa05-429"
+        }
+      }
+    }
+  ]
+}

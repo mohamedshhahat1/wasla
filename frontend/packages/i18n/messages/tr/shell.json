@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "tagline": "Yapay zekâ destekli çok kanallı müşteri hizmetleri ve satış",
+  "signIn": "Giriş yap",
+  "comingSoon": "yakında",
+  "signedOutTitle": "Wasla'ya hoş geldiniz",
+  "signedOutBody": "Giriş yakında burada açılacak.",
+  "consoleName": "Wasla Konsolu",
+  "consoleTagline": "Platform yönetimi",
+  "aboutWasla": "Wasla hakkında",
+  "apiStatusUp": "API erişilebilir (geliştirme)",
+  "apiStatusDown": "API erişilemiyor (geliştirme)",
+  "notFoundTitle": "Sayfa bulunamadı",
+  "notFoundBody": "Adresi kontrol edin veya ana sayfaya dönün.",
+  "errorTitle": "Bir sorun oluştu",
+  "errorBody": "Tekrar deneyin. Sorun sürerse aşağıdaki referansla destek ekibine ulaşın."
+}

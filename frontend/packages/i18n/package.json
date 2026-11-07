@@ -1,0 +1,25 @@
+{
+  "name": "@wasla/i18n",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One ICU catalogue set (en, ar, fr, tr), the locale list and directions, negotiation, formatters and the key checker. Framework-free.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./messages/*": "./messages/*"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0 && wasla-check-files --kind package .",
+    "test": "vitest run",
+    "i18n:check": "node scripts/check.mjs messages"
+  },
+  "devDependencies": {
+    "@formatjs/icu-messageformat-parser": "3.5.22",
+    "@types/node": "24.19.2",
+    "@wasla/config": "workspace:*",
+    "eslint": "9.39.5",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

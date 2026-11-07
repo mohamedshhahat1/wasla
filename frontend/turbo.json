@@ -1,0 +1,54 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "stream",
+  "cacheDir": ".turbo/cache",
+  "globalDependencies": [".nvmrc", "pnpm-lock.yaml"],
+  "globalEnv": [
+    "PUBLIC_API_ORIGIN",
+    "PUBLIC_APP_ORIGIN",
+    "PUBLIC_CONSOLE_ORIGIN",
+    "PUBLIC_MARKETING_ORIGIN",
+    "WASLA_ENV"
+  ],
+  "tasks": {
+    "generate": {
+      "inputs": ["../openapi.json", "openapi.json", "scripts/**", "package.json"],
+      "outputs": ["src/schema.d.ts"],
+      "cache": false
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": []
+    },
+    "lint": {
+      "dependsOn": [],
+      "inputs": ["$TURBO_DEFAULT$", "../../packages/config/eslint/**"],
+      "outputs": []
+    },
+    "test": {
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": []
+    },
+    "i18n:check": {
+      "inputs": ["messages/**", "src/**", "scripts/**"],
+      "outputs": []
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "!test/**", "!**/*.test.*"],
+      "outputs": [".next/**", "!.next/cache/**", ".open-next/**", "dist/**"]
+    },
+    "storybook:build": {
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": ["storybook-static/**"]
+    },
+    "storybook:test": {
+      "dependsOn": ["storybook:build"],
+      "cache": false
+    },
+    "e2e": {
+      "cache": false
+    }
+  }
+}

@@ -1,0 +1,49 @@
+packages:
+  - apps/*
+  - packages/*
+  - e2e
+
+# pnpm 12 reads its settings here (.npmrc keeps the npm-compatible ones).
+saveExact: true
+engineStrict: true
+autoInstallPeers: true
+strictPeerDependencies: false
+linkWorkspacePackages: true
+# Scripts run in pnpm's own shell, so `NAME=value cmd` works on Windows and Linux alike.
+shellEmulator: true
+
+# pnpm 12 refuses versions younger than its minimum release age; these exact pins are the
+# latest patches FE-1 chose (section 1) and were published inside that window.
+minimumReleaseAgeExclude:
+  - eslint-plugin-import-x@4.18.0
+  - "@tailwindcss/node@4.3.5"
+  - "@tailwindcss/oxide-android-arm64@4.3.5"
+  - "@tailwindcss/oxide-darwin-arm64@4.3.5"
+  - "@tailwindcss/oxide-darwin-x64@4.3.5"
+  - "@tailwindcss/oxide-freebsd-x64@4.3.5"
+  - "@tailwindcss/oxide-linux-arm-gnueabihf@4.3.5"
+  - "@tailwindcss/oxide-linux-arm64-gnu@4.3.5"
+  - "@tailwindcss/oxide-linux-arm64-musl@4.3.5"
+  - "@tailwindcss/oxide-linux-x64-gnu@4.3.5"
+  - "@tailwindcss/oxide-linux-x64-musl@4.3.5"
+  - "@tailwindcss/oxide-wasm32-wasi@4.3.5"
+  - "@tailwindcss/oxide-win32-arm64-msvc@4.3.5"
+  - "@tailwindcss/oxide-win32-x64-msvc@4.3.5"
+  - "@tailwindcss/oxide@4.3.5"
+  - "@tailwindcss/vite@4.3.5"
+  - tailwindcss@4.3.5
+  - "@tailwindcss/postcss@4.3.5"
+  - "@tanstack/query-core@5.107.1"
+  - "@tanstack/react-query@5.107.1"
+
+# Packages whose install scripts may run (pnpm 12 runs none by default and fails the install on
+# an unlisted one). Each fetches or builds a native binary the toolchain needs.
+allowBuilds:
+  esbuild: true
+  workerd: true
+  sharp: true
+  "@tailwindcss/oxide": true
+  msw: false
+  # Prebuilt binaries arrive as optional dependencies; their install scripts only rebuild.
+  "@parcel/watcher": false
+  "@swc/core": false

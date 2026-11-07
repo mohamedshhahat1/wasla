@@ -1,0 +1,28 @@
+---
+/**
+ * MKT-09: the site's one not-found page (Workers static assets serve it for any unknown path).
+ * English, with every language's home one link away.
+ */
+import { LOCALES } from "@wasla/i18n";
+
+import Base from "../layouts/Base.astro";
+import { text } from "../lib/copy";
+---
+
+<Base locale="en" title={text("en", "marketing.notFoundTitle")} noindex>
+  <section class="mx-auto flex max-w-prose flex-col items-center gap-5 py-10 text-center">
+    <h1 class="m-0 text-3xl font-semibold text-text">{text("en", "marketing.notFoundTitle")}</h1>
+    <p class="m-0 text-lg text-text-muted">{text("en", "marketing.notFoundBody")}</p>
+    <ul class="m-0 flex list-none flex-wrap justify-center gap-4 p-0">
+      {
+        LOCALES.map((locale) => (
+          <li lang={locale}>
+            <a href={`/${locale}/`} class="font-medium text-primary underline">
+              {text(locale, "marketing.backHome")}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+  </section>
+</Base>

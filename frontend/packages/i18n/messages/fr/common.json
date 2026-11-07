@@ -1,0 +1,21 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "appName": "Wasla",
+  "close": "Fermer",
+  "goHome": "Aller à l'accueil",
+  "tryAgain": "Réessayer",
+  "skipToContent": "Aller au contenu",
+  "requestIdLabel": "Référence :",
+  "languageLabel": "Langue",
+  "retryIn": "{seconds, plural, one {Réessayez dans # seconde} many {Réessayez dans # de secondes} other {Réessayez dans # secondes}}",
+  "messagesCount": "{count, plural, one {# message} many {# de messages} other {# messages}}",
+  "languages": {
+    "en": "English",
+    "ar": "العربية",
+    "fr": "Français",
+    "tr": "Türkçe"
+  }
+}
