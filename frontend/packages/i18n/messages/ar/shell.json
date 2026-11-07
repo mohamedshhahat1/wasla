@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "tagline": "خدمة العملاء والمبيعات متعددة القنوات بالذكاء الاصطناعي",
+  "signIn": "تسجيل الدخول",
+  "comingSoon": "قريبًا",
+  "signedOutTitle": "مرحبًا بك في وصلة",
+  "signedOutBody": "سيُتاح تسجيل الدخول هنا قريبًا.",
+  "consoleName": "لوحة تحكم وصلة",
+  "consoleTagline": "إدارة المنصة",
+  "aboutWasla": "عن وصلة",
+  "apiStatusUp": "واجهة البرمجة متاحة (تطوير)",
+  "apiStatusDown": "واجهة البرمجة غير متاحة (تطوير)",
+  "notFoundTitle": "الصفحة غير موجودة",
+  "notFoundBody": "تحقّق من العنوان أو عُد إلى الصفحة الرئيسية.",
+  "errorTitle": "حدث خطأ ما",
+  "errorBody": "حاول مرة أخرى. إذا تكرر ذلك، تواصل مع الدعم مع ذكر المرجع أدناه."
+}

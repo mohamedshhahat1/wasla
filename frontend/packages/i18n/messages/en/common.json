@@ -1,0 +1,21 @@
+{
+  "_meta": {
+    "reviewed": true,
+    "note": "source"
+  },
+  "appName": "Wasla",
+  "close": "Close",
+  "goHome": "Go to the home page",
+  "tryAgain": "Try again",
+  "skipToContent": "Skip to content",
+  "requestIdLabel": "Reference:",
+  "languageLabel": "Language",
+  "retryIn": "{seconds, plural, one {Try again in # second} other {Try again in # seconds}}",
+  "messagesCount": "{count, plural, one {# message} other {# messages}}",
+  "languages": {
+    "en": "English",
+    "ar": "العربية",
+    "fr": "Français",
+    "tr": "Türkçe"
+  }
+}

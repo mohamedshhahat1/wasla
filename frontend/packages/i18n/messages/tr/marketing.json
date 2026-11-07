@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "homeTitle": "Wasla",
+  "homeBody": "Wasla — yapay zekâ destekli çok kanallı müşteri hizmetleri ve satış; yakında.",
+  "openApp": "Uygulamayı aç",
+  "metaDescription": "Wasla, işletmeleri WhatsApp ve diğer kanallarda yapay zekâ çalışanlarıyla müşterilerine bağlar.",
+  "notFoundTitle": "Sayfa bulunamadı",
+  "notFoundBody": "Bu sayfa mevcut değil.",
+  "backHome": "Ana sayfaya dön"
+}

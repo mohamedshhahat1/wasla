@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "tagline": "Service client et ventes omnicanal par IA",
+  "signIn": "Se connecter",
+  "comingSoon": "bientôt",
+  "signedOutTitle": "Bienvenue sur Wasla",
+  "signedOutBody": "La connexion ouvrira bientôt ici.",
+  "consoleName": "Console Wasla",
+  "consoleTagline": "Administration de la plateforme",
+  "aboutWasla": "À propos de Wasla",
+  "apiStatusUp": "API joignable (développement)",
+  "apiStatusDown": "API injoignable (développement)",
+  "notFoundTitle": "Page introuvable",
+  "notFoundBody": "Vérifiez l'adresse ou revenez à l'accueil.",
+  "errorTitle": "Un problème est survenu",
+  "errorBody": "Réessayez. Si le problème persiste, contactez l'assistance avec la référence ci-dessous."
+}

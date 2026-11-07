@@ -1,0 +1,21 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "appName": "Wasla",
+  "close": "Kapat",
+  "goHome": "Ana sayfaya git",
+  "tryAgain": "Tekrar dene",
+  "skipToContent": "İçeriğe geç",
+  "requestIdLabel": "Referans:",
+  "languageLabel": "Dil",
+  "retryIn": "{seconds, plural, one {# saniye sonra tekrar deneyin} other {# saniye sonra tekrar deneyin}}",
+  "messagesCount": "{count, plural, one {# mesaj} other {# mesaj}}",
+  "languages": {
+    "en": "English",
+    "ar": "العربية",
+    "fr": "Français",
+    "tr": "Türkçe"
+  }
+}

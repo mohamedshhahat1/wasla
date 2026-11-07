@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "reviewed": false,
+    "note": "draft written in FE-1; native review before FE-11 (FEQ-08)"
+  },
+  "homeTitle": "Wasla",
+  "homeBody": "Wasla — service client et ventes omnicanal par IA ; bientôt disponible.",
+  "openApp": "Ouvrir l'application",
+  "metaDescription": "Wasla relie les entreprises à leurs clients grâce à des employés IA sur WhatsApp et ailleurs.",
+  "notFoundTitle": "Page introuvable",
+  "notFoundBody": "Cette page n'existe pas.",
+  "backHome": "Retour à l'accueil"
+}
