@@ -17,8 +17,11 @@ ADR-188. Date: 2026-11-06 (UTC; Cairo = UTC+2). Evidence: `E:\wasla-rdi-notes\` 
 | B: mutation spot-check after the lanes | done: 79 killed, 0 hung | 21:30–21:46 | — |
 | B: merge | done, tree equal | 21:47 | **1ff78e7** (parents b5aa170, 277b716) |
 | B: gates on the final tree | done, green (RGM-23 recorded) | 21:48–22:56 | — |
-| B: report commit, push, ci.yml, security.yml dispatch, addendum | see §30–31 | | |
-| C: cleanup | runs only after the addendum's run is green | | |
+| B: report commit, push | done | 22:57 | fe2ee64 pushed (b5aa170..fe2ee64) |
+| B: ci.yml on fe2ee64 | **green, 5 / 5 jobs** | 22:57–23:57 | run 42308491855 |
+| B: security.yml dispatch (the one run) | red: lock audit 0; RGM-23, RGM-24 and **RGM-27** (container scan) | 23:59–00:01 | run 42315411238 |
+| B: addendum | this commit (owner's decision, 2026-11-07, to record RGM-27 and push) | 2026-11-07 | §30, §31, §37 |
+| C: cleanup | runs only after the addendum's run is green | | E:\wasla-cleanup\CLEANUP_rdi_20261107.md |
 
 ## 1. Executive Summary
 
@@ -42,6 +45,9 @@ ADR-188. Date: 2026-11-06 (UTC; Cairo = UTC+2). Evidence: `E:\wasla-rdi-notes\` 
 - **Two reds recorded, not fixed (owner's decision, 2026-11-06):** security.yml's environment audit (black 26.5.1, **RGM-23**) and its Secret scan (gitleaks, **RGM-24**).
 - **One load failure recorded:** RGM-18's loop-latency test failed once in the local migration-parity job while the machine ran four other suites. On its own it passed 15 / 15 in each of 6 runs, and both full lanes later passed it.
 - **Mutations:** 79 / 79 killed, 0 hung (M-R34 equivalent). Merged tree equals RDI_HEAD.
+- **GitHub (addendum):**
+  - ci.yml on fe2ee64 is green in all 5 jobs.
+  - The one security.yml dispatch audited the lock with 0 advisories, but the run is red: RGM-23, RGM-24, and a new **RGM-27**. In RGM-27 the container scan's image reused a cached `apt-get upgrade` layer, so it carries Debian packages with 9 fixable HIGH / CRITICAL advisories. The owner chose (2026-11-07) to record RGM-27 and push.
 
 ## 2. Source Branches and Exact Heads
 
@@ -275,7 +281,7 @@ MODEL-BUILT, Windows, real clock, venv-head (RDI_HEAD's lock, pypdf 6.21.4). Run
 | ci.yml docker | Windows docker | build ok; live attempt 6 (13 s); ready 503 without services (expected); uid 1001; the new pins in the image; both sandbox children start |
 | security.yml dependencies | Linux, its new steps | install, drift 66 / 0, pip check ok; **lock audit 0**; environment audit 1 (black) → **red, RGM-23** |
 | security.yml secret scan | GitHub-only (gitleaks action) | red since 2026-10-05 on main → **RGM-24** |
-| security.yml container scan | GitHub-only | green on main's scheduled runs |
+| security.yml container scan | GitHub-only | green on main's scheduled run of 2026-11-02; **red on this stage's dispatch → RGM-27** (§31) |
 
 ## 22. Linux: the Sandboxes with their Limits
 
@@ -350,11 +356,46 @@ Harness correction: the first run of the security job named its copy after its s
 
 ## 30. Push
 
-Recorded in the addendum commit that follows the push.
+- **Report commit:** fe2ee64, pushed with `git push origin worktree-billing-google-auth` at 22:57 UTC, b5aa170..fe2ee64 (fast-forward). origin = local = fe2ee648fbacc7aa7f9859f4b8c17e911745ef3b.
+- **The owner's go-ahead (2026-11-06), verbatim:** "Yes, push. Treat the RGM-18 failure as a load finding (record it in the report and carry it to audit #24), not a stop condition."
+- **The stop:** the security.yml dispatch was red on a job other than RGM-23 / RGM-24 (the container scan), so I stopped before this addendum and asked the owner.
+- **The owner's answer (2026-11-07), verbatim:** "Yes, record and push". This commit records RGM-27 and is pushed the same way.
+- No force-push, no rebase, main untouched, no pull request.
 
 ## 31. GitHub Actions
 
-Recorded in the addendum commit that follows the push.
+**ci.yml: run 42308491855, on fe2ee64 (push). Conclusion: success.**
+https://github.com/mohamedshhahat1/wasla/actions/runs/42308491855
+
+| Job | Result | UTC (Cairo = UTC+2) |
+|---|---|---|
+| Lint, format, types | success; drift guard "66 pinned packages checked, 0 differ from the lock"; ruff, black, mypy | 22:57–22:59 |
+| Tests and migrations | success: **7,932 passed / 17 skipped / 2 deselected, 0 failed** (57 m 46 s). Also green: drift 66 / 0, object store, every skip chosen, no media suite skipped, application starts, migrations up / down / up, rules enforced, `alembic check` | 22:57–23:57 (00:57–01:57 Cairo, inside quiet hours) |
+| Migration-built schema | success: drift 66 / 0; enums agree; parity not skipped; every integration / E2E suite against the migrated schema; kept-data sweep (360, no skip) | 22:57–23:55 (inside quiet hours) |
+| Docker build | success | 22:57–22:58 |
+| Alert rules and receivers | success | 22:57–22:59 |
+
+- **Versions installed** (all 4 install steps): pypdf 6.21.4, pyjwt 2.15.1, certifi 2026.10.23, dnspython 2.9.0, opentelemetry-api / -sdk 1.45.1, openpyxl 3.1.5, python-docx 1.2.0, lxml 6.1.3, uvloop 0.22.1.
+- **Named tests:** the Chromium test, Q-1..Q-9, C-1..C-10, the detector, the tie-break and the hardened tests (RGM-02, RGM-19, RGM-18's loop-latency test) are all inside the Tests job's 7,932 passed and its 0 failed.
+- **Log:** evidence/gh/ci_42308491855.log.
+
+**security.yml: run 42315411238, the one workflow_dispatch on worktree-billing-google-auth at fe2ee64. Conclusion: failure.**
+https://github.com/mohamedshhahat1/wasla/actions/runs/42315411238
+
+| Job | Result | What it shows |
+|---|---|---|
+| Dependency audit | failure (expected) | Installs both locks by hash; drift guard "66 pinned packages checked, 0 differ from the lock"; pip check ok; prints the audited versions (the bumped pins above). **Lock audit: "No known vulnerabilities found".** Environment audit: black 26.5.1 CVE-2026-114134 (fix 26.10.1) → **RGM-23**. |
+| Secret scan | failure (expected) | gitleaks v8.18.4: 6 `generic-api-key` hits in test fixtures (test_paymob_token_logging ×2, test_request_body_policy, test_object_store_refusals, test_rag_operations, test_embeddings_contract) → **RGM-24**. main's 2026-11-02 run reported 26. |
+| Authentication security regressions | success | — |
+| Container scan | **failure (not expected)** | Trivy, CRITICAL + HIGH with a fix: 9. CRITICAL: libbrotli1 CVE-2026-111497. HIGH: apt and libapt-pkg7.0 CVE-2026-109518; curl and libcurl4t64 CVE-2026-8286, -8927, -92392. Full report (MEDIUM+, unfixed included): 170. → **RGM-27** |
+
+- **RGM-27 cause:** `docker buildx build --cache-from type=gha` restored the runtime stage's `apt-get update && apt-get upgrade -y && apt-get install curl` layer as **CACHED**. So the image carries the Debian packages of that cache entry, and Debian's fixes published since then (apt 3.0.4, curl 8.14.1-2+deb13u7, brotli 1.1.0-2+deb13u1) are not applied.
+  - The Dockerfile (base `python:3.12-slim@sha256:78387bc3…`) has not changed since e5a56e8 (2026-09-20). main's scheduled run 41461829843 (2026-11-02) had the container scan green (0 CRITICAL).
+  - Nothing this stage changed causes it.
+- **RGM-21's GitHub half: CLOSED.** The dispatch installed from the lock, ran the drift guard (0), and audited the lock (0). OLD vs NEW is proven on GitHub.
+- **Logs:** evidence/gh/sec_42315411238.log and sec_42315411238_failed.log.
+
+**The addendum's own ci.yml run:** watched after this commit is pushed. Its result is recorded in E:\wasla-cleanup\CLEANUP_rdi_20261107.md and in the draft (no third push).
 
 ## 32. Findings
 
@@ -369,10 +410,11 @@ Recorded in the addendum commit that follows the push.
 | RGM-18 | loop-latency test under load (Windows spawn) | NOT CLOSED: left for audit #24 under TB-04 |
 | FRM-07 | parse deadline under load | NOT CLOSED: not reproduced; TB-04, audit #24 |
 | CPM-06 | campaign sweep timing | CLOSED (earlier stage, RT-08) |
-| RGM-21 | security.yml audited an environment, not the lock | **CLOSED** locally (97bec9f, 277b716); GitHub half in §31 |
+| RGM-21 | security.yml audited an environment, not the lock | **CLOSED** (97bec9f, 277b716); GitHub half closed by run 42315411238 (lock audit 0, drift 0) |
 | RGM-22 | pypdf 6.21.4 changes Arabic extraction → an identical Arabic PDF uploaded before the bump is not a repeat | DEFERRED PRODUCT DECISION (owner accepted 2026-11-06; external action before the first real deploy) |
 | RGM-23 | black 26.5.1 (dev pin) CVE-2026-114134; security.yml's environment audit red | DEFERRED PRODUCT DECISION (owner: leave as finding) |
-| RGM-24 | security.yml Secret scan: 26 gitleaks findings in test fixtures | DEFERRED PRODUCT DECISION (owner: leave as finding) |
+| RGM-24 | security.yml Secret scan: gitleaks findings in test fixtures (26 on main's 2026-11-02 run, 6 on this dispatch) | DEFERRED PRODUCT DECISION (owner: leave as finding) |
+| RGM-27 | security.yml Container scan: the GitHub Actions build cache restores a stale `apt-get upgrade` layer, so the image carries 9 fixable HIGH / CRITICAL Debian advisories (libbrotli1, apt, curl) | **OPEN, recorded** (owner, 2026-11-07); not fixed in this stage. Any image built from that cache, including a deploy, ships the stale packages |
 | RGM-25 | equidistant twin passages ordered by HNSW scan | **CLOSED** (ae512a2) |
 | RGM-26 | Windows under load: spawning the extraction child blocks the loop ≈1.2–1.5 s | ACCEPTED RESIDUAL (Linux, the production platform, does not show it); recommendation for audit #24 |
 | Advisories (24, §9) | each bumped | CLOSED |
@@ -383,7 +425,7 @@ Recorded in the addendum commit that follows the push.
 |---|---|
 | EQ-01..EQ-08 | CLOSED (applied) |
 | PD-01..PD-06 | CLOSED |
-| SY-01..SY-07 | CLOSED locally; SY-07 dispatch in §31 |
+| SY-01..SY-07 | CLOSED; SY-07: dispatched once (run 42315411238, §31) |
 | DH-01..DH-10 | CLOSED; DH-03 waived for pypdf by the owner; DH-05 → RGM-22 |
 | RK-01, RK-02, RK-04 | CLOSED; RK-03 ACCEPTED RESIDUAL |
 | PL-01..PL-03 | CLOSED (PL-02 not reproduced) |
@@ -414,6 +456,7 @@ Runs after the addendum's run is green. The result goes to E:\wasla-cleanup\CLEA
 - **security.yml on main:** the scheduled scan reaches main only when the canonical branch is merged into main. Merging into main is the owner's decision.
 - **RGM-23:** bump black in pyproject's dev pins to 26.10.1+ (or drop the environment audit).
 - **RGM-24:** gitleaks allow-list for the test fixtures.
+- **RGM-27, before the first real deploy:** build the release image without the stale cache (`--no-cache` or `--pull` with a cache key that expires, for example a weekly one, on the apt layer). Alternatively, move to a fresh digest of `python:3.12-slim`. Then re-run the container scan to 0 fixable HIGH / CRITICAL.
 - **Recommendations:**
   - enqueue-after-commit for the other subsystems EQ-06 listed;
   - a transactional outbox if the sweep's 300 s is ever too slow;
@@ -430,6 +473,19 @@ Runs after the addendum's run is green. The result goes to E:\wasla-cleanup\CLEA
 
 ## 37. Final Verdict
 
-Provisional at this commit. Every local gate is green apart from the recorded RGM-18 (load), RGM-23 and RGM-24. The owner told me (2026-11-06) to push and to treat RGM-18 as a load finding carried to audit #24, not a stop condition.
+```text
+RAG DEFERRED ITEMS MERGED AND PUSHED, CI GREEN
+SECURITY SCAN RED ON THE LOCK
+CLEANUP NOT RUN (runs after this addendum's ci.yml run is green; result in E:\wasla-cleanup\CLEANUP_rdi_20261107.md)
+```
 
-The verdict is written in the addendum, after the GitHub runs (§31).
+- **CI GREEN:**
+  - every local gate is green, apart from the recorded RGM-18 (load; the owner's decision), RGM-23 and RGM-24;
+  - pushed;
+  - the first ci.yml run (42308491855) is green in all 5 jobs.
+  The addendum's run is recorded in the cleanup file.
+- **SECURITY SCAN RED ON THE LOCK,** stated precisely:
+  - The dispatch ran, and **the lock's own audit is 0**: every advisory on the lock is bumped.
+  - The run is red on the installed dev tool black (RGM-23), gitleaks' fixture hits (RGM-24) and the container image's cached Debian layer (RGM-27).
+  - None of these is an advisory in `requirements.lock` / `requirements-build.lock`.
+  - "GREEN ON THE LOCK" would need the whole dispatch green, so the red label is the honest one.
