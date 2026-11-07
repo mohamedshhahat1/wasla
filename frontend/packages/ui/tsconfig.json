@@ -1,0 +1,5 @@
+{
+  "extends": "@wasla/config/tsconfig.react.json",
+  "compilerOptions": { "types": ["node", "@testing-library/jest-dom/vitest"] },
+  "include": ["src/**/*", "test/**/*", "test-storybook/**/*", ".storybook/**/*", "*.ts"]
+}

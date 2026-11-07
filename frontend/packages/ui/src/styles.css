@@ -1,0 +1,58 @@
+/*
+ * The design system's one stylesheet: Tailwind's preflight and utilities over Wasla's tokens.
+ * Apps import this file and nothing else for styling.
+ */
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* The ui package's own class names (apps add their own folders with @source). */
+@source "./";
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    line-height: var(--leading-latin);
+    color: var(--color-text);
+    background-color: var(--color-surface);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  :lang(ar) {
+    line-height: var(--leading-arabic);
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :root {
+      --motion-fast: 0ms;
+      --motion-base: 0ms;
+      --default-transition-duration: 0ms;
+    }
+
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Icons that point along the reading direction mirror in RTL (DS-03). */
+  [dir="rtl"] .wasla-flip-rtl {
+    transform: scaleX(-1);
+  }
+}

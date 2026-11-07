@@ -1,0 +1,54 @@
+{
+  "name": "@wasla/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Wasla's design system: tokens.css (the only place raw values live), self-hosted IBM Plex fonts, Radix primitives wrapped once, composites and Storybook.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles.css": "./src/styles.css",
+    "./tokens.css": "./src/tokens.css",
+    "./fonts": "./src/fonts.ts",
+    "./licenses/*": "./licenses/*"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0 && wasla-check-files --kind ui src",
+    "test": "vitest run",
+    "storybook": "storybook dev -p 6006 --no-open",
+    "storybook:build": "storybook build -o storybook-static --quiet --disable-telemetry",
+    "storybook:test": "playwright test -c test-storybook/playwright.config.ts"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@fontsource/ibm-plex-sans-arabic": "5.3.0",
+    "lucide-react": "1.70.0",
+    "radix-ui": "1.8.1"
+  },
+  "peerDependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.0",
+    "@storybook/react-vite": "10.6.6",
+    "@tailwindcss/vite": "4.3.5",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.8",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@wasla/config": "workspace:*",
+    "eslint": "9.39.5",
+    "jsdom": "31.0.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "storybook": "10.6.6",
+    "tailwindcss": "4.3.5",
+    "typescript": "5.9.3",
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
+  }
+}

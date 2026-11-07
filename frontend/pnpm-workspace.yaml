@@ -7,12 +7,28 @@ packages:
 # latest patches FE-1 chose (section 1) and were published inside that window.
 minimumReleaseAgeExclude:
   - eslint-plugin-import-x@4.18.0
+  - "@tailwindcss/node@4.3.5"
+  - "@tailwindcss/oxide-android-arm64@4.3.5"
+  - "@tailwindcss/oxide-darwin-arm64@4.3.5"
+  - "@tailwindcss/oxide-darwin-x64@4.3.5"
+  - "@tailwindcss/oxide-freebsd-x64@4.3.5"
+  - "@tailwindcss/oxide-linux-arm-gnueabihf@4.3.5"
+  - "@tailwindcss/oxide-linux-arm64-gnu@4.3.5"
+  - "@tailwindcss/oxide-linux-arm64-musl@4.3.5"
+  - "@tailwindcss/oxide-linux-x64-gnu@4.3.5"
+  - "@tailwindcss/oxide-linux-x64-musl@4.3.5"
+  - "@tailwindcss/oxide-wasm32-wasi@4.3.5"
+  - "@tailwindcss/oxide-win32-arm64-msvc@4.3.5"
+  - "@tailwindcss/oxide-win32-x64-msvc@4.3.5"
+  - "@tailwindcss/oxide@4.3.5"
+  - "@tailwindcss/vite@4.3.5"
+  - tailwindcss@4.3.5
 
-# Packages whose install scripts may run (pnpm runs none by default). Each one fetches or
-# builds a native binary the toolchain needs.
-onlyBuiltDependencies:
-  - esbuild
-  - workerd
-  - sharp
-  - "@tailwindcss/oxide"
-  - msw
+# Packages whose install scripts may run (pnpm 12 runs none by default and fails the install on
+# an unlisted one). Each fetches or builds a native binary the toolchain needs.
+allowBuilds:
+  esbuild: true
+  workerd: true
+  sharp: true
+  "@tailwindcss/oxide": true
+  msw: false
