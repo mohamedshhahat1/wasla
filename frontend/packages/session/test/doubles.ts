@@ -12,6 +12,11 @@ export class FakeLocks implements LockManagerLike {
   readonly #queues = new Map<string, Array<() => void>>();
   readonly #held = new Set<string>();
   granted = 0;
+  readonly grantsByName = new Map<string, number>();
+
+  query(): Promise<{ held: Array<{ name: string }> }> {
+    return Promise.resolve({ held: [...this.#held].map((name) => ({ name })) });
+  }
 
   async request<T>(name: string, callback: () => Promise<T>): Promise<T> {
     if (this.#held.has(name)) {
@@ -23,6 +28,7 @@ export class FakeLocks implements LockManagerLike {
     }
     this.#held.add(name);
     this.granted += 1;
+    this.grantsByName.set(name, (this.grantsByName.get(name) ?? 0) + 1);
     try {
       return await callback();
     } finally {
@@ -35,13 +41,23 @@ export class FakeLocks implements LockManagerLike {
 
 export class FakeChannelHub {
   readonly #channels = new Set<FakeChannel>();
+  /**
+   * "sync": delivered before the next lock grant. "late": delivered a macrotask later, after
+   * the grant - the order Chromium was seen to use. "lost": never (the sending tab closed).
+   */
+  constructor(readonly delivery: "sync" | "late" | "lost" = "sync") {}
   open(): FakeChannel {
     const channel = new FakeChannel(this);
     this.#channels.add(channel);
     return channel;
   }
   deliver(from: FakeChannel, data: unknown): void {
-    for (const channel of this.#channels) if (channel !== from) channel.receive(data);
+    if (this.delivery === "lost") return;
+    const send = () => {
+      for (const channel of this.#channels) if (channel !== from) channel.receive(data);
+    };
+    if (this.delivery === "late") setTimeout(send, 0);
+    else send();
   }
   remove(channel: FakeChannel): void {
     this.#channels.delete(channel);

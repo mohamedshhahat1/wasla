@@ -3,8 +3,10 @@
  * its own - FE-2 injects the /session/refresh call as `fn`.
  */
 export {
+  HANDOFF_TIMEOUT_MS,
   REFRESH_LOCK,
   RefreshCoordinator,
+  TOKEN_MARKER_PREFIX,
   systemClock,
   type Clock,
   type LockManagerLike,

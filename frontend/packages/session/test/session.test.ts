@@ -25,13 +25,18 @@ const fixedClock = (start = T0): Clock & { advance(ms: number): void } => {
   return { now: () => now, advance: (ms) => (now += ms) };
 };
 
-function browserWithTabs(count: number, clock: Clock) {
+function browserWithTabs(
+  count: number,
+  clock: Clock,
+  delivery: "sync" | "late" | "lost" = "sync",
+  delay: (ms: number) => Promise<void> = () => new Promise(() => undefined),
+) {
   const locks = new FakeLocks();
-  const hub = new FakeChannelHub();
+  const hub = new FakeChannelHub(delivery);
   const tabs = Array.from({ length: count }, () => {
     const holder = new TokenHolder();
     const channel = new SessionChannel(holder, hub.open());
-    const coordinator = new RefreshCoordinator({ holder, locks, channel, clock });
+    const coordinator = new RefreshCoordinator({ holder, locks, channel, clock, delay });
     return { holder, channel, coordinator };
   });
   return { locks, tabs };
@@ -52,6 +57,72 @@ describe("one refresh per browser (SS-02, the browser half of J6)", () => {
     expect(runs).toBe(1);
     expect(new Set(tokens)).toEqual(new Set(["access-1"]));
     for (const tab of tabs) expect(tab.holder.current(clock.now())).toBe("access-1");
+  });
+
+  it("still once when the broadcast arrives after the lock grant (the marker hand-off)", async () => {
+    const clock = fixedClock();
+    const { tabs } = browserWithTabs(5, clock, "late");
+    let runs = 0;
+    const fn = async (): Promise<RefreshResult> => {
+      runs += 1;
+      await Promise.resolve();
+      return { access_token: `access-${runs}`, expires_in: 900 };
+    };
+    for (let round = 1; round <= 5; round += 1) {
+      clock.advance(1000);
+      const tokens = await Promise.all(
+        Array.from({ length: 20 }, (_, i) => tabs[i % 5]!.coordinator.refresh(fn)),
+      );
+      expect(runs, `round ${round}`).toBe(round);
+      expect(new Set(tokens)).toEqual(new Set([`access-${round}`]));
+    }
+  });
+
+  it("without the marker, a late broadcast makes the waiting tabs refresh again (why it exists)", async () => {
+    const clock = fixedClock();
+    const locks = new FakeLocks();
+    const noQuery = { request: locks.request.bind(locks) };
+    const hub = new FakeChannelHub("late");
+    const tabs = Array.from({ length: 3 }, () => {
+      const holder = new TokenHolder();
+      return new RefreshCoordinator({
+        holder,
+        locks: noQuery,
+        channel: new SessionChannel(holder, hub.open()),
+        clock,
+      });
+    });
+    let runs = 0;
+    const fn = async (): Promise<RefreshResult> => {
+      runs += 1;
+      await Promise.resolve();
+      return { access_token: `access-${runs}`, expires_in: 900 };
+    };
+    await Promise.all(tabs.map((tab) => tab.refresh(fn)));
+    expect(runs).toBeGreaterThan(1);
+  });
+
+  it("if the announced token never arrives (its tab closed), the waiter refreshes after the timeout", async () => {
+    const clock = fixedClock();
+    let timeouts = 0;
+    const immediately = () => {
+      timeouts += 1;
+      return Promise.resolve();
+    };
+    const { tabs } = browserWithTabs(2, clock, "lost", immediately);
+    let runs = 0;
+    const fn = async (): Promise<RefreshResult> => {
+      runs += 1;
+      await Promise.resolve();
+      return { access_token: `access-${runs}`, expires_in: 900 };
+    };
+    const [a, b] = await Promise.all([
+      tabs[0]!.coordinator.refresh(fn),
+      tabs[1]!.coordinator.refresh(fn),
+    ]);
+    expect(runs).toBe(2);
+    expect(timeouts).toBe(1);
+    expect([a, b].sort()).toEqual(["access-1", "access-2"]);
   });
 
   it("without the lock the same 50 calls would refresh five times (the double is not trivial)", async () => {
@@ -95,7 +166,7 @@ describe("one refresh per browser (SS-02, the browser half of J6)", () => {
     expect(
       results.filter((r) => r.status === "fulfilled").every((r) => r.value === "access-2"),
     ).toBe(true);
-    expect(locks.granted).toBe(5);
+    expect(locks.grantsByName.get("wasla-refresh")).toBe(5);
   });
 
   it("sends the current workspace with the refresh (plan 8.1)", async () => {
