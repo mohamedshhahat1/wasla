@@ -49,3 +49,7 @@ tests/fixtures/rag/**/*.py text eol=lf
 # Windows and on Linux, so a checkout must never rewrite their line endings.
 frontend/packages/api-client/*.json text eol=lf
 frontend/packages/api-client/fixtures/*.json text eol=lf
+
+# The e2e image's own ignore file (tests/e2e_stack/Dockerfile.dockerignore), read by
+# BuildKit like .dockerignore, so its patterns must not carry a CR.
+*.dockerignore text eol=lf
