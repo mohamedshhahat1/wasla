@@ -1,0 +1,24 @@
+{
+  "name": "@wasla/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright against FE-0's real backend profile (docker-compose.e2e.yml): the FE-1 smoke, the session and signer proofs, axe and origin checks, and helpers for FE-2 onward.",
+  "scripts": {
+    "e2e": "playwright test",
+    "e2e:local": "node scripts/e2e-local.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.0",
+    "@types/node": "24.19.2",
+    "@wasla/api-client": "workspace:*",
+    "@wasla/config": "workspace:*",
+    "@wasla/session": "workspace:*",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.5",
+    "typescript": "5.9.3"
+  }
+}

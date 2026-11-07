@@ -86,7 +86,9 @@ export function waslaRules(kind) {
   const isApp = kind.startsWith("app-");
   const rules = {
     "wasla/no-public-secret-env": ["error", { allow: PUBLIC_ORIGIN_NAMES }],
-    "wasla/no-web-storage": ["error", { allowFiles: STORAGE_ALLOW_FILES }],
+    // The e2e harness reads cookies and storage to prove the apps leave them empty (AP-04).
+    "wasla/no-web-storage":
+      kind === "e2e" ? "off" : ["error", { allowFiles: STORAGE_ALLOW_FILES }],
     "wasla/no-server-only-in-client": ["error", { clientFiles: CLIENT_FILE_FRAGMENTS }],
     "no-restricted-imports": ["error", { patterns: importRestrictions(kind) }],
   };
@@ -148,7 +150,8 @@ export function waslaConfig({ kind, tsconfigRootDir, typeChecked = true, ignores
         ...react.configs.flat.recommended.rules,
         ...react.configs.flat["jsx-runtime"].rules,
         ...jsxA11y.flatConfigs.recommended.rules,
-        "react-hooks/rules-of-hooks": "error",
+        // Playwright fixtures call `use()`, which is not React's hook.
+        "react-hooks/rules-of-hooks": kind === "e2e" ? "off" : "error",
         "react-hooks/exhaustive-deps": "error",
         "react/prop-types": "off",
         "react/no-danger": "error",

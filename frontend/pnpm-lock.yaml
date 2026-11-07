@@ -362,6 +362,36 @@ importers:
         specifier: 4.158.0
         version: 4.158.0(@types/node@24.19.2)
 
+  e2e:
+    devDependencies:
+      '@axe-core/playwright':
+        specifier: 4.14.0
+        version: 4.14.0(playwright-core@1.65.0)
+      '@playwright/test':
+        specifier: 1.65.0
+        version: 1.65.0
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      '@wasla/api-client':
+        specifier: workspace:*
+        version: link:../packages/api-client
+      '@wasla/config':
+        specifier: workspace:*
+        version: link:../packages/config
+      '@wasla/session':
+        specifier: workspace:*
+        version: link:../packages/session
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      eslint:
+        specifier: 9.39.5
+        version: 9.39.5(jiti@2.7.0)(supports-color@10.2.2)
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   packages/api-client:
     dependencies:
       openapi-fetch:
