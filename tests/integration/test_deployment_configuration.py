@@ -120,6 +120,9 @@ FEATURE_SETTINGS: dict[str, tuple[str, ...]] = {
     # The embedding switch's target: the API embeds the preview's query in it,
     # the worker builds shadows and answers customers in it (RGM-10, RGM-12).
     "openai_embedding_model_next": ("api", "worker"),
+    # The signed client-IP forward (FEB-01, ADR-190). Only the API serves the
+    # routes the frontend tier signs for; the worker serves no HTTP.
+    "session_forward_secret": ("api",),
 }
 
 # Fields a mapped prefix picks up that a given service deliberately does not

@@ -40,9 +40,11 @@ from collections.abc import Awaitable, Callable, Collection
 from typing import Annotated
 
 from fastapi import Depends, Request
+from pydantic import SecretStr
 
 from app.api.dependencies import ActiveWorkspace, ActiveWorkspaceDep
 from app.api.route import BEFORE_BODY_ATTRIBUTE as ROUTE_BEFORE_BODY_ATTRIBUTE
+from app.core import client_ip_forward
 from app.core.config import Settings
 from app.core.dependencies import RedisDep, SettingsDep
 from app.core.proxy import is_trusted_peer, normalised_address, trusted_networks
@@ -55,7 +57,46 @@ from app.core.rate_limit import RateLimitDecision, RateLimiter, RateLimitPolicy
 UNKNOWN_CLIENT = "unknown"
 
 
-def client_identity(request: Request, *, trusted_proxies: Collection[str] = ()) -> str:
+def client_identity(
+    request: Request,
+    *,
+    trusted_proxies: Collection[str] = (),
+    forward_secret: SecretStr | None = None,
+) -> str:
+    """The address a request is counted under: the connection's, or a signed browser's.
+
+    First the connection's address, decided exactly as `connection_identity`
+    always has. Then, only if the frontend tier signed this request's browser
+    address with `SESSION_FORWARD_SECRET` - for this method, this path, within
+    the last minute - that address instead (FEB-01, ADR-190). Every other case
+    keeps the connection's address, silently: an unsigned, stale, wrongly
+    signed, other-route or malformed claim, and any claim at all while the
+    secret is unset. The forward is an address claim, never a credential.
+    """
+    identity = connection_identity(request, trusted_proxies=trusted_proxies)
+    secret = forward_secret.get_secret_value() if forward_secret is not None else None
+    if not secret:
+        # The feature is off: today's identity, whatever the request says. A
+        # request that never tried is not even counted.
+        if any(request.headers.get(name) for name in client_ip_forward.FORWARD_HEADERS):
+            client_ip_forward.record_forward(
+                client_ip_forward.ForwardVerdict(client_ip_forward.ForwardResult.DISABLED)
+            )
+        return identity
+    verdict = client_ip_forward.verify_forward(
+        request.headers,
+        method=request.method,
+        path=request.url.path,
+        now=client_ip_forward.forward_clock(),
+        secret=secret,
+    )
+    client_ip_forward.record_forward(verdict)
+    if verdict.result is client_ip_forward.ForwardResult.VALID and verdict.address:
+        return verdict.address
+    return identity
+
+
+def connection_identity(request: Request, *, trusted_proxies: Collection[str] = ()) -> str:
     """The address a request came from, as far as this process can tell.
 
     The rule is: **believe a forwarding header only when the connection came
@@ -164,7 +205,11 @@ def _limit_by_client(
         if counted is not None:
             # Already counted, once, before the body was read.
             return counted
-        identity = client_identity(request, trusted_proxies=settings.trusted_proxy_ips)
+        identity = client_identity(
+            request,
+            trusted_proxies=settings.trusted_proxy_ips,
+            forward_secret=settings.session_forward_secret,
+        )
         return await limiter.enforce(policy_for(settings), identity)
 
     async def before_body(request: Request) -> None:
@@ -182,7 +227,11 @@ def _limit_by_client(
             return
         if not settings.rate_limit_enabled:
             return
-        identity = client_identity(request, trusted_proxies=settings.trusted_proxy_ips)
+        identity = client_identity(
+            request,
+            trusted_proxies=settings.trusted_proxy_ips,
+            forward_secret=settings.session_forward_secret,
+        )
         # Raises `RateLimitedError` - a 429 with `Retry-After` - on refusal.
         decision = await RateLimiter(redis).enforce(policy_for(settings), identity)
         _early_decisions(request)[name] = decision
@@ -325,6 +374,7 @@ __all__ = [
     "campaign_rate_limit",
     "charge_deferred",
     "client_identity",
+    "connection_identity",
     "google_oauth_rate_limit",
     "public_rate_limit",
     "workspace_rate_limit",

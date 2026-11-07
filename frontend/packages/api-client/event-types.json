@@ -1,0 +1,20 @@
+{
+  "close_reasons": [
+    "membership_revoked",
+    "server_restart",
+    "token_changed",
+    "workspace_switched",
+    "workspace_unavailable"
+  ],
+  "event_types": [
+    "campaign.changed",
+    "conversation.updated",
+    "follow_up.updated",
+    "message.created",
+    "message.status"
+  ],
+  "stream_frames": [
+    "closed",
+    "resync"
+  ]
+}

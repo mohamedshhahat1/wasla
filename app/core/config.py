@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlparse, urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.hostnames import normalize_roots
@@ -851,6 +851,17 @@ class Settings(BaseSettings):
     # is the only thing a container environment expresses comfortably.
     trusted_proxy_ips: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
+    # The secret the frontend tier signs the browser's address with (FEB-01,
+    # ADR-190). The customer app and the console call the auth routes from
+    # their own servers, so without it every person signing in would be
+    # counted under the tier's address and share one budget. Unset - the
+    # default - means the forward is never believed: the three headers are
+    # ignored on every request and the identity is exactly what
+    # `TRUSTED_PROXY_IPS` alone makes it. It must equal the value set on every
+    # frontend Worker, and it is a `SecretStr` so no repr, log or dump of the
+    # settings can print it. See `app/core/client_ip_forward.py`.
+    session_forward_secret: SecretStr | None = None
+
     # Rate limiting
     # Off by default in tests and on everywhere else, because a limiter that is
     # on in the suite makes every test order-dependent: the twentieth login in a
@@ -1304,6 +1315,14 @@ class Settings(BaseSettings):
             raise ValueError("meta_media_host_roots must name at least one host")
         return list(roots)
 
+    @field_validator("session_forward_secret", mode="before")
+    @classmethod
+    def _blank_forward_secret_is_unset(cls, value: Any) -> Any:
+        """Compose forwards `${SESSION_FORWARD_SECRET:-}`: an empty value means unset."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod
     def _parse_trusted_proxy_ips(cls, value: Any) -> Any:
@@ -1509,6 +1528,21 @@ class Settings(BaseSettings):
                 "JWT_SECRET must be a random value of at least "
                 f"{MINIMUM_SECRET_LENGTH} characters; generate one with "
                 "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+
+        forward_secret = self.session_forward_secret
+        if (
+            not self.is_testing
+            and forward_secret is not None
+            and len(forward_secret.get_secret_value().encode("utf-8")) < MINIMUM_SECRET_LENGTH
+        ):
+            # Optional, but when it is set it is what stands between a stranger
+            # and choosing the bucket their sign-in attempts are counted in
+            # (ADR-190): held to the signing key's rule above.
+            problems.append(
+                "SESSION_FORWARD_SECRET, when set, must be a random value of at least "
+                f"{MINIMUM_SECRET_LENGTH} bytes, the same value on the API and every "
+                "frontend Worker"
             )
 
         if self.is_internet_facing:

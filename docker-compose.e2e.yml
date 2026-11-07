@@ -1,0 +1,191 @@
+# The e2e stack: the real Wasla API and worker against deterministic fakes, for
+# the frontend's Playwright journeys J1-J10 and for anybody who wants the real
+# backend on a laptop with nothing leaving the machine (FE-0, ADR-191).
+#
+#   docker compose -f docker-compose.e2e.yml --profile e2e up -d --build
+#   docker compose -f docker-compose.e2e.yml --profile e2e down -v      # reset
+#
+# TEST-ONLY. Every secret below is a PUBLIC TEST VALUE written into this file on
+# purpose so the stack starts with no configuration; NEVER DEPLOY THIS FILE or
+# its image. Nothing here is read by docker-compose.yml or
+# docker-compose.prod.yml, and the production Dockerfile is not used.
+#
+# Every service is under the `e2e` profile, so nothing starts without it, and
+# every published port is bound to 127.0.0.1. See tests/e2e_stack/README.md.
+
+name: wasla-fe-e2e
+
+x-app: &app
+  image: wasla-fe-e2e-app:local
+  build:
+    context: .
+    dockerfile: tests/e2e_stack/Dockerfile
+  profiles: ["e2e"]
+  networks: [e2e]
+  environment: &app-env
+    # The settings the suites use for a production-shaped application:
+    # environment `test` with the interactive documentation off.
+    ENVIRONMENT: test
+    DOCS_ENABLED: "false"
+    LOG_FORMAT: json
+    LOG_LEVEL: WARNING
+    DATABASE_URL: postgresql+asyncpg://wasla:wasla@pg:5432/wasla
+    REDIS_URL: redis://redis:6379/0
+    RATE_LIMIT_ENABLED: "true"
+    # Public test values - not secrets.
+    JWT_SECRET: e2e-public-jwt-secret-NOT-A-SECRET-0123456789abcdef
+    CREDENTIAL_ENCRYPTION_KEYS: ZTJlLXB1YmxpYy10ZXN0LWtleS1OT1QtQS1TRUNSRVQ=
+    # FEB-01: the frontend tier's signing secret. FE-2's local tier uses this
+    # same public value.
+    SESSION_FORWARD_SECRET: e2e-not-a-secret-0123456789abcdef0123456789abcdef
+    CORS_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:4321
+    APP_PUBLIC_URL: http://localhost:3000
+    EMAIL_ENABLED: "true"
+    EMAIL_PROVIDER: fake
+    EMAIL_FROM: no-reply@example.com
+    META_APP_SECRET: e2e-meta-app-secret-NOT-A-SECRET
+    META_VERIFY_TOKEN: e2e-meta-verify-token
+    BILLING_PROVIDER: paymob
+    PAYMOB_SECRET_KEY: egy_sk_test_e2e_NOT_A_KEY
+    PAYMOB_PUBLIC_KEY: egy_pk_test_e2e_NOT_A_KEY
+    PAYMOB_HMAC_SECRET: e2e-paymob-hmac-NOT-A-SECRET
+    PAYMOB_INTEGRATION_IDS: "4097558"
+    GOOGLE_ENABLED: "true"
+    GOOGLE_CLIENT_ID: e2e-client.apps.googleusercontent.com
+    GOOGLE_CLIENT_SECRET: e2e-google-client-secret-NOT-A-SECRET
+    GOOGLE_REDIRECT_URI: http://localhost:3000/auth/google/callback
+    MEDIA_STORAGE_BACKEND: local
+    MEDIA_STORAGE_PATH: /var/lib/wasla/media
+    # No real provider key, and no route out: a dead proxy for anything that
+    # honours one, and the launcher's socket wall and reroute for the rest.
+    # The OpenAI key is a public dummy: the worker refuses to run an agent or
+    # embed a document without *a* key, and every request it makes is rerouted
+    # to the fakes service.
+    OPENAI_API_KEY: sk-e2e-public-dummy-NOT-A-KEY
+    HTTP_PROXY: http://127.0.0.1:9
+    HTTPS_PROXY: http://127.0.0.1:9
+    ALL_PROXY: http://127.0.0.1:9
+    NO_PROXY: localhost,127.0.0.1,pg,redis,api,worker,fakes,mailbox
+    WASLA_E2E_FAKES_URL: http://fakes:8100
+    WASLA_E2E_FAKES_PUBLIC_URL: http://localhost:${WASLA_E2E_FAKES_PORT:-8026}
+    WASLA_E2E_API_INTERNAL: http://api:8000
+    WASLA_E2E_MAILBOX_INTERNAL: http://mailbox:8025
+    WASLA_E2E_MAILBOX_FILE: /mailbox/messages.jsonl
+    WASLA_E2E_REFUSED_LOG: /mailbox/refused.log
+
+services:
+  pg:
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    container_name: wasla-fe-e2e-pg
+    profiles: ["e2e"]
+    networks: [e2e]
+    environment:
+      POSTGRES_USER: wasla
+      POSTGRES_PASSWORD: wasla
+      POSTGRES_DB: wasla
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wasla -d wasla"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    container_name: wasla-fe-e2e-redis
+    profiles: ["e2e"]
+    networks: [e2e]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *app
+    container_name: wasla-fe-e2e-migrate
+    command: ["sh", "-c", "alembic upgrade head && python -m tests.e2e_stack.seed"]
+    depends_on:
+      pg:
+        condition: service_healthy
+    volumes:
+      - mailbox:/mailbox
+    restart: "no"
+
+  fakes:
+    <<: *app
+    container_name: wasla-fe-e2e-fakes
+    command: ["python", "-m", "tests.e2e_stack.fakes"]
+    # Published because a browser opens two of its pages: the fake Google
+    # sign-in and the fake Paymob checkout.
+    ports:
+      - "127.0.0.1:${WASLA_E2E_FAKES_PORT:-8026}:8100"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mailbox:
+    <<: *app
+    container_name: wasla-fe-e2e-mailbox
+    command: ["python", "-m", "tests.e2e_stack.mailbox"]
+    volumes:
+      - mailbox:/mailbox
+    ports:
+      - "127.0.0.1:${WASLA_E2E_MAILBOX_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8025/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    <<: *app
+    container_name: wasla-fe-e2e-api
+    command: ["python", "-m", "tests.e2e_stack.launcher", "api"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      fakes:
+        condition: service_healthy
+    volumes:
+      - media:/var/lib/wasla/media
+      - mailbox:/mailbox
+    ports:
+      - "127.0.0.1:${WASLA_E2E_API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  worker:
+    <<: *app
+    container_name: wasla-fe-e2e-worker
+    command: ["python", "-m", "tests.e2e_stack.launcher", "worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      fakes:
+        condition: service_healthy
+    volumes:
+      - media:/var/lib/wasla/media
+      - mailbox:/mailbox
+
+networks:
+  e2e:
+    name: wasla-fe-e2e-net
+
+volumes:
+  pg:
+    name: wasla-fe-e2e-pg
+  media:
+    name: wasla-fe-e2e-media
+  mailbox:
+    name: wasla-fe-e2e-mailbox
