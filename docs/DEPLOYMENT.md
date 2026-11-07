@@ -624,6 +624,28 @@ it, for the frontend's Playwright journeys and local development
 (tests/e2e_stack/README.md). It shares nothing with `docker-compose.prod.yml` -
 not a file, not an image, not a volume - and must never be deployed.
 
+## Frontend
+
+The three browser applications live in `frontend/` (ADR-189, ADR-192) and are not part of the backend image.
+
+| App | Host (ADR-189) | Production origin (FEQ-04) | Local |
+| --- | --- | --- | --- |
+| Marketing (Astro, static) | Cloudflare Workers static assets | `https://www.iwasla.tech` (the apex redirects to it) | `http://localhost:4321` |
+| Customer app (Next.js) | Cloudflare Workers with OpenNext | `https://app.iwasla.tech` | `http://localhost:3000` |
+| Console (Next.js) | Cloudflare Workers with OpenNext | `https://console.iwasla.tech` | `http://localhost:3001` |
+| API | as today | `https://api.iwasla.tech` | `http://localhost:8000` |
+
+Build-time settings, per app, read by `packages/config/origins.js`: `WASLA_ENV` (`development`, `preview` or
+`production`) and `PUBLIC_API_ORIGIN`, `PUBLIC_APP_ORIGIN`, `PUBLIC_CONSOLE_ORIGIN`, `PUBLIC_MARKETING_ORIGIN`
+(production values come from the table; a build without `WASLA_ENV`, with a missing preview origin, or with `http`
+outside development fails). `SESSION_FORWARD_SECRET` is a server-side Worker secret for FE-2's `/session/*` route
+handlers and is read by no FE-1 code.
+
+Nothing is deployed to `iwasla.tech` yet: production Workers, custom domains, DNS records and Cloudflare Access are
+FE-11's. FE-1's previews are three Workers on `*.workers.dev` (`wasla-preview-web`, `-console`, `-marketing`),
+deployed only by someone signed in to the owner's Cloudflare account (`wrangler login`), from each app's
+`wrangler.jsonc`, which carries no route, custom domain or binding. The previews are public.
+
 ## Operations
 
 Migrations run as an explicit step before the new application version serves traffic; schema is never mutated manually. Readiness gates traffic on dependency availability while liveness stays independent of PostgreSQL. Health, logging, and observability details are in [../ARCHITECTURE.md](../ARCHITECTURE.md).

@@ -8037,3 +8037,52 @@ backend. Two deviations are recorded in FE0_BACKEND_PREREQUISITES.md: the e2e st
 `OPENAI_API_KEY` (the worker refuses to run an agent or embed without one; every request it makes is rerouted), and the
 fakes' port is published because a browser must open the fake Google and Paymob pages. Left to audit 23: stable
 operationIds, `info.version`, a JSON Schema of the stream frames.
+
+## ADR-192 — The Frontend Foundation: One Pinned Workspace, A Generated Client, Tokens And Primitives, Four Locales (FE-1)
+
+**Status.** Accepted, 2026-11-07 (FE-1 of FRONTEND_PLAN.md; report FE1_FOUNDATION.md).
+
+**Context.** FE-0 (ADR-189..191) left a committed contract (`frontend/packages/api-client/openapi.json`,
+`event-types.json`), the signed-forward vectors and an e2e backend profile. FE-1 builds the ground every later
+frontend stage stands on, before any sign-in screen exists, and changes nothing in the backend.
+
+**Decision.**
+
+1. *Workspace (WSP-01..06; the prompt's WS-*, renamed because `WS-0n` already appears inside the plan's `APP-WS-0n`).*
+   `frontend/` is a pnpm 12.18.0 + Turborepo 2.11.10 workspace on Node 24 (`.nvmrc`, `engines`), one exact-pinned
+   lockfile, the plan's layout (three apps, five packages). Import directions of the plan's section 17 are ESLint errors,
+   and the workspace's own rules (logical properties only, no upper-casing, no secret-looking public variable, no raw
+   design value in an app, no web storage or script cookie, the signer never in client code, the console on platform
+   paths only) each have a failing fixture. TypeScript 5.9 and ESLint 9: TypeScript 7 / 6.1 and ESLint 10 are
+   newer than typescript-eslint, openapi-typescript and the React lint plugins accept.
+2. *API client (AC-01..05, PD-04).* `schema.d.ts` is generated from the committed document by openapi-typescript 7.13
+   (file fields typed `Blob`; `defaultNonNullable` off, so the envelope's optional fields stay optional), committed,
+   and refused when it differs from a regeneration. Every non-2xx answer becomes one `ApiError` keyed by the
+   envelope's `code`; the backend's sentence is kept for diagnostics and never shown.
+3. *Design system (DS-01..08, PD-08, PD-09, PD-15, PD-18).* `tokens.css` is Tailwind 4's `@theme` with the default theme
+   reset, so the plan's placeholders are the only raw values and the only utilities; a redesign edits it and
+   `packages/ui`, never a screen. Sixteen Radix-based primitives (Combobox: the WAI-ARIA pattern over Radix Popover),
+   IBM Plex self-hosted, Storybook 10 in four locales. Their keyboard behaviour in Arabic is proved per component in
+   three browsers (EXT-FE-07); the DropdownMenu wrapper is non-modal because the modal one fails axe (FEF-01).
+4. *Localization (IN-01..05, PD-10, PD-11).* One ICU catalogue set in `packages/i18n`; ar (Modern Standard Arabic),
+   fr and tr are unreviewed drafts until a native review (FEQ-08). The apps choose the locale on the server from the
+   `wasla_locale` cookie (then Accept-Language) and render `lang`/`dir` in the first bytes; marketing has the locale in
+   the URL. Data uses Latin digits by default (FEQ-07's default), behind one flag.
+5. *Session skeleton (SS-01..03, PD-12).* The browser half of S-2 (token in memory, one refresh per browser under the
+   Web Lock `wasla-refresh`, BroadcastChannel) and the server-only forward signer, equal to FE-0's vectors. No route
+   handler, no session cookie - FE-2's.
+6. *Apps (AP-01..06).* Next.js 16 (customer app, console) and Astro 7 (marketing, no JavaScript yet). The only cookie
+   is `wasla_locale`, set by a form post; `proxy.ts` sets the nonce CSP of the plan's section 18 and nothing else.
+   Origins: `iwasla.tech` in production (FEQ-04) - configuration only; development on localhost; preview on
+   `*.workers.dev` names the build must be given.
+7. *Previews (PV-01..03).* Three `wasla-preview-*` Workers on `*.workers.dev` only; no route, custom domain or binding
+   in any `wrangler.jsonc`. Deployed only from a machine signed in to the owner's Cloudflare account.
+
+**Rejected.** A shared design package without a token reset (screens could still use Tailwind's palette); hand-typed
+API types or per-endpoint wrappers (PD-04); a client-side `lang`/`dir` flip; a script-set locale cookie; a React island
+for the marketing switcher (links need no JavaScript); `@hey-api/openapi-ts` and orval (PD-04).
+
+**Consequences.** `.github/workflows/frontend.yml` runs on frontend changes only (install, drift, checks with the
+Workers builds and `pnpm audit`, Storybook with axe and the RTL keyboard proof, e2e against the backend profile);
+`ci.yml` is unchanged and still runs on every push (CI-03: `paths-ignore` is audit 24's). The backend image does not
+grow (`frontend/` is outside its build context, FE-0). FE-2 adds sign-in on this ground.
