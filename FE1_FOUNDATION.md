@@ -554,3 +554,59 @@ Provisional, before GitHub's runs: every local gate green (G-1..G-7), merged as 
 tree byte-identical to FE1_HEAD. The verdict is set in the addendum from the push's frontend.yml and ci.yml runs.
 PREVIEW NOT DEPLOYED   this machine is not signed in to Cloudflare (Part C: EXTERNAL VERIFICATION)
 ```
+
+## Addendum — GitHub Actions of the push, and the verdict
+
+Push `86e3d89..640a23d` at 15:06 UTC (`git push origin worktree-billing-google-auth`, no force); origin re-fetched just
+before was `86e3d89`, after = local = `640a23dfd24e234f2cc3d8fdac182df3d1a306fd`. Not pushed: `fe1-foundation-20261107`,
+any tag; `main` untouched (`8e3a1ba`).
+
+**`frontend.yml` run 42384734330** (its first run) — https://github.com/mohamedshhahat1/wasla/actions/runs/42384734330 —
+**success**:
+
+| Job | Conclusion | Duration | From the log |
+|---|---|---|---|
+| Install (frozen lockfile) | success | 0 m 32 s | Node v24.15.0, pnpm 12.18.0, turbo 2.11.10 |
+| Generated client is current (drift) | success | 0 m 24 s | regenerated; `git diff --exit-code` clean |
+| Typecheck, lint, test, i18n, build, audit | success | 2 m 08 s | Prettier clean; 30/30 tasks; unit tests api-client 39, session 28 (including the 5 header/CSP tests — section 10's "28 + 5" should read "28, of which 5"), ui 42, config 30, i18n 20, web 4, console 4, marketing 3; i18n:check ok (78 keys × 4, CLDR 48); **OpenNext Workers builds of web and console succeed on Linux** (`.open-next/worker.js` entry 4.0 KB, web assets 1.4 MB; the server-function bundle size was not measured by the step); `pnpm audit --prod`: 1 moderate, 0 high/critical |
+| Storybook, axe per story, RTL keyboard | success | 3 m 17 s | 214 passed (76 axe × story/locale, 46 × 3 keyboard), 152 skipped (screenshots) |
+| E2E against the backend profile | success | 5 m 02 s | FE-0's profile built and started on the runner; **128 passed, 10 skipped**; Linux WebKit asserted `SameSite=Lax` (FEF-05 is Windows-only); profile down |
+
+**`ci.yml` run 42384734219** — https://github.com/mohamedshhahat1/wasla/actions/runs/42384734219 — **success**:
+
+| Job | Conclusion | Duration |
+|---|---|---|
+| Lint, format, types | success | 1 m 01 s |
+| Docker build | success | 0 m 42 s |
+| Alert rules and receivers | success | 3 m 08 s |
+| Migration-built schema | success | 50 m 08 s |
+| Tests and migrations | success | 64 m 03 s |
+
+Tests job: `8077 passed, 17 skipped, 2 deselected` — equal to FE-0's run 42354012088 (no backend file changed); lock
+guard `66 pinned packages checked, 0 differ from the lock`, `No broken requirements found`. No section 25 fix was
+needed; nothing was re-run. `security.yml` was not dispatched (still red for RGM-23/24/27, not this stage's). This
+addendum is documentation only; it changes no frontend path, so only `ci.yml` runs for it — recorded in
+`E:\wasla-cleanup\CLEANUP_fe1_20261107.md`.
+
+| Item | Status |
+|---|---|
+| G-8 GitHub | CLOSED (frontend.yml 5/5, ci.yml 5/5) |
+| FEF-04 | ACCEPTED RESIDUAL, Windows only — the Workers build is green on Linux |
+| FEF-05 | ACCEPTED RESIDUAL, Windows only — asserted on Linux WebKit |
+
+```text
+FE-1 MERGED AND PUSHED, CI GREEN
+PREVIEW NOT DEPLOYED           this machine is not signed in to Cloudflare (Part C: EXTERNAL VERIFICATION;
+                               EXT-FE-02's Worker runtime and EXT-FE-03's proxy half stay open)
+FE-2 CAN START                 FEB-01 on origin (FE-0); the client, the session skeleton, the signer, ui, i18n and the e2e
+                               harness are on origin and green on GitHub
+CLEANUP                        runs after this addendum's ci.yml run is green; result in E:\wasla-cleanup\CLEANUP_fe1_20261107.md
+```
+
+If FE-2 started tomorrow from origin it would find a workspace where a sign-in screen is a matter of composing existing
+primitives (FormField, Input, Button, ErrorState), translating keys that already exist for every backend error code,
+and calling a typed client that already reads the backend's real error envelope; a session package that already lets
+only one tab refresh and hands the token to the others (proved in three real browsers); a signer equal to the backend's
+vectors byte for byte and counted correctly by the real API; and a harness that runs the real backend on a laptop and on
+GitHub, in Arabic and English, in three browsers. The look is still the plan's placeholder, changed in `tokens.css`; the
+Arabic, French and Turkish texts are unreviewed drafts; nothing is on iwasla.tech or on Cloudflare yet.
