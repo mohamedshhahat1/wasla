@@ -1,0 +1,21 @@
+# The e2e image's build context (BuildKit reads <Dockerfile>.dockerignore beside
+# the Dockerfile in place of the root .dockerignore). Unlike the production
+# image, this one needs tests/.
+.git
+.github
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+.env
+.env.*
+docs
+nginx
+frontend
