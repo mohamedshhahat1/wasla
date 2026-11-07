@@ -87,8 +87,7 @@ export function waslaRules(kind) {
   const rules = {
     "wasla/no-public-secret-env": ["error", { allow: PUBLIC_ORIGIN_NAMES }],
     // The e2e harness reads cookies and storage to prove the apps leave them empty (AP-04).
-    "wasla/no-web-storage":
-      kind === "e2e" ? "off" : ["error", { allowFiles: STORAGE_ALLOW_FILES }],
+    "wasla/no-web-storage": kind === "e2e" ? "off" : ["error", { allowFiles: STORAGE_ALLOW_FILES }],
     "wasla/no-server-only-in-client": ["error", { clientFiles: CLIENT_FILE_FRAGMENTS }],
     "no-restricted-imports": ["error", { patterns: importRestrictions(kind) }],
   };
