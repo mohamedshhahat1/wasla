@@ -1,0 +1,96 @@
+{
+  "format": "v1",
+  "description": "Test vectors for the signed client-IP forward (FEB-01, ADR-190). The secret is a PUBLIC test value. signature = lowercase hex HMAC-SHA256(secret, canonical); canonical = 'v1\n' + ts + '\n' + client_ip + '\n' + METHOD + '\n' + path. `path` is the percent-decoded URL path the API receives (Starlette request.url.path), without the query string; `wire_path` is what goes on the wire. `identity` is the bucket identity the API derives.",
+  "headers": {
+    "client_ip": "X-Wasla-Client-IP",
+    "ts": "X-Wasla-Forward-Ts",
+    "signature": "X-Wasla-Forward-Sig"
+  },
+  "freshness_seconds": 60,
+  "cases": [
+    {
+      "name": "IPv4, sign in",
+      "secret": "fe0-public-test-vector-secret-NOT-for-any-deployment",
+      "ts": "1794000000",
+      "client_ip": "203.0.113.7",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "wire_path": "/api/v1/auth/login",
+      "canonical": "v1\n1794000000\n203.0.113.7\nPOST\n/api/v1/auth/login",
+      "signature": "ac5930eb0a86521ee929ed0ffbb624bd7efc8734f108e5042b04330d95eba05d",
+      "identity": "203.0.113.7"
+    },
+    {
+      "name": "IPv6 compressed, refresh",
+      "secret": "fe0-public-test-vector-secret-NOT-for-any-deployment",
+      "ts": "1794000000",
+      "client_ip": "2001:db8::42",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "wire_path": "/api/v1/auth/refresh",
+      "canonical": "v1\n1794000000\n2001:db8::42\nPOST\n/api/v1/auth/refresh",
+      "signature": "44b408adbe6d7e8acfeac43c0aab0f6b41057c7bf5938b0b3ea8955a492273eb",
+      "identity": "2001:db8::42"
+    },
+    {
+      "name": "IPv4-mapped IPv6 shares the IPv4 bucket",
+      "secret": "fe0-public-test-vector-secret-NOT-for-any-deployment",
+      "ts": "1794000000",
+      "client_ip": "::ffff:203.0.113.7",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "wire_path": "/api/v1/auth/login",
+      "canonical": "v1\n1794000000\n::ffff:203.0.113.7\nPOST\n/api/v1/auth/login",
+      "signature": "c2408ac87e57b21cbf58aa73eb718fd27e55a4fdcc6a6db767ef6538e879422d",
+      "identity": "203.0.113.7"
+    },
+    {
+      "name": "Google callback",
+      "secret": "fe0-public-test-vector-secret-NOT-for-any-deployment",
+      "ts": "1794000000",
+      "client_ip": "198.51.100.23",
+      "method": "POST",
+      "path": "/api/v1/auth/google/callback",
+      "wire_path": "/api/v1/auth/google/callback",
+      "canonical": "v1\n1794000000\n198.51.100.23\nPOST\n/api/v1/auth/google/callback",
+      "signature": "0431921e8b1834961f8ea6b29af7dee0ad40db24e7b3a5cbab3a6ca1dc5d7c14",
+      "identity": "198.51.100.23"
+    },
+    {
+      "name": "GET, public reference data",
+      "secret": "fe0-public-test-vector-secret-NOT-for-any-deployment",
+      "ts": "1794000000",
+      "client_ip": "192.0.2.10",
+      "method": "GET",
+      "path": "/api/v1/timezones",
+      "wire_path": "/api/v1/timezones",
+      "canonical": "v1\n1794000000\n192.0.2.10\nGET\n/api/v1/timezones",
+      "signature": "ef18a43390b113c794284fd3d90e3fc1d4720b75bedc336ef826cb56fbbd8288",
+      "identity": "192.0.2.10"
+    },
+    {
+      "name": "an encoded character: the signed path is the DECODED path the API sees",
+      "secret": "fe0-public-test-vector-secret-NOT-for-any-deployment",
+      "ts": "1794000000",
+      "client_ip": "192.0.2.11",
+      "method": "POST",
+      "path": "/api/v1/auth/x y",
+      "wire_path": "/api/v1/auth/x%20y",
+      "canonical": "v1\n1794000000\n192.0.2.11\nPOST\n/api/v1/auth/x y",
+      "signature": "eec50ef26ec6dbfca6f0a22a9ae475f64240e0746676a9c1c47559df7649675f",
+      "identity": "192.0.2.11"
+    },
+    {
+      "name": "logout",
+      "secret": "fe0-public-test-vector-secret-NOT-for-any-deployment",
+      "ts": "1794000000",
+      "client_ip": "2001:db8:85a3::8a2e:370:7334",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "wire_path": "/api/v1/auth/logout",
+      "canonical": "v1\n1794000000\n2001:db8:85a3::8a2e:370:7334\nPOST\n/api/v1/auth/logout",
+      "signature": "c491350ac4a34845eab3b595c4b7ce9e22e19c2ad00f2834bee143ce639df588",
+      "identity": "2001:db8:85a3::8a2e:370:7334"
+    }
+  ]
+}

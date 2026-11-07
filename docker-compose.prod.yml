@@ -149,6 +149,7 @@ services:
       # forwarded-client identity and HSTS (ADR-060). The application refuses
       # to start on anything that is not one.
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-10.89.0.10}
+      SESSION_FORWARD_SECRET: ${SESSION_FORWARD_SECRET:-}
       LOG_FORMAT: json
       # Serves /metrics on the internal network. nginx refuses the path on the
       # public listener and this container publishes no port of its own, so the

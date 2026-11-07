@@ -157,6 +157,20 @@ LIFECYCLE_EVENTS = REGISTRY.counter(
     ("operation", "outcome"),
 )
 
+#: Why a signed client-IP forward was or was not believed (FEB-01, ADR-190).
+#: Restated here rather than imported, so this module depends on nothing it
+#: counts; `tests/unit/test_client_ip_forward.py` holds it equal to
+#: `app.core.client_ip_forward.ForwardResult`.
+CLIENT_IP_FORWARD_RESULTS: Final[frozenset[str]] = frozenset(
+    {"valid", "absent", "disabled", "bad_signature", "stale", "malformed"}
+)
+
+CLIENT_IP_FORWARD = REGISTRY.counter(
+    "wasla_client_ip_forward_total",
+    "Signed client-IP forwards from the frontend tier, by result. Never the address.",
+    ("result",),
+)
+
 
 def observe_http(*, method: str, route: str, status_code: int, duration_seconds: float) -> None:
     """Record one served request.
@@ -195,6 +209,15 @@ def observe_auth_event(*, event: str, outcome: str, reason: str) -> None:
     """Count one auth/security event without identities or caller input."""
     try:
         AUTH_SECURITY_EVENTS.increment(event=event, outcome=outcome, reason=reason)
+    except Exception:
+        logger.warning("metrics.record_failed", extra={"event": "metrics.record_failed"})
+
+
+def observe_client_ip_forward(result: str) -> None:
+    """Count one forward outcome; a word outside the closed domain counts as `malformed`."""
+    label = result if result in CLIENT_IP_FORWARD_RESULTS else "malformed"
+    try:
+        CLIENT_IP_FORWARD.increment(result=label)
     except Exception:
         logger.warning("metrics.record_failed", extra={"event": "metrics.record_failed"})
 
