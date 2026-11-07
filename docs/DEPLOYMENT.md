@@ -602,9 +602,27 @@ Publishing needs nothing: `GITHUB_TOKEN` is the registry login, so there is no s
 
 The `production` environment is where an approval gate belongs. Everything else the stack needs — database credentials, `JWT_SECRET`, `CREDENTIAL_ENCRYPTION_KEYS` — lives on the deployment host, not in GitHub: the workflow ships a compose file and an image reference, never a secret.
 
+### The frontend tier's signing secret
+
+`SESSION_FORWARD_SECRET` (FEB-01, ADR-190) is set when the frontend is deployed,
+not before: on the API (the `api` service of `docker-compose.prod.yml` forwards
+it) and on every Worker of the customer app and the console - **the same value**,
+at least 32 random bytes, for example
+`python -c 'import secrets; print(secrets.token_urlsafe(48))'`. Unset, the API
+ignores every forwarded address and counts each request by its own peer, which
+is the right behaviour while no frontend exists. The worker serves no HTTP and
+does not need it.
+
 ### Rolling back
 
 Deploy the previous digest. The procedure, and why a rollback must not run migrations, is in [RUNBOOK.md](RUNBOOK.md).
+
+## The e2e stack is never deployed
+
+`docker-compose.e2e.yml` is a test stack with public test secrets written into
+it, for the frontend's Playwright journeys and local development
+(tests/e2e_stack/README.md). It shares nothing with `docker-compose.prod.yml` -
+not a file, not an image, not a volume - and must never be deployed.
 
 ## Operations
 

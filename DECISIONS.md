@@ -7900,3 +7900,140 @@ fixtures (RGM-24).
 
 **Amends** ADR-187 (2026-11-06): CL-03's "security.yml unchanged" is superseded — the scan now installs from the lock
 as CI does. The dependency-hygiene deferral of RR-38 (RAG_REMEDIATION_PART3_SCALE.md) is closed by item 4.
+
+
+## ADR-189 — The Frontend Is Hosted On Cloudflare; The Browser Session Is S-2 (FEQ-01, FEQ-03; HD-01, HD-02)
+
+**Status.** Accepted, 2026-11-07 (the owner's answers to FEQ-01 and FEQ-03 of FRONTEND_PLAN.md).
+
+**Context.** FRONTEND_PLAN.md (2026-11-07) left two questions to the owner before FE-1: where the three browser
+applications are hosted (FEQ-01, its section 26) and how the customer app and the console hold a session (FEQ-03, its
+section 8). It recommended Cloudflare and the hybrid design S-2, with evidence from the running backend: login, refresh
+and Google callbacks are the only calls that need a server-side hop; a concurrent refresh with one token signs the
+account out everywhere (`token_version`); the Google binding cookie lives on the API host.
+
+**Decision.**
+
+1. *Hosting (HD-01).* The marketing site (Astro) on Cloudflare Workers static assets (Pages also works for a static
+   site); the customer app and the console (Next.js) on Cloudflare Workers with the OpenNext adapter
+   (`@opennextjs/cloudflare`). The fallback is self-hosted Node behind the existing nginx, if FE-1's spike (EXT-FE-02)
+   fails or OpenNext lags a Next.js security release by more than a week; vinext is re-evaluated when it leaves beta.
+   The event stream and every data call go from the browser to the API origin directly, never through a Worker.
+2. *Session (HD-02).* S-2 for the customer app and the console: the access token in page memory only; the refresh token
+   in `__Host-wasla_rt` (console: `__Host-wasla_crt`) - Secure, HttpOnly, `SameSite=Strict`, `Path=/`, on the app's own
+   origin, readable only by the `/session/*` route handlers; one refresh per browser under the Web Lock
+   `wasla-refresh`, at 80 % of `expires_in` or on a 401, always sending the current `workspace_slug`, the new access
+   token shared with `BroadcastChannel`; the `/session/*` routes POST only, with an exact `Origin` check,
+   `X-Wasla-Session: 1` and `Sec-Fetch-Site: same-origin`. The console has the same shape on its own origin and cookie,
+   behind FEQ-05's access gate (still open).
+3. *The backend's half* is FEB-01 alone (ADR-190): the route handlers reach the API from Cloudflare's addresses, the
+   shared-address case FEB-01 fixes. **FEB-14** (a refresh-reuse grace) is not taken: S-2 does not depend on it and it
+   weakens replay detection; it stays with the owner and audit 23.
+
+**Rejected.** S-1 (a backend-for-frontend holding both tokens): every route cookie-authenticated, so CSRF defence on all
+of them, a cross-isolate lock (a Durable Object) for the refresh race, and FEB-01 on every route. S-3 (tokens in
+`localStorage`): a fourteen-day credential readable by any script. Vercel: viable, but more lock-in on Next features for
+no gain the plan could name. Self-hosted Node as the primary: the most operations for one person, and the Next.js
+self-hosting advisories apply directly.
+
+**Consequences.** Nothing is created on Cloudflare by this decision. `CORS_ORIGINS` is unchanged until the domains are
+decided (FEQ-04). FE-2 builds the route handlers, the cookie, the lock and the broadcast; the backend's session
+behaviour does not change (docs/AUTH.md).
+
+## ADR-190 — The Browser's Address, Signed By The Frontend Tier (FEB-01; FW-01..FW-10)
+
+**Status.** Accepted, 2026-11-07.
+
+**Context.** Authentication, Google sign-in and the public reference data are rate limited per client address
+(ADR-032, ADR-060), and `client_identity` believes a forwarding header only from a proxy in `TRUSTED_PROXY_IPS`. Under
+S-2 (ADR-189) every sign-in reaches the API from the frontend tier, so every person would share the tier's ten-a-minute
+bucket - reproduced at 9c7b4e4: twelve sign-ins through one peer, each naming a different browser, answered 401 ten
+times and then 429. Trusting a header from the tier's addresses would let any browser - and anybody - choose its bucket.
+
+**Decision.**
+
+1. *Three headers, one canonical string (FW-01).* `X-Wasla-Client-IP`, `X-Wasla-Forward-Ts` (integer Unix seconds) and
+   `X-Wasla-Forward-Sig`, lowercase hex `HMAC-SHA256(SESSION_FORWARD_SECRET, "v1\n" + ts + "\n" + ip + "\n" + METHOD +
+   "\n" + path)`; `path` is `request.url.path` (percent-decoded, no query). Method and path bind a signature to one
+   route; `v1` lets a later format coexist.
+2. *Where (FW-02).* `client_identity` computes today's identity exactly as before, then returns the signed address only
+   for a valid forward. One verifier (`app/core/client_ip_forward.py`), a pure function of headers, method, path,
+   clock and secret. Its two callers are the client-address buckets; the only other reader of the peer address in
+   `app/` is the HSTS decision (`SecurityHeadersMiddleware`), which is not an identity and is unchanged.
+3. *Off by default (FW-03).* `SESSION_FORWARD_SECRET` is an optional `SecretStr`; blank is unset; unset means the
+   headers are ignored on every request. When set outside `test` it must be at least 32 bytes, the `JWT_SECRET` rule.
+4. *Sixty seconds, no nonce store (FW-04).* A replay inside the window asserts the same address on the same route.
+5. *What an address is (FW-05).* One IPv4 or IPv6 literal, no port, brackets or zone id, at most 45 characters; an
+   IPv4-mapped address counts as its IPv4 form; a repeated or listed header is malformed; the signature is checked over
+   the raw value, the address normalised only after it passes. Private and loopback addresses are not refused: the
+   signature, not the value, is what is trusted.
+6. *Silent (FW-06).* Absent, unsigned, wrongly signed, stale, other-route or malformed: the request continues with
+   today's identity, never a 4xx or 5xx. `wasla_client_ip_forward_total{result}` (closed domain, held equal to
+   `ForwardResult` by a test; `absent` counted only with the secret set) and a warning at most once a minute per
+   result - never the address, signature, timestamp or secret.
+7. *Constant time (FW-07)*; a value that is not 64 hex characters is refused before any HMAC.
+8. *Only the identity (FW-08)*: no bucket's numbers, the per-account login bucket, `TRUSTED_PROXY_IPS`, CORS or any
+   response changes. The forward never authenticates anything.
+9. *Wiring (FW-09)*: the `api` service of `docker-compose.prod.yml`, `FEATURE_SETTINGS`, `.env.example`. The worker
+   serves no HTTP.
+10. *The tier's half (FW-10)* is specified in docs/SECURITY.md with test vectors in
+    `frontend/packages/api-client/fixtures/forward-signature.v1.json`; FE-2 signs `CF-Connecting-IP`.
+
+**Rejected.** Signing the body (it buys nothing for an address claim and couples the signer to a serialiser); a static
+shared token (one leaked log line would choose any bucket forever); trusting `X-Forwarded-For` from Cloudflare's
+published ranges (that trusts every Worker of every Cloudflare customer); a second, "previous" secret for rotation in
+this stage (a recommendation for audit 22 - today a rotation sets both sides together and a few seconds of forwards fall
+back to the tier's bucket).
+
+**Consequences.** Twelve people through one tier address are counted as themselves; one browser still meets its own
+bucket at the eleventh attempt; an unsigned claim behaves exactly as at 9c7b4e4. Proven by
+`tests/unit/test_client_ip_forward.py`, `tests/integration/test_client_ip_forward_endpoints.py` (whose shared-bucket test
+failed at 9c7b4e4 in 3 of 3 runs) and four mutants (removing the signature check, the freshness check, the path from
+the string, or the off switch) each killed.
+
+## ADR-191 — OpenAPI As A Build Artefact With The Real Error Envelope; An E2E Stack For The Frontend (FEB-02, OA-01..OA-09, E2E-01..E2E-10)
+
+**Status.** Accepted, 2026-11-07.
+
+**Context.** Production serves no OpenAPI document (`DOCS_ENABLED` is refused outside local and test), so the
+frontend's generated client needs a file. The document FastAPI generates declared 422 as its own `HTTPValidationError`
+(`{"detail": [...]}`) on 223 of 257 operations, while every handler answers `{"error": {...}}`, and left 401, 403, 404,
+409 and 429 mostly undeclared - a generated client would type every error wrong. And the frontend plan could walk its
+journeys only with a hand launcher, the worker stopped to read mail, no AI turn and no Paymob or Google.
+
+**Decision.**
+
+1. *Export (OA-01).* `python -m scripts.export_openapi` builds the application with `create_app` in-process, from
+   settings that ignore the environment, and writes `frontend/packages/api-client/openapi.json` and `event-types.json`
+   sorted, indented, UTF-8 and LF; `--check` writes nothing and fails stale. No server, database, Redis, network or
+   secret. The operations equal the production route walk (258) less `/metrics`, which excludes itself.
+2. *Freshness (OA-02).* `tests/unit/test_openapi_export.py`, collected by ci.yml's tests job as it is, fails when the
+   committed files differ from the export: a route change that forgets to regenerate fails the backend's CI.
+3. *The envelope as models (OA-03)* in `app/schemas/errors.py`, from the handlers as they are; the handlers are not
+   changed.
+4. *One post-processor (OA-04)* on `app.openapi()` (`app/api/openapi.py`): an existing 422 references
+   `ValidationErrorEnvelope`, every other declared 4xx/5xx `ErrorEnvelope`, every operation gains `default` ->
+   `ErrorEnvelope`, and FastAPI's two error components leave once unreferenced. Router-by-router `responses=` was
+   rejected: 34 routers, and a new one would forget.
+5. *Proved against real bodies (OA-05)* - 400, 401 (twice), 403 (twice), 404 (twice), 405, 409, 413, 422 (three), 429 -
+   validated against the exported file's schemas, strictly (closed objects), by a JSON Schema subset checker in
+   `tests/json_schema_subset.py` because `jsonschema` is not a dependency and the locks do not change.
+6. *The stream's vocabulary (OA-06)* beside the document: event types from `EVENT_TYPES`, close reasons from the closed
+   label domain of `wasla_events_stream_closed_total` (the only closed list of them), and the two control frames.
+7. *Nothing else changes (OA-07, OA-08)*: operationIds, `info.version`, paths, parameters, request bodies and 2xx
+   responses are byte-for-byte what FastAPI generated; the diff from 9c7b4e4's document is the error responses and six
+   components in, two out.
+8. *The e2e stack (E2E-01..E2E-10).* `docker-compose.e2e.yml` and `tests/e2e_stack/`: the real API and worker through a
+   launcher that installs, in-process only, a socket wall, a reroute of every `GuardedTransport` request to a fakes
+   service, the browser-facing Google and Paymob URLs on the fakes' published port, the repository's
+   `FakeOwnershipVerifier`, and an email provider that also writes the mailbox at send time. The fakes reuse the
+   suites' doubles (fake embeddings, the Responses harness's bodies, the Paymob order pairing) and add a scripted agent,
+   a Paymob checkout page that sends the signed callback, and a Google token endpoint with real RS256 tokens. Every
+   published port is on 127.0.0.1; every secret is a public test value; it is never deployed. `seed.py` creates the
+   staff account; `smoke.py` walks J1-J10.
+
+**Consequences.** FE-1 generates its client from a file that is the truth about errors, and cannot drift from the
+backend. Two deviations are recorded in FE0_BACKEND_PREREQUISITES.md: the e2e stack sets a public dummy
+`OPENAI_API_KEY` (the worker refuses to run an agent or embed without one; every request it makes is rerouted), and the
+fakes' port is published because a browser must open the fake Google and Paymob pages. Left to audit 23: stable
+operationIds, `info.version`, a JSON Schema of the stream frames.

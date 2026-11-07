@@ -37,6 +37,16 @@ The atomicity is the security property, not an optimisation (ADR-039). Checking 
 
 **Access tokens are deliberately not individually denylisted.** `POST /auth/logout` spends the supplied refresh token, but its already-issued access token can remain usable until its 15-minute maximum lifetime. `logout-all`, password reset, disable, delete, and refresh-replay teardown increment `token_version`, so their access tokens stop on the next request. Clients must clear both tokens after logout.
 
+**The browser session the frontend uses (ADR-189).** The customer app and the
+console keep the access token in page memory only and the refresh token in a
+`__Host-` HttpOnly, `SameSite=Strict` cookie on their own origin, readable only by
+three `/session/*` route handlers; each browser refreshes once at a time under a
+Web Lock and shares the new access token between its tabs. Those handlers call
+this API server-to-server and sign the browser's address (FEB-01, see
+[SECURITY.md](SECURITY.md)). The backend's own session behaviour above is
+unchanged; in particular two refreshes with one token still sign the account
+out everywhere, which is why the frontend serialises them.
+
 ## Verification onboarding gate
 
 Registration and password login may establish a limited session before inbox verification. `require_verified_user` centrally gates workspace selection, every workspace-scoped business API, and platform administration. `/auth/me`, refresh, logout, password recovery/change, verification itself, and Google identity recovery/linking remain reachable. A denied business request is `403 email_verification_required`. Google's signed `email_verified` claim satisfies the gate only for Gmail or a matching hosted Workspace domain; third-party addresses remain limited until they complete Wasla's code flow.

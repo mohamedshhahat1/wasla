@@ -37,6 +37,48 @@ conclusion drawn from it is vacuously true.
 | 502 | `ExternalServiceError` | A provider failed |
 | 503 | `DependencyUnavailableError` | A dependency or platform credential is unavailable |
 
+## The OpenAPI document
+
+Production serves no document: `DOCS_ENABLED` must be false in staging and
+production, so `/openapi.json`, `/docs` and `/redoc` do not exist there. The
+document a client is generated from is a **committed file** instead (FEB-02,
+ADR-191):
+
+| File | What |
+| --- | --- |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (258 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
+
+`python -m scripts.export_openapi` writes both from the application factory, in
+process - no server, database, Redis, network or secret - sorted and with LF
+line endings, so two runs are byte-identical on any machine.
+`python -m scripts.export_openapi --check` writes nothing and fails if either
+file is stale, and `tests/unit/test_openapi_export.py` does the same in CI: a
+change to a route that does not regenerate the files fails the backend's own
+build. The frontend's client (FE-1) is generated from the committed file.
+
+**Every error is declared as the envelope it really is.** Every operation has a
+`default` response of `ErrorEnvelope`; every declared 4xx/5xx references
+`ErrorEnvelope`, and every 422 `ValidationErrorEnvelope` (FastAPI's own
+`HTTPValidationError` is gone). `tests/integration/test_error_envelope_contract.py`
+validates real 400, 401, 403, 404, 405, 409, 413, 422 and 429 bodies against
+the exported schemas. A 422:
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "The request payload is invalid.",
+    "details": {"errors": [{"type": "missing", "loc": ["body", "password"], "msg": "Field required"}]},
+    "request_id": "b90d21a90352466692f2d2394b6d9bf7"
+  }
+}
+```
+
+`details` and `request_id` are present only when there is something to say.
+`code` is the field to switch on; `message` is English for logs, not for an
+interface. A client treats a code it does not know as the class of its status.
+
 ## Health
 
 | Method | Path | Purpose | Status |

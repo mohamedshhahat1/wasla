@@ -27,6 +27,59 @@ Keys come from configuration, which puts them in the environment of every API an
 
 Two properties are deliberate and both are tested. The limiter **fails open**: if Redis is unreachable the request is allowed, because a limiter that fails closed turns a cache outage into a total outage. And **the WhatsApp webhook is never limited** — Meta retries a non-2xx and eventually disables the subscription, so a 429 there loses a customer's message and then the integration. The webhook is bounded instead by signature verification, idempotency on the event id, and doing no inference on the request path.
 
+### The browser's address through the frontend tier (FEB-01, ADR-190)
+
+The customer app and the console sign people in through route handlers on
+their own origin (ADR-189), so every login, refresh, logout and Google callback
+reaches the API from the frontend tier's address. To keep each browser in its
+own authentication bucket, the tier signs the address it received the request
+from - on Cloudflare, `CF-Connecting-IP` - and the API believes it only when the
+signature is right:
+
+| Header | Value |
+| --- | --- |
+| `X-Wasla-Client-IP` | the browser's address: one IPv4 or IPv6 literal, no port, no brackets, no zone id |
+| `X-Wasla-Forward-Ts` | the signing time, integer Unix seconds |
+| `X-Wasla-Forward-Sig` | lowercase hex of `HMAC-SHA256(SESSION_FORWARD_SECRET, canonical)` |
+
+```text
+canonical = "v1\n" + ts + "\n" + client_ip + "\n" + METHOD + "\n" + path
+```
+
+`METHOD` is upper case; `path` is the URL path the API receives - percent-decoded,
+without the query string (`/api/v1/auth/login`). The method and path bind a
+signature to one route; the timestamp must be within **60 seconds** of the API's
+clock either way. The comparison is constant-time and is made over the raw
+header value; only then is the address normalised (an IPv4-mapped IPv6 address
+counts as its IPv4 form). There is no nonce store: a replay inside the minute
+asserts the same address on the same route, so it cannot choose a bucket.
+
+**A forward that is not exactly right changes nothing, and says nothing.**
+Absent, unsigned, wrongly signed, stale, signed for another route, malformed,
+or any forward while `SESSION_FORWARD_SECRET` is unset: the request is counted
+under the address it would have been counted under anyway (the socket, or a
+`TRUSTED_PROXY_IPS` proxy's `X-Real-IP` / `X-Forwarded-For`), with no 4xx or 5xx,
+so a misconfigured tier degrades to the old per-tier bucket rather than to an
+outage. A browser can send the three headers (CORS allows any request header);
+it cannot produce the signature. The forward is an address claim, never a
+credential, and it changes nothing but the identity: every bucket's numbers, the
+per-account login bucket and `TRUSTED_PROXY_IPS` behave as before.
+
+`wasla_client_ip_forward_total{result}` counts outcomes (`valid`, `absent`,
+`disabled`, `bad_signature`, `stale`, `malformed`; `absent` only when the secret
+is set) and a refused forward is logged at most once a minute per result -
+never the address, the signature, the timestamp or the secret. The secret is
+optional, a `SecretStr`, at least 32 bytes when set, and the same value on the
+API and every frontend Worker. Test vectors for the tier's signer:
+`frontend/packages/api-client/fixtures/forward-signature.v1.json`. Rotating it
+today means setting the new value on the API and the Workers together; for a
+few seconds forwards signed with the old value fall back to the tier's address,
+which is the old per-tier bucket, not a refusal.
+
+**The e2e stack's secrets are public.** `docker-compose.e2e.yml` writes test
+values for every secret, `SESSION_FORWARD_SECRET` included, into the file on
+purpose. It is never deployed.
+
 ## Tenant isolation
 
 **One predicate set for every knowledge query** (RAG remediation Part 2, RQ-15). The vector search, the exact-word search and the neighbour lookup apply `DocumentChunkRepository.served_predicates` - tenant on the chunk, the generation and the document, the active generation, the embedding space, the validity window and the agent's knowledge scope - so a new query path cannot write a shorter list. The exact-word query binds an OR of quoted lexemes as a parameter, never interpolated. The fused, merged, neighbour-expanded, re-ranked, alternate-query, scoped, preview and pre-retrieval paths each have a two-workspace isolation test, and mutants removing each path's predicate are killed. A knowledge scope is validated against the workspace when it is saved; an unknown id and another workspace's id are refused with the same words. The optional re-rank uses the provider already in use with `store: false` and sends only one search's already-filtered candidates - no new data processor; hosted or self-hosted re-rankers would be one and are a product decision. The search preview is administrators only.
