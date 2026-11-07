@@ -1,0 +1,20 @@
+# FE-0's contract files and vectors: never reformatted (FE-1 section 4).
+packages/api-client/openapi.json
+packages/api-client/event-types.json
+packages/api-client/fixtures/
+# Generated.
+packages/api-client/src/schema.d.ts
+pnpm-lock.yaml
+# Lint fixtures are deliberately wrong.
+packages/config/test-fixtures/
+node_modules/
+.next/
+.open-next/
+.astro/
+.wrangler/
+.turbo/
+dist/
+storybook-static/
+playwright-report/
+test-results/
+coverage/

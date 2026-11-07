@@ -1,0 +1,29 @@
+{
+  "name": "wasla-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Wasla's browser applications: the marketing site, the customer app and the platform console (FE-1, ADR-192).",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "generate": "turbo run generate",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "i18n:check": "turbo run i18n:check",
+    "storybook:build": "turbo run storybook:build",
+    "storybook:test": "turbo run storybook:test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "e2e": "pnpm --filter @wasla/e2e run e2e",
+    "e2e:local": "pnpm --filter @wasla/e2e run e2e:local"
+  },
+  "devDependencies": {
+    "prettier": "3.9.10",
+    "turbo": "2.11.10",
+    "typescript": "5.9.3"
+  }
+}

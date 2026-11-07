@@ -1,0 +1,18 @@
+packages:
+  - apps/*
+  - packages/*
+  - e2e
+
+# pnpm 12 refuses versions younger than its minimum release age; these exact pins are the
+# latest patches FE-1 chose (section 1) and were published inside that window.
+minimumReleaseAgeExclude:
+  - eslint-plugin-import-x@4.18.0
+
+# Packages whose install scripts may run (pnpm runs none by default). Each one fetches or
+# builds a native binary the toolchain needs.
+onlyBuiltDependencies:
+  - esbuild
+  - workerd
+  - sharp
+  - "@tailwindcss/oxide"
+  - msw
