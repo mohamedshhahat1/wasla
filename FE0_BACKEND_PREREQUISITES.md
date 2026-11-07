@@ -21,7 +21,9 @@ static checks, the document's freshness, one small mutation check, and one GitHu
 | B verify worktree gates + e2e | done | logs/gates_B_verify.txt, e2e/smoke_B.txt, e2e/canary_B.txt, e2e/down_B.txt | 07:52–08:00 | E:\wasla-fe0-verify @ 6115432 |
 | B merge + tree equality | done | | 08:01 | cc74d09 (parents 9c7b4e4, 6115432) |
 | B final-tree gates | done | logs/gates_B_final.txt | 08:01 | verify worktree @ cc74d09 |
-| B report commit, push, ci.yml | in progress | | | see sections 20–21 |
+| B report commit, push | done | | 08:05 | report b338a44; pushed `9c7b4e4..b338a44`, no force |
+| B ci.yml run of the push | done — green | logs/ci_tests_job.log | 08:05–09:16 | run 42354012088, 5/5 jobs |
+| B addendum | done | this section | 09:20 | this commit; its run in the next line of the cleanup record |
 | C cleanup | not started | | | only after CI green |
 
 (Times are UTC; Cairo = UTC+2.)
@@ -38,7 +40,7 @@ static checks, the document's freshness, one small mutation check, and one GitHu
 | Mutation | M-F01..M-F04 and M-O01 all killed; control green; tree restored each time |
 | Gates | G-1 144 new tests green; G-2 24 nearby files green; G-3 ruff/black/mypy clean; G-4 export fresh, deterministic, Alembic 0138 single head — at FE0_HEAD, in the verify worktree, and (G-1, G-3, G-4) on the merged tree |
 | Merge | one normal merge commit cc74d09, merged tree byte-identical to FE0_HEAD |
-| Verdict | see section 28 (finalised by the addendum after GitHub's run) |
+| Verdict | **FE-0 MERGED AND PUSHED, CI GREEN** (ci.yml 42354012088, 5/5, 8,077 passed) |
 
 ## 2. Source Branches and Exact Heads
 
@@ -355,13 +357,35 @@ ruff clean, black 1135 unchanged, mypy 980 files clean; export `--check` rc 0; A
 
 ## 20. Push
 
-Filled after the push (see the addendum): origin before = `9c7b4e4`.
+| | Value |
+|---|---|
+| origin before | `9c7b4e48512885f5cbb76cc7a8b02a5520e86a3d` (re-fetched just before the push: unmoved) |
+| fast-forward check | `git merge-base --is-ancestor origin/worktree-billing-google-auth HEAD` → true |
+| command | `git push origin worktree-billing-google-auth` (no force) → `9c7b4e4..b338a44` |
+| origin after | `b338a446b205741264fecf2e622a5b333d449e22` = local |
+| Not pushed | `fe0-backend-prereqs-20261107`, `frontend-plan-20261107`, any tag; `main` untouched (`8e3a1ba`) |
 
 ## 21. GitHub Actions
 
-Filled by the addendum: the push's `ci.yml` run id, URL, every job's conclusion and duration, the count line, and the
-addendum's own run. `security.yml` is not dispatched by this stage; its last run (42315411238) is red for RGM-23,
-RGM-24, RGM-27 — recorded, not this stage's.
+`ci.yml` run **42354012088** on `b338a44` — https://github.com/mohamedshhahat1/wasla/actions/runs/42354012088 —
+GitHub ci.yml, Linux runners, **success**:
+
+| Job | Conclusion | Duration |
+|---|---|---|
+| Lint, format, types | success | 1 m 33 s |
+| Tests and migrations | success | 70 m 36 s |
+| Migration-built schema | success | 49 m 0 s |
+| Docker build | success | 1 m 29 s |
+| Alert rules and receivers | success | 2 m 35 s |
+
+Tests job: `8077 passed, 17 skipped, 2 deselected` (the full suite; 9c7b4e4's run 42319764942 had 7,932 passed / 17
+skipped: +145 = this stage's 144 new tests and one new `FEATURE_SETTINGS` parameter); the skip gate passed (17, all
+accepted reasons); the drift guard `66 pinned packages checked, 0 differ from the lock`, `No broken requirements found`.
+Under `-q` the log names no test individually; the freshness test, F-1..F-12, the OA tests and the contract test are in
+the collected `tests/` and in the count, and the migration-built job ran the integration ones against the migrated
+schema. No section 23 fix was needed; nothing was re-run. `security.yml` was not dispatched; its last run
+(42315411238) stays red for RGM-23, RGM-24, RGM-27 — recorded, not this stage's. The addendum's own run is recorded in
+`E:\wasla-cleanup\CLEANUP_fe0_20261107.md`.
 
 ## 22. Findings (FEB-20 ..)
 
@@ -377,8 +401,8 @@ needed an application change.
 
 | Item | Status |
 |---|---|
-| FEB-01 | CLOSED locally (F-1..F-12 green, M-F01..M-F04 killed, P-F01/P-F02 after as required); GitHub confirmation in the addendum |
-| FEB-02 (P0 parts) | CLOSED locally (export without dependencies, envelope on every operation, real bodies valid, freshness proven, M-O01 killed); GitHub in the addendum |
+| FEB-01 | CLOSED (F-1..F-12 green locally and in ci.yml 42354012088, M-F01..M-F04 killed, P-F01/P-F02 after as required) |
+| FEB-02 (P0 parts) | CLOSED (export without dependencies, envelope on every operation, real bodies valid, freshness test green in ci.yml, M-O01 killed) |
 | FEB-02 (P2: operationIds, info.version, frame schema) | DEFERRED PRODUCT DECISION (audit 23) |
 | E2E profile | CLOSED (up/down clean twice, canary refused, J1–J10 each PASSED, EXPECTED UNTIL FE-2 or PASSED WITH FEB-03) |
 | HD-01, HD-02 | CLOSED (ADR-189; nothing created outside the repository) |
@@ -445,9 +469,17 @@ branch, the plan's and the last stage's leftovers, the developer stack, `docker-
 
 ## 28. Final Verdict
 
-Pending GitHub's `ci.yml` run on the push (section 23 of the stage prompt); set by the addendum.
-
 ```text
-FE-1 CAN START                  once FEB-02 is on origin (this push) - HD-01 and HD-02 recorded
-FE-2 CAN START AFTER FE-1       FEB-01 on origin (this push)
+FE-0 MERGED AND PUSHED, CI GREEN
+FE-1 CAN START                  FEB-02 CLOSED and on origin; HD-01 and HD-02 recorded (FEQ-04 domains may stay placeholders)
+FE-2 CAN START AFTER FE-1       FEB-01 CLOSED and on origin
+CLEANUP                         runs after this addendum's ci.yml run is green; result in E:\wasla-cleanup\CLEANUP_fe0_20261107.md
 ```
+
+FEB-01 CLOSED, FEB-02 (P0) CLOSED, the e2e profile CLOSED, HD-01 and HD-02 CLOSED — locally and on GitHub's full
+suite. If FE-1 started tomorrow from origin it would find the plan, the two decisions, and a committed contract that
+tells the truth about every error and that the backend CI refuses to let drift; FE-2's sign-in through the tier would
+give each browser its own bucket and no browser a way to choose one; and every later stage can bring the real backend
+up with one command and nothing leaving the machine. The full suite behind that answer was run by GitHub, not locally,
+by the owner's choice; the inbox, the console and the marketing site still wait for FEB-03/04/05, FEB-07, FEB-08 and
+FEB-10.
