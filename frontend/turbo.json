@@ -1,6 +1,7 @@
 {
   "$schema": "https://turborepo.com/schema.json",
   "ui": "stream",
+  "cacheDir": ".turbo/cache",
   "globalDependencies": [".nvmrc", "pnpm-lock.yaml"],
   "globalEnv": [
     "PUBLIC_API_ORIGIN",
@@ -27,7 +28,7 @@
     },
     "test": {
       "inputs": ["$TURBO_DEFAULT$"],
-      "outputs": ["coverage/**"]
+      "outputs": []
     },
     "i18n:check": {
       "inputs": ["messages/**", "src/**", "scripts/**"],

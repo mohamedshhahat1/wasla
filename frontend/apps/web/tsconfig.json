@@ -1,0 +1,11 @@
+{
+  "extends": "@wasla/config/tsconfig.react.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "allowJs": false,
+    "types": ["node", "@testing-library/jest-dom/vitest"],
+    "plugins": [{ "name": "next" }]
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules", ".next", ".open-next"]
+}

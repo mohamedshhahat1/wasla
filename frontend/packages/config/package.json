@@ -10,7 +10,11 @@
     "./eslint": "./eslint/index.js",
     "./eslint/plugin": "./eslint/plugin.js",
     "./prettier": "./prettier.config.js",
-    "./check-files": "./scripts/check-files.mjs"
+    "./check-files": "./scripts/check-files.mjs",
+    "./origins": {
+      "types": "./origins.d.ts",
+      "default": "./origins.js"
+    }
   },
   "bin": {
     "wasla-check-files": "./scripts/check-files.mjs"

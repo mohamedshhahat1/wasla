@@ -1,0 +1,58 @@
+---
+/**
+ * Every marketing page: <html lang dir> written statically per locale (IN-04), hreflang
+ * alternates and x-default (Astro emits none itself, plan section 16), no script.
+ */
+import "@wasla/ui/fonts";
+import "../styles/global.css";
+
+import { dirOf, type Locale } from "@wasla/i18n";
+
+import LanguageLinks from "../components/LanguageLinks.astro";
+import { alternates, publicEnv, text } from "../lib/copy";
+
+interface Props {
+  locale: Locale;
+  title: string;
+  /** The page's path below /<locale>/, for the alternates ("" for the home page). */
+  path?: string;
+  noindex?: boolean;
+}
+
+const { locale, title, path = "", noindex = false } = Astro.props;
+const site = publicEnv.marketingOrigin;
+---
+
+<!doctype html>
+<html lang={locale} dir={dirOf(locale)}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={text(locale, "marketing.metaDescription")} />
+    {noindex ? <meta name="robots" content="noindex" /> : null}
+    {
+      alternates(path).map((alternate) => (
+        <link rel="alternate" hreflang={alternate.locale} href={`${site}${alternate.href}`} />
+      ))
+    }
+    <link rel="alternate" hreflang="x-default" href={`${site}/en/${path}`} />
+  </head>
+  <body>
+    <div class="flex min-h-dvh flex-col">
+      <header class="border-b border-border bg-surface-raised">
+        <div
+          class="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-4 px-5 py-3"
+        >
+          <a href={`/${locale}/`} class="text-xl font-semibold text-text no-underline">
+            {text(locale, "common.appName")}
+          </a>
+          <LanguageLinks current={locale} path={path} label={text(locale, "common.languageLabel")} />
+        </div>
+      </header>
+      <main id="main" class="mx-auto w-full max-w-page flex-1 px-5 py-10">
+        <slot />
+      </main>
+    </div>
+  </body>
+</html>

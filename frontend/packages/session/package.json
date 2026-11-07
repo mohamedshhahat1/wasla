@@ -6,7 +6,8 @@
   "description": "The browser half of the S-2 session (token in memory, one refresh per browser under Web Locks, BroadcastChannel) and the server-only forward signer (FEB-01).",
   "exports": {
     ".": "./src/browser/index.ts",
-    "./server": "./src/server/index.ts"
+    "./server": "./src/server/index.ts",
+    "./headers": "./src/server/headers.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",

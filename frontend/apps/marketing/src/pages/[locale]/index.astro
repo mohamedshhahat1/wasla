@@ -1,0 +1,26 @@
+---
+/** MKT home placeholder (FE-1): one heading, one sentence, a link to the app - per locale. */
+import { LOCALES, type Locale } from "@wasla/i18n";
+
+import Base from "../../layouts/Base.astro";
+import { publicEnv, text } from "../../lib/copy";
+
+export function getStaticPaths() {
+  return LOCALES.map((locale) => ({ params: { locale } }));
+}
+
+const locale = Astro.params.locale as Locale;
+---
+
+<Base locale={locale} title={text(locale, "marketing.homeTitle")}>
+  <section class="mx-auto flex max-w-prose flex-col items-center gap-5 py-10 text-center">
+    <h1 class="m-0 text-3xl font-semibold text-text">{text(locale, "marketing.homeTitle")}</h1>
+    <p class="m-0 text-lg text-text-muted">{text(locale, "marketing.homeBody")}</p>
+    <a
+      href={`${publicEnv.appOrigin}/`}
+      class="inline-flex min-h-target items-center rounded-md bg-primary px-5 font-medium text-on-primary hover:bg-primary-hover"
+    >
+      {text(locale, "marketing.openApp")}
+    </a>
+  </section>
+</Base>

@@ -23,7 +23,7 @@ function engine(kind: string): ESLint {
     found = new ESLint({
       cwd: frontend,
       overrideConfigFile: true,
-      overrideConfig: waslaConfig({ kind, typeChecked: false }),
+      overrideConfig: waslaConfig({ kind, typeChecked: false }) as ESLint.Options["overrideConfig"],
       ignore: false,
     });
     engines.set(kind, found);

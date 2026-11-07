@@ -1,0 +1,5 @@
+/* The design system is the only stylesheet; the app adds its own folders for class names. */
+@import "@wasla/ui/styles.css";
+
+@source "../app";
+@source "../components";

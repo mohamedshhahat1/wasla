@@ -1,0 +1,6 @@
+{
+  "extends": "@wasla/config/tsconfig.base.json",
+  "compilerOptions": { "types": ["node", "astro/client"] },
+  "include": ["src/**/*.ts", "test/**/*.ts", "*.ts", ".astro/types.d.ts"],
+  "exclude": ["dist", "node_modules"]
+}
