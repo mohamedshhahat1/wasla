@@ -1,0 +1,23 @@
+{
+  "name": "@wasla/session",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The browser half of the S-2 session (token in memory, one refresh per browser under Web Locks, BroadcastChannel) and the server-only forward signer (FEB-01).",
+  "exports": {
+    ".": "./src/browser/index.ts",
+    "./server": "./src/server/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0 && wasla-check-files --kind package .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@wasla/config": "workspace:*",
+    "eslint": "9.39.5",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}
