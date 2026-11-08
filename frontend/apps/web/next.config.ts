@@ -8,6 +8,8 @@ const { environment, origins } = readOrigins(process.env);
 
 const config: NextConfig = {
   poweredByHeader: false,
+  // FX-08: next dev must not write AGENTS.md into the tree when it detects a coding agent.
+  agentRules: false,
   reactStrictMode: true,
   // Image optimisation off: several 2026 advisories were in that API (plan section 22).
   images: { unoptimized: true },
@@ -18,6 +20,8 @@ const config: NextConfig = {
     PUBLIC_APP_ORIGIN: origins["PUBLIC_APP_ORIGIN"],
     PUBLIC_CONSOLE_ORIGIN: origins["PUBLIC_CONSOLE_ORIGIN"],
     PUBLIC_MARKETING_ORIGIN: origins["PUBLIC_MARKETING_ORIGIN"],
+    // FEB-16's workaround: the Google button exists only in builds that say so (APP-AUTH-03).
+    PUBLIC_GOOGLE_ENABLED: process.env["PUBLIC_GOOGLE_ENABLED"] === "true" ? "true" : "false",
   },
 };
 

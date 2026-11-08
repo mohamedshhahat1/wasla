@@ -11,7 +11,7 @@ import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
-import wasla from "./plugin.js";
+import wasla, { SERVER_COOKIE_FILES } from "./plugin.js";
 
 const APPS = ["web", "console", "marketing"];
 
@@ -97,6 +97,13 @@ export function waslaRules(kind) {
   }
   if (kind === "pkg-i18n") rules["wasla/no-uppercase"] = "error";
   if (isApp) rules["wasla/no-raw-design-values"] = "error";
+  // SR-01: tests assert Set-Cookie headers; only app code is held to the rule.
+  if (isApp) {
+    rules["wasla/server-cookies-only-in-session"] = [
+      "error",
+      { allowFiles: [...SERVER_COOKIE_FILES, "/test/"] },
+    ];
+  }
   if (kind === "app-console") rules["wasla/console-platform-paths"] = "error";
   return rules;
 }

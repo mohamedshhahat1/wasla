@@ -2,13 +2,13 @@ import { getLocale, getTranslations } from "next-intl/server";
 import type { ReactNode } from "react";
 
 import { isLocale } from "@wasla/i18n";
-import { Button, Link } from "@wasla/ui";
+import { Link } from "@wasla/ui";
 
 import { publicEnv } from "../lib/env";
 import { ApiHealth } from "./api-health";
 import { LanguageSwitcher } from "./language-switcher";
 
-/** APP-SHELL (signed out): name, language, a sign-in that is not there yet, the footer. */
+/** The page frame until FE-3's shell: name, language, the footer (the session lives in the page). */
 export async function Shell({ children }: { children: ReactNode }) {
   const t = await getTranslations("shell");
   const common = await getTranslations("common");
@@ -28,12 +28,6 @@ export async function Shell({ children }: { children: ReactNode }) {
           <p className="m-0 text-xl font-semibold text-text">{common("appName")}</p>
           <div className="flex flex-wrap items-center gap-3">
             <LanguageSwitcher current={locale} label={common("languageLabel")} />
-            <Button disabled aria-describedby="sign-in-soon">
-              {t("signIn")}
-            </Button>
-            <span id="sign-in-soon" className="text-sm text-text-muted">
-              {t("comingSoon")}
-            </span>
           </div>
         </div>
       </header>

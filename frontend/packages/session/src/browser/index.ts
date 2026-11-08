@@ -20,7 +20,22 @@ export {
   type ChannelLike,
   type SessionMessage,
 } from "./session-channel";
-export { TokenHolder, type HolderListener, type TokenState } from "./token-holder";
+export {
+  TokenHolder,
+  type HolderListener,
+  type TokenState,
+  type WorkspaceRef,
+} from "./token-holder";
+export {
+  BACKOFF_CAP_MS,
+  BACKOFF_START_MS,
+  backoffDelay,
+  ConnectionLost,
+  SignedOut,
+  TransientFailure,
+  withBackoff,
+  type BackoffOptions,
+} from "./backoff";
 
 import { RefreshCoordinator } from "./refresh-coordinator";
 import { SESSION_CHANNEL, SessionChannel } from "./session-channel";

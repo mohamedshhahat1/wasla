@@ -8,6 +8,7 @@
     "PUBLIC_APP_ORIGIN",
     "PUBLIC_CONSOLE_ORIGIN",
     "PUBLIC_MARKETING_ORIGIN",
+    "PUBLIC_GOOGLE_ENABLED",
     "WASLA_ENV"
   ],
   "tasks": {
@@ -38,6 +39,11 @@
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", "!test/**", "!**/*.test.*"],
       "outputs": [".next/**", "!.next/cache/**", ".open-next/**", "dist/**"]
+    },
+    "@wasla/marketing#build": {
+      "dependsOn": ["^build", "@wasla/marketing#typecheck"],
+      "inputs": ["$TURBO_DEFAULT$", "!test/**", "!**/*.test.*"],
+      "outputs": ["dist/**"]
     },
     "storybook:build": {
       "inputs": ["$TURBO_DEFAULT$"],

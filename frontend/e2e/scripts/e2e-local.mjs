@@ -51,6 +51,8 @@ const env = {
   NEXT_TELEMETRY_DISABLED: "1",
   ASTRO_TELEMETRY_DISABLED: "1",
   TURBO_TELEMETRY_DISABLED: "1",
+  // FE-2: the e2e build shows the Google button (the fake Google answers; SR-07, JT-01).
+  PUBLIC_GOOGLE_ENABLED: "true",
 };
 
 if (!own.includes("--skip-build")) {

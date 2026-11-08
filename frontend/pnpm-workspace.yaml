@@ -47,3 +47,11 @@ allowBuilds:
   # Prebuilt binaries arrive as optional dependencies; their install scripts only rebuild.
   "@parcel/watcher": false
   "@swc/core": false
+
+# FE-2 (FX-04, FX-05): advisories fixed by moving transitive packages to their fixed releases,
+# and sharp not installed at all (images are unoptimized, PD-13; miniflare imports it lazily
+# for its Images binding, which no app uses). Each is kept only because every gate is green with it.
+overrides:
+  sharp: "-"
+  "glob@>=9.0.0 <14.0.2": 14.0.4
+  "minimatch@>=7.0.0 <11.0.1": 11.0.5

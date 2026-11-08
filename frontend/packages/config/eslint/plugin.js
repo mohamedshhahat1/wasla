@@ -331,6 +331,55 @@ const noWebStorage = {
   },
 };
 
+/** Where an app may read or write a cookie on the server (SR-01): the session routes and the locale. */
+export const SERVER_COOKIE_FILES = [
+  "/app/session/",
+  "/lib/server/session-handlers.ts",
+  "/app/locale/route.ts",
+  "/i18n/request.ts",
+];
+
+const serverCookiesOnlyInSession = {
+  meta: {
+    type: "problem",
+    docs: {
+      description:
+        "Cookies are read or set on the server only by the /session/* routes and the locale route (SR-01).",
+    },
+    messages: {
+      cookies: "next/headers cookies() is used only by the session routes and the locale (SR-01).",
+      setCookie: "Set-Cookie is written only by the session routes and the locale route (SR-01).",
+    },
+    schema: [
+      {
+        type: "object",
+        properties: { allowFiles: { type: "array", items: { type: "string" } } },
+        additionalProperties: false,
+      },
+    ],
+  },
+  create(context) {
+    const file = normalised(context.filename);
+    const allow = context.options[0]?.allowFiles ?? SERVER_COOKIE_FILES;
+    if (allow.some((fragment) => file.includes(fragment))) return {};
+    return {
+      ImportDeclaration(node) {
+        if (node.source.value !== "next/headers") return;
+        for (const specifier of node.specifiers) {
+          if (specifier.type === "ImportSpecifier" && specifier.imported.name === "cookies") {
+            context.report({ node: specifier, messageId: "cookies" });
+          }
+        }
+      },
+      Literal(node) {
+        if (typeof node.value === "string" && node.value.toLowerCase() === "set-cookie") {
+          context.report({ node, messageId: "setCookie" });
+        }
+      },
+    };
+  },
+};
+
 const SERVER_ONLY_SOURCES = [
   /^@wasla\/session\/server(?:\/|$)/,
   /(?:^|\/)server\/forward(?:\.ts)?$/,
@@ -423,5 +472,6 @@ export default {
     "no-web-storage": noWebStorage,
     "no-server-only-in-client": noServerOnlyInClient,
     "console-platform-paths": consolePlatformPaths,
+    "server-cookies-only-in-session": serverCookiesOnlyInSession,
   },
 };

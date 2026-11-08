@@ -1,7 +1,7 @@
 /**
  * The customer app's public origins (AP-03), validated at build time by next.config.ts and
  * inlined into the bundle under their own PUBLIC_* names. Nothing secret is public:
- * SESSION_FORWARD_SECRET is server-only and read by no FE-1 code path (FE-2 wires it).
+ * SESSION_FORWARD_SECRET is server-only, read by the /session/* handlers alone (FE-2).
  */
 export interface PublicEnv {
   environment: "development" | "preview" | "production";
@@ -27,4 +27,12 @@ export function publicEnv(): PublicEnv {
     throw new Error("the public origins were not set at build time (next.config.ts)");
   }
   return { environment, apiOrigin, appOrigin, consoleOrigin, marketingOrigin };
+}
+
+/**
+ * Whether the Google button is shown (APP-AUTH-03): PUBLIC_GOOGLE_ENABLED at build time, false
+ * unless set to "true" (FEB-16's workaround until the API publishes its auth configuration).
+ */
+export function googleEnabled(): boolean {
+  return process.env.PUBLIC_GOOGLE_ENABLED === "true";
 }

@@ -39,7 +39,17 @@ pnpm format / pnpm format:check                         Prettier
 pnpm --filter @wasla/web dev                            one app in development (also @wasla/console, @wasla/marketing)
 pnpm storybook:build && pnpm storybook:test             Storybook, axe on every story, the RTL keyboard proof
 pnpm e2e:local                                          build, start the backend profile, run Playwright, take it down
+pnpm build:workers:linux -- --env preview               the Workers' outputs built on Linux in Docker (any machine)
 ```
+
+### Building the Workers on Windows
+
+OpenNext's build fails on Windows ("Access is denied" on pnpm's links, FEF-04). `pnpm build:workers:linux` runs it in
+`node:24.15.0-bookworm-slim` (pinned by digest): `frontend/` is mounted read-only, copied without `node_modules`,
+installed from the frozen lockfile inside the container, built (OpenNext for web and console, Astro for marketing), and
+only `apps/web/.open-next`, `apps/console/.open-next` and `apps/marketing/dist` are copied back, links dereferenced.
+`--env` is `development`, `preview` or `production`; `PUBLIC_*` variables set on the host are passed through. Deploying
+stays on the host (`pnpm exec wrangler deploy` in the app's folder): the container never sees wrangler's credentials.
 
 The generated client is regenerated from the committed `packages/api-client/openapi.json`, which the backend exports
 (`python -m scripts.export_openapi` at the repository root); CI fails when `schema.d.ts` differs from a regeneration.
@@ -50,6 +60,30 @@ The generated client is regenerated from the committed `packages/api-client/open
 root, waits for `GET http://127.0.0.1:8000/health`, runs Playwright, then `down -v` whatever happened. Ports: API 8000
 (`WASLA_E2E_API_PORT`), mailbox 8025, fakes 8026 - all on 127.0.0.1. See `../tests/e2e_stack/README.md` for the
 accounts, the mailbox and the stack's public test secrets.
+
+The e2e build of the customer app sets `PUBLIC_GOOGLE_ENABLED=true` (the fake Google answers), and its `next start`
+on :3000 runs with `SESSION_FORWARD_SECRET` = the stack's public test secret and `WASLA_E2E_ROUTES=1` (the test-only
+page `/test-only/session`, and the `X-Wasla-E2E-Client-IP` header that gives each test its own signed address). The
+FX-07 test restarts the API and runs last, alone (`stream-restart` project).
+
+## Signing in (FE-2, ADR-193)
+
+The customer app signs in through its own route handlers, `POST /session/{login, register-login, refresh, switch,
+logout, logout-all, google/authorize, google/callback}` (`apps/web/app/session/`, logic in
+`lib/server/session-handlers.ts`). Each accepts only a same-origin JSON POST with `X-Wasla-Session: 1`, signs its call
+to the API with the browser's address, and keeps the refresh token in an HttpOnly cookie (`__Host-wasla_rt`;
+`wasla_rt` on plain-HTTP localhost). The page holds the access token in memory only (`lib/session/web-session.ts`).
+
+| Variable                 | Where                    | What                                                      |
+| ------------------------ | ------------------------ | --------------------------------------------------------- |
+| `SESSION_FORWARD_SECRET` | server (a Worker secret) | the API's value; unset → every session route answers 503  |
+| `PUBLIC_GOOGLE_ENABLED`  | build                    | `true` shows "Continue with Google"                       |
+| `WASLA_E2E_ROUTES`       | server, development only | `1` enables the test-only page and the e2e address header |
+
+To try it locally: start the e2e profile (`docker compose -f ../docker-compose.e2e.yml --profile e2e up -d --build`
+from `frontend/`), build with `WASLA_ENV=development PUBLIC_GOOGLE_ENABLED=true pnpm turbo run build --filter=@wasla/web`,
+start with `SESSION_FORWARD_SECRET=e2e-not-a-secret-0123456789abcdef0123456789abcdef pnpm --filter @wasla/web exec next
+start -p 3000`, open `http://localhost:3000/signup`, and read the code from `http://127.0.0.1:8025/messages`.
 
 ## Origins
 

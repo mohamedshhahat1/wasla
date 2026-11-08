@@ -1,0 +1,1 @@
+{ "name": "fixture-clean", "private": true, "dependencies": { "fine-lib": "1.0.0", "either-lib": "1.0.0", "@wasla/x": "workspace:*" } }

@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./events": "./src/events.ts",
     "./query": "./src/query.ts",
+    "./stream": "./src/stream.ts",
     "./schema": "./src/schema.d.ts",
     "./msw": "./test/msw.ts"
   },

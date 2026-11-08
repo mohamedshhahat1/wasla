@@ -1,16 +1,21 @@
-import { getTranslations } from "next-intl/server";
+import { Suspense } from "react";
 
-import { EmptyState } from "@wasla/ui";
-
+import { PageGate } from "../components/page-gate";
 import { Shell } from "../components/shell";
+import { SignedInHome } from "../components/workspace/signed-in-home";
 
-/** The signed-out shell (APP-SHELL, FE-1): no API call, no cookie but the locale. */
-export default async function Home() {
-  const t = await getTranslations("shell");
+/**
+ * "/" (FE-2): signed out → /login, unverified → /verify, no workspace → /workspaces/new (AU-03);
+ * otherwise the signed-in placeholder that FE-3's shell replaces.
+ */
+export default function Home() {
   return (
     <Shell>
-      <EmptyState headingLevel={1} title={t("signedOutTitle")} description={t("signedOutBody")} />
-      <p className="text-center text-md text-text-muted">{t("tagline")}</p>
+      <Suspense>
+        <PageGate need="workspace">
+          <SignedInHome />
+        </PageGate>
+      </Suspense>
     </Shell>
   );
 }

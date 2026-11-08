@@ -638,13 +638,21 @@ The three browser applications live in `frontend/` (ADR-189, ADR-192) and are no
 Build-time settings, per app, read by `packages/config/origins.js`: `WASLA_ENV` (`development`, `preview` or
 `production`) and `PUBLIC_API_ORIGIN`, `PUBLIC_APP_ORIGIN`, `PUBLIC_CONSOLE_ORIGIN`, `PUBLIC_MARKETING_ORIGIN`
 (production values come from the table; a build without `WASLA_ENV`, with a missing preview origin, or with `http`
-outside development fails). `SESSION_FORWARD_SECRET` is a server-side Worker secret for FE-2's `/session/*` route
-handlers and is read by no FE-1 code.
+outside development fails). `PUBLIC_GOOGLE_ENABLED` (`true` or unset) shows the "Continue with Google" button; leave
+it unset until Google is configured for that environment (EXT-FE-10).
+
+`SESSION_FORWARD_SECRET` is a Worker secret of the customer app (`wrangler secret put SESSION_FORWARD_SECRET`), never
+a build variable and never in the repository: the **same value** as the API's (see "The frontend tier's signing
+secret" above). Without it, every `/session/*` route answers 503 `session_unavailable` and nobody can sign in - the
+intended state of the previews, which have no API. Signing in on a Worker needs a staging API reachable from
+Cloudflare, with `CORS_ORIGINS` listing the app's origin and the same secret on both sides.
 
 Nothing is deployed to `iwasla.tech` yet: production Workers, custom domains, DNS records and Cloudflare Access are
 FE-11's. FE-1's previews are three Workers on `*.workers.dev` (`wasla-preview-web`, `-console`, `-marketing`),
 deployed only by someone signed in to the owner's Cloudflare account (`wrangler login`), from each app's
-`wrangler.jsonc`, which carries no route, custom domain or binding. The previews are public.
+`wrangler.jsonc`, which carries no route, custom domain or binding. The previews are public, hold no secret,
+and are built on Linux (`pnpm build:workers:linux -- --env preview` in `frontend/`, any machine with Docker) and
+deployed from the host with `wrangler deploy` in each app's folder (frontend/README.md).
 
 ## Operations
 

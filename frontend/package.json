@@ -19,7 +19,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "e2e": "pnpm --filter @wasla/e2e run e2e",
-    "e2e:local": "pnpm --filter @wasla/e2e run e2e:local"
+    "e2e:local": "pnpm --filter @wasla/e2e run e2e:local",
+    "build:workers:linux": "node scripts/build-workers-linux.mjs"
   },
   "devDependencies": {
     "prettier": "3.9.10",

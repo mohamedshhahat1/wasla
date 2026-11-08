@@ -103,15 +103,15 @@ describe("runtime fallback", () => {
   it("every locale has every namespace, and _meta never reaches a screen", () => {
     for (const locale of LOCALES) {
       const tree = messagesFor(locale);
-      expect(Object.keys(tree).sort()).toEqual(["common", "errors", "marketing", "shell"]);
+      expect(Object.keys(tree).sort()).toEqual(["auth", "common", "errors", "marketing", "shell"]);
       expect(JSON.stringify(tree)).not.toContain("_meta");
     }
   });
 
   it("ar, fr and tr are drafts awaiting a native review; en is the reviewed source", () => {
-    expect(Object.values(reviewStatus("en"))).toEqual([true, true, true, true]);
+    expect(Object.values(reviewStatus("en"))).toEqual([true, true, true, true, true]);
     for (const locale of ["ar", "fr", "tr"] as const) {
-      expect(Object.values(reviewStatus(locale))).toEqual([false, false, false, false]);
+      expect(Object.values(reviewStatus(locale))).toEqual([false, false, false, false, false]);
     }
   });
 

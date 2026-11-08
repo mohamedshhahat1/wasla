@@ -1,0 +1,1 @@
+{ "name": "fixture-gpl", "private": true, "dependencies": { "copyleft-lib": "1.0.0", "fine-lib": "1.0.0" } }

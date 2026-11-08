@@ -91,6 +91,25 @@ the `wasla_locale` preference (set by a form post, never by script), and web sto
 e2e suite hold both. The forward signer lives in `@wasla/session/server`, server-only by lint rule; FE-2's route
 handlers use it.
 
+### Sign-in through the session routes (FE-2, ADR-193)
+
+The customer app signs people in through eight POST-only route handlers under `/session/*` (login, register-login,
+refresh, switch, logout, logout-all, google/authorize, google/callback). They are the only code that ever sees a
+refresh token, and they refuse - before any call to the API - anything but a same-origin POST: a request whose
+`Origin` is not exactly the app's origin, whose `Sec-Fetch-Site` (when sent) is not `same-origin`, that lacks
+`X-Wasla-Session: 1`, that is not JSON, or that is larger than 16 KiB, answers 403 (413 for size, 405 for any other
+method). A cross-site form, which cannot set that header or a JSON content type, never passes.
+
+The refresh token lives only in the `__Host-wasla_rt` cookie (`wasla_rt` over plain-HTTP development): HttpOnly,
+SameSite=Strict, Path=/, host-only, Secure outside development. Page script cannot read it, no response body carries
+it, and it never reaches web storage, a URL, a log or the `wasla-session` broadcast; the access token stays in memory
+and is shared between the tabs of one browser. Each route calls only the API origin, signed with the forward
+signature over the browser's own address (`CF-Connecting-IP` on Cloudflare), so the API's rate limits count each
+browser, not the frontend tier. Google's binding cookie is relayed under the name the API set (`__Host-wasla_oauth`,
+or `wasla_oauth` over plain HTTP) and cleared on the callback. Reset, invitation and Google parameters are removed from
+the address bar before the page uses them, and those pages send `Referrer-Policy: no-referrer`. Error messages are
+shown by code: a wrong password and an unknown account read the same, and sign-up never says an address is taken.
+
 ## Tenant isolation
 
 **One predicate set for every knowledge query** (RAG remediation Part 2, RQ-15). The vector search, the exact-word search and the neighbour lookup apply `DocumentChunkRepository.served_predicates` - tenant on the chunk, the generation and the document, the active generation, the embedding space, the validity window and the agent's knowledge scope - so a new query path cannot write a shorter list. The exact-word query binds an OR of quoted lexemes as a parameter, never interpolated. The fused, merged, neighbour-expanded, re-ranked, alternate-query, scoped, preview and pre-retrieval paths each have a two-workspace isolation test, and mutants removing each path's predicate are killed. A knowledge scope is validated against the workspace when it is saved; an unknown id and another workspace's id are refused with the same words. The optional re-rank uses the provider already in use with `store: false` and sends only one search's already-filtered candidates - no new data processor; hosted or self-hosted re-rankers would be one and are a product decision. The search preview is administrators only.

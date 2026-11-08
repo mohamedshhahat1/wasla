@@ -13,7 +13,7 @@
  * present the newest one.
  */
 import type { SessionChannel } from "./session-channel";
-import type { TokenHolder, TokenState } from "./token-holder";
+import type { TokenHolder, TokenState, WorkspaceRef } from "./token-holder";
 
 export const REFRESH_LOCK = "wasla-refresh";
 export const TOKEN_MARKER_PREFIX = "wasla-token@";
@@ -26,6 +26,8 @@ export interface RefreshResult {
   access_token: string;
   expires_in: number;
   workspace_slug?: string | null;
+  /** The API's active_workspace, when the answer carries one (SB-03). */
+  active_workspace?: WorkspaceRef | null;
 }
 
 /** The part of navigator.locks the coordinator uses (a test double implements it). */
@@ -136,7 +138,8 @@ export class RefreshCoordinator {
       accessToken: result.access_token,
       issuedAt,
       expiresAt: issuedAt + result.expires_in * 1000,
-      workspaceSlug: result.workspace_slug ?? workspaceSlug,
+      workspaceSlug: result.active_workspace?.slug ?? result.workspace_slug ?? workspaceSlug,
+      workspace: result.active_workspace ?? this.#holder.state?.workspace ?? null,
     };
     this.#holder.set(state);
     await this.#holdMarker(issuedAt);

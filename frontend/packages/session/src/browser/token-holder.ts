@@ -12,6 +12,16 @@ export interface TokenState {
   issuedAt: number;
   /** The workspace the token is scoped to, sent with every refresh (plan 8.1). */
   workspaceSlug: string | null;
+  /** The active workspace as the API described it (SB-03), carried in every broadcast. */
+  workspace?: WorkspaceRef | null;
+}
+
+/** The active workspace of a session (the API's WorkspaceSummary). */
+export interface WorkspaceRef {
+  id: string;
+  name: string;
+  slug: string;
+  role: string;
 }
 
 export type HolderListener = (state: TokenState | null, holder: TokenHolder) => void;
