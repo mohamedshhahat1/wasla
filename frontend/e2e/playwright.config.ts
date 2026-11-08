@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-import { APPS } from "./support/env";
+import { APPS, E2E_FORWARD_SECRET } from "./support/env";
 
 /**
  * The FE-1 e2e harness (TE-02) against FE-0's backend profile, which `pnpm e2e:local` (or the
@@ -17,13 +17,29 @@ const telemetryOff = {
 const next = (app: "web" | "console", port: number, testRoutes: boolean) => ({
   command: `pnpm --dir ../apps/${app} exec next start -p ${port}`,
   url: `http://localhost:${port}/`,
-  env: { ...telemetryOff, ...(testRoutes ? { WASLA_E2E_ROUTES: "1" } : {}) },
+  env: {
+    ...telemetryOff,
+    // FE-2: the session routes sign with the e2e stack's PUBLIC test secret (never a deployment's).
+    SESSION_FORWARD_SECRET: E2E_FORWARD_SECRET,
+    ...(testRoutes ? { WASLA_E2E_ROUTES: "1" } : {}),
+  },
   reuseExistingServer: false,
   timeout: 120_000,
 });
 
 const desktop = { viewport: { width: 1280, height: 800 } };
 const phone = { viewport: { width: 390, height: 844 }, isMobile: false, hasTouch: true };
+
+const STREAM_RESTART = /fe2-stream\.spec\.ts$/;
+
+const BROWSERS = [
+  { name: "chromium-desktop", use: { ...devices["Desktop Chrome"], ...desktop } },
+  { name: "chromium-phone", use: { ...devices["Desktop Chrome"], ...phone } },
+  { name: "firefox-desktop", use: { ...devices["Desktop Firefox"], ...desktop } },
+  { name: "firefox-phone", use: { ...devices["Desktop Firefox"], ...phone } },
+  { name: "webkit-desktop", use: { ...devices["Desktop Safari"], ...desktop } },
+  { name: "webkit-phone", use: { ...devices["Desktop Safari"], ...phone } },
+];
 
 export default defineConfig({
   testDir: "./tests",
@@ -54,11 +70,13 @@ export default defineConfig({
     },
   ],
   projects: [
-    { name: "chromium-desktop", use: { ...devices["Desktop Chrome"], ...desktop } },
-    { name: "chromium-phone", use: { ...devices["Desktop Chrome"], ...phone } },
-    { name: "firefox-desktop", use: { ...devices["Desktop Firefox"], ...desktop } },
-    { name: "firefox-phone", use: { ...devices["Desktop Firefox"], ...phone } },
-    { name: "webkit-desktop", use: { ...devices["Desktop Safari"], ...desktop } },
-    { name: "webkit-phone", use: { ...devices["Desktop Safari"], ...phone } },
+    ...BROWSERS.map(({ name, use }) => ({ name, use, testIgnore: STREAM_RESTART })),
+    // FX-07's test restarts the API, so it runs alone after every other project.
+    {
+      name: "stream-restart",
+      use: { ...devices["Desktop Chrome"], ...desktop },
+      testMatch: STREAM_RESTART,
+      dependencies: BROWSERS.map(({ name }) => name),
+    },
   ],
 });

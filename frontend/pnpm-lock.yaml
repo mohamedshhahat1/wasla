@@ -396,6 +396,9 @@ importers:
       '@wasla/config':
         specifier: workspace:*
         version: link:../packages/config
+      '@wasla/i18n':
+        specifier: workspace:*
+        version: link:../packages/i18n
       '@wasla/session':
         specifier: workspace:*
         version: link:../packages/session

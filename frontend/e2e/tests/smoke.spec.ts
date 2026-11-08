@@ -23,9 +23,9 @@ const SCREENS: Screen[] = [
   {
     app: "web",
     name: "shell",
-    path: () => "/",
+    path: () => "/login",
     status: 200,
-    heading: { en: /Welcome to Wasla/, ar: /مرحبًا بك في وصلة/ },
+    heading: { en: /Log in to Wasla/, ar: /تسجيل الدخول إلى وصلة/ },
   },
   {
     app: "web",
@@ -123,9 +123,20 @@ for (const screen of SCREENS) {
       expect(overflow).toBeLessThanOrEqual(0);
 
       // TE-04: axe, 0 serious / critical.
-      const axe = await new AxeBuilder({ page })
-        .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"])
-        .analyze();
+      const builder = new AxeBuilder({ page }).withTags([
+        "wcag2a",
+        "wcag2aa",
+        "wcag21a",
+        "wcag21aa",
+        "wcag22aa",
+        "best-practice",
+      ]);
+      // FEF-12 (FE-2): Playwright 1.65's Firefox crashes in these two rules on a form page; they
+      // read the DOM, the same in every engine, and run in Chromium and WebKit.
+      if (test.info().project.name.startsWith("firefox")) {
+        builder.disableRules(["label", "label-title-only"]);
+      }
+      const axe = await builder.analyze();
       const blocking = axe.violations.filter(
         (v) => v.impact === "serious" || v.impact === "critical",
       );
@@ -237,7 +248,9 @@ test("reduced motion sets the motion tokens to zero", async ({ page }) => {
 });
 
 test("touch targets are at least 40×40", async ({ page }) => {
-  await page.goto(`${APPS.web.origin}/`);
+  // FE-2: "/" sends a signed-out visitor to /login; measure there, once it has settled.
+  await page.goto(`${APPS.web.origin}/login`);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   for (const button of await page.locator("header button").all()) {
     const box = await button.boundingBox();
     expect(box!.width).toBeGreaterThanOrEqual(40);
