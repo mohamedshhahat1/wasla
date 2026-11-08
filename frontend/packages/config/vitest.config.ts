@@ -1,5 +1,13 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  test: { include: ["test/**/*.test.ts"], environment: "node", testTimeout: 30_000 },
+  test: {
+    // FX-06 / FEF-08: worker threads, at most two per package - turbo runs every package's tests
+    // beside the builds, and on a cold start forked workers missed vitest's start timeout.
+    pool: "threads",
+    maxWorkers: 2,
+    include: ["test/**/*.test.ts"],
+    environment: "node",
+    testTimeout: 30_000,
+  },
 });

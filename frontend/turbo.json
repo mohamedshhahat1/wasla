@@ -40,6 +40,11 @@
       "inputs": ["$TURBO_DEFAULT$", "!test/**", "!**/*.test.*"],
       "outputs": [".next/**", "!.next/cache/**", ".open-next/**", "dist/**"]
     },
+    "@wasla/marketing#build": {
+      "dependsOn": ["^build", "@wasla/marketing#typecheck"],
+      "inputs": ["$TURBO_DEFAULT$", "!test/**", "!**/*.test.*"],
+      "outputs": ["dist/**"]
+    },
     "storybook:build": {
       "inputs": ["$TURBO_DEFAULT$"],
       "outputs": ["storybook-static/**"]

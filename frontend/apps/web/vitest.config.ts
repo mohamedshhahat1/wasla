@@ -4,6 +4,10 @@ export default defineConfig({
   // tsconfig keeps JSX for Next.js ("preserve"); the tests compile it with React's automatic runtime.
   oxc: { jsx: { runtime: "automatic" } },
   test: {
+    // FX-06 / FEF-08: worker threads, at most two per package - turbo runs every package's tests
+    // beside the builds, and on a cold start forked workers missed vitest's start timeout.
+    pool: "threads",
+    maxWorkers: 2,
     include: ["test/**/*.test.{ts,tsx}"],
     environment: "node",
     testTimeout: 30_000,
