@@ -121,6 +121,14 @@ const cases: Array<{
     minErrors: 1,
   },
   {
+    rule: "wasla/server-cookies-only-in-session",
+    kind: "app-web",
+    path: "apps/web/components/profile.ts",
+    bad: "server-cookies/bad.ts",
+    good: "server-cookies/good.ts",
+    minErrors: 2,
+  },
+  {
     rule: "react/no-danger",
     kind: "app-web",
     path: "apps/web/components/html.tsx",
@@ -143,6 +151,25 @@ describe("workspace lint rules fire on their fixtures", () => {
   it("a server-only import in a ui file fails even without 'use client'", async () => {
     const ids = await ruleIds("pkg-ui", "server-only/good.ts", "packages/ui/src/leak.ts");
     expect(ids).toContain("wasla/no-server-only-in-client");
+  });
+
+  it("cookies are allowed in the session routes and the locale route only (SR-01)", async () => {
+    for (const path of [
+      "apps/web/app/session/login/route.ts",
+      "apps/web/lib/server/session-handlers.ts",
+      "apps/web/app/locale/route.ts",
+      "apps/console/i18n/request.ts",
+    ]) {
+      const kind = path.startsWith("apps/console") ? "app-console" : "app-web";
+      const ids = await ruleIds(kind, "server-cookies/bad.ts", path);
+      expect(ids, path).not.toContain("wasla/server-cookies-only-in-session");
+    }
+    const elsewhere = await ruleIds(
+      "app-console",
+      "server-cookies/bad.ts",
+      "apps/console/lib/a.ts",
+    );
+    expect(elsewhere).toContain("wasla/server-cookies-only-in-session");
   });
 
   it("the console rule does not apply to the customer app", async () => {

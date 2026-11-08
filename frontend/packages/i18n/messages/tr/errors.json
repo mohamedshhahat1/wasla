@@ -46,5 +46,10 @@
   "stream_limit": "Çok fazla açık pencere var. Birini kapatıp tekrar deneyin.",
   "unexpected_response": "Beklenmeyen bir yanıt aldık. Tekrar deneyin.",
   "network_error": "Çevrimdışı görünüyorsunuz. Bağlantınızı kontrol edin.",
+  "session_request_refused": "Bu istek reddedildi. Sayfayı yenileyip tekrar deneyin.",
+  "session_unavailable": "Giriş şu anda kullanılamıyor. Daha sonra tekrar deneyin.",
+  "upstream_timeout": "Wasla'nın yanıtı çok uzun sürdü. Tekrar deneyin.",
+  "check_inbox": "Devam etmek için gelen kutunuzu kontrol edin.",
+  "connection_lost": "Bağlantı kesildi. Kontrol edip tekrar deneyin.",
   "fallback": "Bir sorun oluştu. Tekrar deneyin."
 }

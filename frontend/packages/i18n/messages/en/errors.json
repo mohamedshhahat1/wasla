@@ -46,5 +46,10 @@
   "stream_limit": "Too many open windows. Close one and try again.",
   "unexpected_response": "We received an unexpected answer. Try again.",
   "network_error": "You appear to be offline. Check your connection.",
+  "session_request_refused": "This request was refused. Reload the page and try again.",
+  "session_unavailable": "Signing in is not available right now. Try again later.",
+  "upstream_timeout": "Wasla took too long to answer. Try again.",
+  "check_inbox": "Check your inbox to continue.",
+  "connection_lost": "The connection was lost. Check it and try again.",
   "fallback": "Something went wrong. Try again."
 }

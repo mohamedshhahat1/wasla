@@ -46,5 +46,10 @@
   "stream_limit": "Trop de fenêtres ouvertes. Fermez-en une et réessayez.",
   "unexpected_response": "Nous avons reçu une réponse inattendue. Réessayez.",
   "network_error": "Vous semblez hors ligne. Vérifiez votre connexion.",
+  "session_request_refused": "Cette demande a été refusée. Rechargez la page et réessayez.",
+  "session_unavailable": "La connexion n’est pas disponible pour le moment. Réessayez plus tard.",
+  "upstream_timeout": "Wasla a mis trop de temps à répondre. Réessayez.",
+  "check_inbox": "Consultez votre boîte de réception pour continuer.",
+  "connection_lost": "La connexion a été perdue. Vérifiez-la et réessayez.",
   "fallback": "Un problème est survenu. Réessayez."
 }
