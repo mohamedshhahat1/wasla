@@ -42,9 +42,14 @@ test("two tabs refreshing together call the endpoint once per round (10 rounds)"
     }
     if (path === "/refresh") {
       calls += 1;
+      const issued = calls;
+      // FE-2: held 250 ms (a slower network) so the second tab always calls while the first
+      // refresh is in flight - the race under test; an instant answer let the first refresh
+      // finish before the other tab called (G-5, Firefox round 6), a legitimate second refresh.
+      await new Promise((resolve) => setTimeout(resolve, 250));
       return route.fulfill({
         contentType: "application/json",
-        body: JSON.stringify({ access_token: `access-${calls}`, expires_in: 900 }),
+        body: JSON.stringify({ access_token: `access-${issued}`, expires_in: 900 }),
       });
     }
     return route.fulfill({ contentType: "text/html", body: PAGE });
