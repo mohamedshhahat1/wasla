@@ -48,6 +48,9 @@ type Listener = () => void;
 
 const realDelay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** How long a tab that just opened waits for another tab's token before it refreshes (JT-03). */
+export const TOKEN_HANDOFF_WAIT_MS = 300;
+
 export class WebSession {
   readonly holder = new TokenHolder();
   readonly channel: SessionChannel;
@@ -109,8 +112,26 @@ export class WebSession {
     };
   }
 
-  /** On page load: one refresh under the lock; no cookie (401) → signed out, without an error. */
+  /**
+   * On page load: first ask the open tabs for their valid token (a tab joining never refreshes
+   * while another holds one, JT-03); none within TOKEN_HANDOFF_WAIT_MS → one refresh under the
+   * lock; no cookie (401) → signed out, without an error.
+   */
   async restore(): Promise<void> {
+    let stop: () => void = () => undefined;
+    const handedOver = new Promise<void>((resolve) => {
+      stop = this.holder.subscribe((state) => {
+        if (state) resolve();
+      });
+    });
+    this.channel.askForToken();
+    await Promise.race([handedOver, this.#delay(TOKEN_HANDOFF_WAIT_MS)]);
+    stop();
+    if (this.holder.current(this.#clock.now())) {
+      // Adopted, not a change made elsewhere: no "switched in another tab" notice for it.
+      this.#ownVersion = this.holder.version;
+      return;
+    }
     try {
       await this.refresh();
     } catch (error) {

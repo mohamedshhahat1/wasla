@@ -207,6 +207,29 @@ describe("the session channel", () => {
     });
   });
 
+  it("a tab that just opened asks; a tab with a valid token hands it over (JT-03)", () => {
+    const hub = new FakeChannelHub();
+    const holding = new TokenHolder();
+    new SessionChannel(holding, hub.open(), () => T0);
+    holding.set({ accessToken: "held", issuedAt: T0, expiresAt: T0 + 900_000, workspaceSlug: "w" });
+    const joining = new TokenHolder();
+    const channel = new SessionChannel(joining, hub.open(), () => T0);
+    channel.askForToken();
+    expect(joining.current(T0)).toBe("held");
+    expect(joining.state?.workspaceSlug).toBe("w");
+  });
+
+  it("an expired token is not handed over, and a tab without one stays silent", () => {
+    const hub = new FakeChannelHub();
+    const expired = new TokenHolder();
+    new SessionChannel(expired, hub.open(), () => T0 + 1_000_000);
+    expired.set({ accessToken: "old", issuedAt: T0, expiresAt: T0 + 900_000, workspaceSlug: null });
+    new SessionChannel(new TokenHolder(), hub.open(), () => T0);
+    const joining = new TokenHolder();
+    new SessionChannel(joining, hub.open(), () => T0).askForToken();
+    expect(joining.state).toBeNull();
+  });
+
   it("a workspace switch bumps the generation; a plain refresh does not", () => {
     const holder = new TokenHolder();
     holder.set({ accessToken: "a", issuedAt: T0, expiresAt: T0 + 1, workspaceSlug: "w1" });
