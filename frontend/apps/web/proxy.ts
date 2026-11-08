@@ -4,6 +4,9 @@ import { buildCsp, createNonce, securityHeaders } from "@wasla/session/headers";
 
 import { publicEnv } from "./lib/env";
 
+/** Pages reached with a token in the query (reset, invitation, Google's return). */
+const TOKEN_PAGES = ["/reset-password", "/invitations/accept", "/auth/google/callback"];
+
 /**
  * Security headers and the per-request CSP nonce - and nothing else (PD-02: never
  * authorization). Next.js reads the nonce from the request's CSP header and puts it on its own
@@ -24,6 +27,10 @@ export function proxy(request: NextRequest) {
   response.headers.set("Content-Security-Policy", csp);
   for (const [name, value] of Object.entries(securityHeaders(env.environment))) {
     response.headers.set(name, value);
+  }
+  // Pages that arrive with a token in the URL never pass it on as a referrer (AU-02).
+  if (TOKEN_PAGES.includes(request.nextUrl.pathname)) {
+    response.headers.set("Referrer-Policy", "no-referrer");
   }
   return response;
 }

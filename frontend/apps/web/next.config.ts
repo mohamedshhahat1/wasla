@@ -20,6 +20,8 @@ const config: NextConfig = {
     PUBLIC_APP_ORIGIN: origins["PUBLIC_APP_ORIGIN"],
     PUBLIC_CONSOLE_ORIGIN: origins["PUBLIC_CONSOLE_ORIGIN"],
     PUBLIC_MARKETING_ORIGIN: origins["PUBLIC_MARKETING_ORIGIN"],
+    // FEB-16's workaround: the Google button exists only in builds that say so (APP-AUTH-03).
+    PUBLIC_GOOGLE_ENABLED: process.env["PUBLIC_GOOGLE_ENABLED"] === "true" ? "true" : "false",
   },
 };
 

@@ -12,14 +12,14 @@ export interface FieldControlProps {
 
 export interface FormFieldProps {
   label: ReactNode;
-  hint?: ReactNode;
+  hint?: ReactNode | undefined;
   /** A translated error sentence (never a backend sentence). */
-  error?: ReactNode;
-  required?: boolean;
+  error?: ReactNode | undefined;
+  required?: boolean | undefined;
   /** Shown beside a required label, translated ("required"). */
-  requiredLabel?: string;
+  requiredLabel?: string | undefined;
   children: (control: FieldControlProps) => ReactNode;
-  className?: string;
+  className?: string | undefined;
 }
 
 /** Label, hint and error with aria-describedby (DS-04); the control is rendered by the caller. */
