@@ -12,13 +12,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ApiError } from "@wasla/api-client";
 import { messagesFor } from "@wasla/i18n";
 
+import enErrors from "../../../packages/i18n/messages/en/errors.json" with { type: "json" };
 import { FormAlert } from "../components/auth/form-alert";
 import {
   useParamsFromAddress,
   useTokenFromAddress,
 } from "../components/auth/use-token-from-address";
-
-import enErrors from "../../../packages/i18n/messages/en/errors.json" with { type: "json" };
 
 afterEach(cleanup);
 
@@ -70,7 +69,7 @@ describe("every error code is shown by code, with the request id (AU-01, AU-04)"
         const error = new ApiError({
           status: 400,
           code,
-          message: "BACKEND SENTENCE that must not show",
+          diagnosticMessage: "BACKEND SENTENCE that must not show",
           requestId: `req-${code}`,
         });
         const { unmount } = render(<FormAlert error={error} />, { wrapper: wrap(locale) });
