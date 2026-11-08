@@ -8,6 +8,8 @@ const { environment, origins } = readOrigins(process.env);
 
 const config: NextConfig = {
   poweredByHeader: false,
+  // FX-08: next dev must not write AGENTS.md into the tree when it detects a coding agent.
+  agentRules: false,
   reactStrictMode: true,
   // Image optimisation off: several 2026 advisories were in that API (plan section 22).
   images: { unoptimized: true },

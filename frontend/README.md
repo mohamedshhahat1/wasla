@@ -39,7 +39,17 @@ pnpm format / pnpm format:check                         Prettier
 pnpm --filter @wasla/web dev                            one app in development (also @wasla/console, @wasla/marketing)
 pnpm storybook:build && pnpm storybook:test             Storybook, axe on every story, the RTL keyboard proof
 pnpm e2e:local                                          build, start the backend profile, run Playwright, take it down
+pnpm build:workers:linux -- --env preview               the Workers' outputs built on Linux in Docker (any machine)
 ```
+
+### Building the Workers on Windows
+
+OpenNext's build fails on Windows ("Access is denied" on pnpm's links, FEF-04). `pnpm build:workers:linux` runs it in
+`node:24.15.0-bookworm-slim` (pinned by digest): `frontend/` is mounted read-only, copied without `node_modules`,
+installed from the frozen lockfile inside the container, built (OpenNext for web and console, Astro for marketing), and
+only `apps/web/.open-next`, `apps/console/.open-next` and `apps/marketing/dist` are copied back, links dereferenced.
+`--env` is `development`, `preview` or `production`; `PUBLIC_*` variables set on the host are passed through. Deploying
+stays on the host (`pnpm exec wrangler deploy` in the app's folder): the container never sees wrangler's credentials.
 
 The generated client is regenerated from the committed `packages/api-client/openapi.json`, which the backend exports
 (`python -m scripts.export_openapi` at the repository root); CI fails when `schema.d.ts` differs from a regeneration.
