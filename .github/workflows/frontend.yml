@@ -114,8 +114,12 @@ jobs:
           pnpm --filter @wasla/web run build:worker
           pnpm --filter @wasla/console run build:worker
           du -sh apps/web/.open-next/worker.js apps/web/.open-next/assets apps/console/.open-next/worker.js || true
+          # FX-01: the entry hashes, compared with scripts/build-workers-linux.mjs on a developer's machine.
+          sha256sum apps/web/.open-next/worker.js apps/console/.open-next/worker.js
       - name: Advisories in production dependencies (high / critical fail)
         run: pnpm audit --prod --audit-level high
+      - name: Licences of direct dependencies (FX-05; transitive ones printed, FEF-06)
+        run: node scripts/check-licences.mjs
 
   storybook:
     name: Storybook, axe per story, RTL keyboard
