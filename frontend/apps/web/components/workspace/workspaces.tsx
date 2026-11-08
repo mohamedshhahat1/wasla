@@ -6,11 +6,11 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
-import { z } from "zod";
 
 import { unwrap } from "@wasla/api-client";
 import { Button, linkClasses } from "@wasla/ui";
 
+import { z } from "../../lib/zod";
 import { fieldErrorText, TextField } from "../auth/fields";
 import { FormAlert } from "../auth/form-alert";
 import { suggestSlug, TimezoneField } from "../auth/timezone-field";

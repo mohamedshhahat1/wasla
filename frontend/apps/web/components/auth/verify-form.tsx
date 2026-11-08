@@ -5,12 +5,12 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
-import { z } from "zod";
 
 import { ApiError, unwrap } from "@wasla/api-client";
 import { Button } from "@wasla/ui";
 
 import { afterSignIn } from "../../lib/routing";
+import { z } from "../../lib/zod";
 import { AuthCard } from "../page-gate";
 import { useSession } from "../session-provider";
 import { TextField } from "./fields";

@@ -69,8 +69,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     () => "loading|0|0",
   );
   const [status, version, generation] = snapshot.split("|") as [SessionStatus, string, string];
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [profileLoaded, setProfileLoaded] = useState(false);
+  // The profile belongs to one session state (status and generation): a profile loaded while
+  // signed out is never read as the signed-in visitor's (a page would route on it too early).
+  const profileKey = `${status}|${generation}`;
+  const keyRef = useRef(profileKey);
+  keyRef.current = profileKey;
+  const [loaded, setLoaded] = useState<{ key: string; profile: Profile | null } | null>(null);
+  const profileLoaded = loaded?.key === profileKey;
+  const profile = profileLoaded ? loaded.profile : null;
   const [switchedNotice, setSwitchedNotice] = useState<string | null>(null);
   const lastWorkspace = useRef<string | null>(null);
   const wasSignedIn = useRef(false);
@@ -81,29 +87,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [session]);
 
   const reloadProfile = useCallback(async () => {
+    const key = keyRef.current;
     if (!session.holder.state) {
-      setProfile(null);
-      setProfileLoaded(true);
+      setLoaded({ key, profile: null });
       return null;
     }
     try {
       const me = await unwrap(session.api.GET("/api/v1/auth/me"));
-      setProfile(me);
+      setLoaded({ key: keyRef.current, profile: me });
       return me;
     } catch {
-      setProfile(null);
+      setLoaded({ key: keyRef.current, profile: null });
       return null;
-    } finally {
-      setProfileLoaded(true);
     }
   }, [session]);
 
-  // A new generation (sign-in, switch, sign-out): nothing cached under the old one is read again.
+  // A new generation (switch, sign-out): nothing cached under the old one is read again.
   useEffect(() => {
     queryClient.clear();
-    setProfileLoaded(false);
+  }, [generation, queryClient]);
+
+  // Every new session state (signed in, a switch, signed out) loads its own profile.
+  useEffect(() => {
+    if (status === "loading") return;
     void reloadProfile();
-  }, [generation, queryClient, reloadProfile]);
+  }, [profileKey, status, reloadProfile]);
 
   useEffect(() => {
     const slug = session.workspace?.slug ?? null;
@@ -125,7 +133,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (status === "signed-out" && wasSignedIn.current) {
       wasSignedIn.current = false;
       queryClient.clear();
-      setProfile(null);
+      setLoaded(null);
       if (!AUTH_PATHS.includes(pathname)) router.replace("/login");
     }
   }, [status, pathname, queryClient, router]);

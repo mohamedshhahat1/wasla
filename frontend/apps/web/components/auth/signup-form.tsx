@@ -6,10 +6,10 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
-import { z } from "zod";
 
 import { Button, linkClasses } from "@wasla/ui";
 
+import { z } from "../../lib/zod";
 import { AuthCard } from "../page-gate";
 import { useSession } from "../session-provider";
 import { fieldErrorText, PasswordField, TextField } from "./fields";
