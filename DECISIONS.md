@@ -8086,3 +8086,63 @@ for the marketing switcher (links need no JavaScript); `@hey-api/openapi-ts` and
 Workers builds and `pnpm audit`, Storybook with axe and the RTL keyboard proof, e2e against the backend profile);
 `ci.yml` is unchanged and still runs on every push (CI-03: `paths-ignore` is audit 24's). The backend image does not
 grow (`frontend/` is outside its build context, FE-0). FE-2 adds sign-in on this ground.
+
+## ADR-193 — Sign-In On The S-2 Session Routes; One Session Per Browser; The Stream Helper; Workers Built On Linux (FE-2)
+
+**Status.** Accepted, 2026-11-08 (FE-2 of FRONTEND_PLAN.md; report FE2_AUTH_SESSION.md).
+
+**Context.** ADR-189 chose S-2 (the refresh token in an HttpOnly cookie the browser tier holds; the access token in
+memory) and Cloudflare Workers; ADR-190 made the API count a browser's own address when the frontend tier signs it;
+ADR-192 left the browser session skeleton, the signer and the e2e harness. FE-2 builds sign-in on them, and closes
+FE-1's open findings (FEF-04, -05, -07, -08, -11, PV-03), without a backend change.
+
+**Decision.**
+
+1. *Session routes (SR-01..09).* Eight POST-only route handlers under `apps/web/app/session/` (Node runtime): login,
+   register-login, refresh, switch, logout, logout-all, google/authorize, google/callback. Before anything else each
+   refuses (no API call): a non-POST (405), an `Origin` not exactly the app's, `Sec-Fetch-Site` other than
+   `same-origin` when present (the Origin check decides when absent), no `X-Wasla-Session: 1`, a body that is not JSON,
+   more than 16 KiB (413). `next/headers` cookies and `Set-Cookie` are lint errors outside these routes and the locale
+   route. Responses are `no-store`, `Vary: Origin`, with no CORS header.
+2. *The refresh cookie (SR-03).* `__Host-wasla_rt` (HttpOnly, SameSite=Strict, Path=/, no Domain, Secure) everywhere
+   but plain-HTTP development, where the prefix cannot be set and the name is `wasla_rt` without Secure; a
+   non-development start whose name lacks the prefix refuses to start. Max-Age is the API's configured refresh
+   lifetime (14 days; FEB-30: `SessionResponse` does not carry it). The value is the API's token as issued - no
+   encryption layer: the cookie is host-only, Strict and unreadable by script, and S-2 has no server store. No route
+   body ever contains it; a refused refresh, logout and logout-all clear it.
+3. *Signed API calls (SR-04, SR-06, SR-09).* Every handler calls only `PUBLIC_API_ORIGIN`, with FE-0's forward
+   signature over the browser's address (`CF-Connecting-IP` on Cloudflare; the socket's address in development; a test
+   header only with `WASLA_E2E_ROUTES=1` on a development build), a fresh request id, and a 10 s timeout (504
+   `upstream_timeout`). `SESSION_FORWARD_SECRET` is a server-only Worker secret, the same value as the API's; without
+   it every route answers 503 `session_unavailable` (the previews). API errors pass through by code, request id and
+   `Retry-After`. The routes add no limiter: the API's buckets apply to each signed browser address.
+4. *Google (SR-07, FEB-21).* The authorize route relays the API's binding cookie under the name the API used -
+   `__Host-wasla_oauth` over HTTPS (its prefix requires Path=/), `wasla_oauth` over plain HTTP (scoped to
+   `/session/google/`) - and nothing else; the callback page removes `code` and `state` from the address bar before it
+   posts them; the binding cookie is cleared whatever the result. The button exists only in builds with
+   `PUBLIC_GOOGLE_ENABLED=true` (FEB-16's workaround).
+5. *Browser session (SB-01..03).* One refresh per browser under the Web Lock with the current `workspace_slug`; the
+   result to every tab on `wasla-session`; refresh at 80 % of `expires_in`; a 401 → one refresh and one retry; a tab
+   that opens first asks the other tabs for a valid token (`token-request`) and refreshes only when none answers within
+   300 ms. A network failure backs off (1, 2, 4 … 30 s) while the token is valid, then "connection lost", never a
+   sign-out. A sign-out clears every tab's token and query cache; a switch bumps the session generation in every tab.
+6. *Screens and routing (AU-01..04, WK-01..03).* Sign-up, log-in, Google, verify, forgot / reset and invitation on
+   FE-1's primitives with react-hook-form and zod (apps/web only); every error by code with its request id; one
+   sentence for a wrong password and an unknown account, "check your inbox" for a taken address. Reset, invitation and
+   Google parameters leave the address bar first, with `Referrer-Policy: no-referrer`. Routing by session state happens
+   in the browser (never in `proxy.ts`); `?next=` is honoured only for a same-origin path. One active workspace per
+   browser: a switch in one tab switches every tab (FEQ-16's default).
+7. *The stream helper (FX-07).* `@wasla/api-client/stream` never relies on EventSource's own reconnect (which retries a
+   spent ticket and ends CLOSED, PV-03): a `closed` frame of a terminal reason ends the stream; any other, or a CLOSED
+   source, takes a new ticket and a new EventSource with a bounded backoff. No FE-2 screen opens a stream.
+8. *Workers on Linux (FX-01).* `pnpm build:workers:linux` builds the three Workers' outputs in a digest-pinned Node 24
+   Debian container from any machine (OpenNext fails on Windows, FEF-04); deploying stays on the host.
+
+**Rejected.** S-1 (the refresh token in the browser's reach); an encrypted refresh cookie or a session store (S-2 needs
+neither; the cookie is host-only, Strict and HttpOnly); a limiter in the routes (the API's per-address buckets apply);
+authorisation in `proxy.ts` (PD-02); EventSource's built-in reconnect; changing pnpm's `node-linker` for the whole
+workspace to make OpenNext build on Windows.
+
+**Consequences.** The customer app signs people in against the real API in development and e2e; on the previews the
+session routes answer 503 until a staging API and the secret exist. FE-3 builds the shell on a session that every tab
+shares. `frontend.yml` gains the licence check; the e2e job runs FE-2's journeys.
