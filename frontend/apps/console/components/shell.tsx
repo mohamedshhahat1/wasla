@@ -49,9 +49,11 @@ export async function Shell({ children }: { children: ReactNode }) {
       <main id="main" className="mx-auto w-full max-w-page flex-1 px-5 py-8 sm:py-12">
         {children}
       </main>
-      <footer className="border-t border-border bg-surface">
-        <div className="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-3 px-5 py-5">
-          <Link href={`${env.marketingOrigin}/${locale}/`}>{t("aboutWasla")}</Link>
+      <footer className="bg-primary" data-brand-surface="">
+        <div className="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-3 px-5 py-5 sm:py-6">
+          <Link tone="inverse" href={`${env.marketingOrigin}/${locale}/`}>
+            {t("aboutWasla")}
+          </Link>
           <ApiHealth />
         </div>
       </footer>

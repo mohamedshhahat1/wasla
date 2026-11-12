@@ -23,10 +23,10 @@ export async function Shell({ children }: { children: ReactNode }) {
       >
         {common("skipToContent")}
       </a>
-      <header className="border-b border-border bg-surface">
-        <div className="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-4 px-5 py-3">
+      <header className="bg-brand" data-brand-surface="">
+        <div className="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-4 px-5 py-4">
           <p className="m-0">
-            <Wordmark name={common("appName")} />
+            <Wordmark name={common("appName")} tone="inverse" />
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <LanguageSwitcher current={locale} label={common("languageLabel")} />
@@ -36,9 +36,11 @@ export async function Shell({ children }: { children: ReactNode }) {
       <main id="main" className="mx-auto w-full max-w-page flex-1 px-5 py-8 sm:py-12">
         {children}
       </main>
-      <footer className="border-t border-border bg-surface">
-        <div className="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-3 px-5 py-5">
-          <Link href={`${env.marketingOrigin}/${locale}/`}>{t("aboutWasla")}</Link>
+      <footer className="bg-primary" data-brand-surface="">
+        <div className="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-3 px-5 py-5 sm:py-6">
+          <Link tone="inverse" href={`${env.marketingOrigin}/${locale}/`}>
+            {t("aboutWasla")}
+          </Link>
           <ApiHealth />
         </div>
       </footer>

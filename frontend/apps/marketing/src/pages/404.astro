@@ -11,8 +11,9 @@ import { text } from "../lib/copy";
 
 <Base locale="en" title={text("en", "marketing.notFoundTitle")} noindex>
   <section
-    class="mx-auto flex max-w-prose flex-col items-center gap-5 rounded-xl border border-border bg-surface px-6 py-10 text-center shadow-sm sm:px-10"
+    class="mx-auto flex max-w-prose flex-col items-center gap-5 overflow-hidden rounded-xl border border-border bg-surface px-6 pb-10 text-center shadow-sm sm:px-10"
   >
+    <div aria-hidden="true" class="-mx-6 self-stretch bg-secondary-subtle py-12 sm:-mx-10"></div>
     <h1 class="m-0 text-3xl font-semibold leading-tight tracking-tight text-text">
       {text("en", "marketing.notFoundTitle")}
     </h1>

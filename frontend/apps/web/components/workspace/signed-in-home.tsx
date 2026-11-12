@@ -37,9 +37,11 @@ export function SignedInHome() {
   };
   return (
     <section className="mx-auto flex w-full max-w-prose flex-col gap-6" data-testid="signed-in">
-      <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-text">
-        {t("home.title")}
-      </h1>
+      <div className="rounded-xl bg-secondary-subtle px-6 py-10">
+        <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-text">
+          {t("home.title")}
+        </h1>
+      </div>
       <Card as="div" className="flex flex-col gap-5">
         <p className="m-0 text-md text-text" data-testid="signed-in-as">
           {t.rich("home.signedInAs", {

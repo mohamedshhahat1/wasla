@@ -147,7 +147,7 @@
   /* AuthLayout's split: the form a little wider than the brand panel (CM-03). */
   @media (min-width: 1024px) {
     .wasla-auth-grid {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
+      grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr);
     }
   }
 

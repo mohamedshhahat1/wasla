@@ -58,10 +58,10 @@ const site = publicEnv.marketingOrigin;
       <main id="main" class="mx-auto w-full max-w-page flex-1 px-5 py-8 sm:py-12">
         <slot />
       </main>
-      <footer class="border-t border-border bg-surface">
-        <div class="mx-auto flex w-full max-w-page items-center px-5 py-6">
-          <span class="inline-flex items-center gap-3 text-md font-semibold text-text-muted">
-            <span aria-hidden="true" class="inline-block size-2 rounded-full bg-border-strong"></span>
+      <footer class="bg-primary" data-brand-surface="">
+        <div class="mx-auto flex w-full max-w-page items-center px-5 py-5 sm:py-8">
+          <span class="inline-flex items-center gap-3 text-md font-semibold text-on-primary">
+            <span aria-hidden="true" class="inline-block size-2 rounded-full bg-on-brand"></span>
             {text(locale, "common.appName")}
           </span>
         </div>

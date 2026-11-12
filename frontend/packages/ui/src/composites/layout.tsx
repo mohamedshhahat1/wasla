@@ -64,7 +64,7 @@ export function BrandPanel({
       data-brand-surface=""
       className={cn(
         "wasla-brand-pattern relative flex flex-col justify-between gap-8 overflow-hidden bg-brand",
-        "p-7 text-on-brand lg:p-10",
+        "px-7 py-10 text-on-brand lg:p-10",
         className,
       )}
     >
