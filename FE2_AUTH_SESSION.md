@@ -345,3 +345,93 @@ Provisional (before GitHub's runs): every local gate green at FE2_HEAD 1e20410 a
 Playwright worker native crash, FEF-13, re-run green), merged as one normal merge commit 6bdd405 with the merged
 tree byte-identical to FE2_HEAD.
 ```
+
+## Addendum — GitHub Actions, the post-push fix, and Part C
+
+### The first push (31d8be6..442ece8, 2026-11-08 05:19 UTC)
+
+| Run | Result |
+|---|---|
+| frontend.yml [42450335094](https://github.com/mohamedshhahat1/wasla/actions/runs/42450335094) | success: install, drift, checks (licences 108 direct / 0 outside; Workers entry sha256 d05223bf… for web and console — equal to `build-workers-linux.mjs` on this machine → **FEF-04 CLOSED**), Storybook 214 passed, e2e **312 passed** on Linux |
+| ci.yml [42450335123](https://github.com/mohamedshhahat1/wasla/actions/runs/42450335123) | success, all 5 jobs; tests 8077 passed, 17 skipped, 2 deselected (= FE-1's run; no backend file changed) |
+
+### Part C found two defects; the owner chose to fix them in this stage (2026-11-12)
+
+`wrangler whoami`: "Mohamedshhahat1@gmail.com's Account" (1cc89863…); the three preview Workers did not exist; the
+account's workers.dev subdomain `wasla-marketing` was learned from the first deploy of wasla-preview-marketing
+(version 93a4fa8b, built with placeholder app origins, then rebuilt with the real ones). No subdomain, route, DNS
+record or account setting was created or changed.
+
+| Finding | Cause | Fix (commit) | Proof |
+|---|---|---|---|
+| **FEF-16** every apps/web page answered **HTTP 500 on Workers** | `ReferenceError: BroadcastChannel is not defined` (wrangler tail): SessionProvider built the browser session (BroadcastChannel, navigator.locks) while Next.js rendered on the server. Node 24 defines BroadcastChannel, so `next start` (every e2e run, locally and on CI) never failed; workerd does not | `lib/session/transports.ts`: the real channel and Web Locks only in a browser, inert stand-ins elsewhere (922f34b) | `scripts/workers-smoke.mjs` (`pnpm workers:smoke`, and in frontend.yml after the Workers build) serves web and console in workerd: on the previous build every web page 500; on the fix every page 200, GET /session/* 405, same-origin POST 503 session_unavailable; on GitHub the same |
+| **FEF-17** auth pages showed "Connection lost" instead of their form when the session routes could not answer (no secret on the preview; an API outage in production) | restore's /session/refresh → 503 → connection-lost → PageGate showed the retry screen on every page | pages that need no session keep their form; a submit shows the error by code (922f34b) | page-gate unit test; on the preview the log-in form renders and a submit shows "Signing in is not available right now. Try again later." (and its Arabic) |
+
+Test stability (63d5671): with the developer stack also running on this machine, Firefox phone showed the sign-up time
+zone field still disabled after expect's default 5 s, and axe scanning /verify before its title was set. The journeys
+now wait up to 20 s for the time zones and for a non-empty title before every scan (Firefox desktop and phone, auth
+and axe specs × 2: 64 passed). The e2e API ran on **WASLA_E2E_API_PORT=8010** for these runs because the developer
+stack held 8000 (it was never stopped).
+
+Local gates on the fix (fix worktree): format 0; pipeline 30/30 (web tests 127: +4 transports, +2 page gate);
+action-validator VALID; workerd smoke before 7 × 500 → after all 200; e2e (API :8010) 308 passed with 3 Firefox-phone
+timing failures → the waits above → 64/64.
+
+The fix was committed on the fix branch after fast-forwarding it to 442ece8, and the canonical branch was fast-forwarded
+to it (no merge commit, no rewrite): **442ece8..63d5671**, pushed 2026-11-12 without force; origin = local = 63d5671.
+
+### The second push (442ece8..63d5671)
+
+| Run | Result |
+|---|---|
+| frontend.yml [43188046136](https://github.com/mohamedshhahat1/wasla/actions/runs/43188046136) | success, all 5 jobs; the new step on Linux: `web GET /login → 200`, `/session/login: GET 405, POST 503 session_unavailable`, "workers smoke: every page 200 on workerd"; Workers entry d05223bf…; e2e 312 passed; Storybook 214 passed |
+| ci.yml [43188046309](https://github.com/mohamedshhahat1/wasla/actions/runs/43188046309) | success, all 5 jobs; tests 8077 passed, 17 skipped, 2 deselected (unchanged) |
+
+### Part C — previews and Worker proofs (from 63d5671)
+
+| Worker | URL | Version (canonical) | Upload / gzip | Startup |
+|---|---|---|---|---|
+| wasla-preview-marketing | https://wasla-preview-marketing.wasla-marketing.workers.dev | 415839af | 27 assets | — |
+| wasla-preview-web | https://wasla-preview-web.wasla-marketing.workers.dev | 3bfb6d9c (after PC-03) | 7428.51 / 1509.38 KiB | 15 ms |
+| wasla-preview-console | https://wasla-preview-console.wasla-marketing.workers.dev | c161109e | 5962.52 / 1259.34 KiB | 15 ms |
+
+Built on Linux with `build-workers-linux.mjs --env preview` (PUBLIC_API_ORIGIN https://api.iwasla.tech, the three app
+origins = the workers.dev URLs, PUBLIC_GOOGLE_ENABLED and WASLA_E2E_ROUTES unset), smoke-tested in workerd, deployed
+from the host with `wrangler deploy`. Every wrangler.jsonc unchanged (workers_dev, preview_urls false, no route, no
+custom domain, no binding but ASSETS).
+
+**PC-02** (Chromium and WebKit): marketing /en/ /ar/ /fr/ /tr/ 200 and /no-such-page 404; web /login /signup /forgot
+200 in en and ar (dir rtl in ar), Google button absent, a log-in submit shows session_unavailable in the visitor's
+language; console 200 in en and ar. Every page: lang and dir in the first bytes, CSP, HSTS, nosniff, Referrer-Policy,
+Permissions-Policy; 0 requests to another host; 0 CSP violations. **PASSED.**
+
+**PC-04** (EXT-FE-01, the part that needs no API) on wasla-preview-web: all 8 routes — GET 405 Allow: POST;
+cross-origin POST 403 session_request_refused; POST without X-Wasla-Session 403; correct same-origin POST 503
+session_unavailable (no stack, no-store, no CORS header); a real browser's cross-origin POST from a localhost page → 403.
+**PASSED.** The full S-2 walk on a Worker needs a staging API: EXTERNAL VERIFICATION (first staging deploy).
+
+**PC-03** (FE-1's spike, EXT-FE-02): a spike-only build (git archive of 63d5671 plus `app/%5F%5Fspike/forward/route.ts`,
+never committed) on wasla-preview-web with a generated spike-only secret `SPIKE_SECRET` (put, then deleted): the route
+handler ran on the Worker (Next.js 16.4.5, @opennextjs/cloudflare 1.20.16); its node:crypto HMAC **equals** the value
+computed locally with FE-0's algorithm; `__Host-wasla_spike` (Secure, HttpOnly, SameSite=Strict, Path=/) accepted by
+Chromium and WebKit (header and jar; unreadable by script; Windows WebKit's jar reports sameSite None, FEF-05); bundle
+7443.34 / 1511.12 KiB gzip (under the 3 MiB free-plan limit); CPU 33 ms warm, 144 ms cold (wrangler tail). Then
+wasla-preview-web redeployed from 63d5671 (3bfb6d9c), the secret deleted, `wrangler secret list` → [], POST
+/__spike/forward → 404. **EXT-FE-02 CLOSED.** Operator mistakes on the way (a Windows path; wrangler handing off to the
+spike tree's missing OpenNext CLI; my checker omitting FE-0's `v1` prefix) each ended with the canonical redeploy and
+the secret deleted.
+
+### Verdict
+
+```text
+FE-2 MERGED AND PUSHED, CI GREEN   (the push 442ece8 and the fix push 63d5671; this addendum's ci.yml run: see Part D)
+PREVIEWS DEPLOYED      https://wasla-preview-marketing.wasla-marketing.workers.dev
+                       https://wasla-preview-web.wasla-marketing.workers.dev
+                       https://wasla-preview-console.wasla-marketing.workers.dev
+NEXT: FEB-07 BACKEND STAGE, THEN FE-3   (FE-9 console and FE-10 marketing may start in parallel)
+CLEANUP                runs after this addendum's ci.yml run; result in E:\wasla-cleanup\CLEANUP_fe2_20261112.md
+```
+
+Ledger updates: FEF-16 CLOSED, FEF-17 CLOSED (922f34b), EXT-FE-02 CLOSED, PC-01..PC-05 CLOSED, EXT-FE-01 Worker part
+CLOSED and full walk EXTERNAL VERIFICATION. FE-3 can also rely on `pnpm workers:smoke`: a page that breaks on workerd
+now fails frontend.yml.
