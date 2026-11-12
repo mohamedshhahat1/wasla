@@ -8190,3 +8190,56 @@ and the existing reasons to one state); telling a stranger the workspace exists 
 **Consequences.** FE-3 reads `/auth/me`'s status for the switcher and `GET /workspace/gates` for the banners; J3 and J8
 assert the new codes. A client that switched on `not_found` for a removed member now sees `membership_revoked`.
 
+## ADR-195 — The Transitive Licence Policy; The Blue Design Language In Three Colour Roles; Motion; The Four Design Skills (FE-RD)
+
+**Status.** Accepted, 2026-11-12 (FE-RD, frontend half; report FE_BLUE_REDESIGN.md). Follows ADR-192 (FE-1's design
+system) and ADR-193 (FE-2); FEB-07 is ADR-194.
+
+**Context.** On 2026-11-12 the owner accepted FE-2's licence proposal (FEF-06) and asked for the existing pages and
+buttons to be redesigned in blue only - light blue, white, dark blue - split 60 / 30 / 10, using four design skills
+installed in Claude Code: impeccable, taste-skill, ui-ux-pro-max and emilkowalski (emil-design-eng).
+
+**Decision.**
+
+1. *Licences (LC-01..LC-07).* `frontend/licence-policy.json` holds the owner's lists. Shipped - the production
+   dependency closure of @wasla/web, @wasla/console and @wasla/marketing, conservative on purpose: MIT, ISC,
+   Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, OFL-1.1. Build-only - every other package in the lockfile: those plus
+   BlueOak-1.0.0, CC0-1.0, Python-2.0, MPL-2.0, and CC-BY-4.0 for named data packages (caniuse-lite). SPDX `OR` needs
+   one allowed alternative, `AND` all, `WITH` is decided by its licence and printed. A shipped violation is never
+   excepted; a build-only one only by exact name, version and licence, and a stale exception fails.
+   `scripts/check-licences.mjs` reads every package through pnpm and fails frontend.yml. "Shipped" follows workspace
+   links through `dependencies` only. Enforcing it found eight shipped violations: seven came from build tools
+   listed as runtime dependencies and were fixed by classifying them correctly - `astro` (marketing is static; the
+   Worker serves `dist/`) and `@wasla/config` (imported only by build and lint configs) moved to `devDependencies`;
+   the eighth, `caniuse-lite` (CC-BY-4.0 browser-support data Next.js reads through browserslist), cannot be removed,
+   and the owner decided on 2026-11-12 to allow it in the shipped set as named data (`shippedDataPackages`), CC-BY-4.0
+   only. Result: 174 shipped and 869 build-only packages, 0 violations, 0 exceptions.
+2. *Palette (PA-01..PA-08).* One blue family (hue ≈ 214°, blue-50..950) plus white; greys are blue-greys. The raw
+   scale is read only by role tokens; a unit test refuses it elsewhere. Every colour token has exactly one role in
+   `tokens.roles.json`: dominant (white, blue-50), secondary (blue-100, borders, blue-900 brand, blue-800 console),
+   accent (blue-600 and its hover and pressed, the focus ring), text, status. Red, amber and green remain for
+   statuses only. The console is told apart by its own blue band. Every role pair is tested against WCAG (text 4.5:1,
+   boundaries and focus 3:1).
+3. *60 / 30 / 10 is measured.* `scripts/measure-colour-roles.mjs` classifies screenshot pixels by role (nearest
+   token in OKLab); frontend.yml captures the screens in Chromium at 1280 and 390, in English and Arabic, and fails a
+   screen outside its hard limits (dominant ≥ 45 %, accent ≤ 15 %, status ≤ 3 % without an error) and averages
+   outside the bands (dominant 55–68, secondary 24–36, accent 6–12).
+4. *Components (CM-01..CM-07).* FE-1's sixteen primitives keep their structure and ARIA; Button keeps its four
+   variants and gains a drawn busy state; disabled is drawn, not faded; new layout composites AuthLayout,
+   BrandPanel, Card, PageHeader, Wordmark. Motion tokens from emil-design-eng: press 120 ms, exits 150 ms, menus
+   200 ms, dialogs 240 ms, a strong ease-out, `scale(0.97)` on press, popovers from their trigger; only transform and
+   opacity move; under reduced motion everything is 0 s (a test with a control).
+5. *Skills as the method (SK-01..SK-06).* ui-ux-pro-max decided the design system and the UX rules, taste-skill the
+   direction and composition, emil-design-eng the motion, impeccable the audits before and after. Precedence: this
+   stage's hard lines (no behaviour change, WCAG 2.2 AA, RTL, tokens only, no runtime dependency, the licence policy,
+   CSP, no JavaScript in marketing) over the owner's palette rule over each skill in its own area.
+   `packages/ui/DESIGN.md` is the design language later stages build to.
+
+**Rejected.** A second hue or an accent outside blue (the owner's rule); an animation, component or colour library,
+a CSS-in-JS runtime or GSAP (no runtime dependency); Plus Jakarta Sans or any font from Google Fonts (PA-07, CSP);
+stock photographs and generated imagery (no remote images; the owner's brand); a dark theme now (FEQ-09); a committed
+visual baseline (FEQ-11).
+
+**Consequences.** FE-3 builds the shell, gates and channels from DESIGN.md, the role tokens and the composites, and
+the colour-role gate keeps new screens in proportion. The Arabic, French and Turkish texts, the brand line included,
+remain unreviewed drafts (FEQ-08); the wordmark stays text until the owner brings a logo.
