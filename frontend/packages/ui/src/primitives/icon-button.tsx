@@ -19,9 +19,10 @@ export function IconButton({ icon, iconName, label, className, type, ...props }:
       aria-label={label}
       title={label}
       className={cn(
-        "inline-flex min-h-target min-w-target items-center justify-center rounded-md",
-        "border border-transparent text-text hover:bg-surface-sunken",
-        "disabled:cursor-not-allowed disabled:opacity-60",
+        "wasla-press inline-flex min-h-target min-w-target cursor-pointer items-center",
+        "justify-center rounded-md border border-transparent text-text",
+        "hover:bg-secondary-subtle hover:text-primary active:bg-secondary-subtle",
+        "disabled:cursor-not-allowed disabled:text-text-muted disabled:hover:bg-transparent",
         focusRing,
         className,
       )}

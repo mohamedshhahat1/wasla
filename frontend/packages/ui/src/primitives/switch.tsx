@@ -13,14 +13,14 @@ export function Switch({ className, ...props }: SwitchProps) {
   return (
     <SwitchPrimitive.Root
       className={cn(
-        "group inline-flex min-h-target min-w-target shrink-0 items-center rounded-full",
-        "disabled:cursor-not-allowed disabled:opacity-60",
+        "group inline-flex min-h-target min-w-target shrink-0 cursor-pointer items-center rounded-full",
+        "disabled:cursor-not-allowed",
         focusRing,
         className,
       )}
       {...props}
     >
-      <span className="flex h-7 w-10 items-center rounded-full bg-border-strong p-1 transition-colors group-data-[state=checked]:justify-end group-data-[state=checked]:bg-primary">
+      <span className="flex h-7 w-11 items-center rounded-full bg-border-strong p-1 transition-colors group-hover:bg-text-muted group-data-[state=checked]:justify-end group-data-[state=checked]:bg-primary group-data-[state=checked]:group-hover:bg-primary-hover group-disabled:bg-border">
         <SwitchPrimitive.Thumb className="block size-5 rounded-full bg-surface shadow-sm" />
       </span>
     </SwitchPrimitive.Root>

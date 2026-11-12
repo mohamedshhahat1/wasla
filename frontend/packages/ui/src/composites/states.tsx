@@ -28,14 +28,17 @@ function StateLayout({
   return (
     <section
       className={cn(
-        "mx-auto flex max-w-prose flex-col items-center gap-4 px-5 py-10 text-center",
+        "mx-auto flex w-full max-w-prose flex-col items-center gap-4 rounded-xl border border-border",
+        "bg-surface px-6 py-10 text-center shadow-sm sm:px-10",
         className,
       )}
     >
-      <span className={cn("inline-flex size-10 items-center justify-center rounded-full", tone)}>
-        <Icon icon={icon} name={iconName} size={24} />
+      <span className={cn("inline-flex size-14 items-center justify-center rounded-full", tone)}>
+        <Icon icon={icon} name={iconName} size={28} />
       </span>
-      <Heading className="m-0 text-2xl font-semibold text-text">{title}</Heading>
+      <Heading className="m-0 text-2xl font-semibold leading-tight tracking-tight text-text">
+        {title}
+      </Heading>
       {description ? <p className="m-0 text-md text-text-muted">{description}</p> : null}
       {children}
       {action ? <div className="mt-3 flex flex-wrap justify-center gap-3">{action}</div> : null}
@@ -45,12 +48,7 @@ function StateLayout({
 
 export function EmptyState(props: StateProps) {
   return (
-    <StateLayout
-      icon={Inbox}
-      iconName="Inbox"
-      tone="bg-surface-sunken text-text-muted"
-      {...props}
-    />
+    <StateLayout icon={Inbox} iconName="Inbox" tone="bg-secondary-subtle text-primary" {...props} />
   );
 }
 

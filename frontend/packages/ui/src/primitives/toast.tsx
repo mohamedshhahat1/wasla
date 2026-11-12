@@ -10,10 +10,10 @@ import { IconButton } from "./icon-button";
 export type ToastTone = "info" | "success" | "warning" | "danger";
 
 const tones: Record<ToastTone, string> = {
-  info: "border-info bg-info-subtle",
-  success: "border-success bg-success-subtle",
-  warning: "border-warning bg-warning-subtle",
-  danger: "border-danger bg-danger-subtle",
+  info: "border-info/40 bg-info-subtle",
+  success: "border-success/40 bg-success-subtle",
+  warning: "border-warning/40 bg-warning-subtle",
+  danger: "border-danger/40 bg-danger-subtle",
 };
 
 export interface ToastProps {
@@ -43,7 +43,7 @@ export function Toast({
       open={open}
       onOpenChange={onOpenChange}
       className={cn(
-        "flex items-start gap-4 rounded-md border-s-4 p-5 text-text shadow-md",
+        "wasla-toast flex items-start gap-4 rounded-lg border p-5 text-text shadow-lg",
         tones[tone],
       )}
     >

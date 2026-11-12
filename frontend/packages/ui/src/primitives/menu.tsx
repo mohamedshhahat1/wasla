@@ -18,7 +18,7 @@ function Entries({ items }: { items: MenuEntry[] }) {
     <>
       {items.map((entry) => {
         if (entry.type === "separator") {
-          return <MenuPrimitive.Separator key={entry.key} className="my-2 h-px bg-border" />;
+          return <MenuPrimitive.Separator key={entry.key} className="mx-2 my-2 h-px bg-border" />;
         }
         if (entry.type === "submenu") {
           return (

@@ -11,7 +11,8 @@ export interface LinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
 
 export const linkClasses = (className?: string) =>
   cn(
-    "rounded-sm font-medium text-primary underline underline-offset-4 hover:text-primary-hover",
+    "rounded-sm font-medium text-primary underline decoration-1 underline-offset-4",
+    "transition-colors hover:text-primary-hover hover:decoration-2 focus-visible:decoration-2",
     focusRing,
     className,
   );
