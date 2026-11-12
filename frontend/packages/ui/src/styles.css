@@ -81,9 +81,8 @@
   }
 
   /*
-   * Motion (emil-design-eng, CM-05): enter with a strong ease-out from 0.96 and transparent,
-   * exit faster. Popovers, menus and tooltips grow from their trigger (Radix's computed origin,
-   * which follows the side it chose - mirrored in RTL); dialogs stay centred.
+   * Motion (emil-design-eng, CM-05): a strong ease-out, exits faster than entries. Dialogs scale
+   * from 0.97 at the centre; popovers, menus and tooltips fade where they open.
    */
   .wasla-pop[data-state="open"],
   .wasla-pop[data-state="delayed-open"],
@@ -93,16 +92,6 @@
 
   .wasla-pop[data-state="closed"] {
     animation: wasla-pop-out var(--motion-fast) var(--ease-out);
-  }
-
-  .wasla-pop {
-    transform-origin: var(
-      --radix-popover-content-transform-origin,
-      var(
-        --radix-dropdown-menu-content-transform-origin,
-        var(--radix-tooltip-content-transform-origin, center)
-      )
-    );
   }
 
   .wasla-tooltip[data-state="delayed-open"] {
@@ -181,17 +170,17 @@
   }
 }
 
+/* Popovers, menus, selects and tooltips fade only: their position is measured the moment they
+   open (DS-07's placement proofs), so nothing may move their box (emil's 0.96 scale-in not taken). */
 @keyframes wasla-pop-in {
   from {
     opacity: 0;
-    transform: scale(0.96);
   }
 }
 
 @keyframes wasla-pop-out {
   to {
     opacity: 0;
-    transform: scale(0.96);
   }
 }
 

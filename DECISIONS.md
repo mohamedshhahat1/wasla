@@ -8227,7 +8227,7 @@ installed in Claude Code: impeccable, taste-skill, ui-ux-pro-max and emilkowalsk
 4. *Components (CM-01..CM-07).* FE-1's sixteen primitives keep their structure and ARIA; Button keeps its four
    variants and gains a drawn busy state; disabled is drawn, not faded; new layout composites AuthLayout,
    BrandPanel, Card, PageHeader, Wordmark. Motion tokens from emil-design-eng: press 120 ms, exits 150 ms, menus
-   200 ms, dialogs 240 ms, a strong ease-out, `scale(0.97)` on press, popovers from their trigger; only transform and
+   200 ms, dialogs 240 ms, a strong ease-out, `scale(0.97)` on press, popups fading in place (their placement is measured as they open); only transform and
    opacity move; under reduced motion everything is 0 s (a test with a control).
 5. *Skills as the method (SK-01..SK-06).* ui-ux-pro-max decided the design system and the UX rules, taste-skill the
    direction and composition, emil-design-eng the motion, impeccable the audits before and after. Precedence: this

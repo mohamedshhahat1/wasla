@@ -100,9 +100,9 @@ actions), `Wordmark` (the name as text - there is no logo yet), `EmptyState`, `E
 | `--ease-out`     | cubic-bezier(0.23, 1, 0.32, 1)  | entering and leaving, press        |
 | `--ease-in-out`  | cubic-bezier(0.77, 0, 0.175, 1) | something moving on screen         |
 
-Only `transform` and `opacity` animate (colours fade on hover). Popovers, menus and tooltips grow
-from 0.96 at their trigger's side (mirrored in RTL); dialogs from the centre; toasts slide in from
-the inline end. Exits are faster than entries; nothing goes over 300 ms; nothing starts from
+Only `transform` and `opacity` animate (colours fade on hover). Popovers, menus, selects and
+tooltips fade in where they open - nothing moves their box, because their placement is measured the
+moment they open; dialogs scale from 0.97 at the centre; toasts slide in from the inline end. Exits are faster than entries; nothing goes over 300 ms; nothing starts from
 `scale(0)`; never ease-in. Focus rings, text, typing, arrowing through a menu or a radio group never
 animate; nothing loops but the busy ring; nothing animates on page load. Under
 `prefers-reduced-motion: reduce` every transition is 0 s and no animation runs (a Playwright test
