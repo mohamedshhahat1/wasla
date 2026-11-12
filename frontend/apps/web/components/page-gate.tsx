@@ -4,7 +4,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { Button, ErrorState } from "@wasla/ui";
+import { AuthLayout, BrandPanel, Button, ErrorState } from "@wasla/ui";
 
 import { decideRoute, type PageNeed } from "../lib/routing";
 import { useSession } from "./session-provider";
@@ -74,11 +74,18 @@ export function AuthCard({
   description?: ReactNode;
   children: ReactNode;
 }) {
+  const common = useTranslations("common");
   return (
-    <section className="mx-auto flex w-full max-w-prose flex-col gap-5 py-6">
-      <h1 className="m-0 text-2xl font-semibold text-text">{title}</h1>
-      {description ? <div className="m-0 text-md text-text-muted">{description}</div> : null}
-      {children}
-    </section>
+    <AuthLayout brand={<BrandPanel promise={common("brandPromise")} />}>
+      <section className="flex w-full flex-col gap-6">
+        <div className="flex flex-col gap-2">
+          <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-text">
+            {title}
+          </h1>
+          {description ? <div className="m-0 text-md text-text-muted">{description}</div> : null}
+        </div>
+        {children}
+      </section>
+    </AuthLayout>
   );
 }

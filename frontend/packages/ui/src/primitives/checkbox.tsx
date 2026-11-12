@@ -15,8 +15,8 @@ export function Checkbox({ className, ...props }: CheckboxProps) {
   return (
     <CheckboxPrimitive.Root
       className={cn(
-        "group inline-flex size-target shrink-0 items-center justify-center rounded-md",
-        "disabled:cursor-not-allowed disabled:opacity-60",
+        "group inline-flex size-target shrink-0 cursor-pointer items-center justify-center rounded-md",
+        "disabled:cursor-not-allowed",
         focusRing,
         className,
       )}
@@ -24,9 +24,10 @@ export function Checkbox({ className, ...props }: CheckboxProps) {
     >
       <span
         className={cn(
-          "inline-flex size-6 items-center justify-center rounded-sm border border-border-strong",
-          "bg-surface group-data-[state=checked]:border-primary group-data-[state=checked]:bg-primary",
-          "group-aria-invalid:border-danger",
+          "inline-flex size-6 items-center justify-center rounded-sm border-2 border-border-strong",
+          "bg-surface transition-colors group-hover:border-primary",
+          "group-data-[state=checked]:border-primary group-data-[state=checked]:bg-primary",
+          "group-aria-invalid:border-danger group-disabled:border-border group-disabled:bg-surface-sunken",
         )}
       >
         <CheckboxPrimitive.Indicator className="text-on-primary">

@@ -41,11 +41,12 @@ from app.api.dependencies import (
     TenantAdminDep,
     TenantOwnerDep,
     VerifiedUserDep,
+    WorkspaceMembershipDep,
     WorkspaceServiceDep,
 )
-from app.api.rate_limits import AuthRateLimit, WorkspaceRateLimit
+from app.api.rate_limits import AuthRateLimit, WorkspaceGatesRateLimit, WorkspaceRateLimit
 from app.api.route import CommittingRoute
-from app.core.dependencies import SessionDep
+from app.core.dependencies import SessionDep, SettingsDep
 from app.core.exceptions import ValidationError
 from app.core.timezones import format_offset, offset_of, parse_wall_time, resolve_wall_time
 from app.db.models import Tenant
@@ -65,6 +66,8 @@ from app.schemas.workspace import (
     WorkspaceRead,
     WorkspaceUpdateRequest,
 )
+from app.schemas.workspace_gates import WorkspaceGates
+from app.services import workspace_gates_service
 from app.services.campaign_settings_service import (
     CampaignSettings,
     CampaignSettingsService,
@@ -149,6 +152,35 @@ async def read_workspace(
 ) -> WorkspaceRead:
     """Open to any member. Knowing which workspace you are in is not privileged."""
     return _read(workspace.tenant)
+
+
+@router.get(
+    "/workspace/gates",
+    response_model=WorkspaceGates,
+    summary="What every member may know to draw the workspace's banners",
+)
+async def read_workspace_gates(
+    workspace: WorkspaceMembershipDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    response: Response,
+    limit: WorkspaceGatesRateLimit,
+) -> WorkspaceGates:
+    """Open to any member, and answers for a suspended workspace too (FEB-07, ADR-194).
+
+    Status, whether a renewal is owed, the subscription's status, the trial's
+    end and two channel-capacity flags - and nothing a member may not see: no
+    amount, price, invoice, card or limit. It is the one workspace route a
+    suspended workspace still answers, because it is the call the suspended
+    banner needs; it reads, and writes nothing.
+
+    A revoked member gets 403 `membership_revoked`; somebody who never belonged,
+    404.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    return await workspace_gates_service.read_workspace_gates(
+        session, tenant=workspace.tenant, settings=settings
+    )
 
 
 @router.patch(

@@ -97,5 +97,21 @@ start -p 3000`, open `http://localhost:3000/signup`, and read the code from `htt
 
 ## Changing the look
 
+The design language is [packages/ui/DESIGN.md](packages/ui/DESIGN.md): one blue family and white in three
+colour roles (60 % dominant, 30 % secondary, 10 % accent), the buttons, the composites, the motion rules.
 Edit `packages/ui/src/tokens.css` (colours, type, space, radius, shadow, motion) and the components in
-`packages/ui`. Screens never hold a colour, a size or a spacing value - a lint rule refuses them.
+`packages/ui`. Screens never hold a colour, a size or a spacing value - a lint rule refuses them, and a unit
+test refuses the raw blue scale outside `tokens.css`. Every colour token has one role in
+`packages/ui/src/tokens.roles.json`.
+
+```text
+node scripts/measure-colour-roles.mjs <png | folder>          the role shares of screenshots (VQ-03)
+node scripts/measure-colour-roles.mjs --check <folder>        exit 1 outside the bands (frontend.yml does this)
+```
+
+## Licences
+
+`node scripts/check-licences.mjs` checks every direct dependency against FE-1's list and every package in the
+lockfile against `licence-policy.json` (FEF-06, accepted by the owner on 2026-11-12): a stricter list for the
+production closure of the three apps, a wider one for build-only tooling, exceptions for build-only packages only,
+by exact name, version and licence. frontend.yml fails on a violation or a stale exception.

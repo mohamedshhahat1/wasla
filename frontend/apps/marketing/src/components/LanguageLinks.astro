@@ -17,7 +17,7 @@ const { current, path, label } = Astro.props;
 ---
 
 <nav aria-label={label}>
-  <ul class="m-0 flex list-none flex-wrap gap-2 p-0">
+  <ul class="m-0 flex list-none flex-wrap gap-1 p-0">
     {
       alternates(path).map((alternate) => (
         <li>
@@ -28,7 +28,7 @@ const { current, path, label } = Astro.props;
             dir={alternate.dir}
             data-locale={alternate.locale}
             aria-current={alternate.locale === current ? "page" : undefined}
-            class="inline-flex min-h-target items-center rounded-md px-4 text-md text-text hover:bg-surface-sunken aria-[current=page]:font-semibold aria-[current=page]:text-primary"
+            class="inline-flex min-h-target items-center rounded-md px-4 text-sm text-text transition-colors hover:bg-secondary-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus aria-[current=page]:bg-secondary-subtle aria-[current=page]:font-semibold aria-[current=page]:text-primary"
           >
             {alternate.name}
           </a>

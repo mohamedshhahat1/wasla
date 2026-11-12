@@ -44,11 +44,11 @@ export function Dialog({
     <DialogPrimitive.Root {...rootProps}>
       {trigger ? <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger> : null}
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-(--z-overlay) bg-text/40" />
+        <DialogPrimitive.Overlay className="wasla-scrim fixed inset-0 z-(--z-overlay) bg-scrim" />
         <DialogPrimitive.Content
           className={cn(
             "fixed inset-x-0 top-1/2 z-(--z-modal) mx-auto w-full max-w-prose -translate-y-1/2",
-            "max-h-full overflow-y-auto rounded-lg bg-surface-raised p-7 shadow-lg",
+            "wasla-dialog max-h-full overflow-y-auto rounded-xl border border-border bg-surface-raised p-7 shadow-lg",
           )}
           {...(description ? {} : { "aria-describedby": undefined })}
         >

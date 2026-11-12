@@ -13,12 +13,17 @@ const locale = Astro.params.locale as Locale;
 ---
 
 <Base locale={locale} title={text(locale, "marketing.homeTitle")}>
-  <section class="mx-auto flex max-w-prose flex-col items-center gap-5 py-10 text-center">
-    <h1 class="m-0 text-3xl font-semibold text-text">{text(locale, "marketing.homeTitle")}</h1>
-    <p class="m-0 text-lg text-text-muted">{text(locale, "marketing.homeBody")}</p>
+  <section
+    data-brand-surface=""
+    class="wasla-brand-pattern flex flex-col items-start gap-6 rounded-xl bg-brand px-6 py-9 text-on-brand shadow-md sm:px-12 sm:py-16"
+  >
+    <h1 class="m-0 max-w-prose text-3xl font-semibold leading-tight tracking-tight text-on-brand sm:text-4xl">
+      {text(locale, "marketing.homeTitle")}
+    </h1>
+    <p class="m-0 max-w-prose text-lg text-on-brand-muted">{text(locale, "marketing.homeBody")}</p>
     <a
       href={`${publicEnv.appOrigin}/`}
-      class="inline-flex min-h-target items-center rounded-md bg-primary px-5 font-medium text-on-primary hover:bg-primary-hover"
+      class="wasla-press inline-flex min-h-target items-center rounded-md border border-primary bg-primary px-6 font-medium text-on-primary shadow-sm hover:border-primary-hover hover:bg-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
     >
       {text(locale, "marketing.openApp")}
     </a>

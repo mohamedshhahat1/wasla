@@ -126,11 +126,13 @@ export function WorkspaceList() {
           return (
             <li
               key={item.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-4"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface p-4 transition-colors hover:border-border-strong hover:bg-canvas"
             >
               <span className="flex flex-col">
                 <bdi className="font-medium text-text">{item.name}</bdi>
-                <span className="text-sm text-text-muted">{t(`roles.${item.role}`)}</span>
+                <span className="mt-1 inline-flex w-fit rounded-full bg-secondary-subtle px-3 text-sm text-text-muted">
+                  {t(`roles.${item.role}`)}
+                </span>
               </span>
               <Button
                 variant={current ? "ghost" : "secondary"}

@@ -53,6 +53,7 @@ def _summarise(workspace: WorkspaceContext) -> WorkspaceSummary:
         name=workspace.tenant.name,
         slug=workspace.tenant.slug,
         role=workspace.membership.role,
+        status=workspace.tenant.status,
     )
 
 
@@ -192,7 +193,7 @@ async def switch_workspace(
     summary="Describe the authenticated caller",
 )
 async def me(current_user: CurrentUserDep, service: AuthServiceDep) -> ProfileResponse:
-    workspaces = await service.list_workspaces(user=current_user.user)
+    workspaces = await service.list_workspaces(user=current_user.user, include_suspended=True)
     user = current_user.user
     return ProfileResponse(
         id=user.id,

@@ -7,6 +7,8 @@
   "unauthenticated": "Votre session a expiré. Reconnectez-vous.",
   "permission_denied": "Vous n'avez pas l'autorisation de faire cela.",
   "not_found": "Nous n'avons pas trouvé ce que vous cherchez.",
+  "workspace_suspended": "Cet espace de travail est suspendu. Contactez son propriétaire ou le support Wasla.",
+  "membership_revoked": "Vous n’avez plus accès à cet espace de travail.",
   "conflict": "Cet élément a changé entre-temps. Rechargez et réessayez.",
   "plan_limit_exceeded": "La limite de votre forfait est atteinte.",
   "payment_required": "Un paiement est nécessaire pour continuer.",

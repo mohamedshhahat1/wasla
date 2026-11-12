@@ -2707,6 +2707,27 @@
         "title": "ChannelCapacityBreakdown",
         "type": "object"
       },
+      "ChannelCapacityGates": {
+        "description": "Channel capacity as two flags, without the numbers behind them.",
+        "properties": {
+          "over_limit": {
+            "description": "More channel connections are active than the plan allows now.",
+            "title": "Over Limit",
+            "type": "boolean"
+          },
+          "reduction_pending": {
+            "description": "A capacity reduction is open, waiting for the owner's choice or its grace end.",
+            "title": "Reduction Pending",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "over_limit",
+          "reduction_pending"
+        ],
+        "title": "ChannelCapacityGates",
+        "type": "object"
+      },
       "ChannelCapacityRead": {
         "description": "This workspace's channel capacity and where it is heading.\n\n`effective_limit` and `remaining` are null when unlimited. `remaining` is\nthe general slots left for a connection of a type with no typed slot of its\nown. `selection_revision` is what `POST .../selection` must send as\n`expected_revision`: the open reduction's while one is open, else the\nsubscription's.",
         "properties": {
@@ -19515,6 +19536,56 @@
         "title": "WorkspaceDeleteRequest",
         "type": "object"
       },
+      "WorkspaceGates": {
+        "description": "The banners a member's interface may need to draw for the current workspace.",
+        "properties": {
+          "channel_capacity": {
+            "$ref": "#/components/schemas/ChannelCapacityGates"
+          },
+          "payment_required": {
+            "description": "A renewal invoice is issued and still owed (what Pay Renewal pays).",
+            "title": "Payment Required",
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TenantStatus",
+            "description": "The workspace's own status."
+          },
+          "subscription_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SubscriptionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The subscription's status, or null when the workspace has none."
+          },
+          "trial_ends_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the trial ends, while the subscription has one; null otherwise.",
+            "title": "Trial Ends At"
+          }
+        },
+        "required": [
+          "status",
+          "payment_required",
+          "subscription_status",
+          "trial_ends_at",
+          "channel_capacity"
+        ],
+        "title": "WorkspaceGates",
+        "type": "object"
+      },
       "WorkspacePageRead": {
         "description": "A page of workspaces.\n\n`total` is the number matching the filter, not the number returned, so an\noperator can page through a search without guessing where it ends.",
         "properties": {
@@ -19600,7 +19671,7 @@
         "type": "object"
       },
       "WorkspaceSummary": {
-        "description": "A workspace as seen by one member, including their role in it.",
+        "description": "A workspace as seen by one member, including their role in it and its status.\n\n`status` is the workspace's own (FEB-07, ADR-194): a suspended workspace\nstays in the caller's list so a switcher can say so, rather than vanishing.",
         "properties": {
           "id": {
             "format": "uuid",
@@ -19617,13 +19688,17 @@
           "slug": {
             "title": "Slug",
             "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TenantStatus"
           }
         },
         "required": [
           "id",
           "name",
           "slug",
-          "role"
+          "role",
+          "status"
         ],
         "title": "WorkspaceSummary",
         "type": "object"
@@ -37178,6 +37253,43 @@
           }
         ],
         "summary": "Change this workspace's automatic follow-ups",
+        "tags": [
+          "Workspace"
+        ]
+      }
+    },
+    "/api/v1/workspace/gates": {
+      "get": {
+        "description": "Open to any member, and answers for a suspended workspace too (FEB-07, ADR-194).\n\nStatus, whether a renewal is owed, the subscription's status, the trial's\nend and two channel-capacity flags - and nothing a member may not see: no\namount, price, invoice, card or limit. It is the one workspace route a\nsuspended workspace still answers, because it is the call the suspended\nbanner needs; it reads, and writes nothing.\n\nA revoked member gets 403 `membership_revoked`; somebody who never belonged,\n404.",
+        "operationId": "read_workspace_gates_api_v1_workspace_gates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceGates"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "What every member may know to draw the workspace's banners",
         "tags": [
           "Workspace"
         ]

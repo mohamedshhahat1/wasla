@@ -42,7 +42,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 from pydantic import SecretStr
 
-from app.api.dependencies import ActiveWorkspace, ActiveWorkspaceDep
+from app.api.dependencies import ActiveWorkspace, ActiveWorkspaceDep, WorkspaceMembershipDep
 from app.api.route import BEFORE_BODY_ATTRIBUTE as ROUTE_BEFORE_BODY_ATTRIBUTE
 from app.core import client_ip_forward
 from app.core.config import Settings
@@ -270,23 +270,57 @@ def _limit_by_workspace(
         settings: SettingsDep,
         limiter: RateLimiterDep,
     ) -> RateLimitDecision | None:
-        if not settings.rate_limit_enabled:
-            return None
-        policy = RateLimitPolicy(
-            name=name,
-            limit=per_minute(settings),
-            window_seconds=60,
-        )
-        identity = str(workspace.tenant.id)
-        if name in _charged_after_etag(request):
-            # A conditional poll of a route that charges this bucket only for
-            # an answer that changed (RT-07): the handler decides, after its
-            # ETag check, with `charge_deferred`. A 304 costs nothing here.
-            _deferred(request)[name] = (limiter, policy, identity)
-            return None
-        return await limiter.enforce(policy, identity)
+        return await _charge_workspace(name, per_minute, request, workspace, settings, limiter)
 
     return guard
+
+
+async def _charge_workspace(
+    name: str,
+    per_minute: Callable[[SettingsDep], int],
+    request: Request,
+    workspace: ActiveWorkspace,
+    settings: Settings,
+    limiter: RateLimiter,
+) -> RateLimitDecision | None:
+    if not settings.rate_limit_enabled:
+        return None
+    policy = RateLimitPolicy(
+        name=name,
+        limit=per_minute(settings),
+        window_seconds=60,
+    )
+    identity = str(workspace.tenant.id)
+    if name in _charged_after_etag(request):
+        # A conditional poll of a route that charges this bucket only for
+        # an answer that changed (RT-07): the handler decides, after its
+        # ETag check, with `charge_deferred`. A 304 costs nothing here.
+        _deferred(request)[name] = (limiter, policy, identity)
+        return None
+    return await limiter.enforce(policy, identity)
+
+
+async def workspace_gates_rate_limit(
+    request: Request,
+    workspace: WorkspaceMembershipDep,
+    settings: SettingsDep,
+    limiter: RateLimiterDep,
+) -> RateLimitDecision | None:
+    """The workspace budget for the one route a suspended workspace still answers (FEB-07).
+
+    The same bucket as every other workspace route - a suspended workspace's
+    banner polling it is not a new budget - but resolved through the membership
+    alone, because `ActiveWorkspaceDep` refuses the suspension this route exists
+    to report.
+    """
+    return await _charge_workspace(
+        "workspace",
+        lambda settings: settings.rate_limit_workspace_per_minute,
+        request,
+        workspace,
+        settings,
+        limiter,
+    )
 
 
 #: The attribute a route's endpoint carries to have these buckets charged only
@@ -357,6 +391,7 @@ campaign_rate_limit = _limit_by_workspace(
 AuthRateLimit = Annotated[RateLimitDecision | None, Depends(auth_rate_limit)]
 GoogleOAuthRateLimit = Annotated[RateLimitDecision | None, Depends(google_oauth_rate_limit)]
 WorkspaceRateLimit = Annotated[RateLimitDecision | None, Depends(workspace_rate_limit)]
+WorkspaceGatesRateLimit = Annotated[RateLimitDecision | None, Depends(workspace_gates_rate_limit)]
 PublicRateLimit = Annotated[RateLimitDecision | None, Depends(public_rate_limit)]
 CampaignRateLimit = Annotated[RateLimitDecision | None, Depends(campaign_rate_limit)]
 
@@ -369,6 +404,7 @@ __all__ = [
     "GoogleOAuthRateLimit",
     "PublicRateLimit",
     "RateLimiterDep",
+    "WorkspaceGatesRateLimit",
     "WorkspaceRateLimit",
     "auth_rate_limit",
     "campaign_rate_limit",
@@ -377,5 +413,6 @@ __all__ = [
     "connection_identity",
     "google_oauth_rate_limit",
     "public_rate_limit",
+    "workspace_gates_rate_limit",
     "workspace_rate_limit",
 ]

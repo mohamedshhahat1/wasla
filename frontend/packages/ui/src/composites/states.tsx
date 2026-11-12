@@ -28,30 +28,31 @@ function StateLayout({
   return (
     <section
       className={cn(
-        "mx-auto flex max-w-prose flex-col items-center gap-4 px-5 py-10 text-center",
+        "mx-auto flex w-full max-w-prose flex-col overflow-hidden rounded-xl border border-border",
+        "bg-surface text-center shadow-sm",
         className,
       )}
     >
-      <span className={cn("inline-flex size-10 items-center justify-center rounded-full", tone)}>
-        <Icon icon={icon} name={iconName} size={24} />
-      </span>
-      <Heading className="m-0 text-2xl font-semibold text-text">{title}</Heading>
-      {description ? <p className="m-0 text-md text-text-muted">{description}</p> : null}
-      {children}
-      {action ? <div className="mt-3 flex flex-wrap justify-center gap-3">{action}</div> : null}
+      {/* The light-blue band (the secondary role) holding the state's icon. */}
+      <div aria-hidden="true" className="flex justify-center bg-secondary-subtle py-10">
+        <span className={cn("inline-flex size-14 items-center justify-center rounded-full", tone)}>
+          <Icon icon={icon} name={iconName} size={28} />
+        </span>
+      </div>
+      <div className="flex flex-col items-center gap-4 px-6 py-8 sm:px-10">
+        <Heading className="m-0 text-2xl font-semibold leading-tight tracking-tight text-text">
+          {title}
+        </Heading>
+        {description ? <p className="m-0 text-md text-text-muted">{description}</p> : null}
+        {children}
+        {action ? <div className="mt-3 flex flex-wrap justify-center gap-3">{action}</div> : null}
+      </div>
     </section>
   );
 }
 
 export function EmptyState(props: StateProps) {
-  return (
-    <StateLayout
-      icon={Inbox}
-      iconName="Inbox"
-      tone="bg-surface-sunken text-text-muted"
-      {...props}
-    />
-  );
+  return <StateLayout icon={Inbox} iconName="Inbox" tone="bg-surface text-primary" {...props} />;
 }
 
 export interface ErrorStateProps extends StateProps {

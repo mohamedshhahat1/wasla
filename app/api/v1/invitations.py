@@ -134,5 +134,6 @@ async def accept_invitation(
             name=accepted.tenant.name,
             slug=accepted.tenant.slug,
             role=accepted.membership.role,
+            status=accepted.tenant.status,
         ),
     )

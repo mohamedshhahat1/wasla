@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useState } from "react";
 
-import { Button, ConfirmDialog, FormField, linkClasses, Select } from "@wasla/ui";
+import { Button, Card, ConfirmDialog, FormField, linkClasses, Select } from "@wasla/ui";
 
 import { FormAlert } from "../auth/form-alert";
 import { useSession } from "../session-provider";
@@ -36,49 +36,55 @@ export function SignedInHome() {
     }
   };
   return (
-    <section
-      className="mx-auto flex w-full max-w-prose flex-col gap-5 py-6"
-      data-testid="signed-in"
-    >
-      <h1 className="m-0 text-2xl font-semibold text-text">{t("home.title")}</h1>
-      <p className="m-0 text-md text-text" data-testid="signed-in-as">
-        {t.rich("home.signedInAs", {
-          name: () => <bdi>{profile.full_name || profile.email}</bdi>,
-          email: () => <bdi>{profile.email}</bdi>,
-          workspace: () => <bdi data-testid="active-workspace">{active?.name ?? ""}</bdi>,
-          role: () => (
-            <span data-testid="active-role">{active ? t(`roles.${active.role}`) : ""}</span>
-          ),
-        })}
-      </p>
-      {profile.workspaces && profile.workspaces.length > 1 ? (
-        <FormField label={t("home.switcher")}>
-          {(control) => (
-            <Select
-              id={control.id}
-              aria-labelledby={control["aria-labelledby"]}
-              value={active?.slug ?? ""}
-              disabled={busy}
-              options={profile.workspaces!.map((item) => ({ value: item.slug, label: item.name }))}
-              onValueChange={(slug) =>
-                void run(async () => {
-                  if (slug === active?.slug) return;
-                  await session.switchWorkspace(slug);
-                  await reloadProfile();
-                })
-              }
-            />
-          )}
-        </FormField>
-      ) : null}
-      <div className="flex flex-wrap gap-3">
-        <NextLink href="/workspaces" className={linkClasses("text-sm")}>
-          {t("home.allWorkspaces")}
-        </NextLink>
-        <NextLink href="/workspaces/new" className={linkClasses("text-sm")}>
-          {t("workspace.createLink")}
-        </NextLink>
+    <section className="mx-auto flex w-full max-w-prose flex-col gap-6" data-testid="signed-in">
+      <div className="rounded-xl bg-secondary-subtle px-6 py-10">
+        <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-text">
+          {t("home.title")}
+        </h1>
       </div>
+      <Card as="div" className="flex flex-col gap-5">
+        <p className="m-0 text-md text-text" data-testid="signed-in-as">
+          {t.rich("home.signedInAs", {
+            name: () => <bdi>{profile.full_name || profile.email}</bdi>,
+            email: () => <bdi>{profile.email}</bdi>,
+            workspace: () => <bdi data-testid="active-workspace">{active?.name ?? ""}</bdi>,
+            role: () => (
+              <span data-testid="active-role">{active ? t(`roles.${active.role}`) : ""}</span>
+            ),
+          })}
+        </p>
+        {profile.workspaces && profile.workspaces.length > 1 ? (
+          <FormField label={t("home.switcher")}>
+            {(control) => (
+              <Select
+                id={control.id}
+                aria-labelledby={control["aria-labelledby"]}
+                value={active?.slug ?? ""}
+                disabled={busy}
+                options={profile.workspaces!.map((item) => ({
+                  value: item.slug,
+                  label: item.name,
+                }))}
+                onValueChange={(slug) =>
+                  void run(async () => {
+                    if (slug === active?.slug) return;
+                    await session.switchWorkspace(slug);
+                    await reloadProfile();
+                  })
+                }
+              />
+            )}
+          </FormField>
+        ) : null}
+        <div className="flex flex-wrap gap-3">
+          <NextLink href="/workspaces" className={linkClasses("text-sm")}>
+            {t("home.allWorkspaces")}
+          </NextLink>
+          <NextLink href="/workspaces/new" className={linkClasses("text-sm")}>
+            {t("workspace.createLink")}
+          </NextLink>
+        </div>
+      </Card>
       <FormAlert error={error} />
       <div className="flex flex-wrap gap-3">
         <Button

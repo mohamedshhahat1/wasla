@@ -40,14 +40,51 @@ from app.core.client_ip_forward import (
     FORWARD_TS_HEADER,
     sign_forward,
 )
+from app.core.config import Settings
+from app.core.security import TokenType, create_access_token, decode_token
 
 FORWARD_SECRET = "e2e-not-a-secret-0123456789abcdef0123456789abcdef"
 META_APP_SECRET = b"e2e-meta-app-secret-NOT-A-SECRET"
 PASSWORD = "Correct-Horse-Battery-e2e-9"
 STAFF = ("staff.e2e@example.com", "e2e-staff-password-NOT-A-SECRET")
 PG_CONTAINER = "wasla-fe-e2e-pg"
+# docker-compose.e2e.yml's public, made-up signing key: the smoke re-signs a real
+# account's token for a workspace it never joined, to prove a stranger learns
+# nothing (FEB-07, WG-03).
+E2E_JWT_SECRET = "e2e-public-jwt-secret-NOT-A-SECRET-0123456789abcdef"
 AI_REPLY = "Hello from the Wasla e2e agent."
 SEARCH_REPLY = "Here is what I found."
+
+
+def _e2e_settings() -> Settings:
+    return Settings(_env_file=None, environment="test", jwt_secret=E2E_JWT_SECRET)
+
+
+def workspace_of(token: str) -> str:
+    """The workspace an access token names."""
+    claims = decode_token(token, settings=_e2e_settings(), expected_type=TokenType.ACCESS)
+    return str(claims.tenant_id)
+
+
+def error_code(response: httpx.Response) -> str | None:
+    """The error envelope's code, or None for a body without one."""
+    try:
+        return str(response.json()["error"]["code"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def token_for_another_workspace(token: str, tenant_id: str) -> str:
+    """The same account and token version, signed for a workspace it never joined."""
+    settings = _e2e_settings()
+    claims = decode_token(token, settings=settings, expected_type=TokenType.ACCESS)
+    forged, _ = create_access_token(
+        settings=settings,
+        subject=claims.subject,
+        tenant_id=uuid.UUID(tenant_id),
+        token_version=claims.token_version,
+    )
+    return forged
 
 
 def stored_media_id(conversation: str) -> str:
@@ -425,10 +462,33 @@ class Smoke:
         finally:
             stream.close()
         after = await self.call("GET", "/conversations", mate_token)
-        check(after.status_code in {403, 404}, f"after revoke {after.status_code}")
+        check(
+            after.status_code == 403 and error_code(after) == "membership_revoked",
+            f"after revoke {after.status_code} {after.text[:160]}",
+        )
+        gates = await self.call("GET", "/workspace/gates", mate_token)
+        check(
+            gates.status_code == 403 and error_code(gates) == "membership_revoked",
+            f"gates after revoke {gates.status_code}",
+        )
+        # Somebody who never belonged: the staff account, its own token re-signed
+        # for this workspace. The same 404 a random workspace id gets (WG-03).
+        staff = await self.login(*STAFF)
+        stranger = await self.call(
+            "GET", "/conversations", token_for_another_workspace(staff, workspace_of(token))
+        )
+        nowhere = await self.call(
+            "GET", "/conversations", token_for_another_workspace(staff, str(uuid.uuid4()))
+        )
+        check(
+            stranger.status_code == nowhere.status_code == 404
+            and error_code(stranger) == error_code(nowhere) == "not_found",
+            f"stranger {stranger.status_code} / random {nowhere.status_code}",
+        )
         return (
-            f"invite 201, mailbox link, accept 200, member 403/403/200, "
-            f"stream closed membership_revoked, then {after.status_code}"
+            "invite 201, mailbox link, accept 200, member 403/403/200, "
+            "stream closed membership_revoked, then 403 membership_revoked (gates too); "
+            "a stranger 404 not_found = a random id"
         )
 
     async def j4(self) -> str:
@@ -566,12 +626,28 @@ class Smoke:
         finally:
             stream.close()
         refused = await self.call("GET", "/conversations", token)
+        me = await self.call("GET", "/auth/me", token)
+        gates = await self.call("GET", "/workspace/gates", token)
         restored = await self.call("POST", f"/platform/tenants/{tenant}/restore", staff)
         back = await self.call("GET", "/conversations", token)
-        check(refused.status_code == 403, f"while suspended {refused.status_code}")
+        gates_back = await self.call("GET", "/workspace/gates", token)
+        check(
+            refused.status_code == 403 and error_code(refused) == "workspace_suspended",
+            f"while suspended {refused.status_code} {refused.text[:160]}",
+        )
+        listed = {item["slug"]: item["status"] for item in me.json()["workspaces"]}
+        check(listed.get(self.state["slug"]) == "suspended", f"/auth/me while suspended {listed}")
+        check(
+            gates.status_code == 200 and gates.json()["status"] == "suspended",
+            f"gates while suspended {gates.status_code} {gates.text[:160]}",
+        )
         check(restored.status_code == 200 and back.status_code == 200, "restore")
+        check(gates_back.json()["status"] == "active", f"gates after restore {gates_back.text}")
         self.state["token"] = token
-        return "staff suspend 200, stream closed workspace_unavailable, 403, restore 200, 200"
+        return (
+            "staff suspend 200, stream closed workspace_unavailable, 403 workspace_suspended, "
+            "/auth/me status suspended, gates 200 suspended, restore 200, 200, gates active"
+        )
 
     async def j9(self) -> str:
         started = await self.call("POST", "/auth/google/authorize", sign=True)

@@ -27,7 +27,7 @@ from app.core.security import TokenClaims, TokenType, decode_token
 from app.core.storage import MediaStorage, build_media_storage
 from app.core.telemetry import observe_auth_event
 from app.core.token_store import RefreshTokenStore
-from app.db.models import Membership, PlatformRole, Tenant, TenantRole, User
+from app.db.models import Membership, PlatformRole, Tenant, TenantRole, TenantStatus, User
 from app.db.models.billing import LimitKey
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.integrations.billing import build_checkout_provider
@@ -286,38 +286,86 @@ class ActiveWorkspace:
         return self.membership.role
 
 
-async def get_active_workspace(
+async def get_workspace_membership(
     current_user: VerifiedUserDep,
     session: SessionDep,
 ) -> ActiveWorkspace:
-    """Resolve the workspace named by the token, re-checking membership.
+    """Resolve the workspace named by the token and the caller's live membership in it.
 
-    The membership is loaded on every request rather than trusted from the
-    token, and only an *active* one is loaded, so withdrawing someone's access
-    takes effect at once instead of whenever their access token happens to
-    expire. That is what makes revocation immediate without touching the token
-    estate - which matters, because a token bump would sign the person out of
-    every other workspace they belong to as well (ADR-038).
+    The one place membership is decided (ADR-038, ADR-194). The membership is
+    loaded on every request rather than trusted from the token, and only an
+    *active* one authorises, so withdrawing someone's access takes effect at once
+    instead of whenever their access token happens to expire. That is what makes
+    revocation immediate without touching the token estate - which matters,
+    because a token bump would sign the person out of every other workspace they
+    belong to as well.
+
+    Three different callers meet three different answers (FEB-07, WG-03):
+
+    - an active member gets the workspace, suspended or not - a suspended
+      workspace is refused one step later, by `get_active_workspace`, so that
+      the one route a suspended workspace's banner needs can still answer;
+    - somebody whose membership *here* was withdrawn is told so, 403
+      `membership_revoked`: they knew the workspace, and "not found" would
+      only make them think something broke;
+    - somebody who never belonged gets the same 404 as a random id, so the
+      answer says nothing about whether the workspace exists - and so does
+      everybody once the workspace is deleted, which withdraws every membership.
+
+    The revoked lookup runs only on the refusal path, so a member's request
+    costs the one query it always did.
     """
     tenant_id = current_user.claims.tenant_id
     if tenant_id is None:
         raise PermissionDeniedError("No workspace is selected for this session.")
 
     memberships = MembershipRepository(session, tenant_id=tenant_id)
-    # Active memberships only. This is the single enforcement point for
-    # revocation (ADR-038): a withdrawn membership is not found here, so every
-    # workspace-scoped route below refuses at once rather than waiting for an
-    # access token to expire.
-    membership = await memberships.require_for_user(current_user.user.id)
+    tenants = TenantRepository(session)
+    membership = await memberships.get_for_user(current_user.user.id)
+    if membership is None:
+        withdrawn = await memberships.get_any_for_user(current_user.user.id)
+        if withdrawn is not None:
+            # Deleting a workspace withdraws every membership in it; a deleted
+            # workspace keeps the generic 404 it always answered - the person
+            # was not removed, the workspace is gone.
+            remaining = await tenants.get_by_id(tenant_id)
+            if remaining is not None and remaining.deleted_at is None:
+                raise PermissionDeniedError(
+                    "You no longer have access to this workspace.",
+                    error_code="membership_revoked",
+                )
+        # Exactly what every other scoped miss answers (`_require`): the
+        # generic 404, logged the same way.
+        membership = await memberships.require_for_user(current_user.user.id)
 
-    tenant = await TenantRepository(session).get_by_id(tenant_id)
-    if tenant is None or not tenant.is_active:
+    tenant = await tenants.get_by_id(tenant_id)
+    if tenant is None or tenant.deleted_at is not None:
         raise PermissionDeniedError("This workspace is not available.")
     return ActiveWorkspace(
         user=current_user.user,
         membership=membership,
         tenant=tenant,
     )
+
+
+WorkspaceMembershipDep = Annotated[ActiveWorkspace, Depends(get_workspace_membership)]
+
+
+async def get_active_workspace(workspace: WorkspaceMembershipDep) -> ActiveWorkspace:
+    """The workspace a request may work in: a live membership in a workspace that is not suspended.
+
+    Every workspace-scoped route resolves this. A suspended workspace answers
+    403 `workspace_suspended` with the sentence it always had, so a client can
+    tell "this workspace is paused" from "you may not do that" (FEB-07, WG-02).
+    """
+    if not workspace.tenant.is_active:
+        raise PermissionDeniedError(
+            "This workspace is not available.",
+            error_code=(
+                "workspace_suspended" if workspace.tenant.status is TenantStatus.SUSPENDED else None
+            ),
+        )
+    return workspace
 
 
 ActiveWorkspaceDep = Annotated[ActiveWorkspace, Depends(get_active_workspace)]

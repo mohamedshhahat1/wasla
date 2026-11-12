@@ -31,12 +31,12 @@ export function RadioGroup({ options, className, ...props }: RadioGroupProps) {
               value={option.value}
               disabled={option.disabled ?? false}
               className={cn(
-                "group inline-flex size-target shrink-0 items-center justify-center rounded-full",
-                "disabled:cursor-not-allowed disabled:opacity-60",
+                "group inline-flex size-target shrink-0 cursor-pointer items-center justify-center rounded-full",
+                "disabled:cursor-not-allowed",
                 focusRing,
               )}
             >
-              <span className="inline-flex size-6 items-center justify-center rounded-full border border-border-strong bg-surface group-data-[state=checked]:border-primary">
+              <span className="inline-flex size-6 items-center justify-center rounded-full border-2 border-border-strong bg-surface transition-colors group-hover:border-primary group-data-[state=checked]:border-primary group-disabled:border-border group-disabled:bg-surface-sunken">
                 <RadioPrimitive.Indicator className="size-3 rounded-full bg-primary" />
               </span>
             </RadioPrimitive.Item>

@@ -31,6 +31,9 @@ const desktop = { viewport: { width: 1280, height: 800 } };
 const phone = { viewport: { width: 390, height: 844 }, isMobile: false, hasTouch: true };
 
 const STREAM_RESTART = /fe2-stream\.spec\.ts$/;
+// FE-RD (VQ-01, VQ-03, VQ-04): the colour-role and target proofs run in Chromium only, at 1280 and
+// 390; FE-2's six projects never run them, so their counts are unchanged.
+const VISUAL_ROLES = /visual-roles\.spec\.ts$/;
 
 const BROWSERS = [
   { name: "chromium-desktop", use: { ...devices["Desktop Chrome"], ...desktop } },
@@ -70,7 +73,17 @@ export default defineConfig({
     },
   ],
   projects: [
-    ...BROWSERS.map(({ name, use }) => ({ name, use, testIgnore: STREAM_RESTART })),
+    ...BROWSERS.map(({ name, use }) => ({ name, use, testIgnore: [STREAM_RESTART, VISUAL_ROLES] })),
+    {
+      name: "visual-roles-desktop",
+      use: { ...devices["Desktop Chrome"], ...desktop },
+      testMatch: VISUAL_ROLES,
+    },
+    {
+      name: "visual-roles-phone",
+      use: { ...devices["Desktop Chrome"], ...phone },
+      testMatch: VISUAL_ROLES,
+    },
     // FX-07's test restarts the API, so it runs alone after every other project.
     {
       name: "stream-restart",

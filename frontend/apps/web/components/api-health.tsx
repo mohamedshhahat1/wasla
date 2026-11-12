@@ -27,7 +27,7 @@ function ApiHealthProbe() {
   });
   if (!isSuccess && !isError) return null;
   return (
-    <p className="m-0 text-xs text-text-muted" data-testid="api-health">
+    <p className="m-0 text-xs text-on-brand" data-testid="api-health">
       {isSuccess ? t("apiStatusUp") : t("apiStatusDown")}
     </p>
   );

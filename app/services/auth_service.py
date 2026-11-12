@@ -39,7 +39,7 @@ from app.core.security import (
 from app.core.telemetry import observe_auth_event
 from app.core.timezones import validated as validated_timezone
 from app.core.token_store import RefreshTokenStore
-from app.db.models import Membership, Tenant, TenantRole, User
+from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.audit import AuditAction, AuditActorKind
 from app.repositories import (
     MembershipRepository,
@@ -616,18 +616,31 @@ class AuthService:
             workspace=workspace,
         )
 
-    async def list_workspaces(self, *, user: User) -> list[WorkspaceContext]:
-        """Every workspace this user may open.
+    async def list_workspaces(
+        self, *, user: User, include_suspended: bool = False
+    ) -> list[WorkspaceContext]:
+        """Every workspace this user may open, and with `include_suspended` the suspended ones too.
 
         Two statements whatever the number of workspaces: the memberships, then
-        their tenants by id (DB-014).
+        their tenants by id (DB-014). Only active memberships either way; a
+        deleted workspace never. `GET /auth/me` passes `include_suspended` so a
+        member sees a suspended workspace with its status instead of losing it
+        from the list (FEB-07).
         """
         memberships = await self._memberships.list_for_user(user.id)
         tenants = await self._tenants.get_many([membership.tenant_id for membership in memberships])
         return [
             WorkspaceContext(membership=membership, tenant=tenants[membership.tenant_id])
             for membership in memberships
-            if membership.tenant_id in tenants and tenants[membership.tenant_id].is_active
+            if membership.tenant_id in tenants
+            and (
+                tenants[membership.tenant_id].is_active
+                or (
+                    include_suspended
+                    and tenants[membership.tenant_id].status is TenantStatus.SUSPENDED
+                    and tenants[membership.tenant_id].deleted_at is None
+                )
+            )
         ]
 
     async def _resolve_workspace(

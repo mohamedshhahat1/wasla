@@ -171,6 +171,9 @@ importers:
 
   .:
     devDependencies:
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
       prettier:
         specifier: 3.9.10
         version: 3.9.10
@@ -189,9 +192,6 @@ importers:
       '@wasla/api-client':
         specifier: workspace:*
         version: link:../../packages/api-client
-      '@wasla/config':
-        specifier: workspace:*
-        version: link:../../packages/config
       '@wasla/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
@@ -235,6 +235,9 @@ importers:
       '@types/react-dom':
         specifier: 19.3.0
         version: 19.3.0(@types/react@19.3.0)
+      '@wasla/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       eslint:
         specifier: 9.39.5
         version: 9.39.5(jiti@2.7.0)(supports-color@10.2.2)
@@ -256,18 +259,12 @@ importers:
 
   apps/marketing:
     dependencies:
-      '@wasla/config':
-        specifier: workspace:*
-        version: link:../../packages/config
       '@wasla/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
       '@wasla/ui':
         specifier: workspace:*
         version: link:../../packages/ui
-      astro:
-        specifier: 7.4.7
-        version: 7.4.7(@types/node@24.19.2)(aws4fetch@1.0.20)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.36.0)(yaml@2.9.1)
     devDependencies:
       '@astrojs/check':
         specifier: 0.9.12
@@ -278,6 +275,12 @@ importers:
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2
+      '@wasla/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      astro:
+        specifier: 7.4.7
+        version: 7.4.7(@types/node@24.19.2)(aws4fetch@1.0.20)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.36.0)(yaml@2.9.1)
       eslint:
         specifier: 9.39.5
         version: 9.39.5(jiti@2.7.0)(supports-color@10.2.2)
@@ -305,9 +308,6 @@ importers:
       '@wasla/api-client':
         specifier: workspace:*
         version: link:../../packages/api-client
-      '@wasla/config':
-        specifier: workspace:*
-        version: link:../../packages/config
       '@wasla/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
@@ -360,6 +360,9 @@ importers:
       '@types/react-dom':
         specifier: 19.3.0
         version: 19.3.0(@types/react@19.3.0)
+      '@wasla/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       eslint:
         specifier: 9.39.5
         version: 9.39.5(jiti@2.7.0)(supports-color@10.2.2)
@@ -5520,6 +5523,10 @@ packages:
   pluralize@8.0.0:
     resolution: {integrity: sha512-Nc3IT5yHzflTfbjgqWcCPpo7DaKy4FnpB0l/zCAW0Tc7jxAiuqSxHasntB3D7887LSrA93kDJ9IXovxJYxyLCA==}
     engines: {node: '>=4'}
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
 
   po-parser@2.2.0:
     resolution: {integrity: sha512-NdTrKgh0oO7+y+RFX8KKhOB438x/j94UGXEFzl/7pHH0JjWSn42iJ9tgmPksIO6n1JKDHmNDcejPJfKspljB9g==}
@@ -12003,6 +12010,8 @@ snapshots:
       playwright-core: 1.65.0
 
   pluralize@8.0.0: {}
+
+  pngjs@7.0.0: {}
 
   po-parser@2.2.0: {}
 

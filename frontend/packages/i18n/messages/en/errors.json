@@ -7,6 +7,8 @@
   "unauthenticated": "Your session has ended. Sign in again.",
   "permission_denied": "You do not have permission to do this.",
   "not_found": "We could not find what you were looking for.",
+  "workspace_suspended": "This workspace is suspended. Contact its owner or Wasla support.",
+  "membership_revoked": "You no longer have access to this workspace.",
   "conflict": "This changed while you were working. Reload and try again.",
   "plan_limit_exceeded": "Your plan's limit has been reached.",
   "payment_required": "A payment is needed to continue.",

@@ -1,0 +1,26 @@
+{
+  "acceptedBy": "the owner, 2026-11-12 (FEF-06, FE2_AUTH_SESSION.md section 5)",
+  "decision": "ADR-195",
+  "shipped": ["MIT", "ISC", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "0BSD", "OFL-1.1"],
+  "buildOnly": [
+    "MIT",
+    "ISC",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "OFL-1.1",
+    "BlueOak-1.0.0",
+    "CC0-1.0",
+    "Python-2.0",
+    "MPL-2.0"
+  ],
+  "ccBy4DataPackages": ["caniuse-lite"],
+  "shippedDataPackages": {
+    "packages": ["caniuse-lite"],
+    "licence": "CC-BY-4.0",
+    "decidedBy": "the owner, 2026-11-12: browser-support data Next.js reads through browserslist at build time; it never reaches a browser"
+  },
+  "shippedApps": ["@wasla/web", "@wasla/console", "@wasla/marketing"],
+  "exceptions": []
+}

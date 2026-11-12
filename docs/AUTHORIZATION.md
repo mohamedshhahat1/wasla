@@ -50,7 +50,15 @@ Four gates. Each would have to fail independently.
    tenant-scoped repository — filtered to `status = active` (ADR-038) — and
    re-reads the tenant's status. A token naming a workspace the user never
    joined is refused; a suspension or a revocation takes effect on the next
-   request rather than at token expiry. This is the single enforcement point
+   request rather than at token expiry. The three refusals are told apart
+   (ADR-194): a suspended workspace answers 403 `workspace_suspended`; a member
+   whose membership here was withdrawn, 403 `membership_revoked`; somebody who
+   never belonged, the same generic 404 a random id gets - so the answer never
+   confirms that a workspace exists to a stranger (a deleted workspace, whose
+   memberships deletion withdrew, answers that 404 to everyone). The membership is decided in
+   `get_workspace_membership`; `get_active_workspace` adds the suspension
+   refusal on top of it, and `GET /workspace/gates` is the one route that
+   resolves the membership alone (the suspended banner's call; read-only). This is the single enforcement point
    for membership revocation, which is why §4's matrix is generated rather than
    written: "every workspace route resolves this dependency" is a claim about
    the dependency graph, and it is checked by walking it.
@@ -240,6 +248,7 @@ authoritative answer is always the dependency tree.
 | `GET` | `/api/v1/whatsapp/accounts/{account_id}/messaging-limit` | **MEMBER** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/release` | **ADMIN** | yes | workspace | - |
 | `POST` | `/api/v1/whatsapp/accounts/{account_id}/verify` | **ADMIN** | yes | workspace | - |
+| `GET` | `/api/v1/workspace/gates` | **MEMBER** | yes (answers while suspended) | workspace | - |
 | `GET` | `/api/v1/workspace/campaign-settings` | **MEMBER** | yes | workspace | - |
 | `PUT` | `/api/v1/workspace/campaign-settings` | **ADMIN** | yes | workspace | - |
 | `GET` | `/api/v1/conversations/{conversation_id}/follow-ups` | **MEMBER** | yes | workspace | - |

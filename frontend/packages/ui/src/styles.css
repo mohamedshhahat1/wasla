@@ -13,9 +13,14 @@
     font-family: var(--font-sans);
     line-height: var(--leading-latin);
     color: var(--color-text);
-    background-color: var(--color-surface);
+    background-color: var(--color-canvas);
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
+    /* The browser's own surfaces carry the palette too (impeccable craft floor). */
+    accent-color: var(--color-primary);
+    caret-color: var(--color-primary);
+    /* A focused control is never hidden under the sticky header (WCAG 2.4.11). */
+    scroll-padding-block-start: calc(var(--spacing-target) + var(--spacing-8));
   }
 
   :lang(ar) {
@@ -25,26 +30,45 @@
   body {
     margin: 0;
     min-height: 100dvh;
+    background-color: var(--color-canvas);
   }
 
+  ::selection {
+    background-color: var(--color-selection);
+    color: var(--color-text);
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  /* The ring shows at once and never animates (CM-06); 2px, 3:1 on every surface (PA-06). */
   :focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+    transition: none;
   }
 
+  /* CM-07: under prefers-reduced-motion every transition is 0 s and no animation runs; Radix's
+     presence sees "none" and unmounts at once. */
   @media (prefers-reduced-motion: reduce) {
     :root {
+      --motion-press: 0ms;
       --motion-fast: 0ms;
       --motion-base: 0ms;
+      --motion-slow: 0ms;
       --default-transition-duration: 0ms;
     }
 
     *,
     ::before,
     ::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0ms !important;
+      animation-name: none !important;
+      animation-duration: 0s !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
       scroll-behavior: auto !important;
     }
   }
@@ -55,4 +79,161 @@
   [dir="rtl"] .wasla-flip-rtl {
     transform: scaleX(-1);
   }
+
+  /*
+   * Motion (emil-design-eng, CM-05): a strong ease-out, exits faster than entries. Dialogs scale
+   * from 0.97 at the centre; popovers, menus and tooltips fade where they open.
+   */
+  .wasla-pop[data-state="open"],
+  .wasla-pop[data-state="delayed-open"],
+  .wasla-pop[data-state="instant-open"] {
+    animation: wasla-pop-in var(--motion-base) var(--ease-out);
+  }
+
+  .wasla-pop[data-state="closed"] {
+    animation: wasla-pop-out var(--motion-fast) var(--ease-out);
+  }
+
+  .wasla-tooltip[data-state="delayed-open"] {
+    animation-duration: var(--motion-fast);
+  }
+
+  /* A tooltip opened while another was open appears at once (emil: skip the delay and the motion). */
+  .wasla-tooltip[data-state="instant-open"] {
+    animation: none;
+  }
+
+  .wasla-dialog[data-state="open"] {
+    animation: wasla-dialog-in var(--motion-slow) var(--ease-out);
+  }
+
+  .wasla-dialog[data-state="closed"] {
+    animation: wasla-dialog-out var(--motion-fast) var(--ease-out);
+  }
+
+  .wasla-scrim[data-state="open"] {
+    animation: wasla-fade-in var(--motion-slow) var(--ease-out);
+  }
+
+  .wasla-scrim[data-state="closed"] {
+    animation: wasla-fade-out var(--motion-fast) var(--ease-out);
+  }
+
+  .wasla-toast[data-state="open"] {
+    animation: wasla-toast-in var(--motion-base) var(--ease-out);
+  }
+
+  .wasla-toast[data-state="closed"] {
+    animation: wasla-fade-out var(--motion-fast) var(--ease-out);
+  }
+
+  [dir="rtl"] .wasla-toast[data-state="open"] {
+    animation-name: wasla-toast-in-rtl;
+  }
+
+  /* Press feedback on pressable things, never when disabled or busy (CM-01, emil). */
+  /* Colours change at once: a button's label is never caught half-way between two colour
+     pairs (FE-2's axe proof scans right after a submit); only the press scale moves. */
+  .wasla-press {
+    transition-property: transform;
+    transition-duration: var(--motion-press);
+    transition-timing-function: var(--ease-out);
+  }
+
+  .wasla-press:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+    transform: scale(0.97);
+  }
+
+  /* AuthLayout's split: the form a little wider than the brand panel (CM-03). */
+  @media (min-width: 1024px) {
+    .wasla-auth-grid {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr);
+    }
+  }
+
+  .wasla-auth-brand > * {
+    flex: 1 1 auto;
+  }
+
+  /* The brand panel's quiet pattern: dots of the on-brand white at low alpha, drawn in CSS. */
+  .wasla-brand-pattern {
+    background-image: radial-gradient(
+      color-mix(in srgb, var(--color-on-brand) 9%, transparent) 1.5px,
+      transparent 1.5px
+    );
+    background-size: var(--spacing-7) var(--spacing-7);
+  }
+
+  /* The busy indicator: a ring drawn in CSS, turning while a submit is in flight. */
+  .wasla-spinner {
+    animation: wasla-spin 700ms linear infinite;
+  }
+}
+
+/* Popovers, menus, selects and tooltips fade only: their position is measured the moment they
+   open (DS-07's placement proofs), so nothing may move their box (emil's 0.96 scale-in not taken). */
+@keyframes wasla-pop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes wasla-pop-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* A dialog enters by scale alone: its text is checked for contrast the moment it opens, so it is
+   never part-transparent on the way in (FE-2's axe proof). It fades on the way out. */
+@keyframes wasla-dialog-in {
+  from {
+    transform: scale(0.97);
+  }
+}
+
+@keyframes wasla-dialog-out {
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@keyframes wasla-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes wasla-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes wasla-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
+@keyframes wasla-toast-in-rtl {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes wasla-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* On the dark brand surfaces the focus ring is the light blue (3:1 on blue-900 and blue-800, PA-06).
+   Unlayered, so it wins over the utilities' `outline-focus`. */
+[data-brand-surface] :focus-visible,
+[data-brand-surface]:focus-visible {
+  outline-color: var(--color-focus-inverse);
 }

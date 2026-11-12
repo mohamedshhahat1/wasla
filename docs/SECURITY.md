@@ -91,6 +91,15 @@ the `wasla_locale` preference (set by a form post, never by script), and web sto
 e2e suite hold both. The forward signer lives in `@wasla/session/server`, server-only by lint rule; FE-2's route
 handlers use it.
 
+Every package the frontend installs is held to a licence policy the owner accepted on 2026-11-12 (FEF-06, ADR-195):
+anything in the production dependency closure of the three apps - what can reach a browser - must be MIT, ISC,
+Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD or OFL-1.1; packages used only to build and test may also be
+BlueOak-1.0.0, CC0-1.0, Python-2.0 or MPL-2.0, and CC-BY-4.0 for named data-only packages. `frontend/licence-policy.json`
+holds the lists and any build-only exception (exact name, version and licence; a stale one fails);
+`scripts/check-licences.mjs` reads every package through pnpm and fails frontend.yml on a violation. A shipped package
+is never excepted; the one named data package the owner allowed in the shipped set (`caniuse-lite`, CC-BY-4.0
+browser-support data read by Next.js at build time) is listed in the policy file as the owner's decision.
+
 ### Sign-in through the session routes (FE-2, ADR-193)
 
 The customer app signs people in through eight POST-only route handlers under `/session/*` (login, register-login,

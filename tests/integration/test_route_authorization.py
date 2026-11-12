@@ -33,7 +33,16 @@ pytestmark = pytest.mark.integration
 # The two dependencies that establish who is calling. `get_current_user`
 # authenticates; `get_active_workspace` additionally resolves an active
 # membership. A route resolving neither is open to the internet.
-AUTHENTICATING = frozenset({"get_current_user", "get_active_workspace"})
+AUTHENTICATING = frozenset({"get_current_user", "get_active_workspace", "get_workspace_membership"})
+
+# What binds a route to one tenant: a live membership in the token's workspace.
+# `get_active_workspace` adds the suspension refusal on top of
+# `get_workspace_membership`; the one route that resolves the membership alone
+# is the gate summary a suspended workspace's banner reads (FEB-07, ADR-194),
+# and `WORKSPACE_DURING_SUSPENSION` names it so a second one cannot appear
+# unnoticed.
+WORKSPACE_BINDING = frozenset({"get_active_workspace", "get_workspace_membership"})
+WORKSPACE_DURING_SUSPENSION: frozenset[tuple[str, str]] = frozenset({("GET", "/workspace/gates")})
 
 # Every route that is deliberately open, with the reason it is. Adding a route
 # here is the deliberate act; forgetting to is what this test catches.
@@ -238,7 +247,7 @@ def test_every_other_route_resolves_a_workspace_or_is_an_account_route(
         (method, path)
         for (method, path), names in graph.items()
         if (method, path) not in OPEN_ROUTES
-        and "get_active_workspace" not in names
+        and not (names & WORKSPACE_BINDING)
         and path not in ACCOUNT_OR_PLATFORM
         and not path.startswith("/platform/")
     )
@@ -276,7 +285,7 @@ def test_no_open_route_reaches_a_workspace_service(graph: dict[tuple[str, str], 
     """
     for key in OPEN_ROUTES:
         names = graph.get(key, set())
-        assert "get_active_workspace" not in names, f"{key} resolves a workspace while open"
+        assert not (names & WORKSPACE_BINDING), f"{key} resolves a workspace while open"
         assert "get_current_user" not in names, f"{key} resolves a user while open"
 
 
@@ -292,3 +301,20 @@ def test_every_material_authenticated_route_requires_verified_email(
         and "require_verified_user" not in names
     )
     assert not offenders, f"material authenticated routes without verification: {offenders}"
+
+
+def test_only_the_gate_summary_answers_a_suspended_workspace(
+    graph: dict[tuple[str, str], set[str]],
+) -> None:
+    """Every workspace route refuses a suspended workspace, except the gate summary.
+
+    A route resolving `get_workspace_membership` without `get_active_workspace`
+    answers while the workspace is suspended. That is right for the one route
+    whose job is to say so, and wrong for anything that acts (FEB-07).
+    """
+    during_suspension = {
+        key
+        for key, names in graph.items()
+        if "get_workspace_membership" in names and "get_active_workspace" not in names
+    }
+    assert during_suspension == WORKSPACE_DURING_SUSPENSION

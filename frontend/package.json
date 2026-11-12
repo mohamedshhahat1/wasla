@@ -24,6 +24,7 @@
     "workers:smoke": "node scripts/workers-smoke.mjs"
   },
   "devDependencies": {
+    "pngjs": "7.0.0",
     "prettier": "3.9.10",
     "turbo": "2.11.10",
     "typescript": "5.9.3"

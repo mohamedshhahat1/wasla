@@ -75,7 +75,7 @@ export function Tooltip({ children, content, side = "top", defaultOpen }: Toolti
         <TooltipPrimitive.Content
           side={side}
           sideOffset={6}
-          className="z-(--z-toast) max-w-prose rounded-sm bg-text px-3 py-2 text-sm text-text-inverse shadow-md"
+          className="wasla-pop wasla-tooltip z-(--z-toast) max-w-prose rounded-md bg-text px-3 py-2 text-sm text-text-inverse shadow-md"
         >
           {content}
         </TooltipPrimitive.Content>

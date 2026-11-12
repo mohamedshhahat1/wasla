@@ -40,19 +40,32 @@ const site = publicEnv.marketingOrigin;
   </head>
   <body>
     <div class="flex min-h-dvh flex-col">
-      <header class="border-b border-border bg-surface-raised">
+      <header class="border-b border-border bg-surface">
         <div
           class="mx-auto flex w-full max-w-page flex-wrap items-center justify-between gap-4 px-5 py-3"
         >
-          <a href={`/${locale}/`} class="text-xl font-semibold text-text no-underline">
+          <a
+            href={`/${locale}/`}
+            data-wordmark=""
+            class="inline-flex min-h-target items-center gap-3 rounded-md text-xl font-semibold tracking-tight text-text no-underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          >
+            <span aria-hidden="true" class="inline-block size-3 rounded-full bg-primary"></span>
             {text(locale, "common.appName")}
           </a>
           <LanguageLinks current={locale} path={path} label={text(locale, "common.languageLabel")} />
         </div>
       </header>
-      <main id="main" class="mx-auto w-full max-w-page flex-1 px-5 py-10">
+      <main id="main" class="mx-auto w-full max-w-page flex-1 px-5 py-8 sm:py-12">
         <slot />
       </main>
+      <footer class="bg-primary" data-brand-surface="">
+        <div class="mx-auto flex w-full max-w-page items-center px-5 py-5 sm:py-8">
+          <span class="inline-flex items-center gap-3 text-md font-semibold text-on-primary">
+            <span aria-hidden="true" class="inline-block size-2 rounded-full bg-on-brand"></span>
+            {text(locale, "common.appName")}
+          </span>
+        </div>
+      </footer>
     </div>
   </body>
 </html>

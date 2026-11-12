@@ -1,7 +1,8 @@
 /*
  * Wasla's design tokens - the ONLY place raw colour, size, spacing, radius, shadow and motion
- * values live (DS-01). Placeholders from FRONTEND_PLAN.md section 19; the owner replaces them
- * here, never in a screen.
+ * values live (DS-01). The blue redesign (FE-RD, ADR-195): one blue family plus white, in three
+ * colour roles by visible area - 60 % dominant, 30 % secondary, 10 % accent - written down in
+ * packages/ui/DESIGN.md. Every colour token has exactly one role in tokens.roles.json.
  *
  * The block is Tailwind CSS 4's @theme, so every token is also a utility (bg-surface,
  * text-text-muted, p-4, rounded-md ...) and `--*: initial` removes Tailwind's own palette and
@@ -10,57 +11,90 @@
  *
  * Names follow Tailwind's namespaces; the plan's names map as:
  *   --font-size-*  → --text-*        --space-*  → --spacing-*
- *   --motion-*, --ease-standard, --z-* are kept as the plan named them.
+ *   --motion-*, --ease-*, --z-* are kept as the plan named them.
+ *
+ * The raw scale (--color-blue-*) is read only by the role tokens below: components, stories and
+ * apps use role tokens (a unit test holds that).
  */
 @theme static {
   --*: initial;
 
-  /* Colour - surfaces and text */
-  --color-surface: #ffffff;
-  --color-surface-raised: #ffffff;
-  --color-surface-sunken: #f5f6f8;
-  --color-text: #14171f;
-  --color-text-muted: #5b6270;
-  --color-text-inverse: #ffffff;
+  /* The one blue family (hue ≈ 214°), eleven steps, plus white (PA-01, PA-02) */
+  --color-blue-50: #f4f8fe;
+  --color-blue-100: #e4eefc;
+  --color-blue-200: #c9dcf8;
+  --color-blue-300: #9dbff0;
+  --color-blue-400: #5f97e3;
+  --color-blue-500: #2f74d6;
+  --color-blue-600: #1c5fc2;
+  --color-blue-700: #174d9e;
+  --color-blue-800: #153e7d;
+  --color-blue-900: #122f5e;
+  --color-blue-950: #0a1a35;
+  --color-white: #ffffff;
 
-  /* Colour - brand and status (each status has a -subtle background) */
-  --color-primary: #0f766e;
-  --color-primary-hover: #0b5e58;
-  --color-on-primary: #ffffff;
+  /* Dominant (≈ 60 %): white and blue-tinted near-white */
+  --color-surface: var(--color-white);
+  --color-surface-raised: var(--color-white);
+  --color-canvas: var(--color-blue-50);
+  --color-surface-sunken: var(--color-blue-50);
+
+  /* Secondary (≈ 30 %): light blue and dark blue as structure */
+  --color-secondary-subtle: var(--color-blue-100);
+  --color-border: #d3e0f2;
+  --color-border-strong: #7088ae;
+  --color-brand: var(--color-blue-900);
+  --color-console: var(--color-blue-800);
+  --color-console-hover: var(--color-blue-900);
+  --color-selection: var(--color-blue-200);
+
+  /* Text (counted apart from the three roles) */
+  --color-text: var(--color-blue-950);
+  --color-text-muted: #4b5c7a;
+  --color-text-inverse: var(--color-white);
+  --color-on-brand: var(--color-white);
+  --color-on-brand-muted: var(--color-blue-200);
+
+  /* Accent (≈ 10 %): the action blue and nothing else */
+  --color-primary: var(--color-blue-600);
+  --color-primary-hover: var(--color-blue-700);
+  --color-primary-pressed: var(--color-blue-800);
+  --color-on-primary: var(--color-white);
+  --color-focus: #3b82f6;
+  --color-focus-inverse: var(--color-blue-300);
+
+  /* Status: the only colours outside the blue family, for a status only (PA-05) */
   --color-danger: #b42318;
   --color-danger-subtle: #fef3f2;
   --color-warning: #b54708;
   --color-warning-subtle: #fffaeb;
   --color-success: #067647;
   --color-success-subtle: #ecfdf3;
-  --color-info: #1d4ed8;
-  --color-info-subtle: #eff6ff;
+  --color-info: var(--color-blue-700);
+  --color-info-subtle: var(--color-blue-100);
 
-  /* Colour - lines and focus */
-  --color-border: #e3e6eb;
-  --color-border-strong: #c4c9d2;
-  --color-focus: #2563eb;
+  /* Overlays: the blue-950 ink at low alpha (scrims and shadows are never black) */
+  --color-scrim: rgb(10 26 53 / 0.48);
 
-  /* Colour - the console's accent (applied below, AP-01) */
-  --color-console: #6d28d9;
-  --color-console-hover: #5b21b6;
-
-  /* Type */
+  /* Type (ui-ux-pro-max: one family, 1.125-1.25 steps; nothing under 13 px - taste-skill) */
   --font-sans: "IBM Plex Sans", "IBM Plex Sans Arabic", system-ui, sans-serif;
   --font-weight-normal: 400;
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
-  --text-xs: 12px;
+  --text-xs: 13px;
   --text-sm: 14px;
   --text-md: 16px;
   --text-lg: 18px;
   --text-xl: 20px;
   --text-2xl: 24px;
-  --text-3xl: 30px;
+  --text-3xl: 32px;
+  --text-4xl: 40px;
   --leading-latin: 1.5;
   --leading-arabic: 1.7;
+  --leading-tight: 1.2;
+  --tracking-tight: -0.01em;
 
-  /* Space (the plan's --space-0..10) */
+  /* Space (the plan's --space-0..10, plus two section steps) */
   --spacing-0: 0px;
   --spacing-1: 2px;
   --spacing-2: 4px;
@@ -72,26 +106,37 @@
   --spacing-8: 32px;
   --spacing-9: 40px;
   --spacing-10: 48px;
+  --spacing-11: 64px;
+  --spacing-12: 96px;
   --spacing-target: 40px;
+  --spacing-field: 44px;
   --spacing-full: 100%;
   --spacing-prose: 640px;
+  --spacing-form: 440px;
   --spacing-page: 1120px;
+  --spacing-hero: 560px;
 
-  /* Shape and depth */
-  --radius-sm: 4px;
+  /* Shape and depth: one radius family (8 / 12 / 16); shadows tinted with blue-950, offset + blur */
+  --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-full: 9999px;
-  --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
-  --shadow-md: 0 4px 8px -2px rgb(16 24 40 / 0.1), 0 2px 4px -2px rgb(16 24 40 / 0.06);
-  --shadow-lg: 0 12px 16px -4px rgb(16 24 40 / 0.08), 0 4px 6px -2px rgb(16 24 40 / 0.03);
+  --shadow-sm: 0 1px 2px rgb(10 26 53 / 0.06);
+  --shadow-md: 0 4px 12px -2px rgb(10 26 53 / 0.1), 0 2px 4px -2px rgb(10 26 53 / 0.06);
+  --shadow-lg: 0 16px 32px -8px rgb(10 26 53 / 0.18), 0 4px 8px -4px rgb(10 26 53 / 0.08);
 
-  /* Motion (set to 0 under prefers-reduced-motion in styles.css) */
-  --motion-fast: 120ms;
+  /* Motion (emil-design-eng, CM-05): strong ease-out for UI, exits faster than enters, nothing
+     over 300 ms; every duration resolves to 0 under prefers-reduced-motion (styles.css, CM-07). */
+  --motion-press: 120ms;
+  --motion-fast: 150ms;
   --motion-base: 200ms;
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --default-transition-duration: 120ms;
-  --default-transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  --motion-slow: 240ms;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-standard: cubic-bezier(0.23, 1, 0.32, 1);
+  --default-transition-duration: 150ms;
+  --default-transition-timing-function: ease;
 
   /* Layers */
   --z-dropdown: 1000;
@@ -107,13 +152,14 @@
   --breakpoint-xl: 1280px;
 }
 
-/* The console: one accent override so staff always see they are in the console (AP-01). */
+/* The console: its own blue (PA-04), so staff always see they are in the console. The action blue
+   stays the app's; the console's dark band is --color-console (blue-800). */
 :root[data-app="console"] {
-  --color-primary: var(--color-console);
-  --color-primary-hover: var(--color-console-hover);
+  --color-brand: var(--color-console);
 }
 
-/* Dark theme (FEQ-09: later). Every component reads tokens, so dark mode is this block.
+/* Dark theme (FEQ-09, LP-FE-08: later). Components read role tokens only, so a later
+   [data-theme="dark"] block redefines the roles above and nothing else.
 [data-theme="dark"] {
 }
 */
