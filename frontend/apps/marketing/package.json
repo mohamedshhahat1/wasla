@@ -14,15 +14,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@wasla/config": "workspace:*",
     "@wasla/i18n": "workspace:*",
-    "@wasla/ui": "workspace:*",
-    "astro": "7.4.7"
+    "@wasla/ui": "workspace:*"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",
     "@tailwindcss/vite": "4.3.5",
     "@types/node": "24.19.2",
+    "@wasla/config": "workspace:*",
+    "astro": "7.4.7",
     "eslint": "9.39.5",
     "tailwindcss": "4.3.5",
     "typescript": "5.9.3",
