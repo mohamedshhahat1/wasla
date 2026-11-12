@@ -8220,14 +8220,17 @@ installed in Claude Code: impeccable, taste-skill, ui-ux-pro-max and emilkowalsk
    accent (blue-600 and its hover and pressed, the focus ring), text, status. Red, amber and green remain for
    statuses only. The console is told apart by its own blue band. Every role pair is tested against WCAG (text 4.5:1,
    boundaries and focus 3:1).
-3. *60 / 30 / 10 is measured.* `scripts/measure-colour-roles.mjs` classifies screenshot pixels by role (nearest
+3. *60 / 30 / 10 is measured, and the composition was redesigned until it held.* The first measurement of the
+   restyled screens was 1280 77.5 / 21.5 / 0.9; the frame became a dark header band, the action-blue footer as the one
+   brand band, a wider brand panel and light-blue state bands - measured at the end 1280 65.0 / 25.7 / 9.2 and 390
+   63.2 / 26.7 / 9.6. `scripts/measure-colour-roles.mjs` classifies screenshot pixels by role (nearest
    token in OKLab); frontend.yml captures the screens in Chromium at 1280 and 390, in English and Arabic, and fails a
    screen outside its hard limits (dominant ≥ 45 %, accent ≤ 15 %, status ≤ 3 % without an error) and averages
    outside the bands (dominant 55–68, secondary 24–36, accent 6–12).
 4. *Components (CM-01..CM-07).* FE-1's sixteen primitives keep their structure and ARIA; Button keeps its four
    variants and gains a drawn busy state; disabled is drawn, not faded; new layout composites AuthLayout,
    BrandPanel, Card, PageHeader, Wordmark. Motion tokens from emil-design-eng: press 120 ms, exits 150 ms, menus
-   200 ms, dialogs 240 ms, a strong ease-out, `scale(0.97)` on press, popups fading in place (their placement is measured as they open); only transform and
+   200 ms, dialogs 240 ms, a strong ease-out, `scale(0.97)` on press, popups fading in place (their placement is measured as they open), dialogs entering by scale alone, colours changing at once (axe scans each change); only transform and
    opacity move; under reduced motion everything is 0 s (a test with a control).
 5. *Skills as the method (SK-01..SK-06).* ui-ux-pro-max decided the design system and the UX rules, taste-skill the
    direction and composition, emil-design-eng the motion, impeccable the audits before and after. Precedence: this

@@ -36,7 +36,16 @@ average over the measured screens at each width - dominant 55–68 %, secondary 
 anti-aliasing ≤ 25 % of all pixels. frontend.yml measures the signed-out screens on every push.
 
 Design a new screen's composition before building it: where the secondary sits (a band, a panel,
-the field boundaries) and which single action carries the accent.
+the field boundaries) and which single action carries the accent. The frame every screen already has:
+
+- the header is the dark-blue structural band (`brand`), the language switcher in a white pill on it;
+- the footer is the action blue - the one brand band the accent may carry (taste-skill) - with white
+  links (`Link tone="inverse"`); dark and blue bands carry `data-brand-surface`, which turns the focus
+  ring light (`focus-inverse`, 3:1 on every band);
+- auth screens put the brand panel beside the form (0.8 of its width), a band above it on a phone;
+- empty and error cards hold their icon on a light-blue band.
+
+Measured at FE-RD's end (27 screens, en and ar): 1280 - 65.0 / 25.7 / 9.2; 390 - 63.2 / 26.7 / 9.6.
 
 ### Status colours
 
@@ -75,7 +84,7 @@ focus ring always sits on a 2 px offset of the surface, never directly on the ac
 | `ghost`     | no fill, blue text, light blue on hover             | quiet actions inside a group (the language switcher) |
 | `danger`    | the status red                                      | destructive actions only                             |
 
-Every state has a look: rest, hover (colour only, on devices that hover), pressed (`scale(0.97)` and
+Every state has a look: rest, hover (colour, at once), pressed (`scale(0.97)` and
 the pressed blue), focus-visible (the 2 px ring at once), disabled (blue-50 with muted text, ≥ 3:1),
 busy (`busy` prop: disabled, `aria-busy`, a turning ring before the unchanged label). Targets are at
 least 40 × 40 (`--spacing-target`), fields 44 px tall. `Link` is underlined, thicker on hover and
@@ -100,9 +109,11 @@ actions), `Wordmark` (the name as text - there is no logo yet), `EmptyState`, `E
 | `--ease-out`     | cubic-bezier(0.23, 1, 0.32, 1)  | entering and leaving, press        |
 | `--ease-in-out`  | cubic-bezier(0.77, 0, 0.175, 1) | something moving on screen         |
 
-Only `transform` and `opacity` animate (colours fade on hover). Popovers, menus, selects and
+Only `transform` and `opacity` animate. Colours change at once - a label is never caught
+between two colour pairs (axe checks a screen the moment it changes). Popovers, menus, selects and
 tooltips fade in where they open - nothing moves their box, because their placement is measured the
-moment they open; dialogs scale from 0.97 at the centre; toasts slide in from the inline end. Exits are faster than entries; nothing goes over 300 ms; nothing starts from
+moment they open; dialogs enter by scale alone (never part-transparent) and fade out; toasts slide in
+from the inline end. Exits are faster than entries; nothing goes over 300 ms; nothing starts from
 `scale(0)`; never ease-in. Focus rings, text, typing, arrowing through a menu or a radio group never
 animate; nothing loops but the busy ring; nothing animates on page load. Under
 `prefers-reduced-motion: reduce` every transition is 0 s and no animation runs (a Playwright test
