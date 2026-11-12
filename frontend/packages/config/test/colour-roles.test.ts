@@ -52,7 +52,7 @@ describe("measure-colour-roles (VQ-03)", async () => {
 
   it("reads the theme's value, not a scoped override defined later", async () => {
     const { tokenColours } = (await import(script)) as {
-      tokenColours(css: string): Record<string, string>;
+      tokenColours: (css: string) => Record<string, string>;
     };
     const css = `@theme { --color-primary: #1c5fc2; } :root[data-app="console"] { --color-primary: #153e7d; }`;
     expect(tokenColours(css)["color-primary"]).toBe("#1c5fc2");
