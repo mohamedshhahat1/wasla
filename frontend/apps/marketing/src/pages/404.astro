@@ -10,14 +10,18 @@ import { text } from "../lib/copy";
 ---
 
 <Base locale="en" title={text("en", "marketing.notFoundTitle")} noindex>
-  <section class="mx-auto flex max-w-prose flex-col items-center gap-5 py-10 text-center">
-    <h1 class="m-0 text-3xl font-semibold text-text">{text("en", "marketing.notFoundTitle")}</h1>
+  <section
+    class="mx-auto flex max-w-prose flex-col items-center gap-5 rounded-xl border border-border bg-surface px-6 py-10 text-center shadow-sm sm:px-10"
+  >
+    <h1 class="m-0 text-3xl font-semibold leading-tight tracking-tight text-text">
+      {text("en", "marketing.notFoundTitle")}
+    </h1>
     <p class="m-0 text-lg text-text-muted">{text("en", "marketing.notFoundBody")}</p>
     <ul class="m-0 flex list-none flex-wrap justify-center gap-4 p-0">
       {
         LOCALES.map((locale) => (
           <li lang={locale}>
-            <a href={`/${locale}/`} class="font-medium text-primary underline">
+            <a href={`/${locale}/`} class="inline-flex min-h-target items-center rounded-md px-3 font-medium text-primary underline underline-offset-4 hover:text-primary-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus">
               {text(locale, "marketing.backHome")}
             </a>
           </li>

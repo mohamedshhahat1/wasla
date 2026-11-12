@@ -1,6 +1,6 @@
 import { getTranslations } from "next-intl/server";
 
-import { ErrorState, Link } from "@wasla/ui";
+import { Button, ErrorState } from "@wasla/ui";
 
 import { Shell } from "../components/shell";
 
@@ -14,7 +14,11 @@ export default async function NotFound() {
         headingLevel={1}
         title={t("notFoundTitle")}
         description={t("notFoundBody")}
-        action={<Link href="/">{common("goHome")}</Link>}
+        action={
+          <Button asChild>
+            <a href="/">{common("goHome")}</a>
+          </Button>
+        }
       />
     </Shell>
   );
