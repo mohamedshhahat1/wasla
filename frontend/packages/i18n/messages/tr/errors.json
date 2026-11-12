@@ -7,6 +7,8 @@
   "unauthenticated": "Oturumunuz sona erdi. Yeniden giriş yapın.",
   "permission_denied": "Bunu yapma izniniz yok.",
   "not_found": "Aradığınızı bulamadık.",
+  "workspace_suspended": "Bu çalışma alanı askıya alındı. Sahibiyle veya Wasla desteğiyle iletişime geçin.",
+  "membership_revoked": "Bu çalışma alanına artık erişiminiz yok.",
   "conflict": "Siz çalışırken bu öğe değişti. Yenileyip tekrar deneyin.",
   "plan_limit_exceeded": "Planınızın sınırına ulaşıldı.",
   "payment_required": "Devam etmek için ödeme gerekiyor.",
