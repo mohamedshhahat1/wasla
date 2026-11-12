@@ -15,3 +15,6 @@ next-env.d.ts
 .dev.vars
 # Copied from packages/ui/licenses at build time.
 apps/*/public/licenses/
+
+# FE-RD: visual-roles screenshots (evidence, never a baseline - FEQ-11)
+e2e/visual-roles/
