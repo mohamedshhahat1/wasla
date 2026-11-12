@@ -1,0 +1,53 @@
+{
+  "_comment": "Every colour token in tokens.css has exactly one role (PA-03). The raw scale is 'scale': it is read only by the role tokens. measure-colour-roles.mjs classifies pixels by these roles.",
+  "scale": [
+    "color-blue-50",
+    "color-blue-100",
+    "color-blue-200",
+    "color-blue-300",
+    "color-blue-400",
+    "color-blue-500",
+    "color-blue-600",
+    "color-blue-700",
+    "color-blue-800",
+    "color-blue-900",
+    "color-blue-950",
+    "color-white"
+  ],
+  "dominant": ["color-surface", "color-surface-raised", "color-canvas", "color-surface-sunken"],
+  "secondary": [
+    "color-secondary-subtle",
+    "color-border",
+    "color-border-strong",
+    "color-brand",
+    "color-console",
+    "color-console-hover",
+    "color-selection",
+    "color-info-subtle"
+  ],
+  "accent": [
+    "color-primary",
+    "color-primary-hover",
+    "color-primary-pressed",
+    "color-focus",
+    "color-focus-inverse",
+    "color-info"
+  ],
+  "text": [
+    "color-text",
+    "color-text-muted",
+    "color-text-inverse",
+    "color-on-brand",
+    "color-on-brand-muted",
+    "color-on-primary",
+    "color-scrim"
+  ],
+  "status": [
+    "color-danger",
+    "color-danger-subtle",
+    "color-warning",
+    "color-warning-subtle",
+    "color-success",
+    "color-success-subtle"
+  ]
+}
