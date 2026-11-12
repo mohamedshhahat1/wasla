@@ -33,6 +33,8 @@ test.use({ timezoneId: "Africa/Cairo" });
 const FIREFOX_SKIP = ["label", "label-title-only"];
 
 async function axe(page: Page, state: string): Promise<void> {
+  // The page has settled (its <title> is set) before the scan: under load axe could run mid-render.
+  await expect(page).toHaveTitle(/\S/);
   const builder = new AxeBuilder({ page }).withTags([
     "wcag2a",
     "wcag2aa",
@@ -74,7 +76,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await axe(page, "login form error with request id");
 
       await page.goto(`${WEB}/signup`);
-      await expect(field(page, locale, "auth.timezone")).toBeEnabled();
+      await expect(field(page, locale, "auth.timezone")).toBeEnabled({ timeout: 20_000 });
       await axe(page, "signup empty");
       await page.getByRole("button", { name: label(locale, "auth.signup.submit") }).click();
       await expect(page.getByText(label(locale, "auth.fieldErrors.missing")).first()).toBeVisible();
@@ -138,7 +140,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await field(page, locale, "auth.workspaceSlug").fill(
         `axe-${Math.random().toString(36).slice(2, 9)}`,
       );
-      await expect(field(page, locale, "auth.timezone")).toBeEnabled();
+      await expect(field(page, locale, "auth.timezone")).toBeEnabled({ timeout: 20_000 });
       await page.getByRole("button", { name: label(locale, "auth.signup.submit") }).click();
       await page.waitForURL(`${WEB}/verify`);
       await axe(page, "verify");

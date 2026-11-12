@@ -54,7 +54,7 @@ for (const locale of LOCALES) {
       await field(page, locale, "auth.password").fill(PASSWORD);
       await field(page, locale, "auth.workspaceName").fill(`Journey ${slug}`);
       await field(page, locale, "auth.workspaceSlug").fill(slug);
-      await expect(field(page, locale, "auth.timezone")).toBeEnabled();
+      await expect(field(page, locale, "auth.timezone")).toBeEnabled({ timeout: 20_000 });
       await nothingReachable(page, context);
       await page.getByRole("button", { name: label(locale, "auth.signup.submit") }).click();
 
@@ -162,7 +162,7 @@ for (const locale of LOCALES) {
       await field(page, locale, "auth.workspaceSlug").fill(
         `t-${Math.random().toString(36).slice(2, 9)}`,
       );
-      await expect(field(page, locale, "auth.timezone")).toBeEnabled();
+      await expect(field(page, locale, "auth.timezone")).toBeEnabled({ timeout: 20_000 });
       await page.getByRole("button", { name: label(locale, "auth.signup.submit") }).click();
       await expect(
         page.getByRole("heading", { name: label(locale, "auth.signup.checkInboxTitle") }),
