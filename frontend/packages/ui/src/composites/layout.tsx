@@ -70,7 +70,7 @@ export function BrandPanel({
     >
       {name ? <Wordmark name={name} tone="inverse" /> : <span aria-hidden="true" />}
       <div className="flex flex-col gap-3">
-        <p className="m-0 max-w-form text-2xl font-semibold leading-tight tracking-tight text-on-brand lg:text-3xl">
+        <p className="m-0 max-w-form text-2xl font-semibold leading-tight tracking-tight text-balance text-on-brand lg:text-3xl">
           {promise}
         </p>
         {detail ? <p className="m-0 text-md text-on-brand-muted">{detail}</p> : null}
