@@ -111,8 +111,8 @@ class StubAuthService:
             workspace=self.workspace,
         )
 
-    async def list_workspaces(self, *, user: User) -> list[Any]:
-        self.calls.append(("list_workspaces", {}))
+    async def list_workspaces(self, *, user: User, include_suspended: bool = False) -> list[Any]:
+        self.calls.append(("list_workspaces", {"include_suspended": include_suspended}))
         return [self.workspace]
 
 
@@ -280,6 +280,9 @@ async def test_the_profile_lists_the_callers_workspaces(
     body = response.json()
     assert body["email"] == "owner@example.com"
     assert [entry["slug"] for entry in body["workspaces"]] == ["acme"]
+    # Each with its status, and suspended workspaces asked for too (FEB-07).
+    assert [entry["status"] for entry in body["workspaces"]] == ["active"]
+    assert ("list_workspaces", {"include_suspended": True}) in service.calls
     assert body["platform_role"] is None
     # Reported so a client can render the person without a second request. An
     # account that has never signed in with Google simply has null here.

@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **258 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **259 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -28,7 +28,7 @@ conclusion drawn from it is vacuously true.
 | Status | Raised by | Meaning |
 | --- | --- | --- |
 | 401 | `AuthenticationError` | Missing, malformed or no-longer-valid credentials |
-| 403 | `PermissionDeniedError` | Authenticated, but not permitted in this workspace |
+| 403 | `PermissionDeniedError` | Authenticated, but not permitted in this workspace. Codes a client tells apart (ADR-194): `workspace_suspended` - the workspace is suspended ("This workspace is not available."); `membership_revoked` - the caller's membership in this workspace was withdrawn; `email_verification_required`; otherwise `permission_denied`. Somebody who never belonged to the workspace gets the 404 below, never one of these |
 | 402 | `PlanLimitExceededError` (`plan_limit_exceeded`), `PaymentRequiredError` (`payment_required`) | The plan does not stretch that far; the plan asked for is not paid for |
 | 404 | `NotFoundError`, `TenantIsolationError` | Absent, or outside the caller's workspace |
 | 409 | `ConflictError` | Uniqueness or state conflict. Two entitlement codes (ADR-131): `channel_capacity_exceeded` - every channel slot is taken - and `channel_type_not_allowed` - the plan in force does not include that channel |
@@ -46,7 +46,7 @@ ADR-191):
 
 | File | What |
 | --- | --- |
-| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (258 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (259 operations less `/metrics`, which keeps itself out of the schema) |
 | `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
 
 `python -m scripts.export_openapi` writes both from the application factory, in
@@ -263,6 +263,32 @@ today); `guidance` (an instruction to the AI, never sent as it is) is at most
 follow_up_settings_changed`; none is `422 follow_up_settings_version_required`.
 A workspace with no settings row (never configured) reads `enabled: false,
 version: 0`.
+
+## Workspace gates (FEB-07, ADR-194)
+
+`GET /api/v1/workspace/gates` - what any member of the token's workspace may know to
+draw its banners, in one call per workspace switch:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | the workspace's own status: `active` or `suspended` |
+| `payment_required` | a renewal invoice is issued and still owed - the same open renewals `GET /billing/summary` lists for the owner |
+| `subscription_status` | `trialing`, `active`, `past_due`, `suspended`, `cancelled`, `expired`, or `null` without a subscription |
+| `trial_ends_at` | the trial's end while there is one, else `null` |
+| `channel_capacity.over_limit` | more channel connections are active than the plan allows now (`GET /billing/channel-capacity`'s `over_limit`) |
+| `channel_capacity.reduction_pending` | a capacity reduction is open |
+
+No amount, price, currency, invoice, card, payment method, limit or usage number - those
+stay with the owner's `GET /billing/summary`. Open to owners, admins and members; it is
+the one workspace route that **still answers while the workspace is suspended**, because
+it is the call the suspended banner needs (it only reads). A withdrawn member gets 403
+`membership_revoked`; somebody who never belonged, 404. `Cache-Control: no-store`; the
+workspace rate limit.
+
+`GET /api/v1/auth/me` gives every workspace in `workspaces` a `status`, and lists a
+suspended workspace (with `status: "suspended"`) instead of leaving it out, so a switcher
+can say why it cannot be opened. Revoked memberships and deleted workspaces are not
+listed. `active_workspace` in the session answers carries the same `status`.
 
 ## Workspace local time (TZ-08)
 

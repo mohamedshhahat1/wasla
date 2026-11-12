@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.core.security import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from app.core.timezones import MAX_TIMEZONE_LENGTH
-from app.db.models import PlatformRole, TenantRole
+from app.db.models import PlatformRole, TenantRole, TenantStatus
 from app.schemas.text import StorableText
 
 # Letters, digits and internal hyphens. Case is accepted and normalised on the
@@ -186,12 +186,17 @@ class AccountStateResponse(BaseModel):
 
 
 class WorkspaceSummary(BaseModel):
-    """A workspace as seen by one member, including their role in it."""
+    """A workspace as seen by one member, including their role in it and its status.
+
+    `status` is the workspace's own (FEB-07, ADR-194): a suspended workspace
+    stays in the caller's list so a switcher can say so, rather than vanishing.
+    """
 
     id: uuid.UUID
     name: str
     slug: str
     role: TenantRole
+    status: TenantStatus
 
 
 class SessionResponse(BaseModel):

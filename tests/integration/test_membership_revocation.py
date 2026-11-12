@@ -31,7 +31,11 @@ from fastapi.routing import APIRoute, _IncludedRouter
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_active_workspace, get_entitlement_service
+from app.api.dependencies import (
+    get_active_workspace,
+    get_entitlement_service,
+    get_workspace_membership,
+)
 from app.core.config import Settings
 from app.core.dependencies import get_session
 from app.core.exceptions import ConflictError, PermissionDeniedError, ValidationError
@@ -523,7 +527,10 @@ def _workspace_scoped_routes(app: FastAPI) -> list[tuple[str, str]]:
         dependant = getattr(route, "dependant", None)
         if dependant is None:
             continue
-        if get_active_workspace not in [d.call for d in flatten(dependant)]:
+        calls = {d.call for d in flatten(dependant)}
+        # The gate summary resolves the membership alone (FEB-07): a revoked
+        # member must be refused there too.
+        if not calls & {get_active_workspace, get_workspace_membership}:
             continue
         path = getattr(route, "path", "") or getattr(route, "path_format", "")
         for method in sorted(set(route.methods or set()) - {"HEAD", "OPTIONS"}):

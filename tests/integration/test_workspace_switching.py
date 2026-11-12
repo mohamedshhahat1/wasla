@@ -354,7 +354,9 @@ async def test_a_membership_revoked_after_switching_stops_the_token(
 
     after = await http.get(f"{API}/workspace/members", headers=_bearer(token))
 
-    assert after.status_code == 404
+    # Refused at once, and told why: their membership here was withdrawn (FEB-07).
+    assert after.status_code == 403
+    assert after.json()["error"]["code"] == "membership_revoked"
 
 
 async def test_global_revocation_invalidates_a_switched_token(
