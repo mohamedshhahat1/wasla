@@ -47,9 +47,11 @@ export const BANDS = {
 
 /** Every colour token of tokens.css as #rrggbb, following var(--x) to the scale. */
 export function tokenColours(css) {
-  const raw = Object.fromEntries(
-    [...css.matchAll(/--(color-[a-z0-9-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]),
-  );
+  // The first definition is the theme's; later ones are scoped overrides (the console's).
+  const raw = {};
+  for (const m of css.matchAll(/--(color-[a-z0-9-]+):\s*([^;]+);/g)) {
+    if (!(m[1] in raw)) raw[m[1]] = m[2].trim();
+  }
   const resolveToken = (name, depth = 0) => {
     const value = raw[name];
     const ref = value && /^var\(--([a-z0-9-]+)\)$/.exec(value);
