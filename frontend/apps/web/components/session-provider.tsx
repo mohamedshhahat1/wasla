@@ -16,10 +16,11 @@ import {
 } from "react";
 
 import { unwrap, type components } from "@wasla/api-client";
-import { SESSION_CHANNEL, type WorkspaceRef } from "@wasla/session";
+import type { WorkspaceRef } from "@wasla/session";
 import { Toast } from "@wasla/ui";
 
 import { publicEnv } from "../lib/env";
+import { sessionTransports } from "../lib/session/transports";
 import { WebSession, type SessionStatus } from "../lib/session/web-session";
 
 export type Profile = components["schemas"]["ProfileResponse"];
@@ -51,11 +52,9 @@ export const AUTH_PATHS = [
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [session] = useState(() => {
     const env = publicEnv();
-    return new WebSession({
-      apiOrigin: env.apiOrigin,
-      locks: navigator.locks,
-      channel: new BroadcastChannel(SESSION_CHANNEL),
-    });
+    // FEF-16: the real channel and locks in the browser, inert ones while rendering on the server.
+    const { channel, locks } = sessionTransports();
+    return new WebSession({ apiOrigin: env.apiOrigin, locks, channel });
   });
   const queryClient = useQueryClient();
   const router = useRouter();

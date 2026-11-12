@@ -32,7 +32,9 @@ export function PageGate({ need, children }: { need: PageNeed; children: ReactNo
     if (target) router.replace(target);
   }, [target, router]);
 
-  if (status === "connection-lost") {
+  // FEF-17: an auth page needs no session, so it keeps its form when the session routes cannot
+  // answer (no secret on a preview, an API outage); a submit then shows that error by code.
+  if (status === "connection-lost" && need !== "signed-out") {
     return (
       <ErrorState
         headingLevel={1}

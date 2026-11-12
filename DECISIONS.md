@@ -8136,7 +8136,10 @@ FE-1's open findings (FEF-04, -05, -07, -08, -11, PV-03), without a backend chan
    spent ticket and ends CLOSED, PV-03): a `closed` frame of a terminal reason ends the stream; any other, or a CLOSED
    source, takes a new ticket and a new EventSource with a bounded backoff. No FE-2 screen opens a stream.
 8. *Workers on Linux (FX-01).* `pnpm build:workers:linux` builds the three Workers' outputs in a digest-pinned Node 24
-   Debian container from any machine (OpenNext fails on Windows, FEF-04); deploying stays on the host.
+   Debian container from any machine (OpenNext fails on Windows, FEF-04); deploying stays on the host. The built
+   Workers are served by workerd (`wrangler dev --local`) in CI and every page must answer 200: Node defines browser
+   globals workerd lacks, and the session was once built with `BroadcastChannel` during server rendering (FEF-16) -
+   it now uses inert transports outside the browser.
 
 **Rejected.** S-1 (the refresh token in the browser's reach); an encrypted refresh cookie or a session store (S-2 needs
 neither; the cookie is host-only, Strict and HttpOnly); a limiter in the routes (the API's per-address buckets apply);

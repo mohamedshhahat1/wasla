@@ -116,6 +116,8 @@ jobs:
           du -sh apps/web/.open-next/worker.js apps/web/.open-next/assets apps/console/.open-next/worker.js || true
           # FX-01: the entry hashes, compared with scripts/build-workers-linux.mjs on a developer's machine.
           sha256sum apps/web/.open-next/worker.js apps/console/.open-next/worker.js
+      - name: The Workers served by workerd (FEF-16; every page 200, session routes 405 / 503)
+        run: node scripts/workers-smoke.mjs
       - name: Advisories in production dependencies (high / critical fail)
         run: pnpm audit --prod --audit-level high
       - name: Licences of direct dependencies (FX-05; transitive ones printed, FEF-06)

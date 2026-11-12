@@ -40,6 +40,7 @@ pnpm --filter @wasla/web dev                            one app in development (
 pnpm storybook:build && pnpm storybook:test             Storybook, axe on every story, the RTL keyboard proof
 pnpm e2e:local                                          build, start the backend profile, run Playwright, take it down
 pnpm build:workers:linux -- --env preview               the Workers' outputs built on Linux in Docker (any machine)
+pnpm workers:smoke                                      the built Workers served by workerd: pages 200, session routes 405 / 503
 ```
 
 ### Building the Workers on Windows
