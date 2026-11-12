@@ -31,6 +31,8 @@ export { Toast, ToastViewport, type ToastProps, type ToastTone } from "./primiti
 
 export { FormField, type FieldControlProps, type FormFieldProps } from "./composites/form-field";
 export { EmptyState, ErrorState, type ErrorStateProps } from "./composites/states";
+export { AuthLayout, BrandPanel, Card, PageHeader, Wordmark } from "./composites/layout";
+export { Spinner } from "./primitives/button";
 
 /** The sixteen primitives of DS-04, for the Storybook coverage test. */
 export const PRIMITIVES = [
