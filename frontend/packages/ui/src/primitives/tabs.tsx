@@ -32,7 +32,7 @@ export function Tabs({ items, defaultValue, label }: TabsProps) {
             disabled={item.disabled ?? false}
             className={cn(
               "-mb-px min-h-target cursor-pointer rounded-t-md border-b-2 border-transparent px-5 text-md",
-              "text-text-muted transition-colors hover:bg-secondary-subtle hover:text-text",
+              "text-text-muted hover:bg-secondary-subtle hover:text-text",
               "data-[state=active]:border-primary data-[state=active]:font-medium data-[state=active]:text-primary",
               "disabled:cursor-not-allowed disabled:hover:bg-transparent",
               focusRing,

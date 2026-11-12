@@ -132,12 +132,12 @@
   }
 
   /* Press feedback on pressable things, never when disabled or busy (CM-01, emil). */
+  /* Colours change at once: a button's label is never caught half-way between two colour
+     pairs (FE-2's axe proof scans right after a submit); only the press scale moves. */
   .wasla-press {
-    transition-property: color, background-color, border-color, box-shadow, transform;
-    transition-duration:
-      var(--motion-fast), var(--motion-fast), var(--motion-fast), var(--motion-fast),
-      var(--motion-press);
-    transition-timing-function: ease, ease, ease, ease, var(--ease-out);
+    transition-property: transform;
+    transition-duration: var(--motion-press);
+    transition-timing-function: var(--ease-out);
   }
 
   .wasla-press:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
@@ -184,9 +184,10 @@
   }
 }
 
+/* A dialog enters by scale alone: its text is checked for contrast the moment it opens, so it is
+   never part-transparent on the way in (FE-2's axe proof). It fades on the way out. */
 @keyframes wasla-dialog-in {
   from {
-    opacity: 0;
     transform: scale(0.97);
   }
 }

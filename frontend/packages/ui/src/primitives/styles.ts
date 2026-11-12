@@ -10,7 +10,7 @@ export const focusRing =
  */
 export const controlBase =
   "min-h-field w-full rounded-md border border-border-strong bg-surface px-4 text-md text-text " +
-  "shadow-sm transition-colors placeholder:text-text-muted " +
+  "shadow-sm placeholder:text-text-muted " +
   "hover:border-primary disabled:cursor-not-allowed disabled:border-border disabled:bg-surface-sunken " +
   "disabled:text-text-muted disabled:shadow-none aria-invalid:border-danger " +
   focusRing;
