@@ -110,5 +110,9 @@ describe("measure-colour-roles (VQ-03)", async () => {
     const flat = { dominant: 95, secondary: 3, accent: 2, status: 0, textOther: 10 };
     expect(mod.averageProblems([{ name: "a.png", shares: good }]).problems).toEqual([]);
     expect(mod.averageProblems([{ name: "b.png", shares: flat }]).problems).toHaveLength(3);
+    const loud = { dominant: 50, secondary: 30, accent: 20, status: 0, textOther: 10 };
+    expect(mod.averageProblems([{ name: "c.png", shares: loud }]).problems).toEqual(
+      expect.arrayContaining([expect.stringMatching(/^average accent/)]),
+    );
   });
 });
