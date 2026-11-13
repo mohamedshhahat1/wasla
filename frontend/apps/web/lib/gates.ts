@@ -188,3 +188,17 @@ export function gateSignalOf(code: string | null): GateSignal | null {
   if (code === "workspace_suspended") return "suspended";
   return "recheck";
 }
+
+/**
+ * GT-02: how /workspace/gates and /billing/entitlements are read - once on entering a workspace,
+ * then only when a gate signal invalidates them. Never on a mount, a focus or a reconnect, never
+ * polled, so a later screen that also observes them adds no request.
+ */
+export const GATE_QUERY_POLICY = {
+  staleTime: Infinity,
+  refetchOnMount: false,
+  refetchOnWindowFocus: false,
+  refetchOnReconnect: false,
+  refetchInterval: false,
+  retry: false,
+} as const;

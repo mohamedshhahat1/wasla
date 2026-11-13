@@ -30,6 +30,7 @@ import {
   gateSignalOf,
   BANNER_ORDER,
   decideGates,
+  GATE_QUERY_POLICY,
   trialDaysLeft,
   type GateFacts,
   type LiveCondition,
@@ -433,5 +434,18 @@ describe("GT-01: an error code on any call as a gate signal (M-Z12)", () => {
     for (const code of ["permission_denied", "not_found", "conflict", null]) {
       expect(gateSignalOf(code)).toBeNull();
     }
+  });
+});
+
+describe("GT-02: the gates are read once per workspace, then only on a signal (M-Z16)", () => {
+  it("never on a mount, a focus, a reconnect or a timer; never stale by age", () => {
+    expect(GATE_QUERY_POLICY).toEqual({
+      staleTime: Infinity,
+      refetchOnMount: false,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchInterval: false,
+      retry: false,
+    });
   });
 });

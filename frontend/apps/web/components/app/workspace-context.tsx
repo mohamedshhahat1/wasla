@@ -18,6 +18,7 @@ import { openEventStream, type StreamFrameOut } from "@wasla/api-client/stream";
 import { publicEnv } from "../../lib/env";
 import {
   decideGates,
+  GATE_QUERY_POLICY,
   gateSignalOf,
   type AllowanceFacts,
   type BannerKey,
@@ -134,11 +135,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     queryKey: gatesKey,
     queryFn: () => unwrap(session.api.GET("/api/v1/workspace/gates")),
     enabled: Boolean(workspaceId) && !revokedSignal,
-    staleTime: Infinity,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    retry: false,
+    ...GATE_QUERY_POLICY,
   });
   const gates = (gatesQuery.data as WorkspaceGatesFacts | undefined) ?? null;
   const fullyGated = revokedSignal || suspendedSignal || gates?.status === "suspended";
@@ -147,11 +144,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     queryKey: entitlementsKey,
     queryFn: () => unwrap(session.api.GET("/api/v1/billing/entitlements")),
     enabled: Boolean(workspaceId) && !fullyGated,
-    staleTime: Infinity,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    retry: false,
+    ...GATE_QUERY_POLICY,
   });
   const allowance = useMemo<AllowanceFacts | null>(() => {
     const row = entitlementsQuery.data?.find((entry) => entry.key === "period_ai_turns");
