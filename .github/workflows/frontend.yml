@@ -178,6 +178,8 @@ jobs:
         env:
           CI: "true"
           WASLA_VISUAL_DIR: ${{ github.workspace }}/frontend/e2e/visual-roles
+          # FE-3 (VQ3-02): gate states are measured apart from the averages.
+          WASLA_VISUAL_GATES_DIR: ${{ github.workspace }}/frontend/e2e/visual-gates
         run: pnpm e2e:local
       - name: The 60 / 30 / 10 averages of every captured screen (VQ-03, ADR-195)
         run: node scripts/measure-colour-roles.mjs --check e2e/visual-roles
@@ -196,4 +198,10 @@ jobs:
         with:
           name: visual-roles
           path: frontend/e2e/visual-roles
+          retention-days: 7
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-gates
+          path: frontend/e2e/visual-gates
           retention-days: 7

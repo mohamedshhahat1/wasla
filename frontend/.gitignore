@@ -18,3 +18,4 @@ apps/*/public/licenses/
 
 # FE-RD: visual-roles screenshots (evidence, never a baseline - FEQ-11)
 e2e/visual-roles/
+e2e/visual-gates/
