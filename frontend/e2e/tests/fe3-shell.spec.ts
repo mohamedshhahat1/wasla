@@ -40,10 +40,22 @@ test.use({ timezoneId: "Africa/Cairo" });
 // Several actors per journey (owner, member, staff), each made through the API and the mailbox.
 test.describe.configure({ timeout: 180_000 });
 
-const FIREFOX_SKIP = ["label", "label-title-only"];
+/**
+ * FEF-12's rules, and FEF-25: in Playwright 1.65's Firefox, axe's `aria-allowed-attr` crashes the
+ * content process on some of the shell's states (bisected to that one rule: home's cards when they
+ * were named sections, the switcher menu and the navigation sheet open). The DOM is the same in
+ * every engine; Chromium and WebKit run the rule on every state; Firefox skips only it.
+ */
+const FIREFOX_SKIP = ["label", "label-title-only", "aria-allowed-attr"];
 
 async function axe(page: Page, state: string): Promise<void> {
   await expect(page).toHaveTitle(/\S/);
+  // The page settles first: the stream open (or ended) and no request in flight - a scan while
+  // the shell re-renders crashed Firefox's content process here.
+  await expect
+    .poll(async () => (await streamOf(page))?.state ?? "none", { timeout: 20_000 })
+    .not.toBe("connecting");
+  await page.waitForLoadState("networkidle");
   const builder = new AxeBuilder({ page }).withTags([
     "wcag2a",
     "wcag2aa",
@@ -102,11 +114,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await suspend(second);
       await signIn(page, context, locale, owner.email);
 
-      // Landmarks, the skip link first, the navigation with only what exists.
-      await page.keyboard.press("Tab");
-      await expect(
-        page.getByRole("link", { name: label(locale, "common.skipToContent") }),
-      ).toBeFocused();
+      // The navigation with only what exists (on a phone, in the sheet).
       await openNav(page, locale);
       const nav = page
         .getByRole("navigation", { name: label(locale, "app.navLabel") })
@@ -116,7 +124,28 @@ for (const locale of ["en", "ar"] as Locale[]) {
         "aria-current",
         "page",
       );
-      if (phone()) await page.keyboard.press("Escape");
+      if (phone()) {
+        await page.keyboard.press("Escape");
+        await expect(page.locator("[data-nav-sheet]")).toHaveCount(0);
+      }
+
+      // The skip link is the first stop. Playwright's WebKit moves Tab between fields only (as
+      // Safari does by default), so there the proof is that it is the first focusable element.
+      await page.reload();
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+      const skip = page.getByRole("link", { name: label(locale, "common.skipToContent") });
+      if (test.info().project.name.startsWith("webkit")) {
+        const first = await page.evaluate(() => {
+          const tabbable = document.querySelector<HTMLElement>(
+            'a[href], button:not([disabled]), input:not([type="hidden"]), [tabindex="0"]',
+          );
+          return tabbable?.getAttribute("href") ?? null;
+        });
+        expect(first).toBe("#main");
+      } else {
+        await page.keyboard.press("Tab");
+        await expect(skip).toBeFocused();
+      }
 
       // The switcher: both workspaces, the suspended one marked in words.
       await page.locator("[data-switcher-trigger]").click();
@@ -454,6 +483,10 @@ for (const locale of ["en", "ar"] as Locale[]) {
         await page.keyboard.press("Enter");
         const sheet = page.locator("[data-nav-sheet]");
         await expect(sheet).toBeVisible();
+        // Measured once it has finished entering (the slide moves its box until then).
+        await sheet.evaluate((element) =>
+          Promise.all(element.getAnimations().map((animation) => animation.finished)),
+        );
         const box = await sheet.boundingBox();
         const width = page.viewportSize()!.width;
         // The sheet sits at the inline start: the left in en, the right in ar.

@@ -39,8 +39,16 @@ export async function login(
   return (answer.json as { access_token: string }).access_token;
 }
 
+let staff: { token: string; at: number } | null = null;
+
+/**
+ * The staff account's bearer, reused for ten minutes (access tokens live fifteen): logging the
+ * one staff account in for every suspend meets the per-account log-in limit (429).
+ */
 export async function staffToken(): Promise<string> {
-  return login(STAFF.email, STAFF.password);
+  if (staff && Date.now() - staff.at < 10 * 60_000) return staff.token;
+  staff = { token: await login(STAFF.email, STAFF.password), at: Date.now() };
+  return staff.token;
 }
 
 export async function tenantIdOf(slug: string, staff: string): Promise<string> {

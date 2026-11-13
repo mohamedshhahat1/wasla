@@ -288,8 +288,10 @@ for (const locale of LOCALES) {
       await expect(page.locator('[data-banner="payment"]')).toBeVisible({ timeout: 30_000 });
       await capture(page, testInfo, "gate-payment", locale, "gate");
 
+      // Suspended while the page is open: the stream's closed frame draws the state. (A reload
+      // would refresh into a suspended workspace, which FE-2's session reads as signed out -
+      // FEF-24.)
       await suspend(owner.slug);
-      await page.reload();
       await expect(page.locator('[data-gate="suspended"]')).toBeVisible({ timeout: 30_000 });
       await capture(page, testInfo, "gate-suspended", locale, "gate");
       await restore(owner.slug);

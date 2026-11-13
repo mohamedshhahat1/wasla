@@ -116,7 +116,10 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await page
         .getByRole("button", { name: label(locale, "auth.home.signOutEverywhere") })
         .click();
-      await expect(page.getByRole("dialog")).toBeVisible();
+      // SH-06: the account menu is itself a role="dialog" popover - the confirmation is named.
+      await expect(
+        page.getByRole("dialog", { name: label(locale, "auth.home.signOutEverywhereTitle") }),
+      ).toBeVisible();
       await axe(page, "sign out everywhere dialog");
       await page.keyboard.press("Escape");
 
