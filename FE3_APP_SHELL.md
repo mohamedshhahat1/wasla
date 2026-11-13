@@ -597,3 +597,22 @@ PREVIEWS UPDATED: wasla-preview-web, wasla-preview-console and wasla-preview-mar
 NEXT: WHATSAPP EMBEDDED SIGNUP BACKEND STAGE (FEQ-14, the owner's choice) AND FEB-03 / FEB-04 / FEB-05 BACKEND STAGE, THEN FE-4. FE-9 and FE-10 may start in parallel after their own backend items (FEB-10, FEB-08 and the owner's copy).
 
 CLEANUP: see E:\wasla-cleanup\CLEANUP_fe3_2026-11-13.md.
+
+## A6. The addendum's run and Part D
+
+**The addendum's ci.yml run.** [43508643952](https://github.com/mohamedshhahat1/wasla/actions/runs/43508643952) at b77730a: SUCCESS in every job (Alert rules and receivers, Migration-built schema, Lint, format and types, Tests and migrations, Docker build). The verdict above stands.
+
+**Part D.** It started before that run had finished, on the owner's explicit instruction ("the ci will be green because it is a md file, continue"); the run then came back green. Full detail is in E:\wasla-cleanup\CLEANUP_fe3_2026-11-13.md (not committed).
+
+| Item | Result |
+|---|---|
+| FE-0's e2e profile (7 wasla-fe-e2e-* containers, network, 3 volumes) | removed (`compose down -v`) |
+| wasla-fe3-pg, wasla-fe3-redis, wasla-fe3-net | removed |
+| wasla-fe3:e2e-be-head, wasla-fe3:e2e-start, wasla-fe-e2e-app:local | removed |
+| worktrees E:\wasla-fe3-verify, -preview, -base, -fix (clean; every HEAD an ancestor of b77730a) | removed with `git worktree remove`; `git worktree prune` |
+| E:\wasla-fe3-notes | left for the owner: Claude Code's safety check refused the recursive delete of a top-level folder (as in FE-RD); everything in it is rescued |
+| branch fe3-app-shell-20261113; shared volume wasla-workerbuild-pnpm-store; the preview Workers; earlier stages' folders; the dev stack | kept (branches 49 before = 49 after) |
+
+**Rescue.** E:\wasla-verification-scripts\fe3\: 592 files, about 13.5 MiB (the evidence, logs, the skills' outputs, screens, the mutation runner, scripts incl. pv3_live.mjs, the drafts and this report). `sha256sum -c RESCUE_SHA256SUMS.txt` passed, checked before the removals and after them; no node_modules, venv or secret.
+
+CLEANUP COMPLETE WITH ITEMS LEFT FOR REVIEW: E:\wasla-fe3-notes (`rd /s /q E:\wasla-fe3-notes` from a Command Prompt, or Explorer), and the local branch fe3-app-shell-20261113 (keep or delete).
