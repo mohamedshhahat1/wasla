@@ -178,3 +178,13 @@ export const GATE_SIGNAL_CODES = new Set([
   "channel_capacity_exceeded",
   "channel_type_not_allowed",
 ]);
+
+export type GateSignal = "revoked" | "suspended" | "recheck";
+
+/** GT-01 / GT-02: what one error code on any call means for the gates (null: not a gate code). */
+export function gateSignalOf(code: string | null): GateSignal | null {
+  if (!code || !GATE_SIGNAL_CODES.has(code)) return null;
+  if (code === "membership_revoked") return "revoked";
+  if (code === "workspace_suspended") return "suspended";
+  return "recheck";
+}

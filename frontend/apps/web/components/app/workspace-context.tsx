@@ -18,7 +18,7 @@ import { openEventStream, type StreamFrameOut } from "@wasla/api-client/stream";
 import { publicEnv } from "../../lib/env";
 import {
   decideGates,
-  GATE_SIGNAL_CODES,
+  gateSignalOf,
   type AllowanceFacts,
   type BannerKey,
   type GateDecision,
@@ -205,14 +205,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             .json()
             .catch(() => null),
         );
-        if (!code || !GATE_SIGNAL_CODES.has(code)) return response;
-        if (code === "membership_revoked") {
+        const signal = gateSignalOf(code);
+        if (!signal) return response;
+        if (signal === "revoked") {
           revokedRef.current = true;
           setRevokedSignal(true);
+          void reloadUnlessStranded();
+        } else {
+          if (signal === "suspended") setSuspendedSignal(true);
+          void recheck();
         }
-        if (code === "workspace_suspended") setSuspendedSignal(true);
-        if (code !== "membership_revoked") void recheck();
-        else void reloadUnlessStranded();
         return response;
       },
     };

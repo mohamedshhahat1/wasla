@@ -22,6 +22,7 @@ import {
 import { checklistOpen, checklistStates, type ChecklistInputs } from "../lib/checklist";
 import {
   allowanceExhausted,
+  gateSignalOf,
   BANNER_ORDER,
   decideGates,
   trialDaysLeft,
@@ -404,5 +405,23 @@ describe("ST-04: the handler table", () => {
     expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
     handleFrame({ type: "message.created", id: "2-0", data: {} }, { queryClient, scope });
     expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+});
+
+describe("GT-01: an error code on any call as a gate signal (M-Z12)", () => {
+  it("revoked, suspended, a re-read, or nothing", () => {
+    expect(gateSignalOf("membership_revoked")).toBe("revoked");
+    expect(gateSignalOf("workspace_suspended")).toBe("suspended");
+    for (const code of [
+      "payment_required",
+      "plan_limit_exceeded",
+      "channel_capacity_exceeded",
+      "channel_type_not_allowed",
+    ]) {
+      expect(gateSignalOf(code)).toBe("recheck");
+    }
+    for (const code of ["permission_denied", "not_found", "conflict", null]) {
+      expect(gateSignalOf(code)).toBeNull();
+    }
   });
 });
