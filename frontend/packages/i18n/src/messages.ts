@@ -2,21 +2,25 @@
  * The catalogues as one object per locale. A key missing in ar, fr or tr falls back to English
  * at runtime (IN-02) - never to the key text - and `i18n:check` fails the build first.
  */
+import arApp from "../messages/ar/app.json" with { type: "json" };
 import arAuth from "../messages/ar/auth.json" with { type: "json" };
 import arCommon from "../messages/ar/common.json" with { type: "json" };
 import arErrors from "../messages/ar/errors.json" with { type: "json" };
 import arMarketing from "../messages/ar/marketing.json" with { type: "json" };
 import arShell from "../messages/ar/shell.json" with { type: "json" };
+import enApp from "../messages/en/app.json" with { type: "json" };
 import enAuth from "../messages/en/auth.json" with { type: "json" };
 import enCommon from "../messages/en/common.json" with { type: "json" };
 import enErrors from "../messages/en/errors.json" with { type: "json" };
 import enMarketing from "../messages/en/marketing.json" with { type: "json" };
 import enShell from "../messages/en/shell.json" with { type: "json" };
+import frApp from "../messages/fr/app.json" with { type: "json" };
 import frAuth from "../messages/fr/auth.json" with { type: "json" };
 import frCommon from "../messages/fr/common.json" with { type: "json" };
 import frErrors from "../messages/fr/errors.json" with { type: "json" };
 import frMarketing from "../messages/fr/marketing.json" with { type: "json" };
 import frShell from "../messages/fr/shell.json" with { type: "json" };
+import trApp from "../messages/tr/app.json" with { type: "json" };
 import trAuth from "../messages/tr/auth.json" with { type: "json" };
 import trCommon from "../messages/tr/common.json" with { type: "json" };
 import trErrors from "../messages/tr/errors.json" with { type: "json" };
@@ -24,7 +28,7 @@ import trMarketing from "../messages/tr/marketing.json" with { type: "json" };
 import trShell from "../messages/tr/shell.json" with { type: "json" };
 import { DEFAULT_LOCALE, type Locale } from "./locales";
 
-export const NAMESPACES = ["common", "errors", "shell", "marketing", "auth"] as const;
+export const NAMESPACES = ["common", "errors", "shell", "marketing", "auth", "app"] as const;
 export type Namespace = (typeof NAMESPACES)[number];
 
 export type MessageTree = { [key: string]: string | MessageTree };
@@ -33,6 +37,7 @@ const RAW: Record<Locale, Record<Namespace, Record<string, unknown>>> = {
   en: {
     common: enCommon,
     auth: enAuth,
+    app: enApp,
     errors: enErrors,
     shell: enShell,
     marketing: enMarketing,
@@ -40,6 +45,7 @@ const RAW: Record<Locale, Record<Namespace, Record<string, unknown>>> = {
   ar: {
     common: arCommon,
     auth: arAuth,
+    app: arApp,
     errors: arErrors,
     shell: arShell,
     marketing: arMarketing,
@@ -47,6 +53,7 @@ const RAW: Record<Locale, Record<Namespace, Record<string, unknown>>> = {
   fr: {
     common: frCommon,
     auth: frAuth,
+    app: frApp,
     errors: frErrors,
     shell: frShell,
     marketing: frMarketing,
@@ -54,6 +61,7 @@ const RAW: Record<Locale, Record<Namespace, Record<string, unknown>>> = {
   tr: {
     common: trCommon,
     auth: trAuth,
+    app: trApp,
     errors: trErrors,
     shell: trShell,
     marketing: trMarketing,
@@ -91,6 +99,7 @@ export function catalogue(locale: Locale, raw = RAW): Record<Namespace, MessageT
     shell: strip(sets.shell),
     marketing: strip(sets.marketing),
     auth: strip(sets.auth),
+    app: strip(sets.app),
   };
 }
 
@@ -112,6 +121,7 @@ export function reviewStatus(locale: Locale): Record<Namespace, boolean> {
     shell: reviewed("shell"),
     marketing: reviewed("marketing"),
     auth: reviewed("auth"),
+    app: reviewed("app"),
   };
 }
 

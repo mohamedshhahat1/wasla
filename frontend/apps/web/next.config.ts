@@ -22,6 +22,11 @@ const config: NextConfig = {
     PUBLIC_MARKETING_ORIGIN: origins["PUBLIC_MARKETING_ORIGIN"],
     // FEB-16's workaround: the Google button exists only in builds that say so (APP-AUTH-03).
     PUBLIC_GOOGLE_ENABLED: process.env["PUBLIC_GOOGLE_ENABLED"] === "true" ? "true" : "false",
+    // FE-3: the journeys' test hooks (a clock offset, the lock bypass of JR-09's control, the
+    // mutation cache) exist only in a development build made with WASLA_E2E_ROUTES=1; every other
+    // build inlines "0" and the hooks are dead code.
+    PUBLIC_WASLA_E2E_HOOKS:
+      environment === "development" && process.env["WASLA_E2E_ROUTES"] === "1" ? "1" : "0",
   },
 };
 
