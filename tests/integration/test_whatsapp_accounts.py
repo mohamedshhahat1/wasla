@@ -115,7 +115,10 @@ class StubAccounts:
                 "WhatsApp number verification is not available in this deployment."
             )
         if self.conflict:
-            raise ConflictError("That WhatsApp number is already connected.")
+            raise ConflictError(
+                "That WhatsApp number is already connected.",
+                error_code="whatsapp_number_already_connected",
+            )
         self.connect_calls.append(kwargs)
         return _account(
             tenant_id=kwargs["tenant_id"],
@@ -312,6 +315,8 @@ async def test_a_duplicate_number_is_a_conflict_without_naming_the_holder(
     response = await client.post(PATH, json=CONNECT_BODY)
 
     assert response.status_code == 409
+    # Its own code (FEB-06): the connect screen tells it apart from the other 409s.
+    assert response.json()["error"]["code"] == "whatsapp_number_already_connected"
     # The number may be held by a workspace the caller cannot see.
     assert "workspace" not in response.text.lower()
 

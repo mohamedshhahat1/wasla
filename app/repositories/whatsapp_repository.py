@@ -38,6 +38,9 @@ logger = get_logger(__name__)
 # Named here because the conflict handler below has to recognise it by name:
 # any *other* integrity failure on this insert is a bug, not a race.
 LIVE_NUMBER_INDEX = "uq_whatsapp_accounts_live_phone_number_id"
+# The 409 a second claim on a number gets (FEB-06): its own code, so a client tells
+# it apart from every other conflict; the sentence still names no workspace.
+NUMBER_ALREADY_CONNECTED = "whatsapp_number_already_connected"
 
 
 # Why an event could not be attributed to a workspace. Bounded strings, because
@@ -264,7 +267,10 @@ class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
             # number already claimed by a workspace the caller cannot see. The
             # message says only that the number is in use: which workspace holds
             # it is not the caller's business.
-            raise ConflictError("That WhatsApp number is already connected.")
+            raise ConflictError(
+                "That WhatsApp number is already connected.",
+                error_code=NUMBER_ALREADY_CONNECTED,
+            )
 
         account = WhatsAppAccount(
             tenant_id=self.tenant_id,
@@ -296,7 +302,10 @@ class WhatsAppAccountRepository(TenantScopedRepository[WhatsAppAccount]):
                     "phone_number_id": phone_number_id,
                 },
             )
-            raise ConflictError("That WhatsApp number is already connected.") from error
+            raise ConflictError(
+                "That WhatsApp number is already connected.",
+                error_code=NUMBER_ALREADY_CONNECTED,
+            ) from error
         return account
 
 
