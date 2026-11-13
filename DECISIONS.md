@@ -8286,7 +8286,9 @@ through the API. The owner answered FEQ-14 on 2026-11-13: "Both: form now, plan 
    after a success and keeps the token only in its own memory after a refusal.
 7. *FEB-06 for FE-3's screens (EC).* The one error FE-3 must tell apart that carried only a class code -
    "That WhatsApp number is already connected." - gains `whatsapp_number_already_connected` at both raise sites; status,
-   sentence and the refusal to name the holder are unchanged. A test-only seed helper (tests/e2e_stack/gate_states.py)
+   sentence and the refusal to name the holder are unchanged. Found in the browser walk-through: switching or logging
+   into a suspended workspace answered the class code `permission_denied`; it now answers `workspace_suspended` (same
+   status and sentence; only a member reaches it). A test-only seed helper (tests/e2e_stack/gate_states.py)
    reaches the gate states the API cannot reach in a few calls (a trial ending, past due, an AI allowance used up); no
    module of app/ may import tests/.
 
@@ -8298,4 +8300,5 @@ proved never to cover a focused field).
 **Consequences.** The WhatsApp Embedded Signup backend stage and FEB-03 / 04 / 05 come next; FE-4 replaces the stream's
 handler table with the inbox's invalidation map and adds its navigation entry. The explainer's wording and the ar / fr /
 tr texts are drafts for the owner (FEQ-14's copy, FEQ-08). EventSource cannot read a 429, so `stream_limit` shows as
-"paused - retrying" under the helper's capped backoff (FEF-22).
+"paused - retrying" under the helper's capped backoff (FEF-22). A reload of a suspended workspace's page signs the
+person out, because FE-2's session reads a refused refresh as signed out (FEF-24 - the session is not changed here).

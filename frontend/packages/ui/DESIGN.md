@@ -152,6 +152,20 @@ reversible ones a plain confirmation dialog.
 **Motion.** The sheet enters with `--motion-slow` and leaves with `--motion-fast`; banners are placed, not slid; the
 live mark is a still dot - nothing loops but the busy ring.
 
+**Measured at FE-3's end** (39 screens per width, en and ar, the signed-in screens included): 1280 - 62.3 / 29.9 /
+7.6; 390 - 64.0 / 27.1 / 8.3. Gate states are measured apart (status ≤ 8 %): the payment banner 4.1–6.3 %, the
+suspended state 0.3–0.5 %.
+
+**Cards are not landmarks.** A card is a block with an `h2`; only the frame's header, navigation, main and footer are
+landmarks (a region per card is noise for screen readers - and crashed Firefox's axe run, FEF-25).
+
+| Skill (FE-3) | Decided |
+| --- | --- |
+| ui-ux-pro-max | the shell's navigation pattern, banners in words and icons, the secret field, the typed confirmation, the pre-delivery checklist |
+| taste-skill | where the secondary sits (bar, side navigation, heading bands), one primary per view |
+| emil-design-eng | the sheet's motion; banners placed, not slid; a still live mark |
+| impeccable | the audits before (17/20) and after (19/20) the fixes |
+
 ## Right to left
 
 Logical properties only (the lint forbids physical sides). The brand panel sits at the inline end
