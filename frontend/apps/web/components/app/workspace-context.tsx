@@ -158,20 +158,36 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return row ? { limit: row.limit, remaining: row.remaining, over_limit: row.over_limit } : null;
   }, [entitlementsQuery.data]);
 
+  // GT-04: after "access withdrawn" the profile is read again only when the person has another
+  // workspace for the switcher; with none, re-reading it would route them away (FE-2's AU-03)
+  // before they are told why - the full state says it and offers "Create a workspace".
+  const revokedRef = useRef(false);
+  revokedRef.current = revokedSignal;
+  const otherWorkspaces = (profile?.workspaces ?? []).filter(
+    (item) => item.id !== workspaceId,
+  ).length;
+  const othersRef = useRef(otherWorkspaces);
+  othersRef.current = otherWorkspaces;
+  const reloadUnlessStranded = useCallback(async () => {
+    if (revokedRef.current && othersRef.current === 0) return;
+    await reloadProfile();
+  }, [reloadProfile]);
+
   const rechecking = useRef(false);
   const recheck = useCallback(async () => {
     if (rechecking.current) return;
     rechecking.current = true;
     try {
+      // The gates first: their answer (a code) may be the revocation the profile must wait for.
       await Promise.all([
-        reloadProfile(),
         queryClient.invalidateQueries({ queryKey: gatesKey, exact: true }),
         queryClient.invalidateQueries({ queryKey: entitlementsKey, exact: true }),
       ]);
+      await reloadUnlessStranded();
     } finally {
       rechecking.current = false;
     }
-  }, [queryClient, gatesKey, entitlementsKey, reloadProfile]);
+  }, [queryClient, gatesKey, entitlementsKey, reloadUnlessStranded]);
 
   // A gate read that says "active" again ends a suspension signal (GT-03's restore).
   useEffect(() => {
@@ -190,16 +206,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
             .catch(() => null),
         );
         if (!code || !GATE_SIGNAL_CODES.has(code)) return response;
-        if (code === "membership_revoked") setRevokedSignal(true);
+        if (code === "membership_revoked") {
+          revokedRef.current = true;
+          setRevokedSignal(true);
+        }
         if (code === "workspace_suspended") setSuspendedSignal(true);
         if (code !== "membership_revoked") void recheck();
-        else void reloadProfile();
+        else void reloadUnlessStranded();
         return response;
       },
     };
     session.api.use(middleware);
     return () => session.api.eject(middleware);
-  }, [session, recheck, reloadProfile]);
+  }, [session, recheck, reloadUnlessStranded]);
 
   // GT-02: a tab shown again after five minutes hidden re-reads the gates; never on every focus.
   useEffect(() => {
@@ -249,8 +268,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           void recheck();
         }
         if (reason === "membership_revoked") {
+          revokedRef.current = true;
           setRevokedSignal(true);
-          void reloadProfile();
+          void reloadUnlessStranded();
         }
       }
     });
@@ -269,7 +289,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       next.stop();
       if (coordinator.current === next) coordinator.current = null;
     };
-  }, [streamAllowed, workspaceId, session, queryClient, scope, recheck, reloadProfile]);
+  }, [streamAllowed, workspaceId, session, queryClient, scope, recheck, reloadUnlessStranded]);
 
   // GT-08's quiet period: re-render once it has passed, so "retrying" can show.
   useEffect(() => {
