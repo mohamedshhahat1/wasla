@@ -131,6 +131,24 @@
     animation-name: wasla-toast-in-rtl;
   }
 
+  /* The navigation sheet (FE-3, UI3-03): enters from the inline start, leaves faster; mirrored in
+     RTL. Only transform moves; under reduced motion it appears and goes at once (CM-07). */
+  .wasla-sheet[data-state="open"] {
+    animation: wasla-sheet-in var(--motion-slow) var(--ease-out);
+  }
+
+  .wasla-sheet[data-state="closed"] {
+    animation: wasla-sheet-out var(--motion-fast) var(--ease-out);
+  }
+
+  [dir="rtl"] .wasla-sheet[data-state="open"] {
+    animation-name: wasla-sheet-in-rtl;
+  }
+
+  [dir="rtl"] .wasla-sheet[data-state="closed"] {
+    animation-name: wasla-sheet-out-rtl;
+  }
+
   /* Press feedback on pressable things, never when disabled or busy (CM-01, emil). */
   /* Colours change at once: a button's label is never caught half-way between two colour
      pairs (FE-2's axe proof scans right after a submit); only the press scale moves. */
@@ -222,6 +240,30 @@
   from {
     opacity: 0;
     transform: translateX(-100%);
+  }
+}
+
+@keyframes wasla-sheet-in {
+  from {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes wasla-sheet-out {
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes wasla-sheet-in-rtl {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes wasla-sheet-out-rtl {
+  to {
+    transform: translateX(100%);
   }
 }
 
