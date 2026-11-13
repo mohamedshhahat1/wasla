@@ -115,6 +115,8 @@
   --spacing-form: 440px;
   --spacing-page: 1120px;
   --spacing-hero: 560px;
+  /* The app shell's side navigation and its phone sheet (FE-3) */
+  --spacing-nav: 256px;
 
   /* Shape and depth: one radius family (8 / 12 / 16); shadows tinted with blue-950, offset + blur */
   --radius-sm: 6px;

@@ -26,6 +26,7 @@ import {
   verifiedOwner,
   WEB,
 } from "../support/fe2";
+import { connectNumber, freshNumber, gateState, memberOf, restore, suspend } from "../support/fe3";
 
 interface Shares {
   dominant: number;
@@ -122,11 +123,36 @@ function spaced(target: Target, all: Target[]): boolean {
   });
 }
 
-async function capture(page: Page, testInfo: TestInfo, screen: string, locale: Locale) {
+/**
+ * VQ3-02 (FE-3): a gate state - a banner or a full state on screen - is measured and reported but
+ * kept out of the averages (its own folder); on it status may reach 8 %, the other hard limits hold.
+ */
+function gateDir(testInfo: TestInfo): string {
+  const dir = process.env["WASLA_VISUAL_GATES_DIR"] ?? testInfo.outputPath("visual-gates");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function gateProblems(shares: Shares): string[] {
+  const problems: string[] = [];
+  if (shares.status > 8) problems.push(`status ${shares.status} > 8`);
+  if (shares.dominant < 45) problems.push(`dominant ${shares.dominant} < 45`);
+  if (shares.accent > 15) problems.push(`accent ${shares.accent} > 15`);
+  if (shares.textOther > 25) problems.push(`text/other ${shares.textOther} > 25`);
+  return problems;
+}
+
+async function capture(
+  page: Page,
+  testInfo: TestInfo,
+  screen: string,
+  locale: Locale,
+  kind: "screen" | "gate" = "screen",
+) {
   await settle(page);
   const width = widthOf(testInfo);
   const name = `${screen}-${locale}-${width}.png`;
-  const path = join(outDir(testInfo), name);
+  const path = join(kind === "gate" ? gateDir(testInfo) : outDir(testInfo), name);
   await page.screenshot({ path, fullPage: true, animations: "disabled", caret: "hide" });
 
   const { measure, classify } = await measurement();
@@ -152,7 +178,8 @@ async function capture(page: Page, testInfo: TestInfo, screen: string, locale: L
     path.replace(/\.png$/, ".json"),
     JSON.stringify({ name, shares, bySpacing, failing }, null, 2),
   );
-  expect(measure.screenProblems(name, shares), `${name} ${JSON.stringify(shares)}`).toEqual([]);
+  const problems = kind === "gate" ? gateProblems(shares) : measure.screenProblems(name, shares);
+  expect(problems, `${name} ${JSON.stringify(shares)}`).toEqual([]);
   expect(failing, `${name}: targets below ${minimum} px without 2.5.8 spacing`).toEqual([]);
 }
 
@@ -226,6 +253,72 @@ for (const locale of LOCALES) {
         page.getByRole("heading", { name: label(locale, "auth.workspace.createTitle") }),
       ).toBeVisible();
       await capture(page, testInfo, "web-workspace-new", locale);
+    });
+
+    // FE-3 (VQ3-02): the new screens join the averages; the gate states are measured apart.
+    test(`web-fe3 screens ${locale}`, async ({ page, context }, testInfo) => {
+      await useLocale(context, locale);
+      await useAddress(context);
+      const owner = await verifiedOwner("vis3");
+      await logInThroughTheApp(page, locale, owner.email);
+      await expect(page.getByTestId("onboarding-checklist")).toBeVisible({ timeout: 30_000 });
+      // Every card answered: a capture of "Loading..." would measure the wrong screen.
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-home-owner", locale);
+
+      await page.goto(`${WEB}/channels`);
+      await expect(page.locator('[data-page="channels"]')).toBeVisible();
+      await expect(page.getByTestId("capacity")).toBeVisible();
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-channels-empty", locale);
+
+      await page.goto(`${WEB}/channels/connect/whatsapp`);
+      await expect(page.getByTestId("connect-form")).toBeVisible();
+      await capture(page, testInfo, "web-connect", locale);
+
+      const connected = await connectNumber(owner, freshNumber());
+      const id = (connected.json as { id: string }).id;
+      await page.goto(`${WEB}/channels`);
+      await expect(page.locator(`[data-connection="${id}"]`)).toBeVisible();
+      await capture(page, testInfo, "web-channels", locale);
+
+      await page.goto(`${WEB}/channels/${id}`);
+      await expect(page.getByTestId("messaging-limit")).toBeVisible();
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-connection", locale);
+
+      await gateState("past-due", owner.slug);
+      await page.goto(`${WEB}/`);
+      await expect(page.locator('[data-banner="payment"]')).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "gate-payment", locale, "gate");
+
+      // Suspended while the page is open: the stream's closed frame draws the state. (A reload
+      // would refresh into a suspended workspace, which FE-2's session reads as signed out -
+      // FEF-24.)
+      await suspend(owner.slug);
+      await expect(page.locator('[data-gate="suspended"]')).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "gate-suspended", locale, "gate");
+      await restore(owner.slug);
+    });
+
+    test(`web-home-member ${locale}`, async ({ page, context }, testInfo) => {
+      await useLocale(context, locale);
+      await useAddress(context);
+      const owner = await verifiedOwner("vis3m");
+      const mate = await memberOf(owner);
+      await logInThroughTheApp(page, locale, mate.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId("home-channels")).toBeVisible();
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-home-member", locale);
     });
   });
 }

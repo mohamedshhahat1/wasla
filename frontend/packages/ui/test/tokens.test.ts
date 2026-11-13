@@ -98,6 +98,17 @@ const rolePairs: Array<[string, string, number]> = [
   ["color-primary", "color-surface", NON_TEXT],
   ["color-danger", "color-surface-sunken", NON_TEXT],
   ["color-text-muted", "color-surface-sunken", NON_TEXT],
+  // FE-3 (UI3-02): the side navigation and sheet (light blue), the top bar's pressed controls,
+  // the banners' and badges' words and icons, the meter's track and its over-limit fill.
+  ["color-focus", "color-secondary-subtle", NON_TEXT],
+  ["color-text", "color-secondary-subtle", NON_TEXT],
+  ["color-on-brand", "color-primary-pressed", TEXT],
+  ["color-on-brand-muted", "color-brand", NON_TEXT],
+  ["color-warning", "color-warning-subtle", NON_TEXT],
+  ["color-danger", "color-danger-subtle", NON_TEXT],
+  ["color-info", "color-info-subtle", NON_TEXT],
+  ["color-text-muted", "color-surface", NON_TEXT],
+  ["color-warning", "color-surface", NON_TEXT],
 ];
 
 describe("token contrast (WCAG 1.4.3 text 4.5:1, 1.4.11 non-text 3:1)", () => {

@@ -290,6 +290,60 @@ for (const { locale, dir } of DIRECTIONS) {
       await expect(page.getByRole("dialog")).toHaveCount(0);
       await expect(page.getByTestId("trigger")).toBeFocused();
     });
+    // ---------------------------------------------------------------- FE-3 composites
+    test(`SwitcherMenu ${dir}: ArrowDown moves between workspaces; Escape returns focus`, async ({
+      page,
+    }) => {
+      await openStory(page, "composites-app--switcher-open", locale);
+      const menu = page.locator("[data-switcher-menu]");
+      await expect(menu).toBeVisible();
+      await expect(menu.getByRole("menuitemradio")).toHaveCount(2);
+      await expect(menu.getByRole("menuitemradio").first()).toHaveAttribute("aria-checked", "true");
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("ArrowDown");
+      await expect(menu.getByRole("menuitemradio").nth(1)).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveCount(0);
+      await expect(page.locator("[data-switcher-trigger]")).toBeFocused();
+    });
+    test(`BannerStack ${dir}: the disclosure opens with Enter and says so`, async ({ page }) => {
+      await openStory(page, "composites-app--banner-stack-with-more", locale);
+      await expect(page.locator("[data-banner]")).toHaveCount(2);
+      const more = page.locator("[data-banner-stack] button[aria-expanded]");
+      await more.focus();
+      await page.keyboard.press("Enter");
+      await expect(more).toHaveAttribute("aria-expanded", "true");
+      await expect(page.locator("[data-banner]")).toHaveCount(3);
+      await page.keyboard.press("Enter");
+      await expect(page.locator("[data-banner]")).toHaveCount(2);
+    });
+    test(`AppShell ${dir}: the side navigation sits at the inline start`, async ({ page }) => {
+      await openStory(page, "composites-app--shell", locale);
+      const side = await box(page.locator("[data-side-nav]"));
+      const main = await box(page.locator("#main"));
+      expect(rtl ? side.x > main.x : side.x < main.x).toBe(true);
+    });
+    test(`AppShell ${dir}: on a phone the sheet opens with Enter, at the inline start; Escape returns focus`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await openStory(page, "composites-app--shell", locale);
+      const trigger = page.locator("[data-nav-trigger]");
+      await trigger.focus();
+      await page.keyboard.press("Enter");
+      const sheet = page.locator("[data-nav-sheet]");
+      await expect(sheet).toBeVisible();
+      await sheet.evaluate((element) =>
+        Promise.all(element.getAnimations().map((animation) => animation.finished)),
+      );
+      const b = await box(sheet);
+      if (rtl) expect(Math.round(b.x + b.width)).toBe(390);
+      else expect(Math.round(b.x)).toBe(0);
+      await expect(sheet.getByRole("link").first()).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(sheet).toHaveCount(0);
+      await expect(trigger).toBeFocused();
+    });
     test(`Dialog ${dir}: the close button sits at the inline end of the title`, async ({
       page,
     }) => {

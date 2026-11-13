@@ -63,6 +63,16 @@ const PARTS: Array<{ name: string; open: (page: Page) => Promise<Locator> }> = [
     },
   },
   {
+    // FE-3 (UI3-03): the navigation sheet enters from the inline start.
+    name: "Navigation sheet",
+    open: async (page) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await openStory(page, "composites-app--shell", "en");
+      await page.locator("[data-nav-trigger]").click();
+      return page.locator("[data-nav-sheet]");
+    },
+  },
+  {
     name: "Button",
     open: async (page) => {
       await openStory(page, "primitives-button--default", "en");

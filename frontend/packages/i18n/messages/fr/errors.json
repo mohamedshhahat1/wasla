@@ -25,6 +25,7 @@
   "channel_type_not_allowed": "Votre forfait n'inclut pas ce canal.",
   "channel_capacity_selection_invalid": "Cette sélection de canaux n'est pas valide.",
   "whatsapp_ownership_unverified": "Nous n'avons pas pu confirmer que ce numéro WhatsApp vous appartient.",
+  "whatsapp_number_already_connected": "Ce numéro WhatsApp est déjà connecté à Wasla. Chaque numéro ne peut être connecté qu'une fois.",
   "recipient_opted_out": "Ce client a demandé à ne plus recevoir de messages.",
   "suppressed": "Les messages vers cette adresse sont suspendus.",
   "template_refused": "Ce modèle ne peut pas être utilisé.",

@@ -33,6 +33,34 @@ export { FormField, type FieldControlProps, type FormFieldProps } from "./compos
 export { EmptyState, ErrorState, type ErrorStateProps } from "./composites/states";
 export { AuthLayout, BrandPanel, Card, PageHeader, Wordmark } from "./composites/layout";
 export { Spinner } from "./primitives/button";
+export {
+  AppShell,
+  NavList,
+  useCloseNavigation,
+  type AppShellProps,
+  type NavItem,
+} from "./composites/app";
+export {
+  Badge,
+  Banner,
+  BannerStack,
+  Checklist,
+  KeyValueList,
+  LiveIndicator,
+  Meter,
+  StatCard,
+  StatusState,
+  type BannerProps,
+  type ChecklistItem,
+  type ChecklistState,
+  type LiveState,
+  type StatusTone,
+} from "./composites/status";
+export {
+  SwitcherMenu,
+  type SwitcherMenuProps,
+  type SwitcherWorkspace,
+} from "./composites/switcher";
 
 /** The sixteen primitives of DS-04, for the Storybook coverage test. */
 export const PRIMITIVES = [

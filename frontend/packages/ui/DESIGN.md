@@ -119,6 +119,53 @@ animate; nothing loops but the busy ring; nothing animates on page load. Under
 `prefers-reduced-motion: reduce` every transition is 0 s and no animation runs (a Playwright test
 asserts it, with a control that shows the same parts animating otherwise).
 
+## The signed-in app (FE-3, ADR-196)
+
+**The frame.** The dark-blue top bar (`brand`) carries the wordmark, the workspace switcher (an outlined button on the
+band), the live-updates mark and the account menu; it scrolls with the page, so it never covers a focused field. From
+1024 px the navigation is a light-blue side band (`secondary-subtle`) at the inline start, 256 px (`--spacing-nav`);
+below that it is a sheet from the inline start (mirrored in RTL) behind a menu button. The page sits on the canvas;
+each page opens with its heading on a light-blue band (the secondary's other half); the action-blue footer stays the
+one brand band. The current navigation entry is a white "selected" row with blue words and `aria-current="page"`.
+
+**Navigation shows only what exists** - the registry in `apps/web/lib/navigation.ts`; never a disabled entry, a
+"coming soon" or a link to a screen a later stage builds.
+
+**Gates.** A full state (suspended, access withdrawn) replaces the page with `StatusState` - an amber icon on the
+light-blue band, a heading that takes focus, words, one action. Everything else is a `Banner` under the top bar: one
+line, its status colour only for a status (payment owed: red for owners and admins; a billing issue: amber for
+members; capacity, allowance, a subscription that ended: amber), information in blue (trial ending, live updates
+paused). At most two banners show; the rest sit behind one "n more" disclosure. A new banner is announced once,
+politely; one that stays is never repeated. No amount, price or invoice appears.
+
+**Badges** are a small pill with words and an icon (`Badge`), never colour alone. **Stat cards** (`StatCard`) are a
+label, a number in Latin digits inside `<bdi>`, and an optional line. **Meters** (`Meter`, `role="meter"`) show used
+of total in words beside the bar; over the limit is said in words. **Checklists** (`Checklist`) give every step its
+state in words.
+
+**Secrets typed into a form** (an access token): a password field with show / hide, no autocomplete, no spell check,
+never prefilled; the request is a plain call (never a cached mutation); the form resets after success.
+
+**Irreversible actions** use `ConfirmDialog` with something to type (releasing a number: its last four digits);
+reversible ones a plain confirmation dialog.
+
+**Motion.** The sheet enters with `--motion-slow` and leaves with `--motion-fast`; banners are placed, not slid; the
+live mark is a still dot - nothing loops but the busy ring.
+
+**Measured at FE-3's end** (39 screens per width, en and ar, the signed-in screens included): 1280 - 62.3 / 29.9 /
+7.6; 390 - 64.0 / 27.1 / 8.3. Gate states are measured apart (status ≤ 8 %): the payment banner 4.1–6.3 %, the
+suspended state 0.3–0.5 %.
+
+**Cards are not landmarks.** A card is a block with an `h2`; only the frame's header, navigation, main and footer are
+landmarks (a region per card is noise for screen readers - and crashed Firefox's axe run, FEF-25).
+
+| Skill (FE-3)    | Decided                                                                                                                          |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| ui-ux-pro-max   | the shell's navigation pattern, banners in words and icons, the secret field, the typed confirmation, the pre-delivery checklist |
+| taste-skill     | where the secondary sits (bar, side navigation, heading bands), one primary per view                                             |
+| emil-design-eng | the sheet's motion; banners placed, not slid; a still live mark                                                                  |
+| impeccable      | the audits before (17/20) and after (19/20) the fixes                                                                            |
+
 ## Right to left
 
 Logical properties only (the lint forbids physical sides). The brand panel sits at the inline end
