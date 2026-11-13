@@ -506,3 +506,94 @@ dev stack. The result goes to E:\wasla-cleanup\CLEANUP_fe3_<date>.md (not commit
 ## 30. Final Verdict
 
 The verdict is written in the addendum, once the push's frontend.yml and ci.yml runs are read (section 22).
+
+---
+
+# Addendum — GitHub Actions, the section-27 fixes, Part C and the verdict
+
+## A1. Runs
+
+| Push | Commit | frontend.yml | ci.yml |
+|---|---|---|---|
+| merge + report | 6710169 | [43465981357](https://github.com/mohamedshhahat1/wasla/actions/runs/43465981357): CANCELLED - the e2e job passed its 40 minutes; failures inside it below | [43465981455](https://github.com/mohamedshhahat1/wasla/actions/runs/43465981455): FAILURE - Migration-built schema: test_upload_concurrency `assert 8 < 5`; every other job success |
+| fix 1 | c2634ba | [43485710440](https://github.com/mohamedshhahat1/wasla/actions/runs/43485710440): FAILURE - chromium part (FE-2's chromium-phone auth journeys: "fetch failed"), firefox part (one J1 ar timeout), stream-restart part (demo seed); webkit and visual-roles parts success | [43485710483](https://github.com/mohamedshhahat1/wasla/actions/runs/43485710483): SUCCESS, every job |
+| fix 2 | 5f8fb31 | [43498775464](https://github.com/mohamedshhahat1/wasla/actions/runs/43498775464): SUCCESS, every job | [43498775732](https://github.com/mohamedshhahat1/wasla/actions/runs/43498775732): SUCCESS, every job |
+
+Green run 43498775464 (frontend.yml, 5f8fb31), job by job:
+- Install, drift, checks (licences 174 shipped / 869 build-only / 0 violations = FE-RD), Storybook (289 passed / 224 skipped): success.
+- E2E parts:
+
+| Part | Result | Duration |
+|---|---|---|
+| Chromium, desktop and phone | 148 passed / 6 skipped | 12m06 |
+| Firefox, desktop and phone | 142 passed / 12 skipped (FEF-12's rules; no "Page crashed") | 13m23 |
+| WebKit, desktop and phone; then stream-restart and api-down alone | 144 passed / 12 skipped | 16m32 |
+| visual roles and the 60 / 30 / 10 check | 58 passed; 1280 62.1 / 30.0 / 7.8, 390 64.2 / 26.9 / 8.4 (this machine 62.3 / 29.9 / 7.6 and 64.0 / 27.1 / 8.3: within 0.4 points) | 4m41 |
+
+  - Total 522 tests: the 527 of the first run minus JR-11's five project skips, since JR-11 now has one project of its own.
+  - The e2e duration: FE-RD's single job 19m07 → FE-3's single job over 40 min (cancelled) → the longest part 16m32.
+
+Green run 43498775732 (ci.yml, 5f8fb31):
+- Every job succeeded.
+- Tests line: **8120 passed**, 17 skipped, 2 deselected. That is CI_TEST_COUNT 8105 (run 43335908799 at c57dcb0) + 15, exactly A-BE's tests: test_whatsapp_number_conflict_code 4, test_e2e_gate_states 10, test_workspace_switching +1.
+- The Migration-built schema job passed, and the OpenAPI freshness test passed inside the suite.
+
+## A2. Section-27 fixes (frontend/ and frontend.yml only; no band, bound or journey weakened)
+
+**c2634ba — FEF-25 found at its root.**
+- *Cause.* Playwright 1.65 computes accessible names in its own JavaScript world and reads `element.ariaLabelledByElements` there. axe then reads the same reflected property on the same element from the page's world, and Firefox's content process dies. This was bisected on this machine: a named `getByRole` followed by that one property read crashes; neither alone does. It is the same on Linux, so the crash was never Windows-only.
+- *Why FE-2's axe test started crashing.* It began with this stage's SH-06 move, which named the dialog in the query; Playwright then read the property.
+- *Fix.* In Firefox the fixture removes ARIA element reflection from the page's world (support/page-guard.ts, also for second-actor contexts). axe resolves the same references through getAttribute and runs every rule. FE-3's journeys run aria-allowed-attr in Firefox again.
+- *Job split.* The e2e job is split by Playwright project, and the report is uploaded when a part is cancelled.
+
+**5f8fb31 — JR-11 alone.**
+- *Cause.* JR-11 ran `docker stop` on the e2e API in chromium-desktop while other workers ran journeys. FE-2's chromium-phone journeys failed with "fetch failed", and the local "J1 time-zone field" flake had the same cause.
+- *Fix.* JR-11 moves to fe3-api-down.spec.ts with a project, "api-down", that runs after stream-restart. stream-restart waits for the projects WASLA_E2E_STREAM_AFTER names. The WebKit part closes with both, instead of a separate part that started them on a cold profile, where the demo seed met FEB-32's mailbox race. JR-11 is unchanged and runs once.
+
+Gates on each fix (verify worktree):
+- G-2: drift 0 and format clean on each.
+- G-3 on c2634ba: first run stopped at @wasla/config's licence test, 158 s against its 120 s limit (FEF-20); re-run 30 / 30, 0 cached.
+- G-3 on 5f8fb31: two runs stopped at vitest "Timeout waiting for worker to respond" in @wasla/ui on this machine; ui alone 86 / 86; full re-run 30 / 30, 0 cached.
+- action-validator 0.6.0: VALID.
+- Local Firefox (fe2-axe + fe3-shell, both Firefox projects): 56 passed / 4 skipped, 0 crashes.
+- Local chain (visual-roles-phone → stream-restart → api-down): 31 passed. The first attempt hit FEF-13's native worker exit and was re-run.
+
+**ci.yml at 6710169.** test_upload_concurrency (RAG uploads; not a path of this stage) was red once in the migration lane. Locally it passed 5 / 5 at c57dcb0 and 5 / 5 at a3cdcd8, and it was green in both later CI runs. The test's own comment records the same overshoot once before ("7 of 5 once in the migration lane"). Recorded as FEB-33; it does not decide this stage.
+
+## A3. Part C — the previews
+
+- **Account.** `wrangler whoami` (4.158.0, run from the notes folder) named "Mohamedshhahat1@gmail.com's Account" (1cc89863…), the same as FE-RD.
+- **Build.** `build-workers-linux.mjs --env preview` in E:\wasla-fe3-preview at 6710169, with the three workers.dev origins. web 3847 files / 82,327,103 B; console 3687 / 78,724,134 B; marketing 29 / 570,342 B. workers:smoke green.
+- **Head.** Shipped sources are identical at 5f8fb31 (`git diff 6710169 5f8fb31 -- frontend/apps frontend/packages` is empty), and the worktree was moved to 5f8fb31 before the deploy. Every wrangler.jsonc is unchanged; no secret was set.
+
+| Worker | URL | Previous version (FE-RD) | New version | Upload (gzip) |
+|---|---|---|---|---|
+| wasla-preview-web | https://wasla-preview-web.wasla-marketing.workers.dev | a4e11d16-af70-4386-8745-bded1f4fc16e | 0ef04cfb-8e99-4303-ba43-2b9e937972c7 | 7780.31 KiB (1573.28 KiB) |
+| wasla-preview-console | https://wasla-preview-console.wasla-marketing.workers.dev | 852ff2f9… | 07d1bba6-0f7b-4f8a-932b-06c94383b4c0 | 6108.15 KiB (1291.13 KiB) |
+| wasla-preview-marketing | https://wasla-preview-marketing.wasla-marketing.workers.dev | 9c6c6b1a… | 0b732c17-1e18-4c8c-ab71-0dde38bb9855 | 0.35 KiB (0.24 KiB) |
+
+PV3-02 (logs/pc_live.log, scripts/pv3_live.mjs). 68 page loads: Chromium and WebKit, 1280 and 390, en / ar (marketing also fr / tr).
+- **Pages.** Every status as expected (200, and 404 on the not-found pages). lang and dir right on every load. CSP, X-Content-Type-Options, Referrer-Policy, HSTS and Permissions-Policy present on every response. 0 CSP violations.
+- **Other hosts.** The only request to another host is /signup's read of the configured API origin https://api.iwasla.tech: 8 loads, the same as FE-RD's `foreign=1` on signup.
+- **Session routes.** /session/login and /session/refresh: GET 405, cross-origin 403, header-less 403, same-origin 503 session_unavailable (= FE-2).
+- **"/".** The preview has no API, so "/" shows FE-2's "Connection lost" state (refresh answers 503 session_unavailable), not the sign-in page. Captured in screens/preview/. The shell needs a session, so the owner sees it through the local walk-through, not the preview. Recorded as FEF-26.
+
+## A4. Findings updated
+
+| ID | Finding | Status |
+|---|---|---|
+| FEF-25 | Firefox content-process crash in axe scans: Playwright's and axe's reads of `ariaLabelledByElements` from two worlds | CLOSED (c2634ba; Firefox parts green on Linux) |
+| FEF-26 | the previews' "/" shows "Connection lost" (no API behind a preview) | ACCEPTED RESIDUAL (FE-2's session, protected; correct for a preview without an API) |
+| FEF-27 | JR-11 stopped the API beside other journeys (the J1 "time-zone" flake recorded earlier was this) | CLOSED (5f8fb31) |
+| FEB-32 | the e2e demo seed and the smoke read a superseded code when the register mail arrives late | NOT CLOSED (tests/e2e_stack; it also hit the demo seed on a cold profile on the runner) |
+| FEB-33 | test_upload_concurrency's pool peak overshoots once in the migration lane | NOT CLOSED (timing test outside this stage; green 2 of 3 runs, 10 / 10 locally) |
+
+## A5. Final Verdict
+
+**FE-3 MERGED AND PUSHED, CI GREEN**: the frontend.yml and ci.yml runs for 5f8fb31 are green in every job. This addendum's own ci.yml run is recorded in E:\wasla-cleanup\CLEANUP_fe3_2026-11-13.md, and Part D runs only after it is green.
+
+PREVIEWS UPDATED: wasla-preview-web, wasla-preview-console and wasla-preview-marketing, all three redeployed.
+
+NEXT: WHATSAPP EMBEDDED SIGNUP BACKEND STAGE (FEQ-14, the owner's choice) AND FEB-03 / FEB-04 / FEB-05 BACKEND STAGE, THEN FE-4. FE-9 and FE-10 may start in parallel after their own backend items (FEB-10, FEB-08 and the owner's copy).
+
+CLEANUP: see E:\wasla-cleanup\CLEANUP_fe3_2026-11-13.md.
