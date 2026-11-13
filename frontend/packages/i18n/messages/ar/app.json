@@ -129,6 +129,7 @@
     "emptyTitle": "لا توجد قنوات بعد",
     "emptyBody": "القناة رقم واتساب يكتب إليه عملاؤك. اربط رقمًا لتبدأ في استلام رسائلهم هنا.",
     "capacity": "خانات القنوات",
+    "slotsInUse": "الخانات المستخدمة",
     "capacityValue": "{active} من {limit} مستخدمة",
     "capacityUnlimited": "{active} مستخدمة، بلا حد",
     "capacityOver": "تجاوز الحد",

@@ -257,6 +257,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const stopState = next.onState((state) => {
       setLiveState(state);
       setLiveSince(appNow());
+      // A refused ticket (401 / 403) ends the stream without a closed frame: the membership or
+      // the workspace may have changed, so the gates are read again (their codes then decide).
+      if (state.kind === "ended" && state.reason === "unauthenticated") void recheck();
     });
     next.start();
     installHooks(queryClient, () => ({ role: next.role, state: next.state.kind }));

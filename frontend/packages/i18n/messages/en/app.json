@@ -129,6 +129,7 @@
     "emptyTitle": "No channels yet",
     "emptyBody": "A channel is a WhatsApp number your customers write to. Connect one to start receiving their messages here.",
     "capacity": "Channel slots",
+    "slotsInUse": "Slots in use",
     "capacityValue": "{active} of {limit} in use",
     "capacityUnlimited": "{active} in use, no limit",
     "capacityOver": "Over the limit",

@@ -79,7 +79,8 @@ export function AppShell({
                   iconName="Menu"
                   label={menuLabel}
                   data-nav-trigger=""
-                  className="text-on-brand hover:bg-primary hover:text-on-brand active:bg-primary-pressed lg:hidden"
+                  tone="inverse"
+                  className="lg:hidden"
                 />
               </DialogPrimitive.Trigger>
               <DialogPrimitive.Portal>
@@ -100,12 +101,7 @@ export function AppShell({
                       {menuLabel}
                     </DialogPrimitive.Title>
                     <DialogPrimitive.Close asChild>
-                      <IconButton
-                        icon={X}
-                        iconName="X"
-                        label={closeLabel}
-                        className="text-on-brand hover:bg-primary hover:text-on-brand"
-                      />
+                      <IconButton icon={X} iconName="X" label={closeLabel} tone="inverse" />
                     </DialogPrimitive.Close>
                   </div>
                   <nav aria-label={navLabel} className="flex flex-col gap-2 p-4">

@@ -129,6 +129,7 @@
     "emptyTitle": "Henüz kanal yok",
     "emptyBody": "Kanal, müşterilerinizin yazdığı bir WhatsApp numarasıdır. Mesajlarını burada almaya başlamak için bir tane bağlayın.",
     "capacity": "Kanal yuvaları",
+    "slotsInUse": "Kullanımdaki yuvalar",
     "capacityValue": "{limit} yuvanın {active} tanesi kullanımda",
     "capacityUnlimited": "{active} kullanımda, sınır yok",
     "capacityOver": "Sınırın üzerinde",

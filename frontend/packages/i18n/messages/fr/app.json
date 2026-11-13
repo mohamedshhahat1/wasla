@@ -129,6 +129,7 @@
     "emptyTitle": "Aucun canal pour l'instant",
     "emptyBody": "Un canal est un numéro WhatsApp auquel vos clients écrivent. Connectez-en un pour commencer à recevoir leurs messages ici.",
     "capacity": "Emplacements de canaux",
+    "slotsInUse": "Emplacements utilisés",
     "capacityValue": "{active} sur {limit} utilisés",
     "capacityUnlimited": "{active} utilisés, sans limite",
     "capacityOver": "Au-delà de la limite",

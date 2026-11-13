@@ -202,7 +202,7 @@ export function ChannelsList() {
             </h2>
             {cap.effective_limit !== null ? (
               <Meter
-                label={t("channels.capacity")}
+                label={t("channels.slotsInUse")}
                 value={cap.active}
                 max={cap.effective_limit}
                 valueText={t("channels.capacityValue", {

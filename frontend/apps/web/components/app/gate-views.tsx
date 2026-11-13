@@ -174,10 +174,13 @@ export function GateBanners() {
  */
 export function GateFullState({ state }: { state: "suspended" | "revoked" }) {
   const t = useTranslations("app");
-  const { recheck } = useWorkspace();
+  const { recheck, workspaceId } = useWorkspace();
   const { profile } = useSession();
   const [checking, setChecking] = useState(false);
-  const others = (profile?.workspaces?.length ?? 0) > (state === "suspended" ? 1 : 0);
+  // Suggest switching only when another workspace can actually be opened (an active one).
+  const others = (profile?.workspaces ?? []).some(
+    (item) => item.id !== workspaceId && item.status === "active",
+  );
   useEffect(() => {
     document.getElementById("gate-heading")?.focus();
   }, [state]);
