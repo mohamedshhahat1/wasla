@@ -159,12 +159,12 @@ suspended state 0.3–0.5 %.
 **Cards are not landmarks.** A card is a block with an `h2`; only the frame's header, navigation, main and footer are
 landmarks (a region per card is noise for screen readers - and crashed Firefox's axe run, FEF-25).
 
-| Skill (FE-3) | Decided |
-| --- | --- |
-| ui-ux-pro-max | the shell's navigation pattern, banners in words and icons, the secret field, the typed confirmation, the pre-delivery checklist |
-| taste-skill | where the secondary sits (bar, side navigation, heading bands), one primary per view |
-| emil-design-eng | the sheet's motion; banners placed, not slid; a still live mark |
-| impeccable | the audits before (17/20) and after (19/20) the fixes |
+| Skill (FE-3)    | Decided                                                                                                                          |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| ui-ux-pro-max   | the shell's navigation pattern, banners in words and icons, the secret field, the typed confirmation, the pre-delivery checklist |
+| taste-skill     | where the secondary sits (bar, side navigation, heading bands), one primary per view                                             |
+| emil-design-eng | the sheet's motion; banners placed, not slid; a still live mark                                                                  |
+| impeccable      | the audits before (17/20) and after (19/20) the fixes                                                                            |
 
 ## Right to left
 
