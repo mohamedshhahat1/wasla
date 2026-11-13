@@ -35,6 +35,7 @@ export function AccountMenu({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   if (!profile) return null;
   const name = profile.full_name || profile.email;
 
@@ -56,6 +57,8 @@ export function AccountMenu({
         dir={dir}
         side="bottom"
         label={t("account.label")}
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
         trigger={
           <button
             type="button"
@@ -101,7 +104,23 @@ export function AccountMenu({
             >
               {auth("home.signOut")}
             </Button>
-            <Button variant="danger" disabled={busy} onClick={() => setConfirmOpen(true)}>
+            <Button
+              variant="danger"
+              disabled={busy}
+              onClick={() => {
+                // The menu closes first and the dialog opens once it has left the page: a dialog
+                // over a popover still fading out is never read or scanned half-transparent.
+                setMenuOpen(false);
+                const openWhenGone = () => {
+                  if (document.querySelector("[data-account-menu]")) {
+                    requestAnimationFrame(openWhenGone);
+                  } else {
+                    setConfirmOpen(true);
+                  }
+                };
+                requestAnimationFrame(openWhenGone);
+              }}
+            >
               {auth("home.signOutEverywhere")}
             </Button>
           </div>

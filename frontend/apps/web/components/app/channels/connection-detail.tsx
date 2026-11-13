@@ -299,7 +299,7 @@ export function ConnectionDetail({ id }: { id: string }) {
           }
         />
       </div>
-      <Card as="section" aria-labelledby="facts-title">
+      <Card as="div">
         <div className="flex flex-col gap-5">
           <h2 id="facts-title" className="m-0 text-lg font-semibold text-text">
             {t("detail.facts")}
@@ -307,7 +307,7 @@ export function ConnectionDetail({ id }: { id: string }) {
           <KeyValueList items={facts} />
         </div>
       </Card>
-      <Card as="section" aria-labelledby="limit-title" data-testid="messaging-limit">
+      <Card as="div" data-testid="messaging-limit">
         <div className="flex flex-col gap-4">
           <h2 id="limit-title" className="m-0 text-lg font-semibold text-text">
             {t("detail.limit")}
@@ -358,7 +358,7 @@ export function ConnectionDetail({ id }: { id: string }) {
         </div>
       </Card>
       {manager ? (
-        <Card as="section" aria-labelledby="actions-title" data-testid="connection-actions">
+        <Card as="div" data-testid="connection-actions">
           <div className="flex flex-col gap-4">
             <h2 id="actions-title" className="m-0 text-lg font-semibold text-text">
               {t("detail.actions")}

@@ -278,7 +278,7 @@ export function ConnectAdapterPage({ adapterKey }: { adapterKey: string }) {
         <PageHeader title={t("connect.title")} description={t("connect.line")} />
       </div>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
-        <Card as="section" aria-label={t("connect.title")} className="lg:col-span-3">
+        <Card as="div" className="lg:col-span-3">
           {blocked ? (
             <p className="m-0 text-md text-text" data-testid="connect-reason">
               {blocked}
@@ -287,7 +287,7 @@ export function ConnectAdapterPage({ adapterKey }: { adapterKey: string }) {
             <WhatsAppAssistedForm />
           )}
         </Card>
-        <Card as="section" aria-labelledby="guide-title" className="lg:col-span-2">
+        <Card as="div" className="lg:col-span-2">
           <div className="flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 id="guide-title" className="m-0 text-lg font-semibold text-text">

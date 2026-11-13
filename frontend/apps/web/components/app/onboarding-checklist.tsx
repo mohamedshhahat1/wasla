@@ -92,7 +92,7 @@ export function OnboardingChecklist() {
   });
 
   return (
-    <Card as="section" aria-labelledby="checklist-title" data-testid="onboarding-checklist">
+    <Card as="div" data-testid="onboarding-checklist">
       <div className="flex flex-col gap-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex flex-col gap-1">

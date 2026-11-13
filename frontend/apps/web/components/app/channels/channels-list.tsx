@@ -195,7 +195,7 @@ export function ChannelsList() {
       ) : null}
 
       {cap ? (
-        <Card as="section" aria-labelledby="capacity-title" data-testid="capacity">
+        <Card as="div" data-testid="capacity">
           <div className="flex flex-col gap-4">
             <h2 id="capacity-title" className="m-0 text-lg font-semibold text-text">
               {t("channels.capacity")}
@@ -232,7 +232,7 @@ export function ChannelsList() {
       ) : null}
 
       {cap?.reduction && !cap.reduction.resolved_at ? (
-        <Card as="section" aria-labelledby="reduction-title" data-testid="reduction-notice">
+        <Card as="div" data-testid="reduction-notice">
           <div className="flex flex-col gap-3">
             <h2 id="reduction-title" className="m-0 text-lg font-semibold text-text">
               {t("channels.reductionTitle")}
@@ -275,7 +275,7 @@ export function ChannelsList() {
           }
         />
       ) : connections.data ? (
-        <section aria-label={t("channels.title")}>
+        <div>
           <ul className="m-0 flex list-none flex-col gap-3 p-0" data-testid="connections">
             {connections.data.map((connection) => (
               <ConnectionRow
@@ -288,7 +288,7 @@ export function ChannelsList() {
           {!canManageChannels(role) ? (
             <p className="m-0 mt-4 text-sm text-text-muted">{t("roles.onlyAdmins")}</p>
           ) : null}
-        </section>
+        </div>
       ) : (
         <p role="status" className="m-0 text-sm text-text-muted">
           {t("home.loading")}
@@ -296,7 +296,7 @@ export function ChannelsList() {
       )}
 
       {released.length ? (
-        <section aria-labelledby="released-title" className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 id="released-title" className="m-0 text-lg font-semibold text-text">
               {t("channels.released")}
@@ -327,7 +327,7 @@ export function ChannelsList() {
               ))}
             </ul>
           </div>
-        </section>
+        </div>
       ) : null}
 
       {choosing && cap && connections.data ? (

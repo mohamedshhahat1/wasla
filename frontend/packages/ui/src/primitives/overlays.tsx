@@ -31,6 +31,9 @@ export interface PopoverProps {
   /** The popover's accessible name. */
   label: string;
   defaultOpen?: boolean;
+  /** Controlled use (FE-3: the account menu closes before its confirmation dialog opens). */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 export function Popover({
@@ -40,9 +43,15 @@ export function Popover({
   dir,
   label,
   defaultOpen,
+  open,
+  onOpenChange,
 }: PopoverProps) {
   return (
-    <PopoverPrimitive.Root {...(defaultOpen === undefined ? {} : { defaultOpen })}>
+    <PopoverPrimitive.Root
+      {...(defaultOpen === undefined ? {} : { defaultOpen })}
+      {...(open === undefined ? {} : { open })}
+      {...(onOpenChange ? { onOpenChange } : {})}
+    >
       <PopoverPrimitive.Trigger asChild>{trigger}</PopoverPrimitive.Trigger>
       <PopoverPrimitive.Portal>
         <PopoverPrimitive.Content

@@ -112,7 +112,7 @@ export function Home() {
 
       {manager ? <OnboardingChecklist /> : null}
 
-      <section aria-labelledby="home-today" className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4">
         <h2 id="home-today" className="sr-only">
           {t("home.title")}
         </h2>
@@ -167,11 +167,11 @@ export function Home() {
             {t("gates.allowance.member")}
           </p>
         ) : null}
-      </section>
+      </div>
 
       {manager ? (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <Card as="section" aria-labelledby="home-leads" data-testid="home-leads">
+          <Card as="div" data-testid="home-leads">
             <div className="flex flex-col gap-4">
               <SectionTitle>
                 <span id="home-leads">{t("home.leads")}</span>
@@ -198,7 +198,7 @@ export function Home() {
               </CardBody>
             </div>
           </Card>
-          <Card as="section" aria-labelledby="home-usage" data-testid="home-usage">
+          <Card as="div" data-testid="home-usage">
             <div className="flex flex-col gap-4">
               <SectionTitle>
                 <span id="home-usage">{t("home.usage")}</span>
