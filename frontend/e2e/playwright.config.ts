@@ -31,6 +31,8 @@ const desktop = { viewport: { width: 1280, height: 800 } };
 const phone = { viewport: { width: 390, height: 844 }, isMobile: false, hasTouch: true };
 
 const STREAM_RESTART = /fe2-stream\.spec\.ts$/;
+// FE-3's JR-11 stops the API: like FX-07's restart it runs alone, after it (never beside a journey).
+const API_DOWN = /fe3-api-down\.spec\.ts$/;
 // FE-RD (VQ-01, VQ-03, VQ-04): the colour-role and target proofs run in Chromium only, at 1280 and
 // 390; FE-2's six projects never run them, so their counts are unchanged.
 const VISUAL_ROLES = /visual-roles\.spec\.ts$/;
@@ -43,6 +45,15 @@ const BROWSERS = [
   { name: "webkit-desktop", use: { ...devices["Desktop Safari"], ...desktop } },
   { name: "webkit-phone", use: { ...devices["Desktop Safari"], ...phone } },
 ];
+
+const STREAM_AFTER = (process.env["WASLA_E2E_STREAM_AFTER"] ?? "").split(",").filter(Boolean);
+if (STREAM_AFTER.length === 0) {
+  STREAM_AFTER.push(
+    ...BROWSERS.map(({ name }) => name),
+    "visual-roles-desktop",
+    "visual-roles-phone",
+  );
+}
 
 export default defineConfig({
   testDir: "./tests",
@@ -73,7 +84,11 @@ export default defineConfig({
     },
   ],
   projects: [
-    ...BROWSERS.map(({ name, use }) => ({ name, use, testIgnore: [STREAM_RESTART, VISUAL_ROLES] })),
+    ...BROWSERS.map(({ name, use }) => ({
+      name,
+      use,
+      testIgnore: [STREAM_RESTART, API_DOWN, VISUAL_ROLES],
+    })),
     {
       name: "visual-roles-desktop",
       use: { ...devices["Desktop Chrome"], ...desktop },
@@ -84,12 +99,19 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"], ...phone },
       testMatch: VISUAL_ROLES,
     },
-    // FX-07's test restarts the API, so it runs alone after every other project.
+    // FX-07's test restarts the API, so it runs alone after every other project. frontend.yml runs
+    // the projects in parts: WASLA_E2E_STREAM_AFTER names the projects of the part it closes.
     {
       name: "stream-restart",
       use: { ...devices["Desktop Chrome"], ...desktop },
       testMatch: STREAM_RESTART,
-      dependencies: BROWSERS.map(({ name }) => name),
+      dependencies: STREAM_AFTER,
+    },
+    {
+      name: "api-down",
+      use: { ...devices["Desktop Chrome"], ...desktop },
+      testMatch: API_DOWN,
+      dependencies: ["stream-restart"],
     },
   ],
 });

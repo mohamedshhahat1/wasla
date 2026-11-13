@@ -1,8 +1,9 @@
 /**
  * FE-3's journeys (JR-02..JR-12) against FE-0's profile: the shell and switcher, every gate of
  * plan section 9 for the roles it concerns, one stream per browser, the connect secret, request
- * discipline, live updates down and back, axe and the keyboard - en and ar, six projects (the
- * request-count and stream-count proofs in the projects named beside them).
+ * discipline, axe and the keyboard - en and ar, six projects (the
+ * request-count and stream-count proofs in the projects named beside them). JR-11 stops the API, so
+ * it lives in fe3-api-down.spec.ts, in a project of its own.
  */
 import AxeBuilder from "@axe-core/playwright";
 import type { BrowserContext, Page } from "@playwright/test";
@@ -606,39 +607,6 @@ test.describe("one stream per browser (JR-09) and request discipline (JR-10)", (
     expect(count("/workspace/gates")).toBe(1);
     await flip(5 * 60_000 + 1000);
     await expect.poll(() => count("/workspace/gates")).toBe(2);
-  });
-});
-
-test.describe("live updates down and back (JR-11)", () => {
-  test("the API stops: paused - retrying; it starts: live again with a new ticket", async ({
-    page,
-    context,
-  }) => {
-    test.skip(project() !== "chromium-desktop", "stopping the API runs in one project");
-    const owner = await verifiedOwner("jr11");
-    const tickets: string[] = [];
-    context.on("request", (request) => {
-      if (request.url().includes("/events/ticket")) tickets.push(request.url());
-    });
-    await signIn(page, context, "en", owner.email);
-    await expect.poll(async () => (await streamOf(page))?.state).toBe("open");
-    const { execFile } = await import("node:child_process");
-    const run = (args: string[]) =>
-      new Promise<void>((resolve, reject) =>
-        execFile("docker", args, (error) => (error ? reject(new Error(error.message)) : resolve())),
-      );
-    await run(["stop", "wasla-fe-e2e-api"]);
-    try {
-      await expect(page.locator('[data-banner="live"]')).toBeVisible({ timeout: 45_000 });
-      await expect(page.getByTestId("gate-announcement")).toContainText(
-        label("en", "app.live.paused"),
-      );
-    } finally {
-      await run(["start", "wasla-fe-e2e-api"]);
-    }
-    await expect.poll(async () => (await streamOf(page))?.state, { timeout: 90_000 }).toBe("open");
-    await expect(page.locator('[data-banner="live"]')).toHaveCount(0);
-    expect(tickets.length).toBeGreaterThanOrEqual(2);
   });
 });
 

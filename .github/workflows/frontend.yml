@@ -156,8 +156,8 @@ jobs:
 
   # FE-3 (section 20): with the shell's journeys one job passed 40 minutes on the runner, so the
   # run is split by Playwright project - same profile, same build, same journeys, none dropped.
-  # stream-restart restarts the API, so it runs in a job of its own (--no-deps: its dependency
-  # list exists only to keep it after the browsers in a single local run).
+  # stream-restart and api-down (JR-11) stop the API, so they run alone after the WebKit projects
+  # of their part (WASLA_E2E_STREAM_AFTER), never beside a journey and never on a cold profile.
   e2e:
     name: E2E against the backend profile (${{ matrix.part.name }})
     needs: install
@@ -176,17 +176,14 @@ jobs:
             browsers: firefox
             projects: --project=firefox-desktop --project=firefox-phone
           - id: webkit
-            name: WebKit, desktop and phone
-            browsers: webkit
-            projects: --project=webkit-desktop --project=webkit-phone
+            name: WebKit, desktop and phone; then the API restart and JR-11 alone
+            browsers: webkit chromium
+            projects: --project=webkit-desktop --project=webkit-phone --project=stream-restart --project=api-down
+            stream_after: webkit-desktop,webkit-phone
           - id: visual-roles
             name: visual roles and the 60 / 30 / 10 check
             browsers: chromium
             projects: --project=visual-roles-desktop --project=visual-roles-phone
-          - id: stream-restart
-            name: stream restart
-            browsers: chromium
-            projects: --project=stream-restart --no-deps
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -208,6 +205,7 @@ jobs:
           WASLA_VISUAL_DIR: ${{ github.workspace }}/frontend/e2e/visual-roles
           # FE-3 (VQ3-02): gate states are measured apart from the averages.
           WASLA_VISUAL_GATES_DIR: ${{ github.workspace }}/frontend/e2e/visual-gates
+          WASLA_E2E_STREAM_AFTER: ${{ matrix.part.stream_after }}
         run: node e2e/scripts/e2e-local.mjs -- ${{ matrix.part.projects }}
       - name: The 60 / 30 / 10 averages of every captured screen (VQ-03, ADR-195)
         if: matrix.part.id == 'visual-roles'
