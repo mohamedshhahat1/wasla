@@ -107,12 +107,19 @@ export async function memberOf(
   });
   if (accepted.status !== 200) throw new Error(`accept answered ${accepted.status}`);
   const bearer = await login(email, PASSWORD, owner.slug);
-  await api("POST", "/api/v1/auth/email/verification/send", { token: bearer });
-  const code = await waitForCode(email);
-  const verified = await api("POST", "/api/v1/auth/email/verification/verify", {
-    token: bearer,
-    body: { code },
-  });
+  // A send supersedes the code sent before it, and the mailbox may hold both: each attempt
+  // takes a code it has not tried, and a refused one asks for a new code (FEB-32's race).
+  const tried = new Set<string>();
+  let verified = { status: 0, json: null as unknown };
+  for (let attempt = 0; attempt < 3 && verified.status !== 200; attempt += 1) {
+    await api("POST", "/api/v1/auth/email/verification/send", { token: bearer });
+    const code = await waitForCode(email, tried);
+    tried.add(code);
+    verified = await api("POST", "/api/v1/auth/email/verification/verify", {
+      token: bearer,
+      body: { code },
+    });
+  }
   if (verified.status !== 200) throw new Error(`verify answered ${verified.status}`);
   const me = await api("GET", "/api/v1/auth/me", { token: bearer });
   return { email, token: bearer, userId: (me.json as { id: string }).id };
