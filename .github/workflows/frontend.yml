@@ -154,11 +154,39 @@ jobs:
           path: frontend/packages/ui/test-results
           retention-days: 7
 
+  # FE-3 (section 20): with the shell's journeys one job passed 40 minutes on the runner, so the
+  # run is split by Playwright project - same profile, same build, same journeys, none dropped.
+  # stream-restart restarts the API, so it runs in a job of its own (--no-deps: its dependency
+  # list exists only to keep it after the browsers in a single local run).
   e2e:
-    name: E2E against the backend profile
+    name: E2E against the backend profile (${{ matrix.part.name }})
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        part:
+          - id: chromium
+            name: Chromium, desktop and phone
+            browsers: chromium
+            projects: --project=chromium-desktop --project=chromium-phone
+          - id: firefox
+            name: Firefox, desktop and phone
+            browsers: firefox
+            projects: --project=firefox-desktop --project=firefox-phone
+          - id: webkit
+            name: WebKit, desktop and phone
+            browsers: webkit
+            projects: --project=webkit-desktop --project=webkit-phone
+          - id: visual-roles
+            name: visual roles and the 60 / 30 / 10 check
+            browsers: chromium
+            projects: --project=visual-roles-desktop --project=visual-roles-phone
+          - id: stream-restart
+            name: stream restart
+            browsers: chromium
+            projects: --project=stream-restart --no-deps
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -173,33 +201,34 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
       - run: pnpm install --frozen-lockfile --prefer-offline
       - name: Browsers
-        run: pnpm --filter @wasla/e2e exec playwright install --with-deps chromium firefox webkit
-      - name: Build, start FE-0's profile, run the smoke (3 browsers x 2 widths x en/ar) and the visual roles, down -v
+        run: pnpm --filter @wasla/e2e exec playwright install --with-deps ${{ matrix.part.browsers }}
+      - name: Build, start FE-0's profile, run this part's projects (en/ar), down -v
         env:
           CI: "true"
           WASLA_VISUAL_DIR: ${{ github.workspace }}/frontend/e2e/visual-roles
           # FE-3 (VQ3-02): gate states are measured apart from the averages.
           WASLA_VISUAL_GATES_DIR: ${{ github.workspace }}/frontend/e2e/visual-gates
-        run: pnpm e2e:local
+        run: node e2e/scripts/e2e-local.mjs -- ${{ matrix.part.projects }}
       - name: The 60 / 30 / 10 averages of every captured screen (VQ-03, ADR-195)
+        if: matrix.part.id == 'visual-roles'
         run: node scripts/measure-colour-roles.mjs --check e2e/visual-roles
       - name: The profile is down whatever happened
         if: always()
         working-directory: .
         run: docker compose -f docker-compose.e2e.yml --profile e2e down -v --remove-orphans
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.part.id }}
           path: frontend/e2e/playwright-report
           retention-days: 7
-      - if: failure()
+      - if: (failure() || cancelled()) && matrix.part.id == 'visual-roles'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: visual-roles
           path: frontend/e2e/visual-roles
           retention-days: 7
-      - if: failure()
+      - if: (failure() || cancelled()) && matrix.part.id == 'visual-roles'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: visual-gates

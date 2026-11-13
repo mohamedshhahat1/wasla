@@ -34,19 +34,17 @@ import {
   suspend,
   SUSPEND_BOUND_MS,
 } from "../support/fe3";
-import { expect, test } from "../support/page-guard";
+import { actorContext, expect, test } from "../support/page-guard";
 
 test.use({ timezoneId: "Africa/Cairo" });
 // Several actors per journey (owner, member, staff), each made through the API and the mailbox.
 test.describe.configure({ timeout: 180_000 });
 
 /**
- * FEF-12's rules, and FEF-25: in Playwright 1.65's Firefox, axe's `aria-allowed-attr` crashes the
- * content process on some of the shell's states (bisected to that one rule: home's cards when they
- * were named sections, the switcher menu and the navigation sheet open). The DOM is the same in
- * every engine; Chromium and WebKit run the rule on every state; Firefox skips only it.
+ * FEF-12's rules only. FEF-25 (Firefox's content process crashing in axe scans) is handled by the
+ * fixture (support/page-guard.ts, withoutAriaElementReflection): every other rule runs in Firefox.
  */
-const FIREFOX_SKIP = ["label", "label-title-only", "aria-allowed-attr"];
+const FIREFOX_SKIP = ["label", "label-title-only"];
 
 async function axe(page: Page, state: string): Promise<void> {
   await expect(page).toHaveTitle(/\S/);
@@ -188,7 +186,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       const owner = await verifiedOwner("jr3");
       const mate = await memberOf(owner);
       await signIn(page, context, locale, owner.email);
-      const memberContext = await browser.newContext({ timezoneId: "Africa/Cairo" });
+      const memberContext = await actorContext(browser);
       const memberPage = await memberContext.newPage();
       await signIn(memberPage, memberContext, locale, mate.email);
       const seen = recordRequests(context);
@@ -237,7 +235,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
 
       // A stranger opening that connection sees what a random id shows.
       const stranger = await verifiedOwner("jr4s");
-      const strangerContext = await browser.newContext({ timezoneId: "Africa/Cairo" });
+      const strangerContext = await actorContext(browser);
       const strangerPage = await strangerContext.newPage();
       await signIn(strangerPage, strangerContext, locale, stranger.email);
       await strangerPage.goto(`${WEB}/channels/${connectionId}`);
@@ -262,7 +260,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await expect(banner(page, "payment").locator("button")).toHaveCount(0);
       await axe(page, "payment banner (owner)");
 
-      const memberContext = await browser.newContext({ timezoneId: "Africa/Cairo" });
+      const memberContext = await actorContext(browser);
       const memberPage = await memberContext.newPage();
       const calls = recordRequests(memberContext);
       await signIn(memberPage, memberContext, locale, mate.email);
@@ -275,7 +273,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
 
       const trialOwner = await verifiedOwner("jr5t");
       await gateState("trialing", trialOwner.slug, 3);
-      const trialContext = await browser.newContext({ timezoneId: "Africa/Cairo" });
+      const trialContext = await actorContext(browser);
       const trialPage = await trialContext.newPage();
       await signIn(trialPage, trialContext, locale, trialOwner.email);
       await expect(banner(trialPage, "trial")).toBeVisible();
@@ -452,7 +450,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
         page.getByTestId("onboarding-checklist").locator('[data-step="channel"]'),
       ).toHaveAttribute("data-state", "done");
 
-      const memberContext = await browser.newContext({ timezoneId: "Africa/Cairo" });
+      const memberContext = await actorContext(browser);
       const memberPage = await memberContext.newPage();
       const calls = recordRequests(memberContext);
       await signIn(memberPage, memberContext, locale, mate.email);
