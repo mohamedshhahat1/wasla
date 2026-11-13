@@ -321,6 +321,40 @@ async def test_a_revoked_membership_is_not_switchable(
     assert refused.status_code == 404
 
 
+async def test_a_suspended_workspace_is_refused_with_its_own_code(
+    http: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """FEB-06 (FE-3): the switcher tells a suspended workspace apart from a role refusal.
+
+    Same status and sentence as before; only the code is new. Logging in straight into it
+    answers the same, and somebody outside it still gets the 404 a random slug gets.
+    """
+    person = await _person(db_session)
+    await _workspace(db_session, user=person, slug="alpha")
+    paused = await _workspace(db_session, user=person, slug="paused")
+    paused.status = TenantStatus.SUSPENDED
+    stranger_tenant = Tenant(
+        timezone=TEST_TIMEZONE, name="Shut", slug="shut", status=TenantStatus.SUSPENDED
+    )
+    db_session.add(stranger_tenant)
+    await db_session.flush()
+
+    session = await _login(http)
+    refused = await _switch(http, session["access_token"], "paused")
+    login = await http.post(
+        f"{API}/auth/login",
+        json={"email": EMAIL, "password": PASSWORD, "workspace_slug": "paused"},
+    )
+    foreign = await _switch(http, session["access_token"], "shut")
+
+    for answer in (refused, login):
+        assert answer.status_code == 403
+        assert answer.json()["error"]["code"] == "workspace_suspended"
+        assert answer.json()["error"]["message"] == "This workspace is suspended."
+    assert foreign.status_code == 404
+
+
 async def test_a_membership_revoked_after_switching_stops_the_token(
     http: AsyncClient,
     db_session: AsyncSession,

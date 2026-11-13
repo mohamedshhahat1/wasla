@@ -678,7 +678,11 @@ class AuthService:
             # Distinguishing them would let anyone map which workspaces exist.
             raise TenantIsolationError()
         if not tenant.is_active:
-            raise PermissionDeniedError("This workspace is suspended.")
+            # Its own code (FEB-06, FE-3): the switcher tells a suspended workspace apart from
+            # a role refusal. Only a member reaches this line, so it names nothing new.
+            raise PermissionDeniedError(
+                "This workspace is suspended.", error_code="workspace_suspended"
+            )
         return WorkspaceContext(membership=requested, tenant=tenant)
 
     def _access_token(self, *, user: User, workspace: WorkspaceContext | None) -> str:
