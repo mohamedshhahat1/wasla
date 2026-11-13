@@ -53,6 +53,8 @@ const env = {
   TURBO_TELEMETRY_DISABLED: "1",
   // FE-2: the e2e build shows the Google button (the fake Google answers; SR-07, JT-01).
   PUBLIC_GOOGLE_ENABLED: "true",
+  // FE-3: the web build carries the journeys' test hooks (next.config.ts: PUBLIC_WASLA_E2E_HOOKS).
+  WASLA_E2E_ROUTES: "1",
 };
 
 if (!own.includes("--skip-build")) {

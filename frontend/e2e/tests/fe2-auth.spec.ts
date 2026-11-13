@@ -84,8 +84,9 @@ for (const locale of LOCALES) {
       await field(page, locale, "auth.verify.code").fill(code);
       await page.getByRole("button", { name: label(locale, "auth.verify.submit") }).click();
       await page.waitForURL(`${WEB}/`);
+      // SH-06 (FE-3): the placeholder's heading became home's.
       await expect(
-        page.getByRole("heading", { name: label(locale, "auth.home.title") }),
+        page.getByRole("heading", { level: 1, name: label(locale, "app.home.title") }),
       ).toBeVisible();
       const placeholder = page.getByTestId("signed-in-as");
       await expect(placeholder).toContainText(email);
@@ -137,6 +138,8 @@ for (const locale of LOCALES) {
       expect(jar[0]!.httpOnly).toBe(true);
       await nothingReachable(page, context);
 
+      // SH-06 (FE-3): sign out lives in the shell's account menu.
+      await page.locator("[data-account-trigger]").click();
       await page
         .getByRole("button", { name: label(locale, "auth.home.signOut"), exact: true })
         .click();

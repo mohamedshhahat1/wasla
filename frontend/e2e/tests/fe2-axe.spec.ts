@@ -111,6 +111,8 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await expect(page.getByTestId("signed-in-as")).toBeVisible();
       await axe(page, "placeholder");
 
+      // SH-06 (FE-3): sign out everywhere lives in the shell's account menu.
+      await page.locator("[data-account-trigger]").click();
       await page
         .getByRole("button", { name: label(locale, "auth.home.signOutEverywhere") })
         .click();
