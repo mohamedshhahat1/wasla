@@ -262,11 +262,18 @@ for (const locale of LOCALES) {
       const owner = await verifiedOwner("vis3");
       await logInThroughTheApp(page, locale, owner.email);
       await expect(page.getByTestId("onboarding-checklist")).toBeVisible({ timeout: 30_000 });
+      // Every card answered: a capture of "Loading..." would measure the wrong screen.
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
       await capture(page, testInfo, "web-home-owner", locale);
 
       await page.goto(`${WEB}/channels`);
       await expect(page.locator('[data-page="channels"]')).toBeVisible();
       await expect(page.getByTestId("capacity")).toBeVisible();
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
       await capture(page, testInfo, "web-channels-empty", locale);
 
       await page.goto(`${WEB}/channels/connect/whatsapp`);
@@ -281,6 +288,9 @@ for (const locale of LOCALES) {
 
       await page.goto(`${WEB}/channels/${id}`);
       await expect(page.getByTestId("messaging-limit")).toBeVisible();
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
       await capture(page, testInfo, "web-connection", locale);
 
       await gateState("past-due", owner.slug);
@@ -305,6 +315,9 @@ for (const locale of LOCALES) {
       await logInThroughTheApp(page, locale, mate.email);
       await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId("home-channels")).toBeVisible();
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
       await capture(page, testInfo, "web-home-member", locale);
     });
   });

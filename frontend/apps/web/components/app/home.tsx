@@ -22,21 +22,32 @@ export const HOME_PAGE_SIZE = 20;
 export function CardBody({
   query,
   children,
+  framed = false,
 }: {
   query: { isPending: boolean; isError: boolean; error: unknown; refetch: () => unknown };
   children: () => ReactNode;
+  /** A card of its own (the stat cards): loading and errors keep the card's frame. */
+  framed?: boolean;
 }) {
   const t = useTranslations("app");
+  const frame = (content: ReactNode) =>
+    framed ? (
+      <div className="flex flex-col justify-center rounded-xl border border-border bg-surface p-5 shadow-sm">
+        {content}
+      </div>
+    ) : (
+      content
+    );
   if (query.isPending) {
-    return (
+    return frame(
       <p role="status" className="m-0 text-sm text-text-muted">
         {t("home.loading")}
-      </p>
+      </p>,
     );
   }
   if (query.isError) {
     const requestId = query.error instanceof ApiError ? query.error.requestId : null;
-    return (
+    return frame(
       <div className="flex flex-col items-start gap-2" data-card-error="">
         <p className="m-0 text-sm text-text">{t("home.cardError")}</p>
         {requestId ? (
@@ -47,7 +58,7 @@ export function CardBody({
         <Button variant="secondary" onClick={() => void query.refetch()}>
           {t("home.retry")}
         </Button>
-      </div>
+      </div>,
     );
   }
   return <>{children()}</>;
@@ -117,7 +128,7 @@ export function Home() {
           {t("home.title")}
         </h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <CardBody query={conversations}>
+          <CardBody query={conversations} framed>
             {() => {
               const page = conversations.data!;
               const count = page.items.length;
@@ -138,7 +149,7 @@ export function Home() {
               );
             }}
           </CardBody>
-          <CardBody query={connections}>
+          <CardBody query={connections} framed>
             {() => {
               const active = connections.data!.filter((row) => row.status === "active").length;
               return (

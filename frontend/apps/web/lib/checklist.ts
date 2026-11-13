@@ -45,3 +45,14 @@ export function checklistStates(inputs: ChecklistInputs): Record<ChecklistStep, 
 export function checklistOpen(states: Record<ChecklistStep, StepState>): boolean {
   return CHECKLIST_STEPS.some((step) => states[step] !== "done");
 }
+
+/** True while any of the five reads is still loading: the list shows no state until all answer. */
+export function checklistLoading(inputs: ChecklistInputs): boolean {
+  return [
+    inputs.connections,
+    inputs.agents,
+    inputs.bases,
+    inputs.members,
+    inputs.subscriptionStatus,
+  ].some((read) => read === null);
+}

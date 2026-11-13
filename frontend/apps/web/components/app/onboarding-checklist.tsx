@@ -10,8 +10,10 @@ import { buttonClasses, Card, Checklist, type ChecklistItem } from "@wasla/ui";
 
 import {
   CHECKLIST_STEPS,
+  checklistLoading,
   checklistOpen,
   checklistStates,
+  type ChecklistInputs,
   type ChecklistStep,
   type Read,
 } from "../../lib/checklist";
@@ -57,7 +59,7 @@ export function OnboardingChecklist() {
     queryFn: () => unwrap(session.api.GET("/api/v1/workspace/members")),
   });
 
-  const states = checklistStates({
+  const inputs: ChecklistInputs = {
     connections: readOf(connections),
     agents: readOf(agents),
     bases: readOf(bases),
@@ -66,7 +68,21 @@ export function OnboardingChecklist() {
       return read === "error" || read === null ? read : read.members;
     })(),
     subscriptionStatus: gates ? (gates.subscription_status ?? "none") : null,
-  });
+  };
+  // Until every read has answered, no step claims a state ("could not check" is for a failure).
+  if (checklistLoading(inputs)) {
+    return (
+      <Card as="div" data-testid="onboarding-checklist" data-loading="">
+        <div className="flex flex-col gap-2">
+          <h2 className="m-0 text-xl font-semibold text-text">{t("checklist.title")}</h2>
+          <p role="status" className="m-0 text-sm text-text-muted">
+            {t("home.loading")}
+          </p>
+        </div>
+      </Card>
+    );
+  }
+  const states = checklistStates(inputs);
   if (!checklistOpen(states)) return null;
   const done = CHECKLIST_STEPS.filter((step) => states[step] === "done").length;
 

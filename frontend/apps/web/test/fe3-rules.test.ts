@@ -19,7 +19,12 @@ import {
   connectDecision,
   lastFourDigits,
 } from "../lib/channels";
-import { checklistOpen, checklistStates, type ChecklistInputs } from "../lib/checklist";
+import {
+  checklistLoading,
+  checklistOpen,
+  checklistStates,
+  type ChecklistInputs,
+} from "../lib/checklist";
 import {
   allowanceExhausted,
   gateSignalOf,
@@ -297,6 +302,11 @@ describe("HM-03: the checklist from five reads", () => {
       );
     });
   }
+  it("while any read is loading the list claims no state", () => {
+    expect(checklistLoading(all)).toBe(false);
+    expect(checklistLoading({ ...all, bases: null })).toBe(true);
+    expect(checklistLoading({ ...all, agents: "error" })).toBe(false);
+  });
   it("a failed read is 'could not check', never done; loading likewise", () => {
     const states = checklistStates({ ...all, agents: "error", bases: null });
     expect(states.agent).toBe("unknown");
