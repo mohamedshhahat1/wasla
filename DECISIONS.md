@@ -8246,3 +8246,56 @@ visual baseline (FEQ-11).
 **Consequences.** FE-3 builds the shell, gates and channels from DESIGN.md, the role tokens and the composites, and
 the colour-role gate keeps new screens in proportion. The Arabic, French and Turkish texts, the brand line included,
 remain unreviewed drafts (FEQ-08); the wordmark stays text until the owner brings a logo.
+
+## ADR-196 — The Signed-In Shell, Workspace Gates From One Rule, One Stream Per Browser, Channels Through Adapters (FE-3)
+
+**Status.** Accepted, 2026-11-13 (FE-3; report FE3_APP_SHELL.md). Builds APP-SHELL, APP-HOME, APP-WS-03 and
+APP-CH-01..03 of FRONTEND_PLAN.md on FEB-07 (ADR-194) and the design language of ADR-195.
+
+**Context.** After FE-2 a signed-in person landed on a placeholder. FEB-07 made every gate readable by every member,
+but nothing drew it; the stream helper existed but no screen opened it; and a WhatsApp number could be connected only
+through the API. The owner answered FEQ-14 on 2026-11-13: "Both: form now, plan Embedded next".
+
+**Decision.**
+
+1. *The shell (SH).* A route group renders the signed-in pages in one frame: the dark-blue top bar (wordmark,
+   workspace switcher with each workspace's status, live-updates mark, account menu), the light-blue side navigation
+   at the inline start from 1024 px and a navigation sheet below it. The navigation is a typed registry of routes that
+   have a page - a later stage adds its entry with its screen; no placeholder or "coming soon" entry is ever drawn. The
+   role decides what is drawn; the API decides what is allowed.
+2. *The gates (GT).* One pure reducer turns /auth/me's status, GET /workspace/gates, the AI allowance of
+   GET /billing/entitlements, the error codes any call of the session's client receives (one middleware) and the
+   stream's reasons into one full state (access withdrawn over suspended) and banners in a fixed order (payment / billing
+   issue, capacity, trial ending, allowance, live updates), at most two visible. No amount appears. /workspace/gates is
+   read once on entering a workspace and again only on a signal (a gate code, a closed frame, a channel action, a tab
+   shown after five minutes hidden) - never polled, never on every navigation: the gates change rarely and every change
+   has a signal.
+3. *One stream per browser (ST, PD-14).* A framework-free coordinator in the app: the Web Lock
+   `wasla-stream-<workspace>` picks one leader per browser, which opens FE-2's openEventStream unchanged and fans frames
+   and state out on a BroadcastChannel; the next tab leads with a new ticket and `lastEventId` when the leader leaves; a
+   switch closes the old stream before the new token. The leader lives in FE-3 because the shell is the first screen that
+   needs the stream (gates and home) and FE-4 only adds handlers to its typed table.
+4. *Home and the checklist (HM).* Home reads one page of open conversations ("20+", never a count endpoint) and the
+   active channels for everyone; leads statistics, usage and the onboarding checklist for owners and admins. The
+   checklist is worked out from five reads with no backend state (FEB-18 stays P3) and nothing stored in the browser.
+5. *Channels (CN).* A list with the capacity, the connect screen as an adapter registry (FE-3 registers the assisted
+   WhatsApp form; Embedded Signup becomes one more adapter after its backend stage), and the connection detail with
+   verify, disable, enable, release (typed confirmation of the last four digits) and the owner's capacity selection.
+6. *Typed credentials are secrets (CN-04).* The access token field is a password field without autocomplete or spell
+   check; the call is a plain request, never a TanStack mutation (whose cache would keep the variables); the form resets
+   after a success and keeps the token only in its own memory after a refusal.
+7. *FEB-06 for FE-3's screens (EC).* The one error FE-3 must tell apart that carried only a class code -
+   "That WhatsApp number is already connected." - gains `whatsapp_number_already_connected` at both raise sites; status,
+   sentence and the refusal to name the holder are unchanged. A test-only seed helper (tests/e2e_stack/gate_states.py)
+   reaches the gate states the API cannot reach in a few calls (a trial ending, past due, an AI allowance used up); no
+   module of app/ may import tests/.
+
+**Rejected.** Navigation entries for later stages' screens (dead links); polling the gates; one stream per tab (a sixth
+tab meets 429 `stream_limit`); storing checklist skips or dismissed banners in the browser; a Meta SDK or an Embedded
+Signup button now (needs the backend's code exchange and Meta's app review); a sticky top bar (it would have to be
+proved never to cover a focused field).
+
+**Consequences.** The WhatsApp Embedded Signup backend stage and FEB-03 / 04 / 05 come next; FE-4 replaces the stream's
+handler table with the inbox's invalidation map and adds its navigation entry. The explainer's wording and the ar / fr /
+tr texts are drafts for the owner (FEQ-14's copy, FEQ-08). EventSource cannot read a 429, so `stream_limit` shows as
+"paused - retrying" under the helper's capped backoff (FEF-22).

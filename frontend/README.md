@@ -95,6 +95,29 @@ start -p 3000`, open `http://localhost:3000/signup`, and read the code from `htt
 | console   | `http://localhost:3001` | the `wasla-preview-console` workers.dev URL   | `https://console.iwasla.tech`           |
 | marketing | `http://localhost:4321` | the `wasla-preview-marketing` workers.dev URL | `https://www.iwasla.tech`               |
 
+## The signed-in app (FE-3, ADR-196)
+
+- **The shell** - `apps/web/app/(app)/layout.tsx` renders `components/app/app-frame.tsx` around every signed-in page:
+  FE-2's `PageGate` routes first, then `WorkspaceProvider` (keyed by workspace and session generation) and the
+  `AppShell` composite. The auth pages, `/verify` and `/workspaces*` keep FE-2's frame.
+- **Navigation** - `apps/web/lib/navigation.ts` is the registry: route, label key, icon, roles, and the page file a
+  unit test checks exists. A later stage adds its entry together with its screen; nothing else is drawn.
+- **Gates** - `apps/web/lib/gates.ts` is the one rule (facts in, full state and banners out); the facts come from
+  `components/app/workspace-context.tsx`: /auth/me, `GET /workspace/gates` (read on entering a workspace and on a
+  signal only), the AI allowance, the error codes of any call (one middleware on the session's client) and the
+  stream's reasons.
+- **The stream** - `apps/web/lib/stream-coordinator.ts`: one leader per browser per workspace (Web Lock
+  `wasla-stream-<workspace id>`), frames on a BroadcastChannel of the same name, FE-2's `openEventStream`
+  unchanged. **FE-4 plugs in** by replacing the entries of `apps/web/lib/stream-handlers.ts` (typed by the event
+  vocabulary) - message.created already invalidates home's conversations.
+- **Connect adapters** - `apps/web/lib/channels.ts` `CONNECT_ADAPTERS`: FE-3 registers the assisted WhatsApp form
+  (`/channels/connect/whatsapp`); Embedded Signup adds an entry and a component beside it.
+- **Walking it locally** - bring FE-0's profile up (`docker compose -f docker-compose.e2e.yml --profile e2e up -d`),
+  build the apps with `WASLA_ENV=development` and start the web app (`pnpm --dir apps/web exec next start -p 3000`),
+  sign up at http://localhost:3000/signup (the code arrives in the mailbox at http://127.0.0.1:8025/messages), connect a
+  number whose id starts with `PNID-E2E` (the fake verifier owns those). The gate states the API cannot reach quickly:
+  `docker exec wasla-fe-e2e-api python -m tests.e2e_stack.gate_states trialing|past-due|ai-allowance-used <slug> [days]`.
+
 ## Changing the look
 
 The design language is [packages/ui/DESIGN.md](packages/ui/DESIGN.md): one blue family and white in three
