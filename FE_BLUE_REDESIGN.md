@@ -386,3 +386,53 @@ Provisional: every local gate green at FERD_HEAD a984936 and in the verify workt
 protocol error, each green alone), merged as one normal merge commit 3199d07 with the merged tree byte-identical to
 FERD_HEAD.
 ```
+
+## Addendum — the push, GitHub Actions and Part C
+
+### The push (80b0302..baeba91, 2026-11-13, no force; origin = local = baeba91)
+
+| Run | Result |
+|---|---|
+| frontend.yml [43325027044](https://github.com/mohamedshhahat1/wasla/actions/runs/43325027044) | success, all jobs: install; drift; checks (licences: 174 shipped, 869 build-only, 0 violations, 0 exceptions; the Workers build and workers:smoke); Storybook 245 passed (axe, RTL keyboard, motion, layout); e2e **362 passed** (FE-2's 312 incl. J6 and stream-restart + 50 visual-roles); the 60/30/10 averages on Linux 1280 64.9 / 25.7 / 9.2, 390 63.0 / 26.8 / 9.6 - every screen within 0.4 points of this machine's |
+| ci.yml [43325026930](https://github.com/mohamedshhahat1/wasla/actions/runs/43325026930) | success, all 5 jobs; tests **8105 passed**, 17 skipped, 2 deselected = 8077 + the 28 FEB-07 tests (27 in test_workspace_gates.py, 1 route-authorization); migration-built schema unchanged |
+
+GB-7 and G-10: green. FEF-18 (J6 under local load) did not occur on Linux.
+
+### Part C — the previews redeployed (from baeba91)
+
+`wrangler whoami`: "Mohamedshhahat1@gmail.com's Account" (1cc89863…), FE-2's. Built on Linux with
+`build-workers-linux.mjs --env preview` and the three workers.dev app origins (PUBLIC_API_ORIGIN from the table,
+https://api.iwasla.tech; PUBLIC_GOOGLE_ENABLED and WASLA_E2E_ROUTES unset); outputs web 3811 files / 81,527,831 B,
+console 3686 / 78,429,915 B, marketing 29 / 567,549 B. workerd smoke of those outputs: every page 200; the session
+routes answered 403 (the smoke posts from localhost, which a preview build's origin check refuses - the 503 path is
+proved on the development build in G-9 and live below). Deployed from the host with wrangler 4.158.0; every
+wrangler.jsonc unchanged (workers_dev, preview_urls false, no route, no custom domain, ASSETS only); no secret set.
+
+| Worker | URL | New version | Previous version | Upload / gzip |
+|---|---|---|---|---|
+| wasla-preview-marketing | https://wasla-preview-marketing.wasla-marketing.workers.dev | 9c6c6b1a | 415839af | 0.37 KiB (assets) |
+| wasla-preview-web | https://wasla-preview-web.wasla-marketing.workers.dev | a4e11d16 | ad4f6651 | 7438.42 / 1511.84 KiB |
+| wasla-preview-console | https://wasla-preview-console.wasla-marketing.workers.dev | 852ff2f9 | c161109e | 5968.94 / 1260.91 KiB |
+
+The web Worker's previous version was ad4f6651, not FE-2's recorded 3bfb6d9c (deployed 2026-11-12 09:54, after
+FE-2's record; noted, not rolled back). The owner can roll any Worker back to its previous version in the dashboard.
+
+PV2-02 (Chromium and WebKit, 1280 and 390, en / ar - marketing also fr / tr): 60 page loads; marketing /en/ /ar/
+/fr/ /tr/ 200 and /no-such-page 404; web /login /signup /forgot 200, /no-such-page 404; console 200; `lang` / `dir` right
+(rtl in Arabic); CSP, HSTS, nosniff, Referrer-Policy, Permissions-Policy on every page; 0 CSP violations; no request to
+any host but the Worker's own and, on /signup, the environment's API origin (api.iwasla.tech, the time-zone list -
+FE-2's behaviour, allowed by the CSP). PC-04 on wasla-preview-web (login, refresh, logout): GET 405, cross-origin POST
+403, header-less POST 403, same-origin POST 503 session_unavailable - unchanged. Live captures (30, Chromium) in
+`screens\live\`, added to the contact sheet as its third column.
+
+### Verdict
+
+```text
+FE-RD MERGED AND PUSHED, CI GREEN   (the push baeba91; this addendum's ci.yml run: see Part D)
+PREVIEWS UPDATED       https://wasla-preview-marketing.wasla-marketing.workers.dev
+                       https://wasla-preview-web.wasla-marketing.workers.dev
+                       https://wasla-preview-console.wasla-marketing.workers.dev
+FE-3 CAN START         (FEB-07 CLOSED; DESIGN.md, the role tokens, the composites and the colour-role gate in place;
+                       FE-9 and FE-10 may start in parallel after their own backend items)
+CLEANUP                runs after this addendum's ci.yml run; result in E:\wasla-cleanup\CLEANUP_ferd_20261113.md
+```
