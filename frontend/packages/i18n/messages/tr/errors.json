@@ -25,6 +25,7 @@
   "channel_type_not_allowed": "Planınız bu kanalı içermiyor.",
   "channel_capacity_selection_invalid": "Bu kanal seçimi geçerli değil.",
   "whatsapp_ownership_unverified": "Bu WhatsApp numarasının size ait olduğunu doğrulayamadık.",
+  "whatsapp_number_already_connected": "Bu WhatsApp numarası Wasla'ya zaten bağlı. Her numara yalnızca bir kez bağlanabilir.",
   "recipient_opted_out": "Bu müşteri mesaj almak istemediğini bildirdi.",
   "suppressed": "Bu adrese gönderilen mesajlar durduruldu.",
   "template_refused": "Bu şablon kullanılamaz.",

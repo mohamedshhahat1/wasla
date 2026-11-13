@@ -25,6 +25,7 @@
   "channel_type_not_allowed": "Your plan does not include this channel.",
   "channel_capacity_selection_invalid": "That selection of channels is not valid.",
   "whatsapp_ownership_unverified": "We could not confirm that this WhatsApp number belongs to you.",
+  "whatsapp_number_already_connected": "That WhatsApp number is already connected to Wasla. Each number can be connected once.",
   "recipient_opted_out": "This customer has asked not to receive messages.",
   "suppressed": "Messages to this address are paused.",
   "template_refused": "This template cannot be used.",

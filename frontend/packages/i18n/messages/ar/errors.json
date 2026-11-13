@@ -25,6 +25,7 @@
   "channel_type_not_allowed": "خطتك لا تشمل هذه القناة.",
   "channel_capacity_selection_invalid": "اختيار القنوات هذا غير صالح.",
   "whatsapp_ownership_unverified": "تعذّر التأكد من أن رقم واتساب هذا يخصك.",
+  "whatsapp_number_already_connected": "رقم واتساب هذا متصل بوصلة بالفعل. يمكن ربط كل رقم مرة واحدة فقط.",
   "recipient_opted_out": "طلب هذا العميل عدم تلقي الرسائل.",
   "suppressed": "الرسائل إلى هذا العنوان متوقفة.",
   "template_refused": "لا يمكن استخدام هذا القالب.",
