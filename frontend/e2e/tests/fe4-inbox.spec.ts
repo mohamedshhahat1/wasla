@@ -381,6 +381,25 @@ for (const locale of ["en", "ar"] as Locale[]) {
         token: line.owner.token,
       });
       expect((after.json as { assigned_to_id: string }).assigned_to_id).toBe(member.userId);
+      // The screen now shows the member; someone unassigns it meanwhile. "Assign to me" sends the
+      // member as the expected assignee, so the server refuses and nothing is overwritten (CX-02).
+      await expect(page.locator("[data-action-notice]")).toBeVisible();
+      await api("POST", `/api/v1/conversations/${conversation.id}/assignment`, {
+        token: member.token,
+        body: { assigned_to_id: null, expected_assigned_to_id: member.userId },
+      });
+      const stale = page.waitForResponse(
+        (response) =>
+          response.url().endsWith(`/conversations/${conversation.id}/assignment`) &&
+          response.request().method() === "POST",
+      );
+      await page.locator("[data-assign]").click();
+      await page.getByRole("menuitem", { name: label(locale, "app.inbox.assignToMe") }).click();
+      expect((await stale).status()).toBe(409);
+      const unassigned = await api("GET", `/api/v1/conversations/${conversation.id}`, {
+        token: line.owner.token,
+      });
+      expect((unassigned.json as { assigned_to_id: string | null }).assigned_to_id).toBeNull();
       // A second tab sees a change through the stream.
       const second = await context.newPage();
       await second.goto(`${WEB}/inbox/${conversation.id}`);
@@ -520,6 +539,34 @@ for (const locale of ["en", "ar"] as Locale[]) {
     });
   });
 }
+
+// IL-07 (M-V32): the count comes from the server's answer - a mark-read that fails leaves the row's
+// count as it was; nothing zeroes it ahead of the answer.
+test("IJ-13b: a failed mark-read leaves the count", async ({ page, context }) => {
+  test.skip(test.info().project.name !== "chromium-desktop", "once");
+  const line = await connectedOwner();
+  const sender = freshCustomer();
+  await signIn(page, context, "en", line.owner.email);
+  await openInbox(page);
+  for (const body of ["one", "two"]) await inbound(line, sender, text(body), "Nour");
+  const conversation = await conversationOf(line.owner, sender);
+  await expect(row(page, conversation.id).locator("[data-count]")).toHaveText("2", {
+    timeout: ARRIVAL_BOUND_MS,
+  });
+  let refused = 0;
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/read$/, async (route) => {
+    refused += 1;
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "service_unavailable", message: "Try again." } }),
+    });
+  });
+  await openConversation(page, conversation.id);
+  await expect(page.locator("[data-message-text]").filter({ hasText: "two" })).toBeVisible();
+  await expect.poll(() => refused, { timeout: ARRIVAL_BOUND_MS }).toBeGreaterThan(0);
+  await expect(row(page, conversation.id).locator("[data-count]")).toHaveText("2");
+});
 
 test("IJ-10: requests only to the app and the API; a burst of frames is one refetch", async ({
   page,
