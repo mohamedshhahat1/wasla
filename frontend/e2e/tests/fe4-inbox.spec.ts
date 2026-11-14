@@ -384,6 +384,14 @@ for (const locale of ["en", "ar"] as Locale[]) {
       // The screen now shows the member; someone unassigns it meanwhile. "Assign to me" sends the
       // member as the expected assignee, so the server refuses and nothing is overwritten (CX-02).
       await expect(page.locator("[data-action-notice]")).toBeVisible();
+      // The stream would tell the screen at once; hold its detail reads at what it showed, so the
+      // click carries the member as its (now stale) expectation.
+      const detail = new RegExp(`/api/v1/conversations/${conversation.id}$`);
+      await page.route(detail, async (route) => {
+        const response = await route.fetch();
+        const body = (await response.json()) as Record<string, unknown>;
+        await route.fulfill({ response, json: { ...body, assigned_to_id: member.userId } });
+      });
       await api("POST", `/api/v1/conversations/${conversation.id}/assignment`, {
         token: member.token,
         body: { assigned_to_id: null, expected_assigned_to_id: member.userId },
@@ -396,6 +404,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await page.locator("[data-assign]").click();
       await page.getByRole("menuitem", { name: label(locale, "app.inbox.assignToMe") }).click();
       expect((await stale).status()).toBe(409);
+      await page.unroute(detail);
       const unassigned = await api("GET", `/api/v1/conversations/${conversation.id}`, {
         token: line.owner.token,
       });
