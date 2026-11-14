@@ -278,7 +278,7 @@ export function ConversationListPane({
     <section
       aria-labelledby="inbox-list-heading"
       data-inbox-pane="list"
-      className="flex min-h-0 flex-col gap-3 bg-secondary-subtle p-4"
+      className="flex min-h-0 flex-col gap-3 bg-surface p-4 md:bg-secondary-subtle"
     >
       <h1
         id="inbox-list-heading"
