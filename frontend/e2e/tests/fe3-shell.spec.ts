@@ -55,6 +55,18 @@ async function axe(page: Page, state: string): Promise<void> {
     .poll(async () => (await streamOf(page))?.state ?? "none", { timeout: 20_000 })
     .not.toBe("connecting");
   await page.waitForLoadState("networkidle");
+  // And no finite animation running: a popover fades in (wasla-pop-in), and a contrast scan
+  // mid-fade measures the half-transparent text - WebKit on the runner caught the account menu
+  // so. A spinner repeats forever and is not waited for.
+  await page.waitForFunction(() =>
+    document
+      .getAnimations()
+      .every(
+        (animation) =>
+          animation.playState !== "running" ||
+          animation.effect?.getComputedTiming().iterations === Infinity,
+      ),
+  );
   const builder = new AxeBuilder({ page }).withTags([
     "wcag2a",
     "wcag2aa",
