@@ -290,3 +290,49 @@ of the address bar; the three codes have catalogue keys; the stream frames stay 
 ## 30. Final Verdict
 
 Section 23 and the addendum.
+
+## Addendum — the push, two follow-up fixes, and the CI runs
+
+### The push (section 22)
+
+`git push origin worktree-billing-google-auth` (no force), origin re-checked = a165fe3 first: a165fe3..9303949. Origin =
+local = 9303949.
+
+### GitHub Actions (section 23)
+
+| Commit | Workflow | Run | Result |
+| --- | --- | --- | --- |
+| 9303949 (merge + report) | ci.yml | [43571559216](https://github.com/mohamedshhahat1/wasla/actions/runs/43571559216) | **success**, every job; tests 8154 passed / 17 skipped / 2 deselected = CI_TEST_COUNT 8120 + this stage's 34 (test_inbox_contract.py 22, test_refresh_workspace_refusal.py 8, test_e2e_mailbox_codes.py 3, test_upload_concurrency.py +1) |
+| 9303949 | frontend.yml | [43571559218](https://github.com/mohamedshhahat1/wasla/actions/runs/43571559218) | **failure**: WebKit job, FE-3's JR-02 (ar, webkit-desktop) - axe `color-contrast` on the account menu; 147 passed, 1 failed; every other job green |
+| 9017ad4 (fix 1) | ci.yml | [43576090917](https://github.com/mohamedshhahat1/wasla/actions/runs/43576090917) | **success**, every job |
+| 9017ad4 | frontend.yml | [43576090907](https://github.com/mohamedshhahat1/wasla/actions/runs/43576090907) | **failure**: WebKit job, FE-2's J3 (ar) - the invitee verified with a "code" the API refused; 147 passed, 1 failed; JR-02 green |
+| 6ff1c81 (fix 2) | frontend.yml | [43581964826](https://github.com/mohamedshhahat1/wasla/actions/runs/43581964826) | **success**, all 8 jobs (Chromium 154, Firefox 148, WebKit 150 passed; visual roles; Storybook; drift; install) |
+| 6ff1c81 | ci.yml | [43581964818](https://github.com/mohamedshhahat1/wasla/actions/runs/43581964818) | **success**, every job; tests 8155 passed / 17 skipped / 2 deselected = 8120 + this stage's 35 (the 34 above + the invitation-mail unit test) |
+
+### The two fixes (section 25), made at the owner's request ("is you can fix the failure while the ci runs?")
+
+1. **9017ad4 fix(e2e): FE-3's axe scans wait for finite animations to end.** The account menu is a popover that fades in
+   (`wasla-pop-in`); FE-3's `axe()` helper waited for the stream and the network, not for the animation, and on the
+   runner WebKit measured the text half transparent. The helper now waits until no finite animation runs (a spinner,
+   infinite, is not waited for). Not this stage's code path: the shell components, `packages/ui` and the app routes are
+   unchanged since a165fe3; JR-02 ar passed 3 / 3 in local WebKit before the fix. After: JR-02 / 03 / 05 / 06 / 07 / 07b in
+   Chromium and WebKit, en and ar, 24 / 24 locally (one local Playwright worker crash, 0xC0000409, re-run alone green).
+   `fe3-shell.spec.ts` is outside the stage's list; changed at the owner's request, under section 25's rule for runner
+   timing in a spec.
+2. **6ff1c81 fix(e2e): verification codes are read from verification mails only (FEB-32).** The invitee's trace shows no
+   verification send before the refused verify: the "code" came from the invitation mail, whose random token or slug held
+   six digits - the mailbox lists every six-digit run of any mail. `waitForCode` / `newestCode` and `code_mails` /
+   `code_after` now read only mails with the verification subject (Python takes it from `subject_for`); a unit test
+   holds an invitation with six digits out. This corrects section 5's ML-02 judgement that the TypeScript helpers were not
+   affected. Locally: smoke 11 / 11; FE-2 J3 and J1 in Chromium and WebKit, en and ar, green (J1 en once more on a fresh
+   stack after the stack's own workspace-creation limit, 429, on the first run). The e2e image was not rebuilt: its seed
+   reads only a registration mail, which the subject filter does not change.
+
+Each push waited for the running ci.yml to finish (both workflows cancel an in-progress run on a new push), so every
+commit's ci.yml ran to the end. No run was re-run or cancelled by hand.
+
+### Verdict
+
+**BACKEND STAGE 1 MERGED AND PUSHED, CI GREEN** - ci.yml and frontend.yml green in every job on 6ff1c81, the canonical head after the two section-25 fixes. FEB-03, FEB-04, FEB-05, FEF-24, FEB-32, FEB-33: CLOSED.
+
+NEXT: FE-4 (THE REALTIME INBOX) CAN START; the WhatsApp Embedded Signup backend stage remains scheduled (FEQ-14).
