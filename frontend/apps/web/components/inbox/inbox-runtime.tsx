@@ -20,7 +20,7 @@ import {
 import { unwrap, type components } from "@wasla/api-client";
 
 import { conversationKey, LEAD, messagesKey } from "../../lib/inbox/keys";
-import { pollInterval, shouldPoll, StreamWatch } from "../../lib/inbox/live";
+import { downSince, pollInterval, shouldPoll, StreamWatch } from "../../lib/inbox/live";
 import { countingUrls, Gate, MediaRegistry, type CountingUrls } from "../../lib/inbox/media";
 import { SendQueue } from "../../lib/inbox/send-queue";
 import { refreshInboxLists, registerInboxHooks } from "../../lib/stream-handlers";
@@ -144,18 +144,24 @@ export function InboxRuntimeProvider({ children }: { children: ReactNode }) {
 
   // A reconnect is treated as a possible gap (RT-03).
   const watch = useRef(new StreamWatch());
-  const [streamSince, setStreamSince] = useState(() => appNow());
+  const liveKind = useRef(liveState.kind);
+  const down = useRef<number | null>(null);
   useEffect(() => {
-    setStreamSince(appNow());
+    liveKind.current = liveState.kind;
+    down.current = downSince(down.current, liveState.kind, appNow());
     if (watch.current.next(liveState.kind)) gap();
   }, [liveState, gap]);
 
-  // RT-04: poll while the stream is down past its quiet period; never in a hidden tab.
+  // RT-04: poll while the stream is down past its quiet period; never in a hidden tab. The timer is
+  // not restarted by the stream's reconnect attempts - it reads the state when it fires.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = () => {
-      const now = appNow();
-      if (shouldPoll({ stream: liveState.kind, since: streamSince, now, visible: visible() })) {
+      const since = down.current;
+      if (
+        since !== null &&
+        shouldPoll({ stream: liveKind.current, since, now: appNow(), visible: visible() })
+      ) {
         refreshInboxLists(queryClient, scope);
         const open = openRef.current;
         if (open) void catchUp(open).catch(() => undefined);
@@ -166,7 +172,7 @@ export function InboxRuntimeProvider({ children }: { children: ReactNode }) {
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [liveState, streamSince, queryClient, scope, catchUp]);
+  }, [queryClient, scope, catchUp]);
 
   // TH-04: every object URL goes on page hide and when the inbox unmounts (sign-out, switch).
   useEffect(() => {

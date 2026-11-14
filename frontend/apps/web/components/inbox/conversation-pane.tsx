@@ -330,7 +330,13 @@ export function ConversationPane({
             <Badge tone="warning">{t(`priority.${data.priority}`)}</Badge>
           ) : null}
           <span className="text-sm text-text-muted">
-            {t("assignedTo")} <bdi>{assignee}</bdi>
+            {data.assigned_to_id ? (
+              <>
+                {t("assignedTo")} <bdi>{assignee}</bdi>
+              </>
+            ) : (
+              assignee
+            )}
           </span>
           <span className="ms-auto flex flex-wrap gap-2">
             <Button

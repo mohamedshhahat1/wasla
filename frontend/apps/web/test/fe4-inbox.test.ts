@@ -28,6 +28,7 @@ import { conversationKey, inboxPrefix, messagesKey, unreadSummaryKey } from "../
 import { BREAKPOINTS, layoutFor, panelStartsOpen, phoneStep } from "../lib/inbox/layout";
 import {
   applyListUpdateNow,
+  downSince,
   capCount,
   firstPageOnly,
   mayMarkRead,
@@ -171,6 +172,21 @@ describe("IL-04: a cursor of another view reads the list again from the top, onc
       firstPageOnly({ pages: ["one", "two", "empty"], pageParams: [null, "c1", "bad"] }),
     ).toEqual({ pages: ["one"], pageParams: [null] });
     expect(firstPageOnly(undefined)).toBeUndefined();
+  });
+});
+
+describe("RT-04: since when the stream is down", () => {
+  it("is set once and kept through reconnect attempts; an open stream clears it", () => {
+    let since = downSince(null, "waiting", 1_000);
+    expect(since).toBe(1_000);
+    since = downSince(since, "connecting", 4_000);
+    since = downSince(since, "waiting", 9_000);
+    expect(since).toBe(1_000);
+    expect(shouldPoll({ stream: "waiting", since: since ?? 0, now: 12_000, visible: true })).toBe(
+      true,
+    );
+    expect(downSince(since, "open", 13_000)).toBeNull();
+    expect(downSince(null, "stopped", 13_000)).toBeNull();
   });
 });
 

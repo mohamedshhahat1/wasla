@@ -27,6 +27,16 @@ export function shouldPoll(input: {
   return input.now - input.since >= STREAM_QUIET_MS;
 }
 
+/**
+ * RT-04: since when the stream has been down. It is set once when the stream stops being open and
+ * kept through its reconnect attempts (connecting ↔ waiting change every few seconds while the API
+ * is away); an open stream clears it.
+ */
+export function downSince(previous: number | null, kind: StreamKind, now: number): number | null {
+  if (kind === "open" || kind === "stopped") return null;
+  return previous ?? now;
+}
+
 export function pollInterval(pollAfterSeconds: number | null | undefined): number {
   const seconds =
     typeof pollAfterSeconds === "number" && pollAfterSeconds > 0
