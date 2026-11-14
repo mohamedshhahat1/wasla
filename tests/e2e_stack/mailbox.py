@@ -75,6 +75,25 @@ def read(path: Path = MAILBOX_FILE, *, to: str | None = None) -> list[dict[str, 
     return list(reversed(entries))
 
 
+def code_mails(messages: list[dict[str, Any]]) -> int:
+    """How many of one recipient's messages (newest first) carry a code."""
+    return sum(1 for message in messages if message["codes"])
+
+
+def code_after(messages: list[dict[str, Any]], *, seen: int) -> str | None:
+    """The code of the mail a request caused: the newest, once more than `seen` carry one.
+
+    A send supersedes every earlier code, and the mail of an earlier request -
+    registration's own - can be delivered late. A reader that counted the code
+    mails before its request, and waits for one more, never takes that one for
+    its own (FEB-32). None while the new mail has not arrived.
+    """
+    if code_mails(messages) <= seen:
+        return None
+    newest = next(message for message in messages if message["codes"])
+    return str(newest["codes"][0])
+
+
 def service() -> Any:
     """The read-only mailbox HTTP service."""
     from fastapi import FastAPI, Response

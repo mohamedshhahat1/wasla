@@ -42,6 +42,7 @@ from app.core.client_ip_forward import (
 )
 from app.core.config import Settings
 from app.core.security import TokenType, create_access_token, decode_token
+from tests.e2e_stack.mailbox import code_after, code_mails
 
 FORWARD_SECRET = "e2e-not-a-secret-0123456789abcdef0123456789abcdef"
 META_APP_SECRET = b"e2e-meta-app-secret-NOT-A-SECRET"
@@ -203,6 +204,30 @@ class Smoke:
             await asyncio.sleep(0.5)
         raise JourneyError(f"no {want} for {address} in the mailbox")
 
+    async def _messages(self, address: str) -> list[dict[str, Any]]:
+        response = await self.http.get(f"{self.mailbox}/messages", params={"to": address})
+        return list(response.json())
+
+    async def code_mails_now(self, address: str, *, at_least: int, within: float = 60) -> int:
+        """How many code mails `address` holds, once it holds `at_least` (FEB-32)."""
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            count = code_mails(await self._messages(address))
+            if count >= at_least:
+                return count
+            await asyncio.sleep(0.5)
+        raise JourneyError(f"fewer than {at_least} code mails for {address}")
+
+    async def code_of_own_send(self, address: str, *, seen: int, within: float = 60) -> str:
+        """The code of the mail this caller's send caused: newer than the `seen` before it."""
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            code = code_after(await self._messages(address), seen=seen)
+            if code is not None:
+                return code
+            await asyncio.sleep(0.5)
+        raise JourneyError(f"no new code for {address} in the mailbox")
+
     async def stream(self, token: str) -> Stream:
         ticket = await self.call("POST", "/events/ticket", token)
         check(ticket.status_code == 201, f"ticket {ticket.status_code}")
@@ -245,9 +270,12 @@ class Smoke:
         )
         check(registered.status_code == 202, f"register {registered.status_code}")
         token = await self.login(email, address=address)
+        # Registration mails a code of its own; it is counted before the send, so
+        # the send's code is the one read even when registration's arrives late.
+        seen = await self.code_mails_now(email, at_least=1)
         sent = await self.call("POST", "/auth/email/verification/send", token)
         check(sent.status_code in {200, 202, 204}, f"verification send {sent.status_code}")
-        code = await self.mail(email)
+        code = await self.code_of_own_send(email, seen=seen)
         verified = await self.call(
             "POST", "/auth/email/verification/verify", token, json={"code": code}
         )
@@ -440,8 +468,9 @@ class Smoke:
         )
         check(accepted.status_code == 200, f"accept {accepted.status_code} {accepted.text[:160]}")
         mate_token = await self.login(mate, workspace_slug=self.state["slug"])
+        seen = await self.code_mails_now(mate, at_least=0)
         await self.call("POST", "/auth/email/verification/send", mate_token)
-        code = await self.mail(mate)
+        code = await self.code_of_own_send(mate, seen=seen)
         verified = await self.call(
             "POST", "/auth/email/verification/verify", mate_token, json={"code": code}
         )
