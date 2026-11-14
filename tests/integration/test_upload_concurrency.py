@@ -129,6 +129,36 @@ class _ParseWindow:
         monkeypatch.setattr(extraction, "extract_pdf_pages_bounded", counted)
 
 
+async def test_the_parse_window_opens_when_the_last_upload_is_in_and_closes_with_the_first_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window's own rule (FEB-33): an upload still in setup never opens it."""
+    release = asyncio.Event()
+
+    async def parse(*args: Any, **kwargs: Any) -> list[str]:
+        await release.wait()
+        return []
+
+    monkeypatch.setattr(extraction, "extract_pdf_pages_bounded", parse)
+    window = _ParseWindow(3)
+    window.install(monkeypatch)
+
+    async def settle() -> None:
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    parses = [asyncio.create_task(extraction.extract_pdf_pages_bounded(b"")) for _ in range(2)]
+    await settle()
+    assert not window.all_entered.is_set(), "two of three in: the window must stay shut"
+    parses.append(asyncio.create_task(extraction.extract_pdf_pages_bounded(b"")))
+    await settle()
+    assert window.all_entered.is_set()
+    assert not window.first_left.is_set()
+    release.set()
+    await asyncio.gather(*parses)
+    assert window.first_left.is_set()
+
+
 async def test_a_burst_of_slow_uploads_does_not_exhaust_the_pool(
     indexing: Indexing, slow_child: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
