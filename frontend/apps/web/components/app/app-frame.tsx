@@ -1,13 +1,17 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import NextLink from "next/link";
 import { usePathname } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { Suspense, type ReactNode } from "react";
 
+import { unwrap } from "@wasla/api-client";
 import { AppShell, Link, LiveIndicator, NavList, Wordmark, type LiveState } from "@wasla/ui";
 
 import { publicEnv } from "../../lib/env";
+import { unreadSummaryKey } from "../../lib/inbox/keys";
+import { capCount } from "../../lib/inbox/live";
 import { currentEntry, entriesFor } from "../../lib/navigation";
 import type { SharedState } from "../../lib/stream-coordinator";
 import { ApiHealth } from "../api-health";
@@ -40,7 +44,16 @@ function Frame({ children }: { children: ReactNode }) {
   const shell = useTranslations("shell");
   const locale = useLocale();
   const pathname = usePathname();
-  const { role, workspaceName, decision, liveState } = useWorkspace();
+  const { role, workspaceName, decision, liveState, scope } = useWorkspace();
+  const { session } = useSession();
+  // UR-10 / IL-07: the team's unread customer messages beside Inbox, on every page of the shell;
+  // refetched on the frames that change it (RT-01), never while a full gate state holds.
+  const summary = useQuery({
+    queryKey: unreadSummaryKey(scope),
+    queryFn: () => unwrap(session.api.GET("/api/v1/conversations/unread-summary")),
+    enabled: Boolean(scope.workspaceId) && !decision.fullState,
+  });
+  const unreadMessages = summary.data?.unread_messages ?? 0;
   const current = currentEntry(pathname);
   const live = liveOf(liveState);
   const liveLabel =
@@ -73,6 +86,12 @@ function Frame({ children }: { children: ReactNode }) {
             icon: entry.icon,
             iconName: entry.iconName,
             current: entry.key === current,
+            ...(entry.key === "inbox" && unreadMessages > 0
+              ? {
+                  count: capCount(unreadMessages, 999),
+                  countLabel: t("inboxUnread", { count: unreadMessages }),
+                }
+              : {}),
           }))}
           renderLink={({ href, children: content, ...rest }) => (
             <NextLink href={href} {...rest}>

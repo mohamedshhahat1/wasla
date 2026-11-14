@@ -7,7 +7,8 @@
   "navLabel": "Main",
   "nav": {
     "home": "Home",
-    "channels": "Channels"
+    "channels": "Channels",
+    "inbox": "Inbox"
   },
   "account": {
     "label": "Account",
@@ -96,7 +97,8 @@
     "loading": "Loading…",
     "cardError": "This could not be loaded.",
     "retry": "Try again",
-    "reference": "Reference:"
+    "reference": "Reference:",
+    "conversationsLink": "Open the inbox"
   },
   "checklist": {
     "title": "Set up your workspace",
@@ -243,5 +245,256 @@
     "done": "Your choice is saved."
   },
   "cancel": "Cancel",
-  "close": "Close"
+  "close": "Close",
+  "inboxUnread": "{count, plural, one {# unread message} other {# unread messages}}",
+  "inbox": {
+    "title": "Inbox",
+    "listLabel": "Conversations",
+    "loading": "Loading conversations",
+    "loadMore": "Load more",
+    "loadedCount": "{count, plural, one {# conversation shown} other {# conversations shown}}",
+    "updated": "Updated — show latest",
+    "retry": "Try again",
+    "reference": "Reference:",
+    "back": "Back to the list",
+    "close": "Close",
+    "more": "More actions",
+    "pickConversation": "Choose a conversation to read it here.",
+    "unknownCustomer": "Unknown customer",
+    "unreadCount": "{count, plural, one {# unread} other {# unread}}",
+    "rowMenu": "Actions for {who}",
+    "markUnread": "Mark as unread",
+    "notInView": "This conversation is no longer in this view.",
+    "error": {
+      "title": "The inbox could not be loaded"
+    },
+    "notFound": {
+      "title": "Conversation not found",
+      "description": "It may have been removed, or it belongs to another workspace."
+    },
+    "search": {
+      "label": "Search by name or number",
+      "clear": "Clear",
+      "tooShort": "Type at least 2 characters.",
+      "tooLong": "Search for at most 100 characters."
+    },
+    "filters": {
+      "label": "Views",
+      "status": "Status",
+      "assignee": "Assigned to",
+      "mode": "Handled by",
+      "everyone": "Everyone",
+      "mine": "Me",
+      "unassigned": "Nobody",
+      "anyMode": "AI or a person",
+      "unreadOnly": "Unread only"
+    },
+    "empty": {
+      "open": "No open conversations",
+      "closed": "No closed conversations",
+      "mine": "Nothing assigned to you",
+      "unassigned": "Every conversation has someone",
+      "unread": "No unread conversations",
+      "search": "No conversations match <term></term>",
+      "showAll": "Show all"
+    },
+    "status": {
+      "default": "Open",
+      "open": "Open",
+      "pending": "Pending",
+      "closed": "Closed",
+      "all": "All"
+    },
+    "mode": {
+      "ai": "AI",
+      "human": "Person"
+    },
+    "priority": {
+      "normal": "Normal",
+      "high": "High",
+      "urgent": "Urgent"
+    },
+    "channel": {
+      "whatsapp": "WhatsApp",
+      "instagram": "Instagram",
+      "messenger": "Messenger"
+    },
+    "assignee": {
+      "you": "You",
+      "none": "Unassigned",
+      "someone": "A teammate"
+    },
+    "preview": {
+      "reply": "Reply:",
+      "template": "Template:",
+      "kind": {
+        "image": "Photo",
+        "audio": "Voice or audio message",
+        "video": "Video",
+        "document": "Document",
+        "location": "Location",
+        "other": "Message"
+      }
+    },
+    "assignedTo": "Assigned to",
+    "assign": "Assign",
+    "assignToMe": "Assign to me",
+    "unassign": "Unassign",
+    "staleAssignee": "Someone changed the assignee — now {name}.",
+    "takeOver": "Take over",
+    "handBack": "Hand back to AI",
+    "priorityMenu": "Priority",
+    "reopen": "Reopen",
+    "thread": {
+      "label": "Messages with {who}",
+      "loading": "Loading messages",
+      "error": "The messages could not be loaded."
+    },
+    "loadEarlier": "Load earlier messages",
+    "newMessages": "{count, plural, one {# new message} other {# new messages}}",
+    "newMessageFrom": "New message from {name}",
+    "seenBy": "Seen by <name></name> · {time}",
+    "seenByYou": "you",
+    "template": "Template",
+    "failedSend": "Not sent",
+    "retrySend": "Retry",
+    "discard": "Discard",
+    "author": {
+      "ai": "AI",
+      "campaign": "Campaign",
+      "member": "A teammate",
+      "you": "You"
+    },
+    "delivery": {
+      "sending": "Sending",
+      "uploading": "Uploading",
+      "pending": "Sending",
+      "sent": "Sent",
+      "delivered": "Delivered",
+      "read": "Read",
+      "failed": "Not sent",
+      "received": "Received"
+    },
+    "link": {
+      "title": "Open this link?",
+      "description": "It was sent by the customer. Check the address before you open it.",
+      "open": "Open link",
+      "cancel": "Cancel"
+    },
+    "media": {
+      "kind": {
+        "image": "Photo",
+        "audio": "Audio",
+        "video": "Video",
+        "document": "Document"
+      },
+      "voice": "Voice message",
+      "pending": "Preparing media…",
+      "failed": "This file could not be received",
+      "unavailable": "This file is no longer available",
+      "unsupported": "This file cannot be shown here",
+      "loadImage": "Load image",
+      "playVoice": "Play voice message",
+      "playAudio": "Play audio",
+      "playVideo": "Play video",
+      "download": "Download",
+      "open": "Open image",
+      "imageFrom": "Image from {name}",
+      "defaultFilename": "Document",
+      "defaultImageName": "image",
+      "kb": "KB",
+      "mb": "MB",
+      "transcript": "Transcript (automatic)",
+      "transcribing": "Transcribing…",
+      "noTranscript": "Transcript not available",
+      "showTranscript": "Show transcript",
+      "hideTranscript": "Hide transcript",
+      "viewerTitle": "Image",
+      "previous": "Previous image",
+      "next": "Next image"
+    },
+    "composer": {
+      "label": "Message",
+      "captionLabel": "Caption",
+      "send": "Send",
+      "attach": "Attach a file",
+      "template": "Template",
+      "removeFile": "Remove the file",
+      "drop": "Drop the file to attach it",
+      "mb": "MB",
+      "tooLong": "Messages can be at most {limit} characters.",
+      "fileRefused": {
+        "type": "This type of file cannot be sent.",
+        "size": "Files can be at most 25 MB.",
+        "empty": "This file is empty."
+      },
+      "assignsYou": "Replying will assign this conversation to you.",
+      "windowLeft": "Free replies close in {hours} h {minutes} m.",
+      "aiMode": "The AI is handling this conversation. Your reply is sent as you.",
+      "windowClosed": "It has been more than 24 hours since this customer wrote. You can send an approved template.",
+      "chooseTemplate": "Choose template",
+      "closed": "This conversation is closed.",
+      "reopen": "Reopen",
+      "optedOut": "This customer opted out of messages.",
+      "unavailable": "Messages cannot be sent on this channel right now."
+    },
+    "templates": {
+      "title": "Send an approved template",
+      "close": "Close",
+      "filter": "Find a template",
+      "listLabel": "Approved templates",
+      "loading": "Loading templates",
+      "none": "No approved templates. Templates are synced from WhatsApp.",
+      "noMatch": "No template matches.",
+      "back": "Back",
+      "send": "Send template",
+      "parameter": "Value {number}",
+      "preview": "Preview",
+      "notInInbox": "This template needs a header file or buttons, which the inbox cannot fill yet.",
+      "category": {
+        "marketing": "Marketing",
+        "utility": "Utility",
+        "authentication": "Authentication",
+        "unknown": "Other"
+      }
+    },
+    "panel": {
+      "title": "Customer details",
+      "show": "Customer details",
+      "hide": "Hide details",
+      "customer": "Customer",
+      "name": "Name",
+      "number": "Number",
+      "copy": "Copy the number",
+      "copied": "Number copied",
+      "channel": "Channel",
+      "line": "Your number",
+      "conversation": "Conversation",
+      "status": "Status",
+      "mode": "Handled by",
+      "assignee": "Assigned to",
+      "priority": "Priority",
+      "started": "Started",
+      "lastActivity": "Last activity",
+      "lead": "Lead",
+      "noLead": "No lead for this customer yet.",
+      "loading": "Loading the lead",
+      "leadError": "The lead could not be loaded.",
+      "leadStatus": "Stage",
+      "leadStatusValue": {
+        "new": "New",
+        "contacted": "Contacted",
+        "qualified": "Qualified",
+        "proposal": "Proposal",
+        "won": "Won",
+        "lost": "Lost"
+      },
+      "score": "Score",
+      "source": "Source",
+      "leadOwner": "Owner",
+      "interest": "Interested in",
+      "tags": "Tags",
+      "leadActivity": "Last lead activity"
+    }
+  }
 }

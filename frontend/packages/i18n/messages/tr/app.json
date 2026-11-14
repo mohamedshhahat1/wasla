@@ -7,7 +7,8 @@
   "navLabel": "Ana",
   "nav": {
     "home": "Ana sayfa",
-    "channels": "Kanallar"
+    "channels": "Kanallar",
+    "inbox": "Gelen kutusu"
   },
   "account": {
     "label": "Hesap",
@@ -96,7 +97,8 @@
     "loading": "Yükleniyor…",
     "cardError": "Bu yüklenemedi.",
     "retry": "Tekrar dene",
-    "reference": "Referans:"
+    "reference": "Referans:",
+    "conversationsLink": "Gelen kutusunu aç"
   },
   "checklist": {
     "title": "Çalışma alanınızı kurun",
@@ -243,5 +245,256 @@
     "done": "Seçiminiz kaydedildi."
   },
   "cancel": "İptal",
-  "close": "Kapat"
+  "close": "Kapat",
+  "inboxUnread": "{count, plural, one {# okunmamış mesaj} other {# okunmamış mesaj}}",
+  "inbox": {
+    "title": "Gelen kutusu",
+    "listLabel": "Konuşmalar",
+    "loading": "Konuşmalar yükleniyor",
+    "loadMore": "Daha fazla yükle",
+    "loadedCount": "{count, plural, one {# konuşma gösteriliyor} other {# konuşma gösteriliyor}}",
+    "updated": "Güncellendi — en yenileri göster",
+    "retry": "Yeniden dene",
+    "reference": "Referans:",
+    "back": "Listeye dön",
+    "close": "Kapat",
+    "more": "Diğer işlemler",
+    "pickConversation": "Burada okumak için bir konuşma seçin.",
+    "unknownCustomer": "Bilinmeyen müşteri",
+    "unreadCount": "{count, plural, one {# okunmamış} other {# okunmamış}}",
+    "rowMenu": "{who} için işlemler",
+    "markUnread": "Okunmadı olarak işaretle",
+    "notInView": "Bu konuşma artık bu görünümde değil.",
+    "error": {
+      "title": "Gelen kutusu yüklenemedi"
+    },
+    "notFound": {
+      "title": "Konuşma bulunamadı",
+      "description": "Silinmiş olabilir ya da başka bir çalışma alanına ait olabilir."
+    },
+    "search": {
+      "label": "Ad veya numaraya göre ara",
+      "clear": "Temizle",
+      "tooShort": "En az 2 karakter yazın.",
+      "tooLong": "En fazla 100 karakter arayın."
+    },
+    "filters": {
+      "label": "Görünümler",
+      "status": "Durum",
+      "assignee": "Atanan",
+      "mode": "Yürüten",
+      "everyone": "Herkes",
+      "mine": "Ben",
+      "unassigned": "Kimse",
+      "anyMode": "Yapay zekâ veya bir kişi",
+      "unreadOnly": "Yalnızca okunmamış"
+    },
+    "empty": {
+      "open": "Açık konuşma yok",
+      "closed": "Kapalı konuşma yok",
+      "mine": "Size atanmış bir şey yok",
+      "unassigned": "Her konuşmanın bir sorumlusu var",
+      "unread": "Okunmamış konuşma yok",
+      "search": "<term></term> ile eşleşen konuşma yok",
+      "showAll": "Tümünü göster"
+    },
+    "status": {
+      "default": "Açık",
+      "open": "Açık",
+      "pending": "Beklemede",
+      "closed": "Kapalı",
+      "all": "Tümü"
+    },
+    "mode": {
+      "ai": "Yapay zekâ",
+      "human": "Kişi"
+    },
+    "priority": {
+      "normal": "Normal",
+      "high": "Yüksek",
+      "urgent": "Acil"
+    },
+    "channel": {
+      "whatsapp": "WhatsApp",
+      "instagram": "Instagram",
+      "messenger": "Messenger"
+    },
+    "assignee": {
+      "you": "Siz",
+      "none": "Atanmamış",
+      "someone": "Bir ekip arkadaşı"
+    },
+    "preview": {
+      "reply": "Yanıt:",
+      "template": "Şablon:",
+      "kind": {
+        "image": "Fotoğraf",
+        "audio": "Sesli mesaj",
+        "video": "Video",
+        "document": "Belge",
+        "location": "Konum",
+        "other": "Mesaj"
+      }
+    },
+    "assignedTo": "Atanan",
+    "assign": "Ata",
+    "assignToMe": "Bana ata",
+    "unassign": "Atamayı kaldır",
+    "staleAssignee": "Biri atamayı değiştirdi — şimdi {name}.",
+    "takeOver": "Devral",
+    "handBack": "Yapay zekâya geri ver",
+    "priorityMenu": "Öncelik",
+    "reopen": "Yeniden aç",
+    "thread": {
+      "label": "{who} ile mesajlar",
+      "loading": "Mesajlar yükleniyor",
+      "error": "Mesajlar yüklenemedi."
+    },
+    "loadEarlier": "Önceki mesajları yükle",
+    "newMessages": "{count, plural, one {# yeni mesaj} other {# yeni mesaj}}",
+    "newMessageFrom": "{name} kişisinden yeni mesaj",
+    "seenBy": "Gören: <name></name> · {time}",
+    "seenByYou": "siz",
+    "template": "Şablon",
+    "failedSend": "Gönderilmedi",
+    "retrySend": "Yeniden dene",
+    "discard": "Vazgeç",
+    "author": {
+      "ai": "Yapay zekâ",
+      "campaign": "Kampanya",
+      "member": "Bir ekip arkadaşı",
+      "you": "Siz"
+    },
+    "delivery": {
+      "sending": "Gönderiliyor",
+      "uploading": "Yükleniyor",
+      "pending": "Gönderiliyor",
+      "sent": "Gönderildi",
+      "delivered": "İletildi",
+      "read": "Okundu",
+      "failed": "Gönderilmedi",
+      "received": "Alındı"
+    },
+    "link": {
+      "title": "Bu bağlantı açılsın mı?",
+      "description": "Müşteri tarafından gönderildi. Açmadan önce adresi kontrol edin.",
+      "open": "Bağlantıyı aç",
+      "cancel": "İptal"
+    },
+    "media": {
+      "kind": {
+        "image": "Fotoğraf",
+        "audio": "Ses",
+        "video": "Video",
+        "document": "Belge"
+      },
+      "voice": "Sesli mesaj",
+      "pending": "Dosya hazırlanıyor…",
+      "failed": "Bu dosya alınamadı",
+      "unavailable": "Bu dosya artık kullanılamıyor",
+      "unsupported": "Bu dosya burada gösterilemiyor",
+      "loadImage": "Görseli yükle",
+      "playVoice": "Sesli mesajı oynat",
+      "playAudio": "Sesi oynat",
+      "playVideo": "Videoyu oynat",
+      "download": "İndir",
+      "open": "Görseli aç",
+      "imageFrom": "{name} kişisinden görsel",
+      "defaultFilename": "Belge",
+      "defaultImageName": "gorsel",
+      "kb": "KB",
+      "mb": "MB",
+      "transcript": "Döküm (otomatik)",
+      "transcribing": "Döküm hazırlanıyor…",
+      "noTranscript": "Döküm yok",
+      "showTranscript": "Dökümü göster",
+      "hideTranscript": "Dökümü gizle",
+      "viewerTitle": "Görsel",
+      "previous": "Önceki görsel",
+      "next": "Sonraki görsel"
+    },
+    "composer": {
+      "label": "Mesaj",
+      "captionLabel": "Açıklama",
+      "send": "Gönder",
+      "attach": "Dosya ekle",
+      "template": "Şablon",
+      "removeFile": "Dosyayı kaldır",
+      "drop": "Eklemek için dosyayı bırakın",
+      "mb": "MB",
+      "tooLong": "Mesajlar en fazla {limit} karakter olabilir.",
+      "fileRefused": {
+        "type": "Bu dosya türü gönderilemez.",
+        "size": "Dosyalar en fazla 25 MB olabilir.",
+        "empty": "Bu dosya boş."
+      },
+      "assignsYou": "Yanıtlamak bu konuşmayı size atar.",
+      "windowLeft": "Serbest yanıtlar {hours} sa {minutes} dk içinde kapanıyor.",
+      "aiMode": "Bu konuşmayı yapay zekâ yürütüyor. Yanıtınız sizin adınıza gönderilir.",
+      "windowClosed": "Bu müşterinin son mesajının üzerinden 24 saatten fazla geçti. Onaylı bir şablon gönderebilirsiniz.",
+      "chooseTemplate": "Şablon seç",
+      "closed": "Bu konuşma kapalı.",
+      "reopen": "Yeniden aç",
+      "optedOut": "Bu müşteri mesaj almak istemediğini bildirdi.",
+      "unavailable": "Bu kanalda şu anda mesaj gönderilemiyor."
+    },
+    "templates": {
+      "title": "Onaylı şablon gönder",
+      "close": "Kapat",
+      "filter": "Şablon bul",
+      "listLabel": "Onaylı şablonlar",
+      "loading": "Şablonlar yükleniyor",
+      "none": "Onaylı şablon yok. Şablonlar WhatsApp'tan eşitlenir.",
+      "noMatch": "Eşleşen şablon yok.",
+      "back": "Geri",
+      "send": "Şablonu gönder",
+      "parameter": "Değer {number}",
+      "preview": "Önizleme",
+      "notInInbox": "Bu şablon bir başlık dosyası ya da düğmeler istiyor; gelen kutusu bunları henüz dolduramıyor.",
+      "category": {
+        "marketing": "Pazarlama",
+        "utility": "Hizmet",
+        "authentication": "Kimlik doğrulama",
+        "unknown": "Diğer"
+      }
+    },
+    "panel": {
+      "title": "Müşteri ayrıntıları",
+      "show": "Müşteri ayrıntıları",
+      "hide": "Ayrıntıları gizle",
+      "customer": "Müşteri",
+      "name": "Ad",
+      "number": "Numara",
+      "copy": "Numarayı kopyala",
+      "copied": "Numara kopyalandı",
+      "channel": "Kanal",
+      "line": "Numaranız",
+      "conversation": "Konuşma",
+      "status": "Durum",
+      "mode": "Yürüten",
+      "assignee": "Atanan",
+      "priority": "Öncelik",
+      "started": "Başlangıç",
+      "lastActivity": "Son etkinlik",
+      "lead": "Potansiyel müşteri",
+      "noLead": "Bu müşteri için henüz potansiyel müşteri kaydı yok.",
+      "loading": "Potansiyel müşteri yükleniyor",
+      "leadError": "Potansiyel müşteri yüklenemedi.",
+      "leadStatus": "Aşama",
+      "leadStatusValue": {
+        "new": "Yeni",
+        "contacted": "İletişime geçildi",
+        "qualified": "Nitelikli",
+        "proposal": "Teklif",
+        "won": "Kazanıldı",
+        "lost": "Kaybedildi"
+      },
+      "score": "Puan",
+      "source": "Kaynak",
+      "leadOwner": "Sorumlu",
+      "interest": "İlgilendiği",
+      "tags": "Etiketler",
+      "leadActivity": "Potansiyel müşterinin son etkinliği"
+    }
+  }
 }
