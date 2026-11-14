@@ -22,8 +22,6 @@ import hashlib
 import hmac
 import json
 import re
-import shutil
-import subprocess
 import sys
 import time
 import uuid
@@ -48,7 +46,6 @@ FORWARD_SECRET = "e2e-not-a-secret-0123456789abcdef0123456789abcdef"
 META_APP_SECRET = b"e2e-meta-app-secret-NOT-A-SECRET"
 PASSWORD = "Correct-Horse-Battery-e2e-9"
 STAFF = ("staff.e2e@example.com", "e2e-staff-password-NOT-A-SECRET")
-PG_CONTAINER = "wasla-fe-e2e-pg"
 # docker-compose.e2e.yml's public, made-up signing key: the smoke re-signs a real
 # account's token for a workspace it never joined, to prove a stranger learns
 # nothing (FEB-07, WG-03).
@@ -86,29 +83,6 @@ def token_for_another_workspace(token: str, tenant_id: str) -> str:
         token_version=claims.token_version,
     )
     return forged
-
-
-def stored_media_id(conversation: str) -> str:
-    """The newest stored attachment of a conversation, read from the database.
-
-    FEB-03: no message the API returns carries its media's id, so a client -
-    this smoke included - cannot find it. The frontend will need FEB-03; the
-    smoke reads the stack's own database through `docker exec` instead.
-    """
-    conversation_id = uuid.UUID(conversation)  # refuses anything that is not a UUID
-    docker = shutil.which("docker") or "docker"
-    query = (
-        "select id from message_media "  # noqa: S608
-        f"where conversation_id = '{conversation_id}' and storage_state = 'stored' "
-        "order by created_at desc limit 1;"
-    )
-    return subprocess.run(  # noqa: S603 - fixed argv, the stack's own container
-        [docker, "exec", "-i", PG_CONTAINER, "psql", "-U", "wasla", "-d", "wasla", "-tA"],
-        input=query,
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.strip()
 
 
 class JourneyError(AssertionError):
@@ -294,7 +268,13 @@ class Smoke:
         token: str = response.json()["access_token"]
         return token
 
-    async def webhook(self, phone_number_id: str, message: dict[str, Any], sender: str) -> None:
+    async def webhook(
+        self,
+        phone_number_id: str,
+        message: dict[str, Any],
+        sender: str,
+        name: str = "Customer",
+    ) -> None:
         payload = {
             "object": "whatsapp_business_account",
             "entry": [
@@ -309,7 +289,7 @@ class Smoke:
                                     "display_phone_number": "201000000000",
                                     "phone_number_id": phone_number_id,
                                 },
-                                "contacts": [{"profile": {"name": "Customer"}, "wa_id": sender}],
+                                "contacts": [{"profile": {"name": name}, "wa_id": sender}],
                                 "messages": [
                                     {
                                         "from": sender,
@@ -338,7 +318,7 @@ class Smoke:
         return {str(item["id"]) for item in listed.get("items", [])}
 
     async def new_conversation(self, token: str, known: set[str], within: float = 30) -> str:
-        """The conversation an inbound message just opened (FEB-04: no handle to match on)."""
+        """The conversation an inbound message just opened."""
         deadline = time.monotonic() + within
         while time.monotonic() < deadline:
             fresh = await self.conversation_ids(token) - known
@@ -712,20 +692,69 @@ class Smoke:
             "201000000110",
         )
         conversation = await self.new_conversation(token, known)
-        stored = ""
+        # FEB-03: the message names its file; the id is what the download route takes.
+        item: dict[str, Any] = {}
         deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and not stored:
-            stored = await asyncio.to_thread(stored_media_id, conversation)
-            if not stored:
-                await asyncio.sleep(1)
-        check(bool(stored), "the media never reached storage")
-        served = await self.call("GET", f"/conversations/{conversation}/media/{stored}", token)
+        while time.monotonic() < deadline:
+            page = (await self.call("GET", f"/conversations/{conversation}/messages", token)).json()
+            files = [file for message in page["items"] for file in message.get("media", [])]
+            if files and files[0]["status"] == "available":
+                item = files[0]
+                break
+            await asyncio.sleep(1)
+        check(bool(item), "the message never named an available file")
+        check(item["kind"] == "image", f"kind {item.get('kind')}")
+        forbidden = {"storage_key", "wa_media_id", "locator", "url"} & set(item)
+        check(not forbidden, f"private fields {forbidden}")
+        check(media_id not in json.dumps(item), "the provider's media id is in the message")
+        served = await self.call("GET", f"/conversations/{conversation}/media/{item['id']}", token)
         check(served.status_code == 200, f"media {served.status_code}")
         disposition = served.headers.get("content-disposition", "")
         cache = served.headers.get("cache-control", "")
         check(disposition.startswith("attachment"), f"disposition {disposition}")
         check("private" in cache and "no-store" in cache, f"cache-control {cache}")
-        return "media stored; id read from the database (FEB-03); 200 attachment, private, no-store"
+        return "id from MessageRead.media (FEB-03); 200 attachment, private, no-store"
+
+    async def j11(self) -> str:
+        """FEB-04 and FEB-05 from the API side: a named customer, found by each view."""
+        token = self.state["token"]
+        name = f"Nour Views {self.tag}"
+        number = "201000000111"
+        known = await self.conversation_ids(token)
+        await self.webhook(
+            self.state["pnid"], {"type": "text", "text": {"body": "Views"}}, number, name=name
+        )
+        conversation = await self.new_conversation(token, known)
+
+        async def ids(**params: str) -> list[str]:
+            answer = await self.call(
+                "GET", "/conversations", token, params={"limit": 100, **params}
+            )
+            check(answer.status_code == 200, f"view {params} {answer.status_code}")
+            return [str(row["id"]) for row in answer.json()["items"]]
+
+        detail = (await self.call("GET", f"/conversations/{conversation}", token)).json()
+        who = detail["participant"]
+        check(who["display_name"] == name, f"display_name {who.get('display_name')}")
+        check(who["handle"] == f"+{number}", f"handle {who.get('handle')}")
+        check(await ids(q=name) == [conversation], "q by name")
+        check(await ids(q=f"+{number}") == [conversation], "q by number")
+        check(conversation in await ids(assigned_to="none"), "unassigned")
+        check(conversation in await ids(mode="ai"), "mode ai")
+        check(conversation not in await ids(status="closed"), "closed before")
+        closed = await self.call("POST", f"/conversations/{conversation}/close", token)
+        check(closed.status_code == 200, f"close {closed.status_code}")
+        check(conversation in await ids(status="closed"), "closed after")
+        check(conversation not in await ids(), "the default view leaves closed out")
+        check(conversation in await ids(status="all"), "all")
+        refused = await self.call(
+            "GET", "/conversations", token, params={"status": "all", "limit": 1}
+        )
+        cursor = refused.json()["next_cursor"]
+        if cursor:
+            mixed = await self.call("GET", "/conversations", token, params={"cursor": cursor})
+            check(error_code(mixed) == "cursor_view_mismatch", f"cursor {mixed.status_code}")
+        return "participant named; q (name, number), assigned_to, mode, status, cursor bound"
 
     async def forwards(self) -> list[str]:
         """Two signed addresses do not share the bucket; an unsigned run uses the caller's."""
@@ -785,7 +814,8 @@ async def run(options: argparse.Namespace) -> int:
         ("J7 switch workspace", smoke.j7, "PASSED"),
         ("J8 staff suspends, restores", smoke.j8, "PASSED"),
         ("J9 Google sign-in", smoke.j9, "PASSED"),
-        ("J10 private media", smoke.j10, "PASSED WITH FEB-03"),
+        ("J10 private media", smoke.j10, "PASSED"),
+        ("J11 inbox views and participant", smoke.j11, "PASSED"),
     ]
     results = []
     try:
