@@ -17,6 +17,7 @@ import {
   MessageBubble,
   NavList,
   SegmentedControl,
+  SidePanel,
   TranscriptBlock,
 } from "../src";
 
@@ -180,5 +181,23 @@ describe("controls", () => {
     expect(open).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Open link" }));
     expect(open).toHaveBeenCalledWith("https://example.test/a/very/long/path?x=1");
+  });
+});
+
+describe("the customer panel's drawer (UI4-02)", () => {
+  it("is a dialog named by its title, with or without a heading id", () => {
+    const { unmount } = render(
+      <SidePanel title="Customer details" variant="drawer" open closeLabel="Close" headingId="h">
+        <p>body</p>
+      </SidePanel>,
+    );
+    expect(screen.getByRole("dialog", { name: "Customer details" })).toBeTruthy();
+    unmount();
+    render(
+      <SidePanel title="Customer details" variant="drawer" open closeLabel="Close">
+        <p>body</p>
+      </SidePanel>,
+    );
+    expect(screen.getByRole("dialog", { name: "Customer details" })).toBeTruthy();
   });
 });

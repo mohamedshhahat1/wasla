@@ -917,7 +917,7 @@ export const SidePanel = forwardRef<HTMLHeadingElement, SidePanelProps>(function
   const heading = (
     <h2
       ref={ref}
-      id={headingId}
+      {...(headingId ? { id: headingId } : {})}
       tabIndex={-1}
       className="m-0 text-lg font-semibold text-text outline-none"
     >
@@ -942,6 +942,9 @@ export const SidePanel = forwardRef<HTMLHeadingElement, SidePanelProps>(function
         <DialogPrimitive.Overlay className="wasla-scrim fixed inset-0 z-(--z-overlay) bg-scrim" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
+          // The heading keeps its own id (the pane and the screen's focus use it), which wins over
+          // the one Radix gives its Title - so the drawer names itself by that id.
+          {...(headingId ? { "aria-labelledby": headingId } : {})}
           data-side-panel="drawer"
           className="wasla-drawer fixed inset-y-0 end-0 z-(--z-modal) flex w-full max-w-inbox-panel flex-col overflow-y-auto border-s border-border bg-surface shadow-lg"
         >
