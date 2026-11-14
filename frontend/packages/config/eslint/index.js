@@ -23,8 +23,15 @@ export const PUBLIC_ORIGIN_NAMES = [
   "PUBLIC_MARKETING_ORIGIN",
 ];
 
-/** The one file allowed to touch web storage (it holds no token: S-2). */
-export const STORAGE_ALLOW_FILES = ["packages/session/src/preferences-storage.ts"];
+/**
+ * The files allowed to touch web storage (they hold no token: S-2): the session's preferences, and
+ * the inbox's composer draft - its text only, per workspace and conversation, in sessionStorage
+ * (plan section 21, CP-01).
+ */
+export const STORAGE_ALLOW_FILES = [
+  "packages/session/src/preferences-storage.ts",
+  "apps/web/lib/inbox/draft-storage.ts",
+];
 
 /** Files that always end up in a browser bundle, whatever their directive. */
 export const CLIENT_FILE_FRAGMENTS = [

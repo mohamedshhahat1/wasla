@@ -117,6 +117,13 @@
   --spacing-hero: 560px;
   /* The app shell's side navigation and its phone sheet (FE-3) */
   --spacing-nav: 256px;
+  /* The inbox (FE-4, LY-01): the list pane, the customer panel, a bubble's and an image tile's
+     widest, and the panes' height under the top bar. */
+  --spacing-inbox-list: 360px;
+  --spacing-inbox-panel: 320px;
+  --spacing-bubble: 560px;
+  --spacing-media: 240px;
+  --spacing-inbox: calc(100dvh - 160px);
 
   /* Shape and depth: one radius family (8 / 12 / 16); shadows tinted with blue-950, offset + blur */
   --radius-sm: 6px;

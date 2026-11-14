@@ -68,6 +68,7 @@ from app.repositories.conversation_repository import (
 )
 from app.repositories.media_repository import MediaRepository
 from app.repositories.membership_repository import MembershipRepository
+from app.repositories.read_state_repository import ReadState, ReadStateRepository
 from app.services.analytics_service import AnalyticsRecorder
 from app.services.audit_service import AuditTrail
 from app.services.follow_up_sequences import SequenceService
@@ -165,6 +166,7 @@ def _view_tag(
     priority: ConversationPriority | None,
     channel: Channel | None,
     connection_id: uuid.UUID | None,
+    unread: bool = False,
 ) -> str | None:
     """A short tag naming one view, or None for the default view (no filter at all).
 
@@ -179,6 +181,10 @@ def _view_tag(
         channel.value if channel else None,
         str(connection_id) if connection_id else None,
     ]
+    # Appended only when set, so every view's tag - and every cursor a client
+    # already holds - is unchanged by the unread filter's arrival (UR-09).
+    if unread:
+        parts.append("unread")
     if all(part is None for part in parts):
         return None
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:12]
@@ -219,6 +225,7 @@ class InboxService:
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._identities = ContactIdentityRepository(session, tenant_id=tenant_id)
         self._media = MediaRepository(session, tenant_id=tenant_id)
+        self._reads = ReadStateRepository(session, tenant_id=tenant_id)
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
         self._analytics = AnalyticsRecorder(session, tenant_id=tenant_id)
         self._audit = AuditTrail(session, tenant_id=tenant_id)
@@ -240,6 +247,7 @@ class InboxService:
         mode: ConversationMode | None = None,
         q: str | None = None,
         viewer_id: uuid.UUID | None = None,
+        unread: bool = False,
     ) -> Page[Conversation]:
         """Everything not closed, most recently active first - or one view of the inbox.
 
@@ -267,6 +275,7 @@ class InboxService:
             priority=priority,
             channel=channel,
             connection_id=connection_id,
+            unread=unread,
         )
         after = _view_cursor(cursor, view)
         rows = await self._conversations.list_open(
@@ -279,6 +288,7 @@ class InboxService:
             assigned_to=owner,
             mode=mode,
             search=search,
+            unread=unread,
         )
         page = paginate(
             rows,
@@ -305,6 +315,18 @@ class InboxService:
         return await self._identities.participants(
             {conversation.participant_identity_id for conversation in conversations}
         )
+
+    async def idempotency_key_used(self, key: str | None) -> bool:
+        """Whether a send with this key already exists here, so a replay is told apart (UR-06)."""
+        if key is None:
+            return False
+        return await self._messages.get_by_idempotency_key(key) is not None
+
+    async def read_states(
+        self, conversations: Sequence[Conversation]
+    ) -> dict[uuid.UUID, ReadState]:
+        """The team's read state of each conversation, in one query (UR-05)."""
+        return await self._reads.states([conversation.id for conversation in conversations])
 
     async def media_for(self, messages: Sequence[Message]) -> dict[uuid.UUID, list[MessageMedia]]:
         """The files of these messages, by message id, in one query (FEB-03).

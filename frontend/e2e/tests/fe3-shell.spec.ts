@@ -130,7 +130,9 @@ for (const locale of ["en", "ar"] as Locale[]) {
       const nav = page
         .getByRole("navigation", { name: label(locale, "app.navLabel") })
         .filter({ visible: true });
-      await expect(nav.getByRole("link")).toHaveCount(2);
+      // FE-4 registers the inbox: Home, Inbox, Channels - still only what exists.
+      await expect(nav.getByRole("link")).toHaveCount(3);
+      await expect(nav.getByRole("link", { name: label(locale, "app.nav.inbox") })).toHaveCount(1);
       await expect(nav.getByRole("link", { name: label(locale, "app.nav.home") })).toHaveAttribute(
         "aria-current",
         "page",

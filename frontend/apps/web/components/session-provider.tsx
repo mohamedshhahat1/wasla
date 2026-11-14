@@ -20,6 +20,8 @@ import type { WorkspaceRef } from "@wasla/session";
 import { Toast } from "@wasla/ui";
 
 import { publicEnv } from "../lib/env";
+import { clearDrafts } from "../lib/inbox/composer";
+import { draftStorage } from "../lib/inbox/draft-storage";
 import { sessionTransports } from "../lib/session/transports";
 import { WebSession, type SessionStatus } from "../lib/session/web-session";
 
@@ -101,9 +103,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [session]);
 
-  // A new generation (switch, sign-out): nothing cached under the old one is read again.
+  // A new generation (switch, sign-out): nothing cached under the old one is read again - and no
+  // composer draft of the old workspace or session stays (FE-4, CP-01). Not on the first render:
+  // a reload keeps the tab's drafts.
+  const firstGeneration = useRef(true);
   useEffect(() => {
     queryClient.clear();
+    if (firstGeneration.current) firstGeneration.current = false;
+    else clearDrafts(draftStorage());
   }, [generation, queryClient]);
 
   // Every new session state (signed in, a switch, signed out) loads its own profile.
@@ -132,6 +139,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (status === "signed-out" && wasSignedIn.current) {
       wasSignedIn.current = false;
       queryClient.clear();
+      clearDrafts(draftStorage());
       setLoaded(null);
       if (!AUTH_PATHS.includes(pathname)) router.replace("/login");
     }

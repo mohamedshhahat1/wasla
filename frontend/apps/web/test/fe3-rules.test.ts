@@ -386,10 +386,10 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
       expect(served.has(entry.route)).toBe(true);
     });
   }
-  it("FE-3 registers exactly Home and Channels, for every role", () => {
-    expect(NAVIGATION.map((entry) => entry.route)).toEqual(["/", "/channels"]);
+  it("FE-3 registers Home and Channels, FE-4 Inbox between them, for every role", () => {
+    expect(NAVIGATION.map((entry) => entry.route)).toEqual(["/", "/inbox", "/channels"]);
     for (const role of ALL_ROLES)
-      expect(entriesFor(role).map((entry) => entry.key)).toEqual(["home", "channels"]);
+      expect(entriesFor(role).map((entry) => entry.key)).toEqual(["home", "inbox", "channels"]);
     expect(entriesFor(null)).toEqual([]);
   });
   it("the current entry follows the path", () => {
@@ -397,6 +397,8 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
     expect(currentEntry("/channels")).toBe("channels");
     expect(currentEntry("/channels/abc")).toBe("channels");
     expect(currentEntry("/channels/connect/whatsapp")).toBe("channels");
+    expect(currentEntry("/inbox")).toBe("inbox");
+    expect(currentEntry("/inbox/abc")).toBe("inbox");
     expect(currentEntry("/workspaces")).toBeNull();
   });
 });

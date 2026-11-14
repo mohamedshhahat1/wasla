@@ -8351,3 +8351,50 @@ mailbox helpers.
 with `<bdi>`, never as markup. A refresh into a workspace whose membership was withdrawn answers the generic 404 as before
 and, on a reload, shows "Connection lost" (FEB-34, FEF-27). The previews get the session change with the next frontend
 stage that redeploys. The repository's nginx example logs `$request` for the API (FEB-35).
+
+## ADR-198 — The Realtime Inbox (FE-4): Server Views, Shared Read State, Blob Media, One Key Per Bubble, The Invalidation Map
+
+**Status.** Accepted, 2026-11-14 (FE-4; report FE4_REALTIME_INBOX.md). FRONTEND_PLAN.md section 29's FE-4: APP-INBOX-01..03,
+on BE1's contract (ADR-197) and FE-3's shell (ADR-196); FEB-06's inbox codes; the owner's addition of shared unread, "seen by",
+the last-message preview, assignment on the first reply, an unread-only filter, a total next to Inbox and mark as unread.
+
+**Context.** The plan sized FE-4 "L": a list-detail inbox kept live by one stream per browser, media that an `<img src>`
+cannot fetch (a bearer is needed), a composer under WhatsApp's reply window, and actions that must never overwrite a
+colleague. The owner asked for unread and a preview, which no read model had.
+
+**Decision.**
+
+1. *The list (IL).* BE1's views map one to one to controls; the view lives in the URL's search params, the search term only
+   in component memory (`inboxHref` has no parameter for it). One infinite query per view; the cursor is never built or
+   reused; `cursor_view_mismatch` re-reads from the top once; the request builder has no `updated_since`. A refreshed first
+   page applies at once only at the top with no row focused - otherwise "Updated - show latest".
+2. *Shared read state (UR).* Alembic 0139: `last_read_message_id` (a marker, no foreign key - a key from conversations into
+   messages would make every message delete scan conversations), `last_read_by_user_id`, `last_read_at`. Unread counts the
+   customer's messages after the marker's position, capped at 100 (the summary at 1000). `/read` moves forward only;
+   `/unread` is the one way back. A member's own send marks read and assigns an unassigned conversation through the ordinary
+   assignment (never the AI's send, never a replay, never over an owner). A move emits `conversation.updated` with `read`.
+   Read a page at a time in one query; nothing about read state is kept in the browser; a read is sent only with the newest
+   message in view in a visible tab.
+3. *Media (TH).* Bytes through the session's own client (`parseAs: "blob"`, its bearer and gate middleware), at most three
+   at a time, type-checked against the tile, shown through object URLs in one per-tab registry that revokes them when the
+   tile lets go, on conversation change, page hide, sign-out and switch; at most 50 MB in memory; never Cache Storage or
+   IndexedDB. FE-2's CSP already allowed `blob:` in img-src and media-src only - unchanged.
+4. *The composer (CP).* One Idempotency-Key per bubble, reused on every retry; sends of one conversation in order; a 201, a
+   frame or a refetch carrying the id settles the bubble once. The draft per workspace and conversation in sessionStorage
+   (`apps/web/lib/inbox/draft-storage.ts`, the second allow-listed storage file), cleared on sign-out and switch. The reply
+   window from `reply_policy`; templates with their parameters; files checked before any request.
+5. *Actions (CX)* are not optimistic; assignment sends the expected assignee and a stale answer is told, not overwritten.
+6. *The invalidation map (RT).* `stream-handlers.ts` maps frames to invalidations and patches (message.status patches in
+   place), coalesced per key within 250 ms; the open inbox registers its after= catch-up and its gap rule. A stream that
+   reopens after being open is treated as a gap; polling runs only while the stream has been down 10 s, never hidden.
+7. *Layout (LY).* Three panes from 1024 px (the panel starts shown from 1280 px), list and conversation with the panel as a
+   drawer from 768 px, three URL-tracked steps below.
+8. *FEB-06.* `reply_window_closed`, `idempotency_key_reused`, `media_type_not_allowed` at their raise sites, same status and
+   sentence; `stale_assignment` already had its code.
+
+**Rejected.** A client-side unread set; a preview taken from the messages endpoint; per-member unread and assignment on open
+(the owner chose shared and first reply); a virtual-list, player, PDF, linkify or markdown package; optimistic actions; a
+second stream; media through Cache Storage; a key into messages for the read marker.
+
+**Consequences.** FE-5 plugs the contact detail and lead editing into the panel; FE-6 adds document events to the map. The
+search term reaches the API's query string by design; the nginx example's `$request` log (FEB-35) stays the owner's.

@@ -135,7 +135,7 @@ def test_the_operations_are_the_routes_production_serves(document: dict[str, Any
 
     assert excluded == SELF_EXCLUDED
     assert documented == served - excluded
-    assert len(served) == 259
+    assert len(served) == 262
 
 
 def test_production_still_serves_no_document() -> None:

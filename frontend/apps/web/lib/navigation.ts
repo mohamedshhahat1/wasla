@@ -3,7 +3,7 @@
  * here when it builds the screen - never a placeholder, a "coming soon" item or a disabled link.
  * A unit test holds every route to a page in app/**.
  */
-import { House, RadioTower, type LucideIcon } from "lucide-react";
+import { House, Inbox, RadioTower, type LucideIcon } from "lucide-react";
 
 export type TenantRole = "tenant_owner" | "tenant_admin" | "member";
 
@@ -31,6 +31,15 @@ export const NAVIGATION: readonly NavEntry[] = [
     iconName: "House",
     roles: ALL_ROLES,
     page: "app/(app)/page.tsx",
+  },
+  {
+    key: "inbox",
+    route: "/inbox",
+    labelKey: "inbox",
+    icon: Inbox,
+    iconName: "Inbox",
+    roles: ALL_ROLES,
+    page: "app/(app)/inbox/page.tsx",
   },
   {
     key: "channels",

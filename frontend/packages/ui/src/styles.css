@@ -149,6 +149,24 @@
     animation-name: wasla-sheet-out-rtl;
   }
 
+  /* The inbox's customer drawer (FE-4, UI4-03): enters from the inline end, leaves faster;
+     mirrored in RTL; only transform moves (emil-design-eng, motion-review-fe4). */
+  .wasla-drawer[data-state="open"] {
+    animation: wasla-drawer-in var(--motion-slow) var(--ease-out);
+  }
+
+  .wasla-drawer[data-state="closed"] {
+    animation: wasla-drawer-out var(--motion-fast) var(--ease-out);
+  }
+
+  [dir="rtl"] .wasla-drawer[data-state="open"] {
+    animation-name: wasla-drawer-in-rtl;
+  }
+
+  [dir="rtl"] .wasla-drawer[data-state="closed"] {
+    animation-name: wasla-drawer-out-rtl;
+  }
+
   /* Press feedback on pressable things, never when disabled or busy (CM-01, emil). */
   /* Colours change at once: a button's label is never caught half-way between two colour
      pairs (FE-2's axe proof scans right after a submit); only the press scale moves. */
@@ -278,4 +296,28 @@
 [data-brand-surface] :focus-visible,
 [data-brand-surface]:focus-visible {
   outline-color: var(--color-focus-inverse);
+}
+
+@keyframes wasla-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes wasla-drawer-out {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes wasla-drawer-in-rtl {
+  from {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes wasla-drawer-out-rtl {
+  to {
+    transform: translateX(-100%);
+  }
 }

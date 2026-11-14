@@ -438,6 +438,19 @@ class Conversation(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin)
         nullable=True,
     )
     handoff_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # The team's read position (UR-02, 0139): shared by every member, moved
+    # forward by `POST /conversations/{id}/read` and by a member's reply, back
+    # only by `/unread`. A marker rather than a key into `messages` - see the
+    # migration - so it is resolved to a position by the queries that read it.
+    last_read_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    last_read_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_message_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

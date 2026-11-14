@@ -32,7 +32,7 @@ const phone = { viewport: { width: 390, height: 844 }, isMobile: false, hasTouch
 
 const STREAM_RESTART = /fe2-stream\.spec\.ts$/;
 // FE-3's JR-11 stops the API: like FX-07's restart it runs alone, after it (never beside a journey).
-const API_DOWN = /fe3-api-down\.spec\.ts$/;
+const API_DOWN = /fe[34]-api-down\.spec\.ts$/;
 // FE-RD (VQ-01, VQ-03, VQ-04): the colour-role and target proofs run in Chromium only, at 1280 and
 // 390; FE-2's six projects never run them, so their counts are unchanged.
 const VISUAL_ROLES = /visual-roles\.spec\.ts$/;

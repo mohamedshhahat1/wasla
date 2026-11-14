@@ -26,6 +26,7 @@ from app.api.dependencies import (
     MediaServiceDep,
     MediaStorageDep,
     MessagingServiceDep,
+    ReadStateServiceDep,
     SentimentServiceDep,
 )
 from app.api.route import CommittingRoute
@@ -39,18 +40,26 @@ from app.db.models.channel import Channel
 from app.db.models.conversation import Conversation, ConversationMode, Message, MessageOrigin
 from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import ConversationPriority
+from app.repositories.read_state_repository import EMPTY_READ_STATE, ReadState
 from app.schemas.conversation import (
     AssignmentRequest,
     ConversationListPage,
     ConversationRead,
     CursorPage,
+    LastMessageRead,
+    MarkReadRequest,
     MessageRead,
     ModeUpdateRequest,
     ParticipantRead,
     PriorityUpdateRequest,
+    ReadByRead,
+    ReadMarkerRead,
+    ReadStateRead,
     SendTemplateRequest,
     SendTextRequest,
     TemplateSentRead,
+    UnreadSummaryRead,
+    excerpt,
 )
 from app.schemas.follow_up import FollowUpHistoryRead, FollowUpStateRead
 from app.schemas.text import StorableText
@@ -109,11 +118,13 @@ async def _present_all(
     inbox: InboxService,
     messaging: MessagingService,
 ) -> list[ConversationRead]:
-    """Render conversations for the API, their participants read in one query."""
+    """Render conversations for the API, their participants and read states in one query each."""
     participants = await inbox.participants(conversations)
+    states = await inbox.read_states(conversations)
     reads: list[ConversationRead] = []
     for conversation in conversations:
         who = participants[conversation.participant_identity_id]
+        state = states.get(conversation.id, EMPTY_READ_STATE)
         reads.append(
             ConversationRead.from_model(
                 conversation,
@@ -122,9 +133,40 @@ async def _present_all(
                 participant=ParticipantRead.from_model(
                     who.identity, display_name=who.display_name, lead_id=who.lead_id
                 ),
+                unread_count=state.unread_count,
+                last_message=_last_message(state),
+                read=_read_marker(state),
             )
         )
     return reads
+
+
+def _last_message(state: ReadState) -> LastMessageRead | None:
+    last = state.last_message
+    if last is None:
+        return None
+    return LastMessageRead(
+        id=last.id,
+        direction=last.direction,
+        kind=last.kind,
+        excerpt=excerpt(last.body),
+        created_at=last.created_at,
+    )
+
+
+def _read_marker(state: ReadState) -> ReadMarkerRead | None:
+    marker = state.read
+    if marker is None:
+        return None
+    return ReadMarkerRead(
+        message_id=marker.message_id,
+        by=ReadByRead(user_id=marker.by_user_id, display_name=marker.by_name),
+        at=marker.at,
+    )
+
+
+def _read_state(state: ReadState) -> ReadStateRead:
+    return ReadStateRead(unread_count=state.unread_count, read=_read_marker(state))
 
 
 async def _present_messages(
@@ -170,6 +212,10 @@ async def list_conversations(
         Query(max_length=36, description="me, none, or a member's id (FEB-05)."),
     ] = None,
     mode: ConversationMode | None = None,
+    unread: Annotated[
+        bool,
+        Query(description="Only conversations with a customer message nobody has seen (UR-09)."),
+    ] = False,
     q: Annotated[
         str | None,
         Query(
@@ -195,7 +241,9 @@ async def list_conversations(
     **Views** (FEB-05): `status` - `open`, `pending`, `closed` or `all`; without
     it, everything not closed, as before. `assigned_to` - `me`, `none` or a
     member's id (one of another workspace matches nothing). `mode` - `ai` or
-    `human`. `q` - the customer's name or number. They combine, and keep the
+    `human`. `q` - the customer's name or number. `unread=true` - only
+    conversations holding a customer message nobody has seen (UR-09). They
+    combine, and keep the
     same order. A `next_cursor` belongs to the view it came from: presented
     with other filters it is refused, 422 `cursor_view_mismatch`.
 
@@ -211,11 +259,12 @@ async def list_conversations(
                 "updated_since needs a UTC offset, for example 2026-10-30T09:00:00+02:00.",
                 error_code="updated_since_needs_offset",
             )
-        if any(value is not None for value in (view_status, assigned_to, mode, q)):
+        if unread or any(value is not None for value in (view_status, assigned_to, mode, q)):
             # Catching up lists every change, closed ones included; a view of
             # it would hide the very changes the client is catching up on.
             raise ValidationError(
-                "updated_since lists every change; it takes no status, assigned_to, mode or q.",
+                "updated_since lists every change; it takes no status, assigned_to, mode, q "
+                "or unread.",
                 error_code="inbox_view_with_updated_since",
             )
         page = await inbox.list_changed_since(since=updated_since, limit=limit, cursor=cursor)
@@ -231,6 +280,7 @@ async def list_conversations(
             mode=mode,
             q=q,
             viewer_id=workspace.user.id,
+            unread=unread,
         )
     try:
         streaming = await open_streams(
@@ -262,6 +312,54 @@ async def list_conversations(
             return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": tag})
         headers["ETag"] = tag
     return Response(content=body.model_dump_json(), media_type="application/json", headers=headers)
+
+
+@router.get("/unread-summary", response_model=UnreadSummaryRead)
+async def unread_summary(reads: ReadStateServiceDep) -> UnreadSummaryRead:
+    """The workspace's customer messages nobody has seen yet, over conversations not closed.
+
+    Shared by the team - the same for every member - and capped at 1000 each
+    (UR-10). There is no event of its own: refetch on `message.created` and on
+    `conversation.updated` whose fields include `read` or `status`.
+    """
+    messages, conversations = await reads.summary()
+    return UnreadSummaryRead(unread_messages=messages, unread_conversations=conversations)
+
+
+@router.post("/{conversation_id}/read", response_model=ReadStateRead)
+async def mark_read(
+    conversation_id: uuid.UUID,
+    payload: MarkReadRequest,
+    workspace: ActiveWorkspaceDep,
+    reads: ReadStateServiceDep,
+) -> ReadStateRead:
+    """Mark the conversation read up to a message, for the whole team (UR-06).
+
+    Forward only: an older or equal message changes nothing, not even who and
+    when. A message of another conversation is 404. Emits `conversation.updated`
+    with `read` when the position moved.
+    """
+    state = await reads.mark_read(
+        conversation_id=conversation_id,
+        up_to_message_id=payload.up_to_message_id,
+        actor=workspace.user,
+    )
+    return _read_state(state)
+
+
+@router.post("/{conversation_id}/unread", response_model=ReadStateRead)
+async def mark_unread(
+    conversation_id: uuid.UUID,
+    workspace: ActiveWorkspaceDep,
+    reads: ReadStateServiceDep,
+) -> ReadStateRead:
+    """Mark the customer's newest message unread again, for the whole team (UR-11).
+
+    The one way the read position moves back. A conversation the customer
+    never wrote in answers its state unchanged.
+    """
+    state = await reads.mark_unread(conversation_id=conversation_id, actor=workspace.user)
+    return _read_state(state)
 
 
 @router.get("/{conversation_id}", response_model=ConversationRead)
@@ -373,6 +471,7 @@ async def send_text(
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
     inbox: InboxServiceDep,
+    reads: ReadStateServiceDep,
     idempotency_key: IdempotencyKeyHeader = None,
 ) -> MessageRead:
     """Send free text, allowed only inside the 24-hour service window.
@@ -382,7 +481,11 @@ async def send_text(
 
     Send `Idempotency-Key` to make a retry safe. Without one, a double-clicked
     button or a replayed request is two messages on the customer's phone.
+
+    A member's reply marks the conversation read up to the message before it,
+    and assigns an unassigned conversation to them (UR-06).
     """
+    replayed = await inbox.idempotency_key_used(idempotency_key)
     message = await messaging.send_text(
         conversation_id=conversation_id,
         body=payload.body,
@@ -390,6 +493,9 @@ async def send_text(
         sent_by_id=workspace.user.id,
         idempotency_key=idempotency_key,
         origin=MessageOrigin.HUMAN,
+    )
+    await reads.after_member_reply(
+        message=message, actor=workspace.user, inbox=inbox, replayed=replayed
     )
     return (await _present_messages([message], inbox=inbox))[0]
 
@@ -420,6 +526,7 @@ async def send_template(
     messaging: MessagingServiceDep,
     storage: MediaStorageDep,
     inbox: InboxServiceDep,
+    reads: ReadStateServiceDep,
     idempotency_key: IdempotencyKeyHeader = None,
 ) -> TemplateSentRead:
     """Send an approved template, which is valid outside the service window.
@@ -431,8 +538,10 @@ async def send_template(
     messaging limit, with when it can go (FLIM-02); sent while the limit is
     unknown, with the notice `messaging_limit_unknown`.
 
-    Send `Idempotency-Key` to make a retry safe.
+    Send `Idempotency-Key` to make a retry safe. Like text, a member's template
+    marks read and assigns an unassigned conversation (UR-06).
     """
+    replayed = await inbox.idempotency_key_used(idempotency_key)
     message, notices = await messaging.send_manual_template(
         conversation_id=conversation_id,
         name=payload.name,
@@ -444,6 +553,9 @@ async def send_template(
         sender_role=workspace.role,
         header_media_id=payload.header_media_id,
         storage=storage,
+    )
+    await reads.after_member_reply(
+        message=message, actor=workspace.user, inbox=inbox, replayed=replayed
     )
     read = (await _present_messages([message], inbox=inbox))[0]
     return TemplateSentRead(**read.model_dump(), notices=notices)
@@ -460,6 +572,7 @@ async def send_media(
     messaging: MessagingServiceDep,
     storage: MediaStorageDep,
     inbox: InboxServiceDep,
+    reads: ReadStateServiceDep,
     file: Annotated[UploadFile, File()],
     caption: Annotated[StorableText | None, Form(max_length=MAX_CAPTION_LENGTH)] = None,
     idempotency_key: IdempotencyKeyHeader = None,
@@ -477,6 +590,7 @@ async def send_media(
     if not content:
         raise ValidationError("The uploaded file is empty.")
 
+    replayed = await inbox.idempotency_key_used(idempotency_key)
     message = await messaging.send_media(
         conversation_id=conversation_id,
         idempotency_key=idempotency_key,
@@ -492,6 +606,9 @@ async def send_media(
         caption=caption,
         sent_by_id=workspace.user.id,
         storage=storage,
+    )
+    await reads.after_member_reply(
+        message=message, actor=workspace.user, inbox=inbox, replayed=replayed
     )
     return (await _present_messages([message], inbox=inbox))[0]
 

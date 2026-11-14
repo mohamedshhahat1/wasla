@@ -56,6 +56,10 @@
   "search_term_invalid": "2 ile 100 karakter arasında arayın.",
   "cursor_view_mismatch": "Listenin filtreleri değişti. Baştan yeniden yükleyin.",
   "inbox_view_with_updated_since": "Bu görünüm güncellemeleri izlemeyle birleştirilemez. Listeyi yeniden yükleyin.",
+  "stale_assignment": "Bu konuşmanın sorumlusu başka biri tarafından değiştirildi. Konuşma yeniden yüklendi.",
+  "reply_window_closed": "Bu müşterinin son mesajının üzerinden 24 saatten fazla geçti. Bunun yerine onaylı bir şablon gönderin.",
+  "idempotency_key_reused": "Bu mesaj gönderilemedi. Tekrar deneyin.",
+  "media_type_not_allowed": "Bu dosya türü gönderilemez.",
   "connection_lost": "Bağlantı kesildi. Kontrol edip tekrar deneyin.",
   "fallback": "Bir sorun oluştu. Tekrar deneyin."
 }

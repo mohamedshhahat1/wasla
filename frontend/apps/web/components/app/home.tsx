@@ -137,6 +137,12 @@ export function Home() {
                 <Card as="div" data-testid="home-conversations-empty">
                   <p className="m-0 text-sm text-text-muted">{t("home.conversations")}</p>
                   <p className="m-0 mt-2 text-md text-text">{t("home.conversationsNone")}</p>
+                  <NextLink
+                    href="/inbox"
+                    className="mt-2 inline-block text-primary underline underline-offset-4"
+                  >
+                    {t("home.conversationsLink")}
+                  </NextLink>
                 </Card>
               ) : (
                 <StatCard
@@ -144,6 +150,11 @@ export function Home() {
                   label={t("home.conversations")}
                   value={
                     more ? t("home.conversationsMore", { count: number(count) }) : number(count)
+                  }
+                  sub={
+                    <NextLink href="/inbox" className="text-primary underline underline-offset-4">
+                      {t("home.conversationsLink")}
+                    </NextLink>
                   }
                 />
               );

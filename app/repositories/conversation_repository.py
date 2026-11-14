@@ -30,6 +30,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority
 from app.repositories.base import BaseRepository, TenantScopedRepository, escape_like
+from app.repositories.read_state_repository import has_unread
 
 # The constraint the idempotency claim races on. Named so the conflict handler
 # can recognise it: any *other* integrity failure on that insert is a bug.
@@ -376,6 +377,7 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         assigned_to: uuid.UUID | Unassigned | None = None,
         mode: ConversationMode | None = None,
         search: InboxSearch | None = None,
+        unread: bool = False,
     ) -> list[Conversation]:
         """Everything not closed, most recently active first - or the inbox view asked for.
 
@@ -426,6 +428,10 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
             query = query.where(Conversation.mode == mode)
         if search is not None:
             query = query.where(self._matches(search))
+        # Only conversations holding a customer message the team has not seen
+        # (UR-09). Another filter on the same order, so it pages like the rest.
+        if unread:
+            query = query.where(has_unread())
         if after is not None:
             query = query.where(_after_nullable(Conversation, after))
         return await self._all(query)

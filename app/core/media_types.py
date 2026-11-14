@@ -79,6 +79,11 @@ class MediaClass(StrEnum):
     DOCUMENT = "document"
 
 
+#: The `error_code` of a file whose type is refused (FEB-06, EC4-02): the
+#: composer's own pre-check said yes, and the bytes say otherwise.
+MEDIA_TYPE_NOT_ALLOWED: Final = "media_type_not_allowed"
+
+
 class MediaTypeError(ValidationError):
     """The bytes are not a supported type, or are not the type that was claimed.
 
@@ -376,7 +381,9 @@ def resolve(*, claimed: str | None, prefix: bytes) -> DetectedMedia:
     """
     candidates = detect(prefix)
     if candidates is None:
-        raise MediaTypeError("This file is not a type Wasla can accept.")
+        raise MediaTypeError(
+            "This file is not a type Wasla can accept.", error_code=MEDIA_TYPE_NOT_ALLOWED
+        )
 
     normalised = (claimed or "").split(";", 1)[0].strip().lower()
     if normalised in UNDECLARED_TYPES:
@@ -388,7 +395,8 @@ def resolve(*, claimed: str | None, prefix: bytes) -> DetectedMedia:
         if not canonical:
             raise MediaTypeError(
                 "This file does not say what type it is, and its contents could "
-                "be more than one. Send it with a content type."
+                "be more than one. Send it with a content type.",
+                error_code=MEDIA_TYPE_NOT_ALLOWED,
             )
         return DetectedMedia(mime_type=canonical, kind=CANONICAL_TYPES[canonical])
 
@@ -397,7 +405,10 @@ def resolve(*, claimed: str | None, prefix: bytes) -> DetectedMedia:
         # whoever sent the file, and the useful half - which file, and what the
         # detector concluded - belongs in a log line, not in a response that
         # would otherwise let a caller enumerate the table above.
-        raise MediaTypeError("This file's contents do not match the type it was sent as.")
+        raise MediaTypeError(
+            "This file's contents do not match the type it was sent as.",
+            error_code=MEDIA_TYPE_NOT_ALLOWED,
+        )
 
     return DetectedMedia(mime_type=normalised, kind=CANONICAL_TYPES[normalised])
 

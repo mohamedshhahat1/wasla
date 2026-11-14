@@ -779,6 +779,8 @@ Do not change `OPENAI_EMBEDDING_MODEL` in a running deployment: every document b
 
 **Migrations `0135`-`0138` (RAG remediation Part 3)** are additive and online: `document_source` gains `csv`, `xlsx`, `docx`, `html` (enum labels cannot be dropped; the downgrade refuses while any document uses them); `document_generation_state` gains `shadow` and `workspace_embedding_spaces` is created (the downgrade refuses while a switch, a shadow or its audit rows exist); `document_chunks` gets autovacuum and statistics storage parameters (catalogue-only, `SHARE UPDATE EXCLUSIVE`); `knowledge_search_gaps` is created (the downgrade refuses while it holds rows). No back-fill. The Part 1 and Part 2 first-deploy steps above cover all three Parts: one `reindex-all` pass builds normalised text, the new chunks, contextual embeddings and lexical text; then `rag_invariants verify` must report RR-01 .. RR-14 at 0. Row-level security is not applied (ADR-185), so no new database role is needed.
 
+**Migration `0139` (FE-4, ADR-198)** is additive and online: three nullable columns on `conversations` (`last_read_message_id`, `last_read_by_user_id` with a `SET NULL` key to `users`, `last_read_at`) - the team's shared read position. No back-fill: every existing conversation starts unread. The downgrade drops the three columns.
+
 | Setting | Default | Notes |
 | --- | --- | --- |
 | `OPENAI_EMBEDDING_MODEL_NEXT` | unset | Only during an embedding-model switch, on the API and the worker alike (RGM-10); `docker-compose.prod.yml` passes it and every `RAG_*` setting to both (RGM-12) |

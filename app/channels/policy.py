@@ -22,8 +22,13 @@ from enum import StrEnum
 from typing import Final, Literal, Protocol
 
 from app.core.exceptions import ValidationError
+from app.core.media_types import MEDIA_TYPE_NOT_ALLOWED
 from app.db.models.channel import Channel
 from app.db.models.conversation import Conversation, MessageOrigin
+
+#: A free-form send after the channel's window closed: the composer switches to
+#: templates (FEB-06, EC4-02).
+REPLY_WINDOW_CLOSED: Final = "reply_window_closed"
 
 
 class PolicyRefusalError(ValidationError):
@@ -152,12 +157,18 @@ def require_sendable_media(
     """Refuse a file the channel's provider would refuse, before it is staged (OMNI-045)."""
     capabilities = policy.capabilities
     if family not in capabilities.media_families:
-        raise PolicyRefusalError(f"This file cannot be sent over {policy.display_name}.")
+        raise PolicyRefusalError(
+            f"This file cannot be sent over {policy.display_name}.",
+            error_code=MEDIA_TYPE_NOT_ALLOWED,
+        )
     limit = capabilities.media_limits.get(family)
     if limit is None:
         return
     if limit.mime_types and mime_type not in limit.mime_types:
-        raise PolicyRefusalError(f"{policy.display_name} does not accept this type of {family}.")
+        raise PolicyRefusalError(
+            f"{policy.display_name} does not accept this type of {family}.",
+            error_code=MEDIA_TYPE_NOT_ALLOWED,
+        )
     if byte_size > limit.max_bytes:
         megabytes = limit.max_bytes // (1024 * 1024)
         raise PolicyRefusalError(
@@ -176,14 +187,17 @@ class SendDecision:
     allowed: bool
     reason: str | None = None
     mechanism: SendMechanism | None = None
+    #: The `error_code` a refusal carries when a client must tell it apart
+    #: (FEB-06); None keeps the class code.
+    code: str | None = None
 
     @classmethod
     def allow(cls, mechanism: SendMechanism = SendMechanism.STANDARD_WINDOW) -> SendDecision:
         return cls(allowed=True, mechanism=mechanism)
 
     @classmethod
-    def refuse(cls, reason: str) -> SendDecision:
-        return cls(allowed=False, reason=reason)
+    def refuse(cls, reason: str, *, code: str | None = None) -> SendDecision:
+        return cls(allowed=False, reason=reason, code=code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,7 +397,7 @@ class WindowedPolicy:
         # campaign never borrows a human agent's permission (OMNI-033).
         if origin is MessageOrigin.HUMAN and self.human_tag_open(conversation, now=now):
             return SendDecision.allow(SendMechanism.HUMAN_AGENT_TAG)
-        return SendDecision.refuse(self.closed_window_refusal)
+        return SendDecision.refuse(self.closed_window_refusal, code=REPLY_WINDOW_CLOSED)
 
     def reply_policy(self, conversation: Conversation, *, now: datetime) -> ReplyPolicy:
         window_open = self.standard_window_open(conversation, now=now)

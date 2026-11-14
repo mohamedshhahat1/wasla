@@ -7,7 +7,8 @@
   "navLabel": "Principal",
   "nav": {
     "home": "Accueil",
-    "channels": "Canaux"
+    "channels": "Canaux",
+    "inbox": "Boîte de réception"
   },
   "account": {
     "label": "Compte",
@@ -96,7 +97,8 @@
     "loading": "Chargement…",
     "cardError": "Impossible de charger ceci.",
     "retry": "Réessayer",
-    "reference": "Référence :"
+    "reference": "Référence :",
+    "conversationsLink": "Ouvrir la boîte de réception"
   },
   "checklist": {
     "title": "Configurez votre espace de travail",
@@ -243,5 +245,256 @@
     "done": "Votre choix est enregistré."
   },
   "cancel": "Annuler",
-  "close": "Fermer"
+  "close": "Fermer",
+  "inboxUnread": "{count, plural, one {# message non lu} many {# messages non lus} other {# messages non lus}}",
+  "inbox": {
+    "title": "Boîte de réception",
+    "listLabel": "Conversations",
+    "loading": "Chargement des conversations",
+    "loadMore": "Afficher plus",
+    "loadedCount": "{count, plural, one {# conversation affichée} many {# conversations affichées} other {# conversations affichées}}",
+    "updated": "Mise à jour — afficher les plus récentes",
+    "retry": "Réessayer",
+    "reference": "Référence :",
+    "back": "Retour à la liste",
+    "close": "Fermer",
+    "more": "Autres actions",
+    "pickConversation": "Choisissez une conversation pour la lire ici.",
+    "unknownCustomer": "Client inconnu",
+    "unreadCount": "{count, plural, one {# non lu} many {# non lus} other {# non lus}}",
+    "rowMenu": "Actions pour {who}",
+    "markUnread": "Marquer comme non lu",
+    "notInView": "Cette conversation ne fait plus partie de cette vue.",
+    "error": {
+      "title": "La boîte de réception n'a pas pu être chargée"
+    },
+    "notFound": {
+      "title": "Conversation introuvable",
+      "description": "Elle a peut-être été supprimée, ou appartient à un autre espace de travail."
+    },
+    "search": {
+      "label": "Rechercher par nom ou numéro",
+      "clear": "Effacer",
+      "tooShort": "Saisissez au moins 2 caractères.",
+      "tooLong": "Recherchez au plus 100 caractères."
+    },
+    "filters": {
+      "label": "Vues",
+      "status": "Statut",
+      "assignee": "Attribuée à",
+      "mode": "Prise en charge par",
+      "everyone": "Tout le monde",
+      "mine": "Moi",
+      "unassigned": "Personne",
+      "anyMode": "IA ou une personne",
+      "unreadOnly": "Non lues uniquement"
+    },
+    "empty": {
+      "open": "Aucune conversation ouverte",
+      "closed": "Aucune conversation fermée",
+      "mine": "Rien ne vous est attribué",
+      "unassigned": "Chaque conversation a un responsable",
+      "unread": "Aucune conversation non lue",
+      "search": "Aucune conversation ne correspond à <term></term>",
+      "showAll": "Tout afficher"
+    },
+    "status": {
+      "default": "Ouvertes",
+      "open": "Ouverte",
+      "pending": "En attente",
+      "closed": "Fermée",
+      "all": "Toutes"
+    },
+    "mode": {
+      "ai": "IA",
+      "human": "Personne"
+    },
+    "priority": {
+      "normal": "Normale",
+      "high": "Haute",
+      "urgent": "Urgente"
+    },
+    "channel": {
+      "whatsapp": "WhatsApp",
+      "instagram": "Instagram",
+      "messenger": "Messenger"
+    },
+    "assignee": {
+      "you": "Vous",
+      "none": "Non attribuée",
+      "someone": "Un collègue"
+    },
+    "preview": {
+      "reply": "Réponse :",
+      "template": "Modèle :",
+      "kind": {
+        "image": "Photo",
+        "audio": "Message vocal ou audio",
+        "video": "Vidéo",
+        "document": "Document",
+        "location": "Position",
+        "other": "Message"
+      }
+    },
+    "assignedTo": "Attribuée à",
+    "assign": "Attribuer",
+    "assignToMe": "M'attribuer",
+    "unassign": "Retirer l'attribution",
+    "staleAssignee": "Quelqu'un a changé l'attribution — désormais {name}.",
+    "takeOver": "Prendre la main",
+    "handBack": "Rendre à l'IA",
+    "priorityMenu": "Priorité",
+    "reopen": "Rouvrir",
+    "thread": {
+      "label": "Messages avec {who}",
+      "loading": "Chargement des messages",
+      "error": "Les messages n'ont pas pu être chargés."
+    },
+    "loadEarlier": "Charger les messages précédents",
+    "newMessages": "{count, plural, one {# nouveau message} many {# nouveaux messages} other {# nouveaux messages}}",
+    "newMessageFrom": "Nouveau message de {name}",
+    "seenBy": "Vu par <name></name> · {time}",
+    "seenByYou": "vous",
+    "template": "Modèle",
+    "failedSend": "Non envoyé",
+    "retrySend": "Réessayer",
+    "discard": "Abandonner",
+    "author": {
+      "ai": "IA",
+      "campaign": "Campagne",
+      "member": "Un collègue",
+      "you": "Vous"
+    },
+    "delivery": {
+      "sending": "Envoi…",
+      "uploading": "Téléversement…",
+      "pending": "Envoi…",
+      "sent": "Envoyé",
+      "delivered": "Distribué",
+      "read": "Lu",
+      "failed": "Non envoyé",
+      "received": "Reçu"
+    },
+    "link": {
+      "title": "Ouvrir ce lien ?",
+      "description": "Il a été envoyé par le client. Vérifiez l'adresse avant de l'ouvrir.",
+      "open": "Ouvrir le lien",
+      "cancel": "Annuler"
+    },
+    "media": {
+      "kind": {
+        "image": "Photo",
+        "audio": "Audio",
+        "video": "Vidéo",
+        "document": "Document"
+      },
+      "voice": "Message vocal",
+      "pending": "Préparation du fichier…",
+      "failed": "Ce fichier n'a pas pu être reçu",
+      "unavailable": "Ce fichier n'est plus disponible",
+      "unsupported": "Ce fichier ne peut pas être affiché ici",
+      "loadImage": "Charger l'image",
+      "playVoice": "Écouter le message vocal",
+      "playAudio": "Écouter l'audio",
+      "playVideo": "Lire la vidéo",
+      "download": "Télécharger",
+      "open": "Ouvrir l'image",
+      "imageFrom": "Image de {name}",
+      "defaultFilename": "Document",
+      "defaultImageName": "image",
+      "kb": "Ko",
+      "mb": "Mo",
+      "transcript": "Transcription (automatique)",
+      "transcribing": "Transcription…",
+      "noTranscript": "Transcription indisponible",
+      "showTranscript": "Afficher la transcription",
+      "hideTranscript": "Masquer la transcription",
+      "viewerTitle": "Image",
+      "previous": "Image précédente",
+      "next": "Image suivante"
+    },
+    "composer": {
+      "label": "Message",
+      "captionLabel": "Légende",
+      "send": "Envoyer",
+      "attach": "Joindre un fichier",
+      "template": "Modèle",
+      "removeFile": "Retirer le fichier",
+      "drop": "Déposez le fichier pour le joindre",
+      "mb": "Mo",
+      "tooLong": "Un message compte au plus {limit} caractères.",
+      "fileRefused": {
+        "type": "Ce type de fichier ne peut pas être envoyé.",
+        "size": "Un fichier fait au plus 25 Mo.",
+        "empty": "Ce fichier est vide."
+      },
+      "assignsYou": "Répondre vous attribuera cette conversation.",
+      "windowLeft": "Les réponses libres se ferment dans {hours} h {minutes} min.",
+      "aiMode": "L'IA gère cette conversation. Votre réponse est envoyée en votre nom.",
+      "windowClosed": "Plus de 24 heures se sont écoulées depuis le dernier message de ce client. Vous pouvez envoyer un modèle approuvé.",
+      "chooseTemplate": "Choisir un modèle",
+      "closed": "Cette conversation est fermée.",
+      "reopen": "Rouvrir",
+      "optedOut": "Ce client a demandé à ne plus recevoir de messages.",
+      "unavailable": "Les messages ne peuvent pas être envoyés sur ce canal pour le moment."
+    },
+    "templates": {
+      "title": "Envoyer un modèle approuvé",
+      "close": "Fermer",
+      "filter": "Trouver un modèle",
+      "listLabel": "Modèles approuvés",
+      "loading": "Chargement des modèles",
+      "none": "Aucun modèle approuvé. Les modèles sont synchronisés depuis WhatsApp.",
+      "noMatch": "Aucun modèle ne correspond.",
+      "back": "Retour",
+      "send": "Envoyer le modèle",
+      "parameter": "Valeur {number}",
+      "preview": "Aperçu",
+      "notInInbox": "Ce modèle demande un fichier d'en-tête ou des boutons, que la boîte de réception ne sait pas encore remplir.",
+      "category": {
+        "marketing": "Marketing",
+        "utility": "Service",
+        "authentication": "Authentification",
+        "unknown": "Autre"
+      }
+    },
+    "panel": {
+      "title": "Détails du client",
+      "show": "Détails du client",
+      "hide": "Masquer les détails",
+      "customer": "Client",
+      "name": "Nom",
+      "number": "Numéro",
+      "copy": "Copier le numéro",
+      "copied": "Numéro copié",
+      "channel": "Canal",
+      "line": "Votre numéro",
+      "conversation": "Conversation",
+      "status": "Statut",
+      "mode": "Prise en charge par",
+      "assignee": "Attribuée à",
+      "priority": "Priorité",
+      "started": "Commencée",
+      "lastActivity": "Dernière activité",
+      "lead": "Prospect",
+      "noLead": "Pas encore de prospect pour ce client.",
+      "loading": "Chargement du prospect",
+      "leadError": "Le prospect n'a pas pu être chargé.",
+      "leadStatus": "Étape",
+      "leadStatusValue": {
+        "new": "Nouveau",
+        "contacted": "Contacté",
+        "qualified": "Qualifié",
+        "proposal": "Proposition",
+        "won": "Gagné",
+        "lost": "Perdu"
+      },
+      "score": "Score",
+      "source": "Source",
+      "leadOwner": "Responsable",
+      "interest": "Intéressé par",
+      "tags": "Étiquettes",
+      "leadActivity": "Dernière activité du prospect"
+    }
+  }
 }

@@ -10,6 +10,7 @@ blocking I/O that only shows up under load.
 
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from datetime import datetime
@@ -445,6 +446,89 @@ class ReplyPolicyRead(BaseModel):
         )
 
 
+#: The longest preview the list carries (UR-04); the ellipsis is the screen's.
+EXCERPT_LENGTH: Final = 120
+
+
+def excerpt(text: str | None) -> str | None:
+    """At most `EXCERPT_LENGTH` code points of `text`, whitespace runs collapsed.
+
+    Cut at a code-point boundary - Python strings are code points, so never
+    inside a surrogate pair - and a combining mark left at the cut is dropped
+    with its base rather than shown alone. None for nothing to show.
+    """
+    if text is None:
+        return None
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return None
+    if len(collapsed) <= EXCERPT_LENGTH:
+        return collapsed
+    cut = collapsed[:EXCERPT_LENGTH]
+    following = collapsed[EXCERPT_LENGTH]
+    if unicodedata.combining(following) or following == "‍":
+        # The next code point belongs to the last character kept: drop that
+        # character too, so no letter loses its marks and no emoji its join.
+        while cut and (unicodedata.combining(cut[-1]) or cut[-1] == "‍"):
+            cut = cut[:-1]
+        cut = cut[:-1]
+    return cut.rstrip() or None
+
+
+class LastMessageRead(BaseModel):
+    """The newest message of a conversation, as the inbox previews it (UR-04).
+
+    `excerpt` is customer or colleague text: render it as text, never markup.
+    Null for a file without a caption - name it by `kind`.
+    """
+
+    id: uuid.UUID
+    direction: MessageDirection
+    kind: MessageKind
+    excerpt: str | None
+    created_at: datetime
+
+
+class ReadByRead(BaseModel):
+    user_id: uuid.UUID | None
+    display_name: str | None
+
+
+class ReadMarkerRead(BaseModel):
+    """Where the team's read position stands ("seen by"), shared by every member (UR-05).
+
+    `message_id` is null after `/unread` on a conversation whose first message
+    is the customer's newest: nothing before it to stand on.
+    """
+
+    message_id: uuid.UUID | None
+    by: ReadByRead
+    at: datetime
+
+
+class ReadStateRead(BaseModel):
+    """What `POST /conversations/{id}/read` and `/unread` answer (UR-06, UR-11)."""
+
+    unread_count: int
+    read: ReadMarkerRead | None
+
+
+class MarkReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    up_to_message_id: uuid.UUID
+
+
+class UnreadSummaryRead(BaseModel):
+    """The workspace's unread customer messages, not closed, shared by the team (UR-10).
+
+    Both capped at 1000.
+    """
+
+    unread_messages: int
+    unread_conversations: int
+
+
 class ConversationRead(BaseModel):
     id: uuid.UUID
     contact_id: uuid.UUID
@@ -480,6 +564,12 @@ class ConversationRead(BaseModel):
     # The conversation's follow-ups (FUS-09): on `GET /conversations/{id}` only;
     # null in a list.
     follow_up: FollowUpStateRead | None = None
+    # The team's shared read state (UR-05, ADR-198): customer messages nobody
+    # has seen (capped at 100), the newest message's preview, and who saw it
+    # last. The same for every member.
+    unread_count: int = 0
+    last_message: LastMessageRead | None = None
+    read: ReadMarkerRead | None = None
 
     @classmethod
     def from_model(
@@ -489,6 +579,9 @@ class ConversationRead(BaseModel):
         service_window_open: bool,
         reply_policy: ReplyPolicy,
         participant: ParticipantRead,
+        unread_count: int = 0,
+        last_message: LastMessageRead | None = None,
+        read: ReadMarkerRead | None = None,
     ) -> Self:
         return cls(
             id=conversation.id,
@@ -512,6 +605,9 @@ class ConversationRead(BaseModel):
             reply_policy=ReplyPolicyRead.from_policy(reply_policy),
             created_at=conversation.created_at,
             updated_at=_loaded_updated_at(conversation),
+            unread_count=unread_count,
+            last_message=last_message,
+            read=read,
         )
 
 
