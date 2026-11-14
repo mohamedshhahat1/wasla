@@ -435,10 +435,14 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
 
         Both held to this workspace by their own tenant column, and to the
         conversation's own contact and participant - never a contact elsewhere.
+        The workspace is also stated as a constant, so the planner reads one
+        workspace's rows through its tenant index instead of scanning every
+        workspace's (IV-06: 252 ms -> a bounded per-workspace read at 50,000).
         """
         name = (
             select(Contact.id)
             .where(
+                Contact.tenant_id == self.tenant_id,
                 Contact.tenant_id == Conversation.tenant_id,
                 Contact.id == Conversation.contact_id,
                 Contact.display_name.ilike(f"%{escape_like(search.text)}%", escape="\\"),
@@ -450,6 +454,7 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         number = (
             select(ContactIdentity.id)
             .where(
+                ContactIdentity.tenant_id == self.tenant_id,
                 ContactIdentity.tenant_id == Conversation.tenant_id,
                 ContactIdentity.id == Conversation.participant_identity_id,
                 ContactIdentity.kind == IdentityKind.PHONE,
