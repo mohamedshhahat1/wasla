@@ -112,6 +112,9 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"], ...desktop },
       testMatch: API_DOWN,
       dependencies: ["stream-restart"],
+      // JR-11 and FE-4's IJ-08 each stop the API: one at a time, never beside each other.
+      workers: 1,
+      fullyParallel: false,
     },
   ],
 });
