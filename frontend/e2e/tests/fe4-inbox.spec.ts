@@ -193,9 +193,15 @@ for (const locale of ["en", "ar"] as Locale[]) {
       // busy or gone by the time a click lands: click only when it is still idle.
       const more = page.locator("[data-load-more]");
       const nextPage = async () => {
-        if (!(await more.isVisible())) return;
-        await more.scrollIntoViewIfNeeded();
-        if (await more.isEnabled()) await more.click({ timeout: 2_000 }).catch(() => undefined);
+        // The button may go between two calls (the last page loaded by the observer): every step
+        // is bounded, and a vanished button is not an error.
+        try {
+          if (!(await more.isVisible())) return;
+          await more.scrollIntoViewIfNeeded({ timeout: 2_000 });
+          if (await more.isEnabled()) await more.click({ timeout: 2_000 });
+        } catch {
+          // gone or busy: the next round looks again
+        }
       };
       await expect(async () => {
         await nextPage();
@@ -369,51 +375,70 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await signIn(page, context, locale, line.owner.email);
       await openInbox(page);
       await openConversation(page, conversation.id);
-      // Someone else assigns it between the screen's read and the click.
-      await api("POST", `/api/v1/conversations/${conversation.id}/assignment`, {
-        token: member.token,
-        body: { assigned_to_id: member.userId, expected_assigned_to_id: null },
-      });
-      await page.locator("[data-assign]").click();
-      await page.getByRole("menuitem", { name: label(locale, "app.inbox.assignToMe") }).click();
-      await expect(page.locator("[data-action-notice]")).toBeVisible({ timeout: ARRIVAL_BOUND_MS });
-      const after = await api("GET", `/api/v1/conversations/${conversation.id}`, {
-        token: line.owner.token,
-      });
-      expect((after.json as { assigned_to_id: string }).assigned_to_id).toBe(member.userId);
-      // The screen now shows the member; someone unassigns it meanwhile. "Assign to me" sends the
-      // member as the expected assignee, so the server refuses and nothing is overwritten (CX-02).
-      await expect(page.locator("[data-action-notice]")).toBeVisible();
-      // The stream would tell the screen at once; hold its detail reads at what it showed, so the
-      // click carries the member as its (now stale) expectation.
+      // A stale assignment: someone changes the assignee between the screen's read and the click.
+      // The stream would tell the screen at once, so its detail reads are held at what it showed
+      // ("shown"), and the click waits until the frame's refetch has been answered - the request
+      // then carries a stale expectation every time, in every browser.
+      let shown: string | null = null;
+      let held = 0;
       const detail = new RegExp(`/api/v1/conversations/${conversation.id}$`);
       await page.route(detail, async (route) => {
         // The screen may abort a read it no longer needs; then there is nothing to answer.
         try {
           const response = await route.fetch();
           const body = (await response.json()) as Record<string, unknown>;
-          await route.fulfill({ response, json: { ...body, assigned_to_id: member.userId } });
+          await route.fulfill({ response, json: { ...body, assigned_to_id: shown } });
+          held += 1;
         } catch {
           await route.abort().catch(() => undefined);
         }
       });
+      const assignToMe = async () => {
+        const answer = page.waitForResponse(
+          (response) =>
+            response.url().endsWith(`/conversations/${conversation.id}/assignment`) &&
+            response.request().method() === "POST",
+        );
+        await page.locator("[data-assign]").click();
+        await page.getByRole("menuitem", { name: label(locale, "app.inbox.assignToMe") }).click();
+        return (await answer).status();
+      };
+      const assigneeNow = async () =>
+        (
+          (
+            await api("GET", `/api/v1/conversations/${conversation.id}`, {
+              token: line.owner.token,
+            })
+          ).json as { assigned_to_id: string | null }
+        ).assigned_to_id;
+
+      // 1. The screen shows nobody; the member takes it meanwhile.
+      let before = held;
+      await api("POST", `/api/v1/conversations/${conversation.id}/assignment`, {
+        token: member.token,
+        body: { assigned_to_id: member.userId, expected_assigned_to_id: null },
+      });
+      await expect.poll(() => held, { timeout: ARRIVAL_BOUND_MS }).toBeGreaterThan(before);
+      expect(await assignToMe()).toBe(409);
+      await expect(page.locator("[data-action-notice]")).toBeVisible({ timeout: ARRIVAL_BOUND_MS });
+      expect(await assigneeNow()).toBe(member.userId);
+
+      // 2. The screen shows the member; the member lets it go meanwhile. "Assign to me" sends the
+      // member as the expected assignee: refused, and it stays unassigned (CX-02, M-V23).
+      shown = member.userId;
+      before = held;
+      await page.reload();
+      await expect(page.locator('[data-inbox-pane="conversation"]')).toBeVisible();
+      await expect.poll(() => held, { timeout: ARRIVAL_BOUND_MS }).toBeGreaterThan(before);
+      before = held;
       await api("POST", `/api/v1/conversations/${conversation.id}/assignment`, {
         token: member.token,
         body: { assigned_to_id: null, expected_assigned_to_id: member.userId },
       });
-      const stale = page.waitForResponse(
-        (response) =>
-          response.url().endsWith(`/conversations/${conversation.id}/assignment`) &&
-          response.request().method() === "POST",
-      );
-      await page.locator("[data-assign]").click();
-      await page.getByRole("menuitem", { name: label(locale, "app.inbox.assignToMe") }).click();
-      expect((await stale).status()).toBe(409);
+      await expect.poll(() => held, { timeout: ARRIVAL_BOUND_MS }).toBeGreaterThan(before);
+      expect(await assignToMe()).toBe(409);
+      expect(await assigneeNow()).toBeNull();
       await page.unrouteAll({ behavior: "wait" });
-      const unassigned = await api("GET", `/api/v1/conversations/${conversation.id}`, {
-        token: line.owner.token,
-      });
-      expect((unassigned.json as { assigned_to_id: string | null }).assigned_to_id).toBeNull();
       // A second tab sees a change through the stream.
       const second = await context.newPage();
       await second.goto(`${WEB}/inbox/${conversation.id}`);
