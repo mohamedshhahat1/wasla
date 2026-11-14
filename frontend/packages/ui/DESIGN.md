@@ -166,6 +166,41 @@ landmarks (a region per card is noise for screen readers - and crashed Firefox's
 | emil-design-eng | the sheet's motion; banners placed, not slid; a still live mark                                                                  |
 | impeccable      | the audits before (17/20) and after (19/20) the fixes                                                                            |
 
+## The inbox (FE-4, ADR-198)
+
+**Panes.** From 1024 px the list (`--spacing-inbox-list`, on the light-blue secondary band), the conversation (the canvas)
+and the customer panel (`--spacing-inbox-panel`, white with its heading on the light-blue band) sit side by side; the panel
+starts shown from 1280 px and can be hidden, because a third pane at 1024-1279 px leaves the conversation too narrow. From
+768 px the panel is a drawer from the inline end; below that the inbox is one step at a time - list, conversation, panel -
+with the URL tracking the step.
+
+**Rows** are the navigation's "selected row" recipe: two lines (who, then the preview) and a badge line; the open one white
+with `aria-current="page"`; an unread row's name in the stronger weight with the count pill (the accent, "99+").
+
+**Bubbles.** The customer's at the inline start, white with a hairline; replies at the inline end on `secondary-subtle` -
+the secondary, so a long thread never floods the accent. The author ("AI", a colleague, "You") above a group; delivery in
+words with an icon under the last bubble of a group; a failed send on `danger-subtle` with its reason, Retry and Discard.
+Day separators and "Seen by" are quiet muted lines. Customer text is text: `dir="auto"`, names and numbers in `<bdi>`; a
+link in it is a button that shows the full address before anything opens.
+
+**Media** tiles draw by kind and state - a pending, failed or unavailable file is a framed line of words, never a broken
+image; images open in FE-1's dialog; documents download; a voice note's transcript sits under it, behind a disclosure when
+long.
+
+**The composer** has one primary: Send - or, once the reply window has closed, "Choose template". Attach and Template are
+quiet; the first-reply line and the window's time left are muted notes above the field.
+
+**Motion.** No bubble, row or badge animates (seen tens of times a day; emil-design-eng); the drawer enters from the inline
+end with `--motion-slow` and leaves with `--motion-fast`; the phone steps change without a transition, focus moving to the
+step's heading.
+
+| Skill (FE-4)    | Decided                                                                                             |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| ui-ux-pro-max   | the IME-safe Enter, contextual live counts, deep-linked views and Back, focus not obscured          |
+| taste-skill     | where the secondary sits (list band, reply bubbles, panel heading), one primary in the conversation |
+| emil-design-eng | no motion on bubbles, rows and badges; the drawer's entry and faster exit; no step transitions      |
+| impeccable      | the audit of the new screens (FE4_REALTIME_INBOX.md)                                                |
+
 ## Right to left
 
 Logical properties only (the lint forbids physical sides). The brand panel sits at the inline end

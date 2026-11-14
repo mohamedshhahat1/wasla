@@ -118,7 +118,9 @@ describe("IL-02 / LY-03: the view in the URL, never the search term", () => {
     expect(parseView(new URLSearchParams("status=<x>&assigned_to=bob&mode=robot"))).toEqual(
       DEFAULT_VIEW,
     );
-    expect(parseView(new URLSearchParams(`assigned_to=${ID.toUpperCase()}`)).assignedTo).toBe(ID);
+    expect(
+      parseView(new URLSearchParams(`assigned_to=${ID.toLocaleUpperCase("en-US")}`)).assignedTo,
+    ).toBe(ID);
   });
   it("builds addresses with the view and the step only (M-V12)", () => {
     const view: InboxView = { ...DEFAULT_VIEW, status: "pending", unread: true };
@@ -352,12 +354,11 @@ describe("TH-04 / TH-05 / CP-03: media", () => {
       apiOrigin: "https://api.test",
       devServer: false,
     });
-    const directives = Object.fromEntries(
-      csp.split(";").map((part) => {
-        const [name, ...values] = part.trim().split(/\s+/);
-        return [name, values];
-      }),
-    );
+    const directives: Record<string, string[]> = {};
+    for (const part of csp.split(";")) {
+      const [name = "", ...values] = part.trim().split(/\s+/);
+      directives[name] = values;
+    }
     expect(directives["img-src"]).toContain("blob:");
     expect(directives["media-src"]).toContain("blob:");
     for (const name of ["default-src", "script-src", "connect-src", "frame-src", "object-src"]) {
@@ -394,7 +395,7 @@ describe("CP-01 .. CP-04: the composer", () => {
     expect(storage.length).toBe(0);
     const draftFile = readFileSync(join(__dirname, "../lib/inbox/draft-storage.ts"), "utf8");
     expect(draftFile).toMatch(/window\.sessionStorage/);
-    expect(draftFile).not.toMatch(/window\.localStorage|localStorage\./);
+    expect(draftFile).not.toMatch(/window\.localStorage|[^.\w]localStorage\./);
   });
   const facts = (
     overrides: Partial<ConversationFacts["reply_policy"]> & { status?: string } = {},
@@ -478,8 +479,9 @@ describe("CP-02: one Idempotency-Key per bubble", () => {
             }),
         ),
     );
-    const second = queue.enqueue(ID, async () => {
+    const second = queue.enqueue(ID, () => {
       order.push("b");
+      return Promise.resolve();
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(order).toEqual([]);

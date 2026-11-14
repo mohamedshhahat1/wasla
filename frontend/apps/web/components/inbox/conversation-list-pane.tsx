@@ -423,7 +423,7 @@ export function ConversationListPane({
                 unread={unread}
                 unreadLabel={unread ? t("unreadCount", { count: unreadCount }) : null}
                 selected={conversation.id === openId}
-                accessibleName={`${who}, ${stateWords.join(", ")}, ${time}`}
+                stateLabel={stateWords.join(", ")}
                 badges={
                   <>
                     <Badge tone="neutral" icon={false}>

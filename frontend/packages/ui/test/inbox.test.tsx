@@ -35,7 +35,7 @@ describe("customer text is never markup (M-V27, M-V33)", () => {
           previewText={MARKUP}
           time="now"
           timeFull="now"
-          accessibleName="row"
+          stateLabel="Open"
         />
       </ul>,
     );

@@ -124,14 +124,13 @@ export interface ConversationRowProps {
   unread?: string | null;
   unreadLabel?: string | null;
   selected?: boolean;
-  /** The whole row's accessible name ("<who>, <state>, <n> unread, <time>"). */
-  accessibleName: string;
+  /** State words read with the row's visible text ("Open, AI, 3 unread"), for screen readers. */
+  stateLabel?: string;
   renderLink?: (props: {
     href: string;
     className: string;
     children: ReactNode;
     "aria-current"?: "page";
-    "aria-label": string;
     "data-conversation-row": string;
   }) => ReactNode;
   /** The row's own menu (Mark as unread): a trigger the app renders. */
@@ -154,7 +153,7 @@ export function ConversationRow({
   unread,
   unreadLabel,
   selected = false,
-  accessibleName,
+  stateLabel,
   renderLink,
   menu,
 }: ConversationRowProps) {
@@ -206,13 +205,14 @@ export function ConversationRow({
         {unread ? <CountBadge value={unread} label={unreadLabel ?? null} /> : null}
       </span>
       {badges ? <span className="flex flex-wrap items-center gap-1">{badges}</span> : null}
+      {/* The visible text is the link's name (WCAG 2.5.3); the state words ride along. */}
+      {stateLabel ? <span className="sr-only">{stateLabel}</span> : null}
     </>
   );
   const linkProps = {
     href,
     className,
     children: body,
-    "aria-label": accessibleName,
     "data-conversation-row": href,
     ...(selected ? { "aria-current": "page" as const } : {}),
   };
@@ -225,7 +225,6 @@ export function ConversationRow({
           <a
             href={linkProps.href}
             className={linkProps.className}
-            aria-label={linkProps["aria-label"]}
             aria-current={linkProps["aria-current"]}
             data-conversation-row={linkProps["data-conversation-row"]}
           >

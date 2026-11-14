@@ -27,6 +27,7 @@ import {
   WEB,
 } from "../support/fe2";
 import { connectNumber, freshNumber, gateState, memberOf, restore, suspend } from "../support/fe3";
+import { connectedOwner, conversationOf, freshCustomer, inbound, text } from "../support/fe4";
 
 interface Shares {
   dominant: number;
@@ -305,6 +306,64 @@ for (const locale of LOCALES) {
       await expect(page.locator('[data-gate="suspended"]')).toBeVisible({ timeout: 30_000 });
       await capture(page, testInfo, "gate-suspended", locale, "gate");
       await restore(owner.slug);
+    });
+
+    // FE-4 (VQ4-02): the inbox joins the averages - empty, with a list and an open conversation,
+    // the template dialog; on a phone the list step and the conversation step.
+    test(`web-fe4 inbox ${locale}`, async ({ page, context }, testInfo) => {
+      await useLocale(context, locale);
+      await useAddress(context);
+      const line = await connectedOwner("vis4");
+      await logInThroughTheApp(page, locale, line.owner.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+      await page.goto(`${WEB}/inbox`);
+      await expect(page.locator('[data-page="inbox"]')).toBeVisible();
+      await expect(page.locator("[data-conversation-list] [aria-busy]")).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-inbox-empty", locale);
+
+      const customers = ["Nour Hassan", "Omar Said", "Laila Adel"];
+      let open = "";
+      for (const name of customers) {
+        const sender = freshCustomer();
+        await inbound(
+          line,
+          sender,
+          text(`Hello, this is ${name}. Is Thursday free for a visit?`),
+          name,
+        );
+        open = (await conversationOf(line.owner, sender)).id;
+      }
+      await page.goto(`${WEB}/inbox/${open}`);
+      await expect(page.locator('[data-inbox-pane="conversation"]')).toBeVisible();
+      await expect(page.locator("[data-message-text]").first()).toBeVisible({ timeout: 30_000 });
+      await page.locator("[data-composer-field]").fill("Yes - Thursday at 10 works.");
+      await page.locator("[data-send]").click();
+      await expect(page.locator('[data-bubble="out"]').first()).toBeVisible({ timeout: 30_000 });
+      await capture(
+        page,
+        testInfo,
+        testInfo.project.name.endsWith("phone")
+          ? "web-inbox-conversation-step"
+          : "web-inbox-conversation",
+        locale,
+      );
+
+      if (testInfo.project.name.endsWith("phone")) {
+        await page.goto(`${WEB}/inbox`);
+        await expect(page.locator('[data-inbox-pane="list"]')).toBeVisible();
+        await capture(page, testInfo, "web-inbox-list-step", locale);
+      } else {
+        await page
+          .getByRole("button", { name: label(locale, "app.inbox.composer.template") })
+          .click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+        await expect(page.getByText(label(locale, "app.inbox.templates.loading"))).toHaveCount(0, {
+          timeout: 30_000,
+        });
+        await capture(page, testInfo, "web-inbox-templates", locale);
+      }
     });
 
     test(`web-home-member ${locale}`, async ({ page, context }, testInfo) => {

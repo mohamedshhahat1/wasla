@@ -156,7 +156,7 @@ jobs:
 
   # FE-3 (section 20): with the shell's journeys one job passed 40 minutes on the runner, so the
   # run is split by Playwright project - same profile, same build, same journeys, none dropped.
-  # stream-restart and api-down (JR-11) stop the API, so they run alone after the WebKit projects
+  # stream-restart and api-down (JR-11, FE-4's IJ-08) stop the API, so they run alone after the WebKit projects
   # of their part (WASLA_E2E_STREAM_AFTER), never beside a journey and never on a cold profile.
   e2e:
     name: E2E against the backend profile (${{ matrix.part.name }})
@@ -176,7 +176,7 @@ jobs:
             browsers: firefox
             projects: --project=firefox-desktop --project=firefox-phone
           - id: webkit
-            name: WebKit, desktop and phone; then the API restart and JR-11 alone
+            name: WebKit, desktop and phone; then the API restart, JR-11 and IJ-08 alone
             browsers: webkit chromium
             projects: --project=webkit-desktop --project=webkit-phone --project=stream-restart --project=api-down
             stream_after: webkit-desktop,webkit-phone

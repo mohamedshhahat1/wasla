@@ -158,7 +158,7 @@ export const List: Story = {
             unread="3"
             unreadLabel={t.unread}
             selected
-            accessibleName={t.nour}
+            stateLabel={t.open}
             badges={
               <>
                 <Badge tone="neutral" icon={false}>
@@ -181,7 +181,7 @@ export const List: Story = {
             previewText={t.outbound}
             time="1 h"
             timeFull="14 November 2026, 09:40"
-            accessibleName={t.omar}
+            stateLabel={t.open}
             badges={
               <>
                 <Badge tone="neutral" icon={false}>
