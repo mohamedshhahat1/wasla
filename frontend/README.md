@@ -124,6 +124,22 @@ out as before.
   number whose id starts with `PNID-E2E` (the fake verifier owns those). The gate states the API cannot reach quickly:
   `docker exec wasla-fe-e2e-api python -m tests.e2e_stack.gate_states trialing|past-due|ai-allowance-used <slug> [days]`.
 
+## The inbox (FE-4, ADR-198)
+
+- **Routes** - `/inbox` and `/inbox/[id]`, both drawn by `apps/web/app/(app)/inbox/layout.tsx` (one screen kept mounted,
+  so opening another conversation never drops the tab's pending sends or media). Components in `components/inbox/`,
+  rules in `lib/inbox/` (view and URL, composer, send queue, media registry, live rules, time, layout).
+- **The invalidation map** - `apps/web/lib/stream-handlers.ts`; the open inbox registers its catch-up and gap reactions
+  with `registerInboxHooks`. FE-3's coordinator is unchanged.
+- **Media** - `lib/inbox/media.ts` `MediaRegistry` (object URLs, revoked by owner, page hide, sign-out) and `Gate` (three
+  fetches at a time); bytes come from the session's client with `parseAs: "blob"`.
+- **Walking it locally** - FE-0's profile up and the web app started as above; sign up, connect a `PNID-E2E…` number, then
+  make a customer write through the fake webhook: `frontend/e2e/support/fe4.ts` `inbound()` signs the payload with the
+  profile's public test secret `e2e-meta-app-secret-NOT-A-SECRET` (`POST http://localhost:8000/api/v1/webhooks/whatsapp`, header
+  `X-Hub-Signature-256: sha256=<HMAC-SHA256 of the body>`). The states a few calls cannot reach:
+  `docker exec wasla-fe-e2e-api python -m tests.e2e_stack.inbox_states window-closed <conversation id> | templates <slug> |
+media <conversation id> pending|failed|unavailable | voice-note <conversation id>`.
+
 ## Changing the look
 
 The design language is [packages/ui/DESIGN.md](packages/ui/DESIGN.md): one blue family and white in three
