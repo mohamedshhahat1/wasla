@@ -13,7 +13,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 
 import type { Locale } from "@wasla/i18n";
 
@@ -149,12 +149,16 @@ async function capture(
   screen: string,
   locale: Locale,
   kind: "screen" | "gate" = "screen",
+  // FE-4 (VQ4-02): a modal is measured as itself - the scrim that dims the page behind it is not
+  // part of its composition and would read as text/other.
+  only?: Locator,
 ) {
   await settle(page);
   const width = widthOf(testInfo);
   const name = `${screen}-${locale}-${width}.png`;
   const path = join(kind === "gate" ? gateDir(testInfo) : outDir(testInfo), name);
-  await page.screenshot({ path, fullPage: true, animations: "disabled", caret: "hide" });
+  if (only) await only.screenshot({ path, animations: "disabled", caret: "hide" });
+  else await page.screenshot({ path, fullPage: true, animations: "disabled", caret: "hide" });
 
   const { measure, classify } = await measurement();
   const shares = measure.measureFile(path, classify);
@@ -362,7 +366,14 @@ for (const locale of LOCALES) {
         await expect(page.getByText(label(locale, "app.inbox.templates.loading"))).toHaveCount(0, {
           timeout: 30_000,
         });
-        await capture(page, testInfo, "web-inbox-templates", locale);
+        await capture(
+          page,
+          testInfo,
+          "web-inbox-templates",
+          locale,
+          "screen",
+          page.getByRole("dialog"),
+        );
       }
     });
 
