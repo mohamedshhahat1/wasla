@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
-from app.db.models import Tenant
+from app.db.models import Tenant, User
+from app.db.models.audit import AuditLog
 from tests.e2e_stack import inbox_states
 from tests.integration.test_inbox_contract import (
     LIST,
@@ -21,13 +27,33 @@ from tests.integration.test_inbox_contract import (
 pytestmark = pytest.mark.integration
 
 
+@pytest_asyncio.fixture
+async def no_people_left(prepared_database: str) -> AsyncIterator[None]:
+    """Remove the @inbox.test people the `inbox` fixture makes once it has torn down.
+
+    Taken before `inbox`, so it tears down after it. Left behind, they are counted by tests that
+    read every user (the Google sign-in tests).
+    """
+    yield
+    engine = create_async_engine(prepared_database, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            people = select(User.id).where(User.email.endswith("@inbox.test"))
+            await connection.execute(delete(AuditLog).where(AuditLog.actor_id.in_(people)))
+            await connection.execute(delete(User).where(User.email.endswith("@inbox.test")))
+    finally:
+        await engine.dispose()
+
+
 class Store(MemoryStorage):
     async def put_at(self, *, key: str, data: bytes, mime_type: str | None = None) -> None:
         self.objects[key] = data
 
 
 async def test_every_inbox_state_reads_back_as_the_inbox_draws_it(
-    inbox: Inbox, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+    no_people_left: None,
+    inbox: Inbox,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     shop, db = inbox.mine, inbox.database
     monkeypatch.setattr("app.core.storage.build_media_storage", lambda settings: inbox.storage)
