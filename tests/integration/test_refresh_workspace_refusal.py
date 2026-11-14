@@ -205,3 +205,40 @@ async def test_a_sole_withdrawn_membership_still_opens_a_session_without_a_works
 
     refreshed = await auth.refresh(refresh_token=session.refresh_token, workspace_slug=SLUG)
     assert refreshed.workspace is None
+
+
+async def test_a_reload_names_no_workspace_and_is_refused_when_every_one_is_suspended(
+    auth: AuthService, db_session: AsyncSession, redis: _RedisClient, settings: Settings
+) -> None:
+    """A reload holds no token yet, so its refresh names no workspace. With only a suspended
+    one, that used to open a session with none - which no page can draw. Now it is the same
+    refusal as the named case, and the token is not spent; after a restore it opens it."""
+    session = await _register(auth, db_session)
+    await _set_status(db_session, TenantStatus.SUSPENDED)
+
+    with pytest.raises(PermissionDeniedError) as refused:
+        await auth.refresh(refresh_token=session.refresh_token)
+    assert refused.value.error_code == "workspace_suspended"
+    assert not await _spent(redis, session.refresh_token, settings)
+
+    await _set_status(db_session, TenantStatus.ACTIVE)
+    refreshed = await auth.refresh(refresh_token=session.refresh_token)
+    assert refreshed.workspace is not None and refreshed.workspace.tenant.slug == SLUG
+
+
+async def test_a_reload_with_another_active_workspace_opens_that_one(
+    auth: AuthService, db_session: AsyncSession
+) -> None:
+    """Unchanged: with an active workspace left, a refresh naming none opens it."""
+    session = await _register(auth, db_session)
+    user = (
+        await db_session.execute(select(User).where(User.email == "refusal@example.test"))
+    ).scalar_one()
+    other = Tenant(name="Other", slug=f"{SLUG}-active", timezone=TEST_TIMEZONE)
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(Membership(tenant_id=other.id, user_id=user.id, role=TenantRole.MEMBER))
+    await _set_status(db_session, TenantStatus.SUSPENDED)
+
+    refreshed = await auth.refresh(refresh_token=session.refresh_token)
+    assert refreshed.workspace is not None and refreshed.workspace.tenant.slug == f"{SLUG}-active"

@@ -550,6 +550,12 @@ class AuthService:
         Unresolved when the account cannot refresh at all - the checks after
         `spend` refuse it, exactly as before. A workspace refusal is raised
         here, with the token untouched, unless the token was already spent.
+
+        A reload names no workspace (the browser holds no token yet), so a
+        person whose every workspace is suspended used to be handed a session
+        with none - which no page can draw. That is refused like the named
+        case, `workspace_suspended`; somebody with an active workspace still
+        gets it.
         """
         user = await self._users.get_by_id(claims.subject)
         if (
@@ -560,7 +566,19 @@ class AuthService:
         ):
             return _UNRESOLVED
         try:
-            return await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+            workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+            # Memberships, none of them in a workspace that may open: a deleted
+            # workspace withdraws its memberships (ADR-194), so what remains is
+            # suspended.
+            if (
+                workspace is None
+                and workspace_slug is None
+                and await self._memberships.list_for_user(user.id)
+            ):
+                raise PermissionDeniedError(
+                    "This workspace is suspended.", error_code="workspace_suspended"
+                )
+            return workspace
         except (PermissionDeniedError, TenantIsolationError):
             if await self._token_store.is_revoked(claims.token_id):
                 # Spent already: a replay, whatever the workspace says.

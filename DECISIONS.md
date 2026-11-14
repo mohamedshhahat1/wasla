@@ -8333,7 +8333,8 @@ suspended state's "Check again" would have been a replay that tears every sessio
 5. *A refused refresh spends nothing (FEF-24).* `AuthService.refresh` asks the workspace before `spend`. The question
    issues nothing, so the single-use race is untouched; a token already spent is still a replay whatever the workspace
    says. A suspended workspace answers `403 workspace_suspended` (the code FEB-07 already raised) with the token left as
-   valid as it was. The session's refresh outcome is one table (`refreshOutcome`) shared by the browser and the
+   valid as it was - also when the refresh names no workspace (a reload) and every workspace the person belongs to is
+   suspended, which used to open a session with no workspace that no page could draw. The session's refresh outcome is one table (`refreshOutcome`) shared by the browser and the
    `/session/refresh` route: `403 workspace_suspended` keeps the cookie and is the session state `workspace-suspended`,
    shown as GT-03's state with "Check again" and "Sign out"; every other refusal signs out as before. FE-3's protection of
    the session was lifted for exactly these files (SU-05).
