@@ -53,6 +53,9 @@
   "session_unavailable": "Giriş şu anda kullanılamıyor. Daha sonra tekrar deneyin.",
   "upstream_timeout": "Wasla'nın yanıtı çok uzun sürdü. Tekrar deneyin.",
   "check_inbox": "Devam etmek için gelen kutunuzu kontrol edin.",
+  "search_term_invalid": "2 ile 100 karakter arasında arayın.",
+  "cursor_view_mismatch": "Listenin filtreleri değişti. Baştan yeniden yükleyin.",
+  "inbox_view_with_updated_since": "Bu görünüm güncellemeleri izlemeyle birleştirilemez. Listeyi yeniden yükleyin.",
   "connection_lost": "Bağlantı kesildi. Kontrol edip tekrar deneyin.",
   "fallback": "Bir sorun oluştu. Tekrar deneyin."
 }

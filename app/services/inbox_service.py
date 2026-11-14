@@ -31,20 +31,23 @@ the codebase goes through `released`, which commits first.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, ValidationError
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.db.models.analytics import AnalyticsSource
 from app.db.models.audit import AuditAction, AuditActorKind
-from app.db.models.channel import Channel, ContactIdentity
+from app.db.models.channel import Channel
 from app.db.models.conversation import (
     Conversation,
     ConversationMode,
@@ -52,10 +55,18 @@ from app.db.models.conversation import (
     Message,
 )
 from app.db.models.follow_up_sequence import SequenceEndReason
+from app.db.models.media import MessageMedia
 from app.db.models.sentiment import ConversationPriority
 from app.db.models.user import User
-from app.repositories.channel_repository import ContactIdentityRepository
-from app.repositories.conversation_repository import ConversationRepository, MessageRepository
+from app.repositories.channel_repository import ContactIdentityRepository, Participant
+from app.repositories.conversation_repository import (
+    UNASSIGNED,
+    ConversationRepository,
+    InboxSearch,
+    MessageRepository,
+    Unassigned,
+)
+from app.repositories.media_repository import MediaRepository
 from app.repositories.membership_repository import MembershipRepository
 from app.services.analytics_service import AnalyticsRecorder
 from app.services.audit_service import AuditTrail
@@ -82,6 +93,109 @@ _ACTOR_KIND: Final[dict[AnalyticsSource, AuditActorKind]] = {
 }
 
 
+class InboxStatus(StrEnum):
+    """The `status` view of the inbox (FEB-05). Without it: everything not closed."""
+
+    OPEN = "open"
+    PENDING = "pending"
+    CLOSED = "closed"
+    ALL = "all"
+
+
+_STATUSES: Final[dict[InboxStatus, frozenset[ConversationStatus]]] = {
+    InboxStatus.OPEN: frozenset({ConversationStatus.OPEN}),
+    InboxStatus.PENDING: frozenset({ConversationStatus.PENDING}),
+    InboxStatus.CLOSED: frozenset({ConversationStatus.CLOSED}),
+    InboxStatus.ALL: frozenset(ConversationStatus),
+}
+
+#: The bounds of an inbox search, after trimming (FEB-05).
+MIN_SEARCH_LENGTH: Final = 2
+MAX_SEARCH_LENGTH: Final = 100
+#: The fewest digits that make a search read as a number.
+MIN_SEARCH_DIGITS: Final = 3
+#: Between a view's cursor and the tag of the view it belongs to. Not in the
+#: URL-safe base64 alphabet the cursor itself is written in.
+VIEW_SEPARATOR: Final = "."
+
+#: A search shorter or longer than the bounds above (FEB-05, FEB-06).
+SEARCH_TERM_INVALID: Final = "search_term_invalid"
+#: A cursor of one inbox view presented with another (FEB-05, FEB-06).
+CURSOR_VIEW_MISMATCH: Final = "cursor_view_mismatch"
+
+_NUMBER_PUNCTUATION: Final = str.maketrans("", "", " +-().")
+
+
+def inbox_search(q: str | None) -> InboxSearch | None:
+    """A search as the repository applies it: trimmed, bounded, and its digits if a number."""
+    if q is None:
+        return None
+    text = q.strip()
+    if not MIN_SEARCH_LENGTH <= len(text) <= MAX_SEARCH_LENGTH:
+        raise ValidationError(
+            f"Search for {MIN_SEARCH_LENGTH} to {MAX_SEARCH_LENGTH} characters.",
+            error_code=SEARCH_TERM_INVALID,
+        )
+    digits = text.translate(_NUMBER_PUNCTUATION)
+    number = digits if digits.isdigit() and len(digits) >= MIN_SEARCH_DIGITS else None
+    return InboxSearch(text=text, digits=number)
+
+
+def _owner(assigned_to: str | None, viewer_id: uuid.UUID | None) -> uuid.UUID | Unassigned | None:
+    if assigned_to is None:
+        return None
+    if assigned_to == "none":
+        return UNASSIGNED
+    if assigned_to == "me":
+        if viewer_id is None:
+            raise ValidationError("assigned_to=me needs a signed-in member.")
+        return viewer_id
+    try:
+        return uuid.UUID(assigned_to)
+    except ValueError as error:
+        raise ValidationError("assigned_to is me, none or a member's id.") from error
+
+
+def _view_tag(
+    *,
+    status: InboxStatus | None,
+    owner: uuid.UUID | Unassigned | None,
+    mode: ConversationMode | None,
+    search: InboxSearch | None,
+    priority: ConversationPriority | None,
+    channel: Channel | None,
+    connection_id: uuid.UUID | None,
+) -> str | None:
+    """A short tag naming one view, or None for the default view (no filter at all).
+
+    A hash, so the cursor carries no search term - it travels in a URL.
+    """
+    parts = [
+        status.value if status else None,
+        "none" if isinstance(owner, Unassigned) else (str(owner) if owner else None),
+        mode.value if mode else None,
+        search.text.casefold() if search else None,
+        priority.value if priority else None,
+        channel.value if channel else None,
+        str(connection_id) if connection_id else None,
+    ]
+    if all(part is None for part in parts):
+        return None
+    return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:12]
+
+
+def _view_cursor(cursor: str | None, view: str | None) -> Cursor | None:
+    if not cursor:
+        return None
+    raw, _, tag = cursor.partition(VIEW_SEPARATOR)
+    if (tag or None) != view:
+        raise ValidationError(
+            "That pagination cursor belongs to another view of the inbox.",
+            error_code=CURSOR_VIEW_MISMATCH,
+        )
+    return Cursor.decode(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class ModeTransition:
     """What asking for a mode did.
@@ -104,6 +218,7 @@ class InboxService:
         self._conversations = ConversationRepository(session, tenant_id=tenant_id)
         self._messages = MessageRepository(session, tenant_id=tenant_id)
         self._identities = ContactIdentityRepository(session, tenant_id=tenant_id)
+        self._media = MediaRepository(session, tenant_id=tenant_id)
         self._memberships = MembershipRepository(session, tenant_id=tenant_id)
         self._analytics = AnalyticsRecorder(session, tenant_id=tenant_id)
         self._audit = AuditTrail(session, tenant_id=tenant_id)
@@ -120,35 +235,66 @@ class InboxService:
         priority: ConversationPriority | None = None,
         channel: Channel | None = None,
         connection_id: uuid.UUID | None = None,
+        status: InboxStatus | None = None,
+        assigned_to: str | None = None,
+        mode: ConversationMode | None = None,
+        q: str | None = None,
+        viewer_id: uuid.UUID | None = None,
     ) -> Page[Conversation]:
-        """Everything not closed, most recently active first.
+        """Everything not closed, most recently active first - or one view of the inbox.
 
         `priority` narrows the list to conversations at one level, which is how
         somebody works the flagged queue without the default view changing under
         everybody else. `channel` and `connection_id` narrow the same one inbox
         to one channel or one connection (OMNI-014); a connection of another
         workspace matches nothing rather than answering differently.
+
+        The views (FEB-05): `status` (`open`, `pending`, `closed`, `all`),
+        `assigned_to` (`me`, `none`, a member's id), `mode` and `q` - the
+        customer's name or number. One ordering for all of them; a cursor
+        carries a tag of the view it was made under, and another view refuses
+        it (`cursor_view_mismatch`) rather than answering a page of the wrong
+        list. The default view's cursor carries no tag, exactly as before.
         """
-        after = Cursor.decode(cursor) if cursor else None
+        statuses = _STATUSES[status] if status is not None else None
+        owner = _owner(assigned_to, viewer_id)
+        search = inbox_search(q)
+        view = _view_tag(
+            status=status,
+            owner=owner,
+            mode=mode,
+            search=search,
+            priority=priority,
+            channel=channel,
+            connection_id=connection_id,
+        )
+        after = _view_cursor(cursor, view)
         rows = await self._conversations.list_open(
             limit=limit,
             after=after,
             priority=priority,
             channel=channel,
             connection_id=connection_id,
+            statuses=statuses,
+            assigned_to=owner,
+            mode=mode,
+            search=search,
         )
-        return paginate(
+        page = paginate(
             rows,
             limit=limit,
             key=lambda row: Cursor(sort_value=row.last_message_at, id=row.id),
         )
+        if view is None or page.next_cursor is None:
+            return page
+        return Page(items=page.items, next_cursor=f"{page.next_cursor}{VIEW_SEPARATOR}{view}")
 
     async def get_conversation(self, conversation_id: uuid.UUID) -> Conversation:
         return await self._conversations.require_by_id(conversation_id)
 
     async def participants(
         self, conversations: Sequence[Conversation]
-    ) -> dict[uuid.UUID, ContactIdentity]:
+    ) -> dict[uuid.UUID, Participant]:
         """The identity each of these conversations addresses, by identity id, in one query.
 
         What the API's `participant` is read from (OMNI-015). Every conversation
@@ -156,9 +302,17 @@ class InboxService:
         workspace, contact and channel - so a missing entry is a broken
         invariant, not an empty state.
         """
-        return await self._identities.map_by_ids(
+        return await self._identities.participants(
             {conversation.participant_identity_id for conversation in conversations}
         )
+
+    async def media_for(self, messages: Sequence[Message]) -> dict[uuid.UUID, list[MessageMedia]]:
+        """The files of these messages, by message id, in one query (FEB-03).
+
+        Scoped to this workspace by the repository, and keyed by message id, so
+        a message is only ever shown its own files.
+        """
+        return await self._media.map_all_for_messages([message.id for message in messages])
 
     async def list_changed_since(
         self, *, since: datetime, limit: int = 50, cursor: str | None = None

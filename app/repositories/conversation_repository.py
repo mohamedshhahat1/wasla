@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,7 +15,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from app.channels.inbound import ReplyAction
 from app.channels.policy import CHANNEL_DISPLAY_NAMES
 from app.core.pagination import Cursor
-from app.db.models.channel import Channel, ChannelConnection
+from app.db.models.channel import Channel, ChannelConnection, ContactIdentity, IdentityKind
 from app.db.models.conversation import (
     Contact,
     Conversation,
@@ -28,7 +29,7 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority
-from app.repositories.base import BaseRepository, TenantScopedRepository
+from app.repositories.base import BaseRepository, TenantScopedRepository, escape_like
 
 # The constraint the idempotency claim races on. Named so the conflict handler
 # can recognise it: any *other* integrity failure on that insert is a bug.
@@ -39,6 +40,21 @@ IDEMPOTENCY_CONSTRAINT = "uq_messages_tenant_id_idempotency_key"
 # inserts is a bug rather than a burst of traffic.
 CONTACT_IDENTITY_CONSTRAINT = "uq_contacts_tenant_id_wa_id"
 CONVERSATION_IDENTITY_CONSTRAINT = "uq_conversations_tenant_id_contact_id_account_id"
+
+
+class Unassigned:
+    """The `assigned_to=none` view: conversations nobody owns."""
+
+
+UNASSIGNED = Unassigned()
+
+
+@dataclass(frozen=True, slots=True)
+class InboxSearch:
+    """A normalised inbox search: the words as typed, and the digits if it reads as a number."""
+
+    text: str
+    digits: str | None
 
 
 def _after_nullable(model: type[Conversation], after: Cursor) -> ColumnElement[bool]:
@@ -356,8 +372,17 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         priority: ConversationPriority | None = None,
         channel: Channel | None = None,
         connection_id: uuid.UUID | None = None,
+        statuses: Collection[ConversationStatus] | None = None,
+        assigned_to: uuid.UUID | Unassigned | None = None,
+        mode: ConversationMode | None = None,
+        search: InboxSearch | None = None,
     ) -> list[Conversation]:
-        """Everything not closed, most recently active first.
+        """Everything not closed, most recently active first - or the inbox view asked for.
+
+        `statuses` replaces the default "not closed" (FEB-05); `assigned_to` is a
+        member's id or `UNASSIGNED`; `search` matches the customer's name or
+        number. Every filter narrows the same ordering, so one cursor format
+        pages every view.
 
         Ordered by `last_message_at` with nulls last and `id` as the
         tiebreaker. A conversation that has never carried a message sorts to the
@@ -371,7 +396,11 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         """
         query = (
             self._select()
-            .where(Conversation.status != ConversationStatus.CLOSED)
+            .where(
+                Conversation.status != ConversationStatus.CLOSED
+                if statuses is None
+                else Conversation.status.in_(list(statuses))
+            )
             .order_by(
                 Conversation.last_message_at.desc().nullslast(),
                 Conversation.id.desc(),
@@ -387,9 +416,53 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
             query = query.where(Conversation.channel == channel)
         if connection_id is not None:
             query = query.where(Conversation.account_id == connection_id)
+        # A member of another workspace, or nobody, simply matches nothing: the
+        # tenant predicate is already on the query (FEB-05, no oracle).
+        if isinstance(assigned_to, Unassigned):
+            query = query.where(Conversation.assigned_to_id.is_(None))
+        elif assigned_to is not None:
+            query = query.where(Conversation.assigned_to_id == assigned_to)
+        if mode is not None:
+            query = query.where(Conversation.mode == mode)
+        if search is not None:
+            query = query.where(self._matches(search))
         if after is not None:
             query = query.where(_after_nullable(Conversation, after))
         return await self._all(query)
+
+    def _matches(self, search: InboxSearch) -> ColumnElement[bool]:
+        """The customer's name as the channel gave it, or their number (FEB-05).
+
+        Both held to this workspace by their own tenant column, and to the
+        conversation's own contact and participant - never a contact elsewhere.
+        The workspace is also stated as a constant, so the planner reads one
+        workspace's rows through its tenant index instead of scanning every
+        workspace's (IV-06: 252 ms -> a bounded per-workspace read at 50,000).
+        """
+        name = (
+            select(Contact.id)
+            .where(
+                Contact.tenant_id == self.tenant_id,
+                Contact.tenant_id == Conversation.tenant_id,
+                Contact.id == Conversation.contact_id,
+                Contact.display_name.ilike(f"%{escape_like(search.text)}%", escape="\\"),
+            )
+            .exists()
+        )
+        if search.digits is None:
+            return name
+        number = (
+            select(ContactIdentity.id)
+            .where(
+                ContactIdentity.tenant_id == self.tenant_id,
+                ContactIdentity.tenant_id == Conversation.tenant_id,
+                ContactIdentity.id == Conversation.participant_identity_id,
+                ContactIdentity.kind == IdentityKind.PHONE,
+                ContactIdentity.value.contains(search.digits, autoescape=True),
+            )
+            .exists()
+        )
+        return or_(name, number)
 
     async def list_changed_since(
         self,

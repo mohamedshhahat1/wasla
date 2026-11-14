@@ -53,6 +53,9 @@
   "session_unavailable": "La connexion n’est pas disponible pour le moment. Réessayez plus tard.",
   "upstream_timeout": "Wasla a mis trop de temps à répondre. Réessayez.",
   "check_inbox": "Consultez votre boîte de réception pour continuer.",
+  "search_term_invalid": "Recherchez entre 2 et 100 caractères.",
+  "cursor_view_mismatch": "Les filtres de la liste ont changé. Rechargez-la depuis le début.",
+  "inbox_view_with_updated_since": "Cette vue ne peut pas être combinée avec la mise à jour. Rechargez la liste.",
   "connection_lost": "La connexion a été perdue. Vérifiez-la et réessayez.",
   "fallback": "Un problème est survenu. Réessayez."
 }

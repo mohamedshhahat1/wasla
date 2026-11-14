@@ -20,6 +20,7 @@ from httpx import AsyncClient
 from app.api.dependencies import (
     ActiveWorkspace,
     get_active_workspace,
+    get_inbox_service,
     get_media_service,
     get_messaging_service,
 )
@@ -146,10 +147,18 @@ def media_service(app: FastAPI) -> StubMediaService:
     return stub
 
 
+class StubInbox:
+    """The files a sent message carries, as the route reads them back (FEB-03): none here."""
+
+    async def media_for(self, messages: list[Any]) -> dict[uuid.UUID, list[MessageMedia]]:
+        return {}
+
+
 @pytest.fixture
 def messaging(app: FastAPI, media_service: StubMediaService) -> StubMessaging:
     stub = StubMessaging()
     app.dependency_overrides[get_messaging_service] = lambda: stub
+    app.dependency_overrides[get_inbox_service] = lambda: StubInbox()
     return stub
 
 

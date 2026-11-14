@@ -28,6 +28,8 @@ from datetime import UTC, datetime
 import httpx
 from sqlalchemy import select
 
+from tests.e2e_stack.mailbox import code_after, code_mails
+
 STAFF_EMAIL = "staff.e2e@example.com"
 STAFF_PASSWORD = "e2e-staff-password-NOT-A-SECRET"
 DEMO_EMAIL = "demo.owner.e2e@example.com"
@@ -66,13 +68,25 @@ async def seed_staff() -> bool:
         await database.dispose()
 
 
-def _code(client: httpx.Client, address: str) -> str:
+def _code_mails(client: httpx.Client, address: str, *, at_least: int) -> int:
+    """How many code mails `address` holds, once it holds `at_least` (FEB-32)."""
     for _ in range(60):
-        for message in client.get(f"{MAILBOX}/messages", params={"to": address}).json():
-            if message["codes"]:
-                return str(message["codes"][0])
+        count = code_mails(client.get(f"{MAILBOX}/messages", params={"to": address}).json())
+        if count >= at_least:
+            return count
         time.sleep(1)
-    raise RuntimeError(f"no code reached the mailbox for {address}")
+    raise RuntimeError(f"fewer than {at_least} code mails reached the mailbox for {address}")
+
+
+def _code(client: httpx.Client, address: str, *, seen: int) -> str:
+    """The code of the mail the caller's own send caused: newer than the `seen` before it."""
+    for _ in range(60):
+        messages = client.get(f"{MAILBOX}/messages", params={"to": address}).json()
+        code = code_after(messages, seen=seen)
+        if code is not None:
+            return code
+        time.sleep(1)
+    raise RuntimeError(f"no new code reached the mailbox for {address}")
 
 
 def seed_demo() -> bool:
@@ -99,11 +113,14 @@ def seed_demo() -> bool:
             f"{API}/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD}
         ).json()
         bearer = {"Authorization": f"Bearer {session['access_token']}"}
+        # Registration's own code mail is counted first, so a late one is never
+        # read in place of the send's (FEB-32).
+        seen = _code_mails(client, DEMO_EMAIL, at_least=1)
         client.post(f"{API}/auth/email/verification/send", headers=bearer).raise_for_status()
         client.post(
             f"{API}/auth/email/verification/verify",
             headers=bearer,
-            json={"code": _code(client, DEMO_EMAIL)},
+            json={"code": _code(client, DEMO_EMAIL, seen=seen)},
         ).raise_for_status()
         client.post(
             f"{API}/whatsapp/accounts",

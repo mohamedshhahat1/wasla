@@ -385,6 +385,38 @@ describe("refresh (SR-05)", () => {
     expect(text).not.toContain(REFRESH);
   });
 
+  it("a suspended workspace's refusal keeps the cookie and passes its code through (FEF-24)", async () => {
+    const api = fakeApi({
+      "/api/v1/auth/refresh": {
+        status: 403,
+        json: { error: { code: "workspace_suspended", message: "This workspace is suspended." } },
+      },
+    });
+    const response = await handleSession(
+      "refresh",
+      post("refresh", { workspace_slug: "acme" }, { Cookie: `wasla_rt=${REFRESH}` }),
+      config(api.fetch).value,
+    );
+    expect(response.status).toBe(403);
+    expect(response.headers.getSetCookie()).toEqual([]);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+      "workspace_suspended",
+    );
+  });
+
+  it("any other 403 on refresh still clears the cookie", async () => {
+    const api = fakeApi({
+      "/api/v1/auth/refresh": { status: 403, json: { error: { code: "permission_denied" } } },
+    });
+    const response = await handleSession(
+      "refresh",
+      post("refresh", {}, { Cookie: `wasla_rt=${REFRESH}` }),
+      config(api.fetch).value,
+    );
+    expect(response.status).toBe(403);
+    expect(response.headers.getSetCookie()[0]).toMatch(/^wasla_rt=; .*Max-Age=0/);
+  });
+
   it("a refused refresh clears the cookie and passes the 401 through", async () => {
     const api = fakeApi({
       "/api/v1/auth/refresh": { status: 401, json: { error: { code: "invalid_token" } } },

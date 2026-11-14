@@ -4,7 +4,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { AuthLayout, BrandPanel, Button, ErrorState } from "@wasla/ui";
+import { AuthLayout, BrandPanel, Button, ErrorState, StatusState } from "@wasla/ui";
 
 import { decideRoute, type PageNeed } from "../lib/routing";
 import { useSession } from "./session-provider";
@@ -32,6 +32,11 @@ export function PageGate({ need, children }: { need: PageNeed; children: ReactNo
     if (target) router.replace(target);
   }, [target, router]);
 
+  // FEF-24: a reload of a suspended workspace keeps the person signed in on GT-03's state.
+  // "Check again" refreshes again (the API left the token unspent); no other call is made.
+  if (status === "workspace-suspended" && need !== "signed-out") {
+    return <SuspendedSession />;
+  }
   // FEF-17: an auth page needs no session, so it keeps its form when the session routes cannot
   // answer (no secret on a preview, an API outage); a submit then shows that error by code.
   if (status === "connection-lost" && need !== "signed-out") {
@@ -62,6 +67,43 @@ export function PageGate({ need, children }: { need: PageNeed; children: ReactNo
     );
   }
   return <>{children}</>;
+}
+
+/** GT-03's suspended full state, for a session that holds no token for the workspace (FEF-24). */
+function SuspendedSession() {
+  const { session } = useSession();
+  const t = useTranslations("app");
+  const [checking, setChecking] = useState(false);
+  useEffect(() => {
+    document.getElementById("gate-heading")?.focus();
+  }, []);
+  return (
+    <div data-gate="suspended" data-session="workspace-suspended">
+      <StatusState
+        tone="warning"
+        headingId="gate-heading"
+        title={t("gates.suspended.title")}
+        description={<p className="m-0">{t("gates.suspended.body")}</p>}
+        action={
+          <div className="flex flex-wrap gap-3">
+            <Button
+              variant="secondary"
+              busy={checking}
+              onClick={() => {
+                setChecking(true);
+                void session.restore().finally(() => setChecking(false));
+              }}
+            >
+              {t("gates.suspended.checkAgain")}
+            </Button>
+            <Button variant="ghost" onClick={() => void session.signOut()}>
+              {t("account.signOut")}
+            </Button>
+          </div>
+        }
+      />
+    </div>
+  );
 }
 
 /** The heading and body of one auth screen. */

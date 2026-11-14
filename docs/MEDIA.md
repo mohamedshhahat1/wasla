@@ -398,3 +398,7 @@ A workspace cannot fill the object store without limit. `LimitKey.STORAGE_BYTES`
 The check runs where the intent is committed, under the workspace's advisory lock, which makes the intent itself the reservation: two uploads racing for the last megabyte cannot both have it.
 
 The two write paths answer differently, and the difference is the same one that runs through the rest of this system. An **inbound** attachment is recorded as `SKIPPED` with the reason on the row, exactly as an oversized file is — a customer's message is stored, projected and answerable whatever the business's plan says. An **authenticated upload** is refused with a 402 before Meta is asked to do anything, because that is a request somebody made and can act on.
+
+## What a message says about its files (FEB-03, ADR-197)
+
+`MessageRead.media` lists a message's files for a screen to draw: the id `GET /conversations/{id}/media/{media_id}` takes, the kind, the type the download serves, the stored filename, the size, whether it is a voice note, the transcript and its state, a public `status` (`available` when `storage_state` is `stored`; `unavailable` when purging, purged or mismatched, or never stored; `pending` while downloading or uploading; `failed` after a failed attempt) and the caption on the first file. It never says where or how a file is stored: no `storage_key`, `wa_media_id`, locator, URL, hash, `last_error` or retention date. The bytes are reached through the download route and nothing else.

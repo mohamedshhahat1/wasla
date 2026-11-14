@@ -86,6 +86,12 @@ from `frontend/`), build with `WASLA_ENV=development PUBLIC_GOOGLE_ENABLED=true 
 start with `SESSION_FORWARD_SECRET=e2e-not-a-secret-0123456789abcdef0123456789abcdef pnpm --filter @wasla/web exec next
 start -p 3000`, open `http://localhost:3000/signup`, and read the code from `http://127.0.0.1:8025/messages`.
 
+**A suspended workspace on a reload (FEF-24, ADR-197).** When the refresh is refused with `403 workspace_suspended`,
+the session is not signed out: `refreshOutcome` (in `@wasla/session`) maps it to the state `workspace-suspended`, the
+`/session/refresh` route keeps the cookie (the API does not spend the token on that refusal), and every page but the
+auth pages shows GT-03's suspended state with "Check again" (another refresh) and "Sign out". Every other refusal signs
+out as before.
+
 ## Origins
 
 |           | development             | preview                                       | production (configuration only, FEQ-04) |

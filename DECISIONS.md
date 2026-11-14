@@ -8302,3 +8302,52 @@ handler table with the inbox's invalidation map and adds its navigation entry. T
 tr texts are drafts for the owner (FEQ-14's copy, FEQ-08). EventSource cannot read a 429, so `stream_limit` shows as
 "paused - retrying" under the helper's capped backoff (FEF-22). A reload of a suspended workspace's page signs the
 person out, because FE-2's session reads a refused refresh as signed out (FEF-24 - the session is not changed here).
+
+## ADR-197 — The Inbox Contract (Media, Participant, Views); A Refused Refresh Spends Nothing; The E2E Mailbox And Pool Measurements (Backend Stage 1)
+
+**Status.** Accepted, 2026-11-14 (backend stage 1; report BE1_INBOX_CONTRACT.md). FRONTEND_PLAN.md section 30's FEB-03
+and FEB-04 (P0) and FEB-05 (P1), which FE-4 waits for; FE-3's FEF-24, FEB-32 and FEB-33.
+
+**Context.** The inbox could not be drawn from the read models: a message did not say which files it carried, a
+conversation did not say who the customer was, and the list had no closed / mine / unassigned / search view. A reload of
+a suspended workspace's page signed the person out - and the refused refresh had spent their refresh token, so the
+suspended state's "Check again" would have been a replay that tears every session of the account down (ADR-039).
+
+**Decision.**
+
+1. *Media on messages (FEB-03).* `MessageRead.media` lists each file as the plan words it - `id` (the download route's
+   `media_id`), `kind`, `mime_type` (as the download serves it), `filename`, `byte_size`, `is_voice`, `transcript_status`,
+   `transcript`, `status` (`available | pending | failed | unavailable`), `position`, `caption` - and `[]` for none. Never
+   a storage key, a provider id or locator, a URL, a hash or the last error. One presenter for every route that returns
+   a message; a page's files are read in one query. The stream's payloads are unchanged: FE-4 refetches.
+2. *Participant identity (FEB-04).* `participant` gains `contact_id`, `display_name` (customer text, rendered as text),
+   `handle` (the WhatsApp number in E.164 - the value every member already reads in `GET /contacts`; a business-scoped id
+   is never a handle and is never returned) and `lead_id` (the open lead). One joined query per page.
+3. *Inbox views (FEB-05).* `status`, `assigned_to` (`me | none | id`), `mode`, `q` narrow one order (last activity, then
+   id). A filtered view's cursor carries a hash tag of its view and another view refuses it (`cursor_view_mismatch`); the
+   default view and its cursor are unchanged. Another workspace's member, connection or customer matches nothing; the
+   search term is never logged. No migration: the views are filters on the inbox's existing index, `q` a bounded
+   per-workspace match (no trigram extension).
+4. *The codes (FEB-06).* `search_term_invalid`, `cursor_view_mismatch`, `inbox_view_with_updated_since`, each in the four
+   catalogues (ar / fr / tr drafts).
+5. *A refused refresh spends nothing (FEF-24).* `AuthService.refresh` asks the workspace before `spend`. The question
+   issues nothing, so the single-use race is untouched; a token already spent is still a replay whatever the workspace
+   says. A suspended workspace answers `403 workspace_suspended` (the code FEB-07 already raised) with the token left as
+   valid as it was - also when the refresh names no workspace (a reload) and every workspace the person belongs to is
+   suspended, which used to open a session with no workspace that no page could draw. The session's refresh outcome is one table (`refreshOutcome`) shared by the browser and the
+   `/session/refresh` route: `403 workspace_suspended` keeps the cookie and is the session state `workspace-suspended`,
+   shown as GT-03's state with "Check again" and "Sign out"; every other refusal signs out as before. FE-3's protection of
+   the session was lifted for exactly these files (SU-05).
+6. *Test fixes.* The e2e helpers read the code of the mail their own send caused (FEB-32, `code_after`);
+   `test_upload_concurrency` measures the pool while the burst is inside extraction, opened and closed by conditions
+   (FEB-33) - the bound and the product unchanged.
+
+**Rejected.** A new download or thumbnail route; widening the stream's frames; filtering in the client; returning a
+business-scoped id as a handle; a sort parameter; issuing any token for a suspended workspace; un-spending a token after a
+refusal (two tabs would race into a teardown); raising FEB-33's bound, retrying or skipping it; a fixed delay in the
+mailbox helpers.
+
+**Consequences.** FE-4 reads `media`, `participant` and the views; it keeps `q` out of the address bar and renders names
+with `<bdi>`, never as markup. A refresh into a workspace whose membership was withdrawn answers the generic 404 as before
+and, on a reload, shows "Connection lost" (FEB-34, FEF-27). The previews get the session change with the next frontend
+stage that redeploys. The repository's nginx example logs `$request` for the API (FEB-35).

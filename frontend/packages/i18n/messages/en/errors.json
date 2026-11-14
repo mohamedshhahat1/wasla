@@ -53,6 +53,9 @@
   "session_unavailable": "Signing in is not available right now. Try again later.",
   "upstream_timeout": "Wasla took too long to answer. Try again.",
   "check_inbox": "Check your inbox to continue.",
+  "search_term_invalid": "Search for 2 to 100 characters.",
+  "cursor_view_mismatch": "The list changed its filters. Reload it from the top.",
+  "inbox_view_with_updated_since": "This view cannot be combined with catching up. Reload the list.",
   "connection_lost": "The connection was lost. Check it and try again.",
   "fallback": "Something went wrong. Try again."
 }

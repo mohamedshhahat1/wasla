@@ -19,6 +19,7 @@ import {
   presentedBinding,
   readCookie,
   readSessionBody,
+  refreshClearsCookie,
   refreshCookieHeader,
   refreshCookieName,
   relayBindingCookie,
@@ -113,6 +114,15 @@ function bearerOf(request: Request): string | null {
   return match?.[1] ?? null;
 }
 
+/** The API envelope's code, or null for a body without one. */
+function apiErrorCode(answer: ApiAnswer): string | null {
+  const envelope =
+    typeof answer.json === "object" && answer.json !== null
+      ? (answer.json as { error?: { code?: unknown } }).error
+      : undefined;
+  return typeof envelope?.code === "string" ? envelope.code : null;
+}
+
 function json(status: number, body: unknown, headers: Headers): Response {
   return new Response(JSON.stringify(body), { status, headers });
 }
@@ -199,7 +209,9 @@ const HANDLERS: Record<SessionVerb, (ctx: Context) => Promise<Response>> = {
       body: { refresh_token: token, ...(slug ? { workspace_slug: slug } : {}) },
     });
     if (answer.status === 200) return sessionEstablished(ctx, answer);
-    if (answer.status === 401 || answer.status === 403) {
+    // FEF-24: a suspended workspace refuses with its code and keeps the person signed in - the
+    // cookie stays (the API did not spend it); every other refusal clears it, as before.
+    if (refreshClearsCookie(answer.status, apiErrorCode(answer))) {
       return withCleared(passThroughError(answer), [
         clearRefreshCookieHeader(ctx.config.environment),
       ]);

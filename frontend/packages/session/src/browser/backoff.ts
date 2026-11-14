@@ -2,7 +2,8 @@
  * SB-02: a refresh that fails for the network (not a refusal) is retried by the tab holding the
  * lock, with backoff 1, 2, 4 … capped at 30 s, while the access token is still valid. Once it
  * has expired the caller gets `ConnectionLost` - not a sign-out: the cookie may still be good.
- * A refusal (401/403 from /session/refresh) ends at once as `SignedOut`.
+ * A refusal (401/403 from /session/refresh) ends at once as `SignedOut` - or, for a suspended
+ * workspace, as `WorkspaceSuspended` (FEF-24, `refreshOutcome`).
  */
 import type { Clock } from "./refresh-coordinator";
 
@@ -21,6 +22,18 @@ export class SignedOut extends Error {
     super(code);
     this.name = "SignedOut";
     this.code = code;
+  }
+}
+
+/**
+ * The refresh was refused because the workspace is suspended (FEF-24): the person stays signed
+ * in - the cookie is kept and the token was not spent - and the page shows the suspended state.
+ */
+export class WorkspaceSuspended extends Error {
+  readonly code = "workspace_suspended";
+  constructor() {
+    super("workspace_suspended");
+    this.name = "WorkspaceSuspended";
   }
 }
 
@@ -59,7 +72,7 @@ export async function withBackoff<T>(
     try {
       return await attempt();
     } catch (error) {
-      if (error instanceof SignedOut) throw error;
+      if (error instanceof SignedOut || error instanceof WorkspaceSuspended) throw error;
       const expiresAt = options.expiresAt();
       const wait = backoffDelay(tries + 1);
       if (expiresAt === null || options.clock.now() + wait >= expiresAt) throw new ConnectionLost();

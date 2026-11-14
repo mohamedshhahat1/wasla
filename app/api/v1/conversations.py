@@ -36,7 +36,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.media_types import CANONICAL_TYPES
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.channel import Channel
-from app.db.models.conversation import Conversation, MessageOrigin
+from app.db.models.conversation import Conversation, ConversationMode, Message, MessageOrigin
 from app.db.models.invoice import MAX_IDEMPOTENCY_KEY_LENGTH
 from app.db.models.sentiment import ConversationPriority
 from app.schemas.conversation import (
@@ -46,6 +46,7 @@ from app.schemas.conversation import (
     CursorPage,
     MessageRead,
     ModeUpdateRequest,
+    ParticipantRead,
     PriorityUpdateRequest,
     SendTemplateRequest,
     SendTextRequest,
@@ -54,7 +55,7 @@ from app.schemas.conversation import (
 from app.schemas.follow_up import FollowUpHistoryRead, FollowUpStateRead
 from app.schemas.text import StorableText
 from app.services.follow_up_sequences import SequenceService
-from app.services.inbox_service import InboxService
+from app.services.inbox_service import InboxService, InboxStatus
 from app.services.media_retention_service import purge_reason
 from app.services.messaging_service import MessagingService
 from app.services.realtime_streams import open_streams
@@ -93,6 +94,10 @@ CursorQuery = Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)]
 POLL_WITHOUT_STREAM_SECONDS = 30
 POLL_WITH_STREAM_SECONDS = 60
 
+# A search longer than this is refused by validation before it is read; the
+# service's own bound (100) answers `search_term_invalid` below it (FEB-05).
+SEARCH_QUERY_CEILING = 1_000
+
 # The largest caption any supported channel accepts (OMNI-044); each channel's
 # own limit is applied by the send.
 MAX_CAPTION_LENGTH = REQUEST_CAPTION_CEILING
@@ -106,14 +111,29 @@ async def _present_all(
 ) -> list[ConversationRead]:
     """Render conversations for the API, their participants read in one query."""
     participants = await inbox.participants(conversations)
-    return [
-        ConversationRead.from_model(
-            conversation,
-            service_window_open=messaging.window_open(conversation),
-            reply_policy=messaging.reply_policy(conversation),
-            participant=participants[conversation.participant_identity_id],
+    reads: list[ConversationRead] = []
+    for conversation in conversations:
+        who = participants[conversation.participant_identity_id]
+        reads.append(
+            ConversationRead.from_model(
+                conversation,
+                service_window_open=messaging.window_open(conversation),
+                reply_policy=messaging.reply_policy(conversation),
+                participant=ParticipantRead.from_model(
+                    who.identity, display_name=who.display_name, lead_id=who.lead_id
+                ),
+            )
         )
-        for conversation in conversations
+    return reads
+
+
+async def _present_messages(
+    messages: Sequence[Message], *, inbox: InboxService
+) -> list[MessageRead]:
+    """Render messages for the API, the files of all of them read in one query (FEB-03)."""
+    media = await inbox.media_for(messages)
+    return [
+        MessageRead.from_model(message, media=media.get(message.id, ())) for message in messages
     ]
 
 
@@ -144,6 +164,22 @@ async def list_conversations(
     channel: Channel | None = None,
     connection_id: uuid.UUID | None = None,
     updated_since: datetime | None = None,
+    view_status: Annotated[InboxStatus | None, Query(alias="status")] = None,
+    assigned_to: Annotated[
+        str | None,
+        Query(max_length=36, description="me, none, or a member's id (FEB-05)."),
+    ] = None,
+    mode: ConversationMode | None = None,
+    q: Annotated[
+        str | None,
+        Query(
+            max_length=SEARCH_QUERY_CEILING,
+            description=(
+                "The customer's name or number, 2 to 100 characters (422 search_term_invalid). "
+                "Never logged; keep it out of a page's address."
+            ),
+        ),
+    ] = None,
 ) -> Response:
     """Open conversations, most recently active first.
 
@@ -155,6 +191,13 @@ async def list_conversations(
     be worked deliberately while the default view stays as it was. `channel`
     and `connection_id` narrow it the same way, to one channel or one
     connection.
+
+    **Views** (FEB-05): `status` - `open`, `pending`, `closed` or `all`; without
+    it, everything not closed, as before. `assigned_to` - `me`, `none` or a
+    member's id (one of another workspace matches nothing). `mode` - `ai` or
+    `human`. `q` - the customer's name or number. They combine, and keep the
+    same order. A `next_cursor` belongs to the view it came from: presented
+    with other filters it is refused, 422 `cursor_view_mismatch`.
 
     **Catching up** (RT-04): `updated_since` (with its offset) lists every
     conversation changed at or after it - closed ones too - oldest change
@@ -168,6 +211,13 @@ async def list_conversations(
                 "updated_since needs a UTC offset, for example 2026-10-30T09:00:00+02:00.",
                 error_code="updated_since_needs_offset",
             )
+        if any(value is not None for value in (view_status, assigned_to, mode, q)):
+            # Catching up lists every change, closed ones included; a view of
+            # it would hide the very changes the client is catching up on.
+            raise ValidationError(
+                "updated_since lists every change; it takes no status, assigned_to, mode or q.",
+                error_code="inbox_view_with_updated_since",
+            )
         page = await inbox.list_changed_since(since=updated_since, limit=limit, cursor=cursor)
     else:
         page = await inbox.list_conversations(
@@ -176,6 +226,11 @@ async def list_conversations(
             priority=priority,
             channel=channel,
             connection_id=connection_id,
+            status=view_status,
+            assigned_to=assigned_to,
+            mode=mode,
+            q=q,
+            viewer_id=workspace.user.id,
         )
     try:
         streaming = await open_streams(
@@ -294,7 +349,7 @@ async def list_messages(
             conversation_id=conversation_id, message_id=after, limit=limit
         )
         return CursorPage[MessageRead](
-            items=[MessageRead.from_model(message) for message in newer], next_cursor=None
+            items=await _present_messages(newer, inbox=inbox), next_cursor=None
         )
     page = await inbox.list_messages(
         conversation_id=conversation_id,
@@ -302,7 +357,7 @@ async def list_messages(
         cursor=cursor,
     )
     return CursorPage[MessageRead](
-        items=[MessageRead.from_model(message) for message in page.items],
+        items=await _present_messages(page.items, inbox=inbox),
         next_cursor=page.next_cursor,
     )
 
@@ -317,6 +372,7 @@ async def send_text(
     payload: SendTextRequest,
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
+    inbox: InboxServiceDep,
     idempotency_key: IdempotencyKeyHeader = None,
 ) -> MessageRead:
     """Send free text, allowed only inside the 24-hour service window.
@@ -335,7 +391,7 @@ async def send_text(
         idempotency_key=idempotency_key,
         origin=MessageOrigin.HUMAN,
     )
-    return MessageRead.from_model(message)
+    return (await _present_messages([message], inbox=inbox))[0]
 
 
 @router.post(
@@ -363,6 +419,7 @@ async def send_template(
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
     storage: MediaStorageDep,
+    inbox: InboxServiceDep,
     idempotency_key: IdempotencyKeyHeader = None,
 ) -> TemplateSentRead:
     """Send an approved template, which is valid outside the service window.
@@ -388,7 +445,8 @@ async def send_template(
         header_media_id=payload.header_media_id,
         storage=storage,
     )
-    return TemplateSentRead(**MessageRead.from_model(message).model_dump(), notices=notices)
+    read = (await _present_messages([message], inbox=inbox))[0]
+    return TemplateSentRead(**read.model_dump(), notices=notices)
 
 
 @router.post(
@@ -401,6 +459,7 @@ async def send_media(
     workspace: ActiveWorkspaceDep,
     messaging: MessagingServiceDep,
     storage: MediaStorageDep,
+    inbox: InboxServiceDep,
     file: Annotated[UploadFile, File()],
     caption: Annotated[StorableText | None, Form(max_length=MAX_CAPTION_LENGTH)] = None,
     idempotency_key: IdempotencyKeyHeader = None,
@@ -434,7 +493,7 @@ async def send_media(
         sent_by_id=workspace.user.id,
         storage=storage,
     )
-    return MessageRead.from_model(message)
+    return (await _present_messages([message], inbox=inbox))[0]
 
 
 @router.get("/{conversation_id}/media/{media_id}")

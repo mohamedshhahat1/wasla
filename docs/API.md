@@ -32,7 +32,7 @@ conclusion drawn from it is vacuously true.
 | 402 | `PlanLimitExceededError` (`plan_limit_exceeded`), `PaymentRequiredError` (`payment_required`) | The plan does not stretch that far; the plan asked for is not paid for |
 | 404 | `NotFoundError`, `TenantIsolationError` | Absent, or outside the caller's workspace |
 | 409 | `ConflictError` | Uniqueness or state conflict. Two entitlement codes (ADR-131): `channel_capacity_exceeded` - every channel slot is taken - and `channel_type_not_allowed` - the plan in force does not include that channel; and `whatsapp_number_already_connected` - the WhatsApp number is already held by a workspace (which one is never said; FEB-06, ADR-196) |
-| 422 | `ValidationError` | Rejected by a business rule |
+| 422 | `ValidationError` | Rejected by a business rule. Inbox codes (FEB-05, ADR-197): `search_term_invalid` - `q` outside 2..100 characters; `cursor_view_mismatch` - a `next_cursor` presented with other inbox filters than the view it came from; `inbox_view_with_updated_since` - `status`, `assigned_to`, `mode` or `q` together with `updated_since` |
 | 429 | `RateLimitedError` | Upstream is rate limiting |
 | 502 | `ExternalServiceError` | A provider failed |
 | 503 | `DependencyUnavailableError` | A dependency or platform credential is unavailable |
@@ -532,7 +532,7 @@ All conversation routes are available to any member of the workspace. Restrictin
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/conversations` | Open conversations, most recently active first; `?priority=`, `?channel=` and `?connection_id=` narrow |
+| GET | `/api/v1/conversations` | Open conversations, most recently active first; `?priority=`, `?channel=` and `?connection_id=` narrow; the views `?status=`, `?assigned_to=`, `?mode=` and `?q=` (FEB-05) |
 | GET | `/api/v1/conversations/{conversation_id}` | One conversation |
 | GET | `/api/v1/conversations/{conversation_id}/messages` | Messages, most recent first |
 | POST | `/api/v1/conversations/{conversation_id}/messages` | Send free text (`201`) |
@@ -546,6 +546,10 @@ All conversation routes are available to any member of the workspace. Restrictin
 | DELETE | `/api/v1/conversations/{conversation_id}/follow-up` | Stop its automatic follow-ups; audited `follow_up_stopped_by_person` |
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
+
+**Who and what** (FEB-03, FEB-04, ADR-197). Every message carries `media`: its files in the provider's order, `[]` for none - each `{id, kind, mime_type, filename, byte_size, is_voice, transcript_status, transcript, status, position, caption}`. `id` is the `media_id` the download route takes; `status` is `available` (the route serves it now), `pending`, `failed` or `unavailable` (removed, refused or never stored - the inbox says "not available"); `transcript_status` is `none`, `pending`, `ready` or `failed`, and `transcript` is set once `ready`; `mime_type` is what the download serves. No storage key, provider id, locator or URL is ever returned. Every conversation's `participant` carries `contact_id`, `display_name` (the name the channel gave - customer text, render it as text), `handle` (the WhatsApp number in E.164, the number `GET /contacts` already shows every member; null for a customer known only by a business-scoped id, which is never returned) and `lead_id` (the contact's open lead, or null). Both are read a page at a time, in one query each.
+
+**Views** (FEB-05, ADR-197). `status=open|pending|closed|all` (without it: everything not closed, unchanged), `assigned_to=me|none|<member id>` (another workspace's member matches nothing), `mode=ai|human` and `q=` (the customer's name, case-insensitive, or their number with or without `+`, spaces or dashes; 2 to 100 characters, else `422 search_term_invalid`). They combine and keep the one order, last activity first then id. A filtered view's `next_cursor` belongs to that view: presented with other filters it is `422 cursor_view_mismatch`; the default view's cursor is unchanged. A view cannot be combined with `updated_since` (`422 inbox_view_with_updated_since`). The search term is never written to the application's logs; keep it out of a page's address.
 
 **Catching up** (RT-04). `GET /conversations` answers `{items, next_cursor, poll_after_seconds}`; `poll_after_seconds` is 30 with no event stream open for you, 60 with one (then the poll is only a safety net). `?updated_since=<time with offset>` lists every conversation changed at or after it - closed ones too - oldest change first, keyed by `updated_at` (now on every conversation read); a time without an offset is `422 updated_since_needs_offset`. The first page carries an `ETag`; send it as `If-None-Match` and an unchanged inbox answers `304`. `GET /conversations/{id}/messages?after=<message id>` lists the messages after that one, oldest first (a message of another conversation names no position and lists nothing).
 

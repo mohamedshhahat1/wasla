@@ -13,6 +13,8 @@ import {
   TokenHolder,
   TransientFailure,
   withBackoff,
+  WorkspaceSuspended,
+  refreshOutcome,
   type ChannelLike,
   type Clock,
   type LockManagerLike,
@@ -23,7 +25,13 @@ import {
 
 import { ApiError, createApiClient, normaliseError, networkErrorOf, type WaslaClient } from "./api";
 
-export type SessionStatus = "loading" | "signed-out" | "signed-in" | "connection-lost";
+/**
+ * `workspace-suspended` (FEF-24): the refresh was refused only because the workspace is
+ * suspended - the person is signed in (the cookie is kept), holds no usable token for it, and
+ * the page shows the suspended state with "Check again" (`restore`) and "Sign out".
+ */
+export type SessionStatus =
+  "loading" | "signed-out" | "signed-in" | "connection-lost" | "workspace-suspended";
 
 /** What a session route answers on success (never a refresh token). */
 export interface SessionGrant {
@@ -136,6 +144,7 @@ export class WebSession {
       await this.refresh();
     } catch (error) {
       if (error instanceof ConnectionLost) this.#setStatus("connection-lost");
+      else if (error instanceof WorkspaceSuspended) this.#setStatus("workspace-suspended");
       else this.#setStatus("signed-out");
     }
   }
@@ -161,6 +170,7 @@ export class WebSession {
           else this.#setStatus("signed-out");
         }
         if (error instanceof ConnectionLost) this.#setStatus("connection-lost");
+        if (error instanceof WorkspaceSuspended) this.#setStatus("workspace-suspended");
         throw error;
       });
   }
@@ -257,12 +267,17 @@ export class WebSession {
     }
     const body: unknown = await response.json().catch(() => null);
     if (response.ok) return body as RefreshResult;
-    if (response.status === 401 || response.status === 403) {
-      throw new SignedOut(normaliseError(body, response).code);
+    const refusal = normaliseError(body, response);
+    switch (refreshOutcome(response.status, refusal.code)) {
+      case "workspace-suspended":
+        throw new WorkspaceSuspended();
+      case "signed-out":
+        throw new SignedOut(refusal.code);
+      case "transient":
+        throw new TransientFailure(response.status);
+      default:
+        throw refusal;
     }
-    if (response.status >= 500 || response.status === 0)
-      throw new TransientFailure(response.status);
-    throw normaliseError(body, response);
   }
 
   #rawPost(verb: string, body: Record<string, unknown>, bearer?: string): Promise<Response> {

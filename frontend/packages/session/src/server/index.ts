@@ -1,3 +1,4 @@
+export { refreshClearsCookie, refreshOutcome, type RefreshOutcome } from "../refresh-outcome";
 export {
   canonicalString,
   FORWARD_HEADERS,

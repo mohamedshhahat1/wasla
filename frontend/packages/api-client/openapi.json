@@ -7713,6 +7713,17 @@
         "title": "IdentityProvider",
         "type": "string"
       },
+      "InboxStatus": {
+        "description": "The `status` view of the inbox (FEB-05). Without it: everything not closed.",
+        "enum": [
+          "open",
+          "pending",
+          "closed",
+          "all"
+        ],
+        "title": "InboxStatus",
+        "type": "string"
+      },
       "IncidentRead": {
         "properties": {
           "amount": {
@@ -9804,6 +9815,28 @@
         "title": "MarketLineRead",
         "type": "object"
       },
+      "MediaAvailability": {
+        "description": "Whether `GET …/media/{id}` can serve the file now, in the words a screen needs (FEB-03).\n\n`unavailable` is one word for every reason the bytes cannot be served and\nwill not be - removed by retention, being removed, refused as not what was\nwritten, or never stored (too large, a type nothing reads). The screen says\n\"not available\"; why storage refused it is not the inbox's to show.",
+        "enum": [
+          "available",
+          "pending",
+          "failed",
+          "unavailable"
+        ],
+        "title": "MediaAvailability",
+        "type": "string"
+      },
+      "MediaKind": {
+        "description": "What sort of file an attachment is, for drawing it (FEB-03).",
+        "enum": [
+          "image",
+          "audio",
+          "video",
+          "document"
+        ],
+        "title": "MediaKind",
+        "type": "string"
+      },
       "MemberListResponse": {
         "properties": {
           "members": {
@@ -9931,6 +9964,103 @@
         ],
         "title": "MessageKind",
         "type": "string"
+      },
+      "MessageMediaRead": {
+        "description": "One file of a message, as a screen draws it (FEB-03).\n\n`id` is what `GET /conversations/{id}/media/{media_id}` takes. Never here:\nthe storage key, the provider's media id or locator, a URL, a hash, the\nlast error or retention dates - the file is reached through that route\nand nothing else.",
+        "properties": {
+          "byte_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Byte Size"
+          },
+          "caption": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caption"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_voice": {
+            "title": "Is Voice",
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MediaKind"
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MediaAvailability"
+          },
+          "transcript": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcript"
+          },
+          "transcript_status": {
+            "$ref": "#/components/schemas/TranscriptStatus"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "mime_type",
+          "filename",
+          "byte_size",
+          "is_voice",
+          "transcript_status",
+          "transcript",
+          "status",
+          "position",
+          "caption"
+        ],
+        "title": "MessageMediaRead",
+        "type": "object"
       },
       "MessageMetricsRead": {
         "description": "Traffic, and how long customers waited.\n\n`average_response_seconds` is null when nothing in the window was answered -\nnot zero, which would read as instant service. `unanswered` counts customers\nwho started a conversation and are still waiting.",
@@ -10154,6 +10284,13 @@
           },
           "kind": {
             "$ref": "#/components/schemas/MessageKind"
+          },
+          "media": {
+            "items": {
+              "$ref": "#/components/schemas/MessageMediaRead"
+            },
+            "title": "Media",
+            "type": "array"
           },
           "origin": {
             "$ref": "#/components/schemas/MessageOrigin"
@@ -11013,10 +11150,37 @@
         "type": "object"
       },
       "ParticipantRead": {
-        "description": "Who a conversation is with, as its channel addresses them - never the value itself.\n\nThe identifier (a phone number, a business-scoped id) is personal data and\nis not needed to render an inbox; `kind` says what sort of address it is, so\na client can say \"username\" rather than showing an empty phone field.",
+        "description": "Who a conversation is with (OMNI-015, FEB-04).\n\n`kind` says what sort of address the channel uses for them. `handle` is how\na person recognises them on that channel: the WhatsApp number in E.164,\nthe same number every member already reads in the contact picker\n(`GET /contacts`). An address that is not a phone number - a business-scoped\nuser id, a page-scoped id - is never a handle and is not returned: it means\nnothing to a person and is not a number to call. `display_name` is the name\nthe channel gave, as the customer typed it: text, never markup.",
         "properties": {
           "channel": {
             "$ref": "#/components/schemas/Channel"
+          },
+          "contact_id": {
+            "format": "uuid",
+            "title": "Contact Id",
+            "type": "string"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "handle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handle"
           },
           "id": {
             "format": "uuid",
@@ -11025,12 +11189,28 @@
           },
           "kind": {
             "$ref": "#/components/schemas/IdentityKind"
+          },
+          "lead_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Id"
           }
         },
         "required": [
           "id",
           "channel",
-          "kind"
+          "kind",
+          "contact_id",
+          "display_name",
+          "handle",
+          "lead_id"
         ],
         "title": "ParticipantRead",
         "type": "object"
@@ -17456,6 +17636,13 @@
           "kind": {
             "$ref": "#/components/schemas/MessageKind"
           },
+          "media": {
+            "items": {
+              "$ref": "#/components/schemas/MessageMediaRead"
+            },
+            "title": "Media",
+            "type": "array"
+          },
           "notices": {
             "items": {
               "type": "string"
@@ -18868,6 +19055,17 @@
           "current_period_end"
         ],
         "title": "TopupValidity",
+        "type": "string"
+      },
+      "TranscriptStatus": {
+        "description": "Where reading the file got: a voice note's transcript, an image's description (FEB-03).",
+        "enum": [
+          "none",
+          "pending",
+          "ready",
+          "failed"
+        ],
+        "title": "TranscriptStatus",
         "type": "string"
       },
       "TypedSlotRead": {
@@ -25246,7 +25444,7 @@
     },
     "/api/v1/conversations": {
       "get": {
-        "description": "Open conversations, most recently active first.\n\nPaged by cursor rather than offset: the inbox is written to while it is\nbeing read, and an offset would let an arriving conversation push a row\nacross the page boundary.\n\n`priority` narrows the list without reordering it, so the flagged queue can\nbe worked deliberately while the default view stays as it was. `channel`\nand `connection_id` narrow it the same way, to one channel or one\nconnection.\n\n**Catching up** (RT-04): `updated_since` (with its offset) lists every\nconversation changed at or after it - closed ones too - oldest change\nfirst. The first page carries an `ETag`: send it back as `If-None-Match`\nand an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30\nwith no event stream open, 60 with one.",
+        "description": "Open conversations, most recently active first.\n\nPaged by cursor rather than offset: the inbox is written to while it is\nbeing read, and an offset would let an arriving conversation push a row\nacross the page boundary.\n\n`priority` narrows the list without reordering it, so the flagged queue can\nbe worked deliberately while the default view stays as it was. `channel`\nand `connection_id` narrow it the same way, to one channel or one\nconnection.\n\n**Views** (FEB-05): `status` - `open`, `pending`, `closed` or `all`; without\nit, everything not closed, as before. `assigned_to` - `me`, `none` or a\nmember's id (one of another workspace matches nothing). `mode` - `ai` or\n`human`. `q` - the customer's name or number. They combine, and keep the\nsame order. A `next_cursor` belongs to the view it came from: presented\nwith other filters it is refused, 422 `cursor_view_mismatch`.\n\n**Catching up** (RT-04): `updated_since` (with its offset) lists every\nconversation changed at or after it - closed ones too - oldest change\nfirst. The first page carries an `ETag`: send it back as `If-None-Match`\nand an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30\nwith no event stream open, 60 with one.",
         "operationId": "list_conversations_api_v1_conversations_get",
         "parameters": [
           {
@@ -25342,6 +25540,76 @@
                 }
               ],
               "title": "Updated Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/InboxStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "description": "me, none, or a member's id (FEB-05).",
+            "in": "query",
+            "name": "assigned_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "me, none, or a member's id (FEB-05).",
+              "title": "Assigned To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ConversationMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Mode"
+            }
+          },
+          {
+            "description": "The customer's name or number, 2 to 100 characters (422 search_term_invalid). Never logged; keep it out of a page's address.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The customer's name or number, 2 to 100 characters (422 search_term_invalid). Never logged; keep it out of a page's address.",
+              "title": "Q"
             }
           }
         ],
