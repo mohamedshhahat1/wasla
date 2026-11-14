@@ -143,6 +143,9 @@ class StubInbox:
     async def media_for(self, messages: list[Message]) -> dict[uuid.UUID, list[Any]]:
         return {}
 
+    async def read_states(self, conversations: list[Conversation]) -> dict[uuid.UUID, Any]:
+        return {}
+
     async def participants(self, conversations: list[Conversation]) -> dict[uuid.UUID, Participant]:
         return {
             PARTICIPANT_ID: Participant(
@@ -258,6 +261,8 @@ async def test_the_cursor_reaches_the_service(client: AsyncClient, inbox: StubIn
             "mode": None,
             "q": None,
             "viewer_id": USER_ID,
+            # UR-09's unread filter, not asked for.
+            "unread": False,
         }
     ]
 

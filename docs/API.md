@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **259 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **262 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -46,7 +46,7 @@ ADR-191):
 
 | File | What |
 | --- | --- |
-| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (259 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (262 operations less `/metrics`, which keeps itself out of the schema) |
 | `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
 
 `python -m scripts.export_openapi` writes both from the application factory, in
@@ -532,7 +532,8 @@ All conversation routes are available to any member of the workspace. Restrictin
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/conversations` | Open conversations, most recently active first; `?priority=`, `?channel=` and `?connection_id=` narrow; the views `?status=`, `?assigned_to=`, `?mode=` and `?q=` (FEB-05) |
+| GET | `/api/v1/conversations` | Open conversations, most recently active first; `?priority=`, `?channel=` and `?connection_id=` narrow; the views `?status=`, `?assigned_to=`, `?mode=` and `?q=` (FEB-05), and `?unread=true` (ADR-198) |
+| GET | `/api/v1/conversations/unread-summary` | The workspace's unseen customer messages and the conversations holding them, not closed; shared by the team, capped at 1000 each (ADR-198) |
 | GET | `/api/v1/conversations/{conversation_id}` | One conversation |
 | GET | `/api/v1/conversations/{conversation_id}/messages` | Messages, most recent first |
 | POST | `/api/v1/conversations/{conversation_id}/messages` | Send free text (`201`) |
@@ -546,10 +547,14 @@ All conversation routes are available to any member of the workspace. Restrictin
 | DELETE | `/api/v1/conversations/{conversation_id}/follow-up` | Stop its automatic follow-ups; audited `follow_up_stopped_by_person` |
 | POST | `/api/v1/conversations/{conversation_id}/close` | Close the conversation |
 | POST | `/api/v1/conversations/{conversation_id}/reopen` | Reopen it |
+| POST | `/api/v1/conversations/{conversation_id}/read` | `{up_to_message_id}`: mark read for the whole team, forward only (`404` for a message of another conversation) (ADR-198) |
+| POST | `/api/v1/conversations/{conversation_id}/unread` | Make the customer's newest message unread again, for the whole team (ADR-198) |
 
 **Who and what** (FEB-03, FEB-04, ADR-197). Every message carries `media`: its files in the provider's order, `[]` for none - each `{id, kind, mime_type, filename, byte_size, is_voice, transcript_status, transcript, status, position, caption}`. `id` is the `media_id` the download route takes; `status` is `available` (the route serves it now), `pending`, `failed` or `unavailable` (removed, refused or never stored - the inbox says "not available"); `transcript_status` is `none`, `pending`, `ready` or `failed`, and `transcript` is set once `ready`; `mime_type` is what the download serves. No storage key, provider id, locator or URL is ever returned. Every conversation's `participant` carries `contact_id`, `display_name` (the name the channel gave - customer text, render it as text), `handle` (the WhatsApp number in E.164, the number `GET /contacts` already shows every member; null for a customer known only by a business-scoped id, which is never returned) and `lead_id` (the contact's open lead, or null). Both are read a page at a time, in one query each.
 
 **Views** (FEB-05, ADR-197). `status=open|pending|closed|all` (without it: everything not closed, unchanged), `assigned_to=me|none|<member id>` (another workspace's member matches nothing), `mode=ai|human` and `q=` (the customer's name, case-insensitive, or their number with or without `+`, spaces or dashes; 2 to 100 characters, else `422 search_term_invalid`). They combine and keep the one order, last activity first then id. A filtered view's `next_cursor` belongs to that view: presented with other filters it is `422 cursor_view_mismatch`; the default view's cursor is unchanged. A view cannot be combined with `updated_since` (`422 inbox_view_with_updated_since`). The search term is never written to the application's logs; keep it out of a page's address.
+
+**Read state** (UR, ADR-198). Shared by the team: once one member has seen a conversation it is read for every member. Every conversation read carries `unread_count` (the customer's messages after the read position, capped at 100 - replies, the AI's or a colleague's, never count), `last_message` (`{id, direction, kind, excerpt, created_at}`: `excerpt` is at most 120 characters of the newest message's text or caption, whitespace collapsed, null for a file without a caption - customer text, render it as text) and `read` (`{message_id, by: {user_id, display_name}, at}`, or null when nothing was read). `POST /conversations/{id}/read` moves the position forward only; `/unread` moves it back to just before the customer's newest message. A member's reply (text, template or file) marks read up to the message before it and, if nobody owns the conversation, assigns it to them through the ordinary assignment (audited, `conversation.updated` with `assignee`); an idempotent replay does neither. A move emits `conversation.updated` whose `fields` include `read`. Read positions are not audited.
 
 **Catching up** (RT-04). `GET /conversations` answers `{items, next_cursor, poll_after_seconds}`; `poll_after_seconds` is 30 with no event stream open for you, 60 with one (then the poll is only a safety net). `?updated_since=<time with offset>` lists every conversation changed at or after it - closed ones too - oldest change first, keyed by `updated_at` (now on every conversation read); a time without an offset is `422 updated_since_needs_offset`. The first page carries an `ETag`; send it as `If-None-Match` and an unchanged inbox answers `304`. `GET /conversations/{id}/messages?after=<message id>` lists the messages after that one, oldest first (a message of another conversation names no position and lists nothing).
 

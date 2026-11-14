@@ -3670,6 +3670,16 @@
             ],
             "title": "Last Inbound At"
           },
+          "last_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastMessageRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "last_message_at": {
             "anyOf": [
               {
@@ -3690,6 +3700,16 @@
           },
           "priority": {
             "$ref": "#/components/schemas/ConversationPriority"
+          },
+          "read": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReadMarkerRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reply_policy": {
             "$ref": "#/components/schemas/ReplyPolicyRead"
@@ -3721,6 +3741,11 @@
           },
           "status": {
             "$ref": "#/components/schemas/ConversationStatus"
+          },
+          "unread_count": {
+            "default": 0,
+            "title": "Unread Count",
+            "type": "integer"
           },
           "updated_at": {
             "anyOf": [
@@ -8548,6 +8573,47 @@
         "title": "KnowledgeSettingsUpdate",
         "type": "object"
       },
+      "LastMessageRead": {
+        "description": "The newest message of a conversation, as the inbox previews it (UR-04).\n\n`excerpt` is customer or colleague text: render it as text, never markup.\nNull for a file without a caption - name it by `kind`.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/MessageDirection"
+          },
+          "excerpt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MessageKind"
+          }
+        },
+        "required": [
+          "id",
+          "direction",
+          "kind",
+          "excerpt",
+          "created_at"
+        ],
+        "title": "LastMessageRead",
+        "type": "object"
+      },
       "LeadActivityKind": {
         "description": "What happened to a lead. The vocabulary of the timeline.",
         "enum": [
@@ -9783,6 +9849,21 @@
           "method"
         ],
         "title": "ManualPaymentDetails",
+        "type": "object"
+      },
+      "MarkReadRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "up_to_message_id": {
+            "format": "uuid",
+            "title": "Up To Message Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "up_to_message_id"
+        ],
+        "title": "MarkReadRequest",
         "type": "object"
       },
       "MarketLineRead": {
@@ -15557,6 +15638,96 @@
         "title": "RateRowRead",
         "type": "object"
       },
+      "ReadByRead": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name"
+        ],
+        "title": "ReadByRead",
+        "type": "object"
+      },
+      "ReadMarkerRead": {
+        "description": "Where the team's read position stands (\"seen by\"), shared by every member (UR-05).\n\n`message_id` is null after `/unread` on a conversation whose first message\nis the customer's newest: nothing before it to stand on.",
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "by": {
+            "$ref": "#/components/schemas/ReadByRead"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          }
+        },
+        "required": [
+          "message_id",
+          "by",
+          "at"
+        ],
+        "title": "ReadMarkerRead",
+        "type": "object"
+      },
+      "ReadStateRead": {
+        "description": "What `POST /conversations/{id}/read` and `/unread` answer (UR-06, UR-11).",
+        "properties": {
+          "read": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReadMarkerRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unread_count": {
+            "title": "Unread Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "unread_count",
+          "read"
+        ],
+        "title": "ReadStateRead",
+        "type": "object"
+      },
       "ReadinessResponse": {
         "description": "Aggregate readiness plus per-dependency detail.",
         "properties": {
@@ -19089,6 +19260,25 @@
           "used"
         ],
         "title": "TypedSlotRead",
+        "type": "object"
+      },
+      "UnreadSummaryRead": {
+        "description": "The workspace's unread customer messages, not closed, shared by the team (UR-10).\n\nBoth capped at 1000.",
+        "properties": {
+          "unread_conversations": {
+            "title": "Unread Conversations",
+            "type": "integer"
+          },
+          "unread_messages": {
+            "title": "Unread Messages",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "unread_messages",
+          "unread_conversations"
+        ],
+        "title": "UnreadSummaryRead",
         "type": "object"
       },
       "UsageCounters": {
@@ -25444,7 +25634,7 @@
     },
     "/api/v1/conversations": {
       "get": {
-        "description": "Open conversations, most recently active first.\n\nPaged by cursor rather than offset: the inbox is written to while it is\nbeing read, and an offset would let an arriving conversation push a row\nacross the page boundary.\n\n`priority` narrows the list without reordering it, so the flagged queue can\nbe worked deliberately while the default view stays as it was. `channel`\nand `connection_id` narrow it the same way, to one channel or one\nconnection.\n\n**Views** (FEB-05): `status` - `open`, `pending`, `closed` or `all`; without\nit, everything not closed, as before. `assigned_to` - `me`, `none` or a\nmember's id (one of another workspace matches nothing). `mode` - `ai` or\n`human`. `q` - the customer's name or number. They combine, and keep the\nsame order. A `next_cursor` belongs to the view it came from: presented\nwith other filters it is refused, 422 `cursor_view_mismatch`.\n\n**Catching up** (RT-04): `updated_since` (with its offset) lists every\nconversation changed at or after it - closed ones too - oldest change\nfirst. The first page carries an `ETag`: send it back as `If-None-Match`\nand an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30\nwith no event stream open, 60 with one.",
+        "description": "Open conversations, most recently active first.\n\nPaged by cursor rather than offset: the inbox is written to while it is\nbeing read, and an offset would let an arriving conversation push a row\nacross the page boundary.\n\n`priority` narrows the list without reordering it, so the flagged queue can\nbe worked deliberately while the default view stays as it was. `channel`\nand `connection_id` narrow it the same way, to one channel or one\nconnection.\n\n**Views** (FEB-05): `status` - `open`, `pending`, `closed` or `all`; without\nit, everything not closed, as before. `assigned_to` - `me`, `none` or a\nmember's id (one of another workspace matches nothing). `mode` - `ai` or\n`human`. `q` - the customer's name or number. `unread=true` - only\nconversations holding a customer message nobody has seen (UR-09). They\ncombine, and keep the\nsame order. A `next_cursor` belongs to the view it came from: presented\nwith other filters it is refused, 422 `cursor_view_mismatch`.\n\n**Catching up** (RT-04): `updated_since` (with its offset) lists every\nconversation changed at or after it - closed ones too - oldest change\nfirst. The first page carries an `ETag`: send it back as `If-None-Match`\nand an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30\nwith no event stream open, 60 with one.",
         "operationId": "list_conversations_api_v1_conversations_get",
         "parameters": [
           {
@@ -25594,6 +25784,18 @@
             }
           },
           {
+            "description": "Only conversations with a customer message nobody has seen (UR-09).",
+            "in": "query",
+            "name": "unread",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Only conversations with a customer message nobody has seen (UR-09).",
+              "title": "Unread",
+              "type": "boolean"
+            }
+          },
+          {
             "description": "The customer's name or number, 2 to 100 characters (422 search_term_invalid). Never logged; keep it out of a page's address.",
             "in": "query",
             "name": "q",
@@ -25654,6 +25856,43 @@
           }
         ],
         "summary": "List Conversations",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/v1/conversations/unread-summary": {
+      "get": {
+        "description": "The workspace's customer messages nobody has seen yet, over conversations not closed.\n\nShared by the team - the same for every member - and capped at 1000 each\n(UR-10). There is no event of its own: refetch on `message.created` and on\n`conversation.updated` whose fields include `read` or `status`.",
+        "operationId": "unread_summary_api_v1_conversations_unread_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnreadSummaryRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Unread Summary",
         "tags": [
           "conversations"
         ]
@@ -26164,7 +26403,7 @@
         ]
       },
       "post": {
-        "description": "Send free text, allowed only inside the 24-hour service window.\n\nAnswers 201 even when Meta rejects the message: the attempt is recorded, and\nthe returned status says whether it was sent or failed.\n\nSend `Idempotency-Key` to make a retry safe. Without one, a double-clicked\nbutton or a replayed request is two messages on the customer's phone.",
+        "description": "Send free text, allowed only inside the 24-hour service window.\n\nAnswers 201 even when Meta rejects the message: the attempt is recorded, and\nthe returned status says whether it was sent or failed.\n\nSend `Idempotency-Key` to make a retry safe. Without one, a double-clicked\nbutton or a replayed request is two messages on the customer's phone.\n\nA member's reply marks the conversation read up to the message before it,\nand assigns an unassigned conversation to them (UR-06).",
         "operationId": "send_text_api_v1_conversations__conversation_id__messages_post",
         "parameters": [
           {
@@ -26340,7 +26579,7 @@
     },
     "/api/v1/conversations/{conversation_id}/messages/template": {
       "post": {
-        "description": "Send an approved template, which is valid outside the service window.\n\nRefused with 422 when the local registry records the template as paused,\nrejected or disabled. A template the registry has never heard of is allowed\nthrough, because a workspace that has not synced cannot be told apart from\none whose template does not exist. Refused with 409 at 100 % of Meta's\nmessaging limit, with when it can go (FLIM-02); sent while the limit is\nunknown, with the notice `messaging_limit_unknown`.\n\nSend `Idempotency-Key` to make a retry safe.",
+        "description": "Send an approved template, which is valid outside the service window.\n\nRefused with 422 when the local registry records the template as paused,\nrejected or disabled. A template the registry has never heard of is allowed\nthrough, because a workspace that has not synced cannot be told apart from\none whose template does not exist. Refused with 409 at 100 % of Meta's\nmessaging limit, with when it can go (FLIM-02); sent while the limit is\nunknown, with the notice `messaging_limit_unknown`.\n\nSend `Idempotency-Key` to make a retry safe. Like text, a member's template\nmarks read and assigns an unassigned conversation (UR-06).",
         "operationId": "send_template_api_v1_conversations__conversation_id__messages_template_post",
         "parameters": [
           {
@@ -26574,6 +26813,75 @@
         ]
       }
     },
+    "/api/v1/conversations/{conversation_id}/read": {
+      "post": {
+        "description": "Mark the conversation read up to a message, for the whole team (UR-06).\n\nForward only: an older or equal message changes nothing, not even who and\nwhen. A message of another conversation is 404. Emits `conversation.updated`\nwith `read` when the position moved.",
+        "operationId": "mark_read_api_v1_conversations__conversation_id__read_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadStateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mark Read",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
     "/api/v1/conversations/{conversation_id}/reopen": {
       "post": {
         "operationId": "reopen_conversation_api_v1_conversations__conversation_id__reopen_post",
@@ -26627,6 +26935,65 @@
           }
         ],
         "summary": "Reopen Conversation",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/v1/conversations/{conversation_id}/unread": {
+      "post": {
+        "description": "Mark the customer's newest message unread again, for the whole team (UR-11).\n\nThe one way the read position moves back. A conversation the customer\nnever wrote in answers its state unchanged.",
+        "operationId": "mark_unread_api_v1_conversations__conversation_id__unread_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadStateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mark Unread",
         "tags": [
           "conversations"
         ]

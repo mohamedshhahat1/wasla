@@ -69,6 +69,7 @@ from app.services.messaging_limit_service import MessagingLimitService
 from app.services.messaging_service import MessagingService
 from app.services.payment_method_service import PaymentMethodService
 from app.services.plan_catalog import PlanCatalog
+from app.services.read_state_service import ReadStateService
 from app.services.refund_service import RefundService
 from app.services.sentiment_service import SentimentService
 from app.services.subscription_service import SubscriptionService
@@ -515,6 +516,14 @@ def get_inbox_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> Inb
 
 
 InboxServiceDep = Annotated[InboxService, Depends(get_inbox_service)]
+
+
+def get_read_state_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> ReadStateService:
+    """The team's read positions in the active workspace (UR, ADR-198)."""
+    return ReadStateService(session=session, tenant_id=workspace.tenant.id)
+
+
+ReadStateServiceDep = Annotated[ReadStateService, Depends(get_read_state_service)]
 
 
 def get_knowledge_service(

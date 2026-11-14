@@ -193,11 +193,13 @@ _CONVERSATION_FIELDS: Final[dict[str, str]] = {
     "mode": "owner",
     "assigned_to_id": "assignee",
     "priority": "priority",
+    # Every move of the team's read position writes `last_read_at` (UR-07).
+    "last_read_at": "read",
 }
 
 
 def _conversation_updated(_mapper: Any, _connection: Any, target: Any) -> None:
-    fields = [_CONVERSATION_FIELDS[name] for name in _changed(target, *_CONVERSATION_FIELDS)]
+    fields = {_CONVERSATION_FIELDS[name] for name in _changed(target, *_CONVERSATION_FIELDS)}
     if fields:
         _stage_for(
             target,
