@@ -388,9 +388,14 @@ for (const locale of ["en", "ar"] as Locale[]) {
       // click carries the member as its (now stale) expectation.
       const detail = new RegExp(`/api/v1/conversations/${conversation.id}$`);
       await page.route(detail, async (route) => {
-        const response = await route.fetch();
-        const body = (await response.json()) as Record<string, unknown>;
-        await route.fulfill({ response, json: { ...body, assigned_to_id: member.userId } });
+        // The screen may abort a read it no longer needs; then there is nothing to answer.
+        try {
+          const response = await route.fetch();
+          const body = (await response.json()) as Record<string, unknown>;
+          await route.fulfill({ response, json: { ...body, assigned_to_id: member.userId } });
+        } catch {
+          await route.abort().catch(() => undefined);
+        }
       });
       await api("POST", `/api/v1/conversations/${conversation.id}/assignment`, {
         token: member.token,
@@ -404,7 +409,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await page.locator("[data-assign]").click();
       await page.getByRole("menuitem", { name: label(locale, "app.inbox.assignToMe") }).click();
       expect((await stale).status()).toBe(409);
-      await page.unroute(detail);
+      await page.unrouteAll({ behavior: "wait" });
       const unassigned = await api("GET", `/api/v1/conversations/${conversation.id}`, {
         token: line.owner.token,
       });
