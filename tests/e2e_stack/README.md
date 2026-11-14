@@ -56,6 +56,11 @@ DELETE http://127.0.0.1:8025/messages                 empty it
 Each message: `{to, subject, text, html, links, codes, sent_at}` - `codes` holds
 the six-digit verification codes, `links` the invitation and reset links.
 
+A verification code is read as the code of the mail the reader's own request
+caused (FEB-32, `mailbox.code_after`): count the code mails before the send,
+wait for one more, take the newest. Registration mails a code of its own, and
+when its mail is late it must never be read as the send's.
+
 ## What each fake answers
 
 | Provider | Answer |
@@ -101,5 +106,7 @@ python -m tests.e2e_stack.smoke
 Walks J1–J10 from the API side with fresh accounts, prints one row per journey
 and the signed-forward checks, and exits non-zero if a journey failed. J6 is
 `EXPECTED UNTIL FE-2` (two refreshes with one token sign the account out - the
-race FE-2's single refresh per browser avoids). J10 reads the media id from the
-database because no message carries it (FEB-03).
+race FE-2's single refresh per browser avoids). J10 takes the media id from the
+message's `media` (FEB-03), and J11 walks the inbox views and the participant
+(FEB-04, FEB-05). Conversations are made per journey through the fake inbound
+webhook, never shared through the seed.
