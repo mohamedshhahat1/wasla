@@ -19,13 +19,15 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select, text
+from sqlalchemy import insert, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models.conversation import (
     Contact,
     Conversation,
+    ConversationMode,
+    ConversationStatus,
     MessageDeliveryState,
     MessageKind,
     MessageOrigin,
@@ -81,13 +83,26 @@ async def _seed(url: str) -> dict[str, tuple[uuid.UUID, datetime | None]]:
                     tenant=tenant,
                     account=account,
                     wa_id=f"2010{abs(hash(case)) % 10**8:08d}",
+                    with_conversation=False,
                 )
-                conversation = await session.scalar(
-                    select(Conversation).where(Conversation.contact_id == contact.id)
+                # The database is at 0119: the conversation is written with the columns it sets,
+                # never through the model, which also maps what later revisions add (0139's read
+                # state) and would name those columns in its INSERT and SELECT.
+                conversation_id = await session.scalar(
+                    insert(Conversation)
+                    .values(
+                        tenant_id=tenant.id,
+                        contact_id=contact.id,
+                        account_id=account.id,
+                        status=ConversationStatus.OPEN,
+                        mode=ConversationMode.AI,
+                        last_inbound_at=now,
+                    )
+                    .returning(Conversation.id)
                 )
-                assert conversation is not None
+                assert conversation_id is not None
                 message = await MessageRepository(session, tenant_id=tenant.id).stage_outbound(
-                    conversation_id=conversation.id,
+                    conversation_id=conversation_id,
                     kind=MessageKind.TEMPLATE,
                     body=None,
                     template_name=name,

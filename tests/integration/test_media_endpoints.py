@@ -23,6 +23,7 @@ from app.api.dependencies import (
     get_inbox_service,
     get_media_service,
     get_messaging_service,
+    get_read_state_service,
 )
 from app.core.exceptions import NotFoundError
 from app.core.storage import StorageError
@@ -153,12 +154,23 @@ class StubInbox:
     async def media_for(self, messages: list[Any]) -> dict[uuid.UUID, list[MessageMedia]]:
         return {}
 
+    async def idempotency_key_used(self, key: str | None) -> bool:
+        return False
+
+
+class StubReads:
+    """A member's reply also marks read and may assign (UR-06): proved in its own tests."""
+
+    async def after_member_reply(self, **_: Any) -> None:
+        return None
+
 
 @pytest.fixture
 def messaging(app: FastAPI, media_service: StubMediaService) -> StubMessaging:
     stub = StubMessaging()
     app.dependency_overrides[get_messaging_service] = lambda: stub
     app.dependency_overrides[get_inbox_service] = lambda: StubInbox()
+    app.dependency_overrides[get_read_state_service] = lambda: StubReads()
     return stub
 
 

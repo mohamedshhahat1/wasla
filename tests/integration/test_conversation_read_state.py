@@ -25,7 +25,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.api.dependencies import (
     ActiveWorkspaceDep,
@@ -125,7 +125,20 @@ async def desk(
     finally:
         await http.aclose()
         await erase(database)
+        await forget_people(database)
         await database.dispose()
+
+
+async def forget_people(database: Database) -> None:
+    """The people `_person` made (@inbox.test): `erase` takes only the harness's own domain.
+
+    Left behind, they are counted by tests that read every user (the Google sign-in tests).
+    """
+    async with database.session_factory() as session:
+        people = select(User.id).where(User.email.endswith("@inbox.test"))
+        await session.execute(delete(AuditLog).where(AuditLog.actor_id.in_(people)))
+        await session.execute(delete(User).where(User.email.endswith("@inbox.test")))
+        await session.commit()
 
 
 def recent() -> datetime:
