@@ -189,17 +189,26 @@ for (const locale of ["en", "ar"] as Locale[]) {
       for (let index = 0; index < 32; index += 1)
         await customerWrites(line, `bulk ${index}`, freshCustomer(), `Bulk ${index}`);
       await page.reload();
+      // The button scrolled into view loads the next page by itself (IL-04's observer), so it is
+      // busy or gone by the time a click lands: click only when it is still idle.
       const more = page.locator("[data-load-more]");
-      await more.scrollIntoViewIfNeeded();
-      await more.click();
+      const nextPage = async () => {
+        if (!(await more.isVisible())) return;
+        await more.scrollIntoViewIfNeeded();
+        if (await more.isEnabled()) await more.click({ timeout: 2_000 }).catch(() => undefined);
+      };
+      await expect(async () => {
+        await nextPage();
+        expect(swapped).toBe(true);
+      }).toPass({ timeout: 60_000 });
       await expect(
         page.locator('[data-conversation-list] [role="status"], [data-conversation-list] h2'),
       ).toHaveCount(0);
       // Refetched from the top silently (no error state); the older row is one more page away.
-      expect(swapped).toBe(true);
-      await more.scrollIntoViewIfNeeded();
-      await more.click();
-      await expect(row(page, open.id)).toBeVisible();
+      await expect(async () => {
+        await nextPage();
+        await expect(row(page, open.id)).toBeVisible({ timeout: 2_000 });
+      }).toPass({ timeout: 60_000 });
     });
 
     test("IJ-04 / IJ-05 (J10): text as text, links behind a confirmation, media as revoked blobs", async ({

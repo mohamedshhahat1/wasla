@@ -29,8 +29,11 @@ import { BREAKPOINTS, layoutFor, panelStartsOpen, phoneStep } from "../lib/inbox
 import {
   applyListUpdateNow,
   capCount,
+  firstPageOnly,
   mayMarkRead,
+  onlyAppends,
   pollInterval,
+  restartsFromTop,
   shouldPoll,
   StreamWatch,
 } from "../lib/inbox/live";
@@ -148,11 +151,40 @@ describe("IL-02 / LY-03: the view in the URL, never the search term", () => {
   });
 });
 
+describe("IL-04: a cursor of another view reads the list again from the top, once", () => {
+  it("restarts only for cursor_view_mismatch on a next page, and only once in a row", () => {
+    expect(
+      restartsFromTop({ code: "cursor_view_mismatch", cursor: "c1", mismatchesInARow: 0 }),
+    ).toBe(true);
+    expect(
+      restartsFromTop({ code: "cursor_view_mismatch", cursor: "c1", mismatchesInARow: 1 }),
+    ).toBe(false);
+    expect(
+      restartsFromTop({ code: "cursor_view_mismatch", cursor: null, mismatchesInARow: 0 }),
+    ).toBe(false);
+    expect(restartsFromTop({ code: "validation_error", cursor: "c1", mismatchesInARow: 0 })).toBe(
+      false,
+    );
+  });
+  it("cuts the loaded pages to the first one, read from no cursor", () => {
+    expect(
+      firstPageOnly({ pages: ["one", "two", "empty"], pageParams: [null, "c1", "bad"] }),
+    ).toEqual({ pages: ["one"], pageParams: [null] });
+    expect(firstPageOnly(undefined)).toBeUndefined();
+  });
+});
+
 describe("IL-06 / IL-07: the live list and the counts", () => {
   it("applies an update at once only at the top with no row focused", () => {
     expect(applyListUpdateNow({ scrolledAway: false, rowFocused: false })).toBe(true);
     expect(applyListUpdateNow({ scrolledAway: true, rowFocused: false })).toBe(false);
     expect(applyListUpdateNow({ scrolledAway: false, rowFocused: true })).toBe(false);
+  });
+  it("applies a loaded page at once, even scrolled away: only a reorder waits", () => {
+    expect(onlyAppends(["a", "b"], ["a", "b", "c"])).toBe(true);
+    expect(onlyAppends(["a", "b"], ["b", "a", "c"])).toBe(false);
+    expect(onlyAppends(["a", "b"], ["a", "b"])).toBe(false);
+    expect(onlyAppends(["a", "b", "c"], ["a", "b"])).toBe(false);
   });
   it("caps counts as 99+ and 999+", () => {
     expect(capCount(99, 99)).toBe("99");

@@ -85,7 +85,37 @@ export function applyListUpdateNow(input: { scrolledAway: boolean; rowFocused: b
   return !input.scrolledAway && !input.rowFocused;
 }
 
+/**
+ * IL-04 / IL-06: a fetched list that keeps every shown row in place and only adds rows after them
+ * is a page the person asked for ("Load more"), never a reorder - it applies at once.
+ */
+export function onlyAppends(shown: readonly string[], fetched: readonly string[]): boolean {
+  return fetched.length > shown.length && shown.every((id, index) => fetched[index] === id);
+}
+
 /** "99+" above 99 (rows), "999+" above 999 (the Inbox total). */
 export function capCount(value: number, cap: number): string {
   return value > cap ? `${cap}+` : String(value);
+}
+
+/**
+ * IL-04: whether a failed page read is BE1's "cursor of another view" that the list answers by
+ * reading from the top - only for a next page (a cursor was sent), and only once in a row.
+ */
+export function restartsFromTop(input: {
+  code: string | null | undefined;
+  cursor: string | null | undefined;
+  mismatchesInARow: number;
+}): boolean {
+  return (
+    input.code === "cursor_view_mismatch" && Boolean(input.cursor) && input.mismatchesInARow === 0
+  );
+}
+
+/** IL-04: the loaded pages cut back to the first one, so a refetch reads from the top only. */
+export function firstPageOnly<P>(
+  data: { pages: P[]; pageParams: (string | null)[] } | undefined,
+): { pages: P[]; pageParams: (string | null)[] } | undefined {
+  if (!data || data.pages.length === 0) return data;
+  return { pages: data.pages.slice(0, 1), pageParams: [null] };
 }

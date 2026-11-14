@@ -28,7 +28,13 @@ import {
 } from "@wasla/ui";
 
 import { INBOX } from "../../lib/inbox/keys";
-import { applyListUpdateNow, capCount } from "../../lib/inbox/live";
+import {
+  applyListUpdateNow,
+  capCount,
+  firstPageOnly,
+  onlyAppends,
+  restartsFromTop,
+} from "../../lib/inbox/live";
 import { fullTime, relativeTime } from "../../lib/inbox/time";
 import {
   checkSearch,
@@ -104,6 +110,7 @@ export function ConversationListPane({
   const baseKey = listKey(scope, view);
   const key = useMemo(() => [...baseKey, term ?? ""] as const, [baseKey, term]);
   const mismatches = useRef(0);
+  const [restart, setRestart] = useState(0);
 
   const list = useInfiniteQuery({
     queryKey: key,
@@ -119,31 +126,30 @@ export function ConversationListPane({
         mismatches.current = 0;
         return page;
       } catch (error) {
-        // IL-04: a cursor of another view → drop the pages and read from the top, once.
-        if (
-          error instanceof ApiError &&
-          error.code === "cursor_view_mismatch" &&
-          pageParam &&
-          mismatches.current === 0
-        ) {
+        // IL-04: a cursor of another view → this page ends the list for now, then (after the
+        // append has landed) the pages are cut to the first one and read again from the top.
+        const code = error instanceof ApiError ? error.code : null;
+        if (restartsFromTop({ code, cursor: pageParam, mismatchesInARow: mismatches.current })) {
           mismatches.current += 1;
-          queueMicrotask(() =>
-            queryClient.setQueryData<InfiniteData<ListPage, string | null>>(key, (data) =>
-              data ? { pages: data.pages.slice(0, 1), pageParams: [null] } : data,
-            ),
-          );
-          return unwrap(
-            session.api.GET("/api/v1/conversations", {
-              params: { query: listQuery(view, term, null, PAGE_SIZE) },
-              signal,
-            }),
-          );
+          setRestart((count) => count + 1);
+          const empty: ListPage = { items: [], next_cursor: null, poll_after_seconds: 0 };
+          return empty;
         }
         throw error;
       }
     },
     getNextPageParam: (last) => last.next_cursor ?? null,
   });
+
+  const restartsHandled = useRef(0);
+  useEffect(() => {
+    if (restart === restartsHandled.current) return;
+    restartsHandled.current = restart;
+    queryClient.setQueryData<InfiniteData<ListPage, string | null>>(key, (data) =>
+      firstPageOnly(data),
+    );
+    void queryClient.refetchQueries({ queryKey: key, exact: true });
+  }, [restart, key, queryClient]);
 
   useEffect(() => {
     runtime.setPollAfter(list.data?.pages[0]?.poll_after_seconds ?? null);
@@ -162,7 +168,16 @@ export function ConversationListPane({
     );
     const sameOrder =
       shown.length === fetched.length && shown.every((row, index) => row.id === fetched[index]?.id);
-    if (sameOrder || shown.length === 0 || applyListUpdateNow({ scrolledAway, rowFocused })) {
+    const appended = onlyAppends(
+      shown.map((row) => row.id),
+      fetched.map((row) => row.id),
+    );
+    if (
+      sameOrder ||
+      appended ||
+      shown.length === 0 ||
+      applyListUpdateNow({ scrolledAway, rowFocused })
+    ) {
       setShown(fetched);
       setWaiting(null);
     } else {
