@@ -28,6 +28,7 @@ from typing import Any
 
 from app.integrations.email.base import EmailMessage, EmailSendResult
 from app.integrations.email.fake import FakeEmailProvider
+from app.services.email_templates import EmailTemplate, subject_for
 
 MAILBOX_FILE = Path(os.environ.get("WASLA_E2E_MAILBOX_FILE", "/mailbox/messages.jsonl"))
 _CODE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
@@ -75,9 +76,19 @@ def read(path: Path = MAILBOX_FILE, *, to: str | None = None) -> list[dict[str, 
     return list(reversed(entries))
 
 
+#: The verification mail's subject, from the app's own template table. Codes are read from
+#: these mails only: `codes` lists every six-digit run of any mail, and an invitation's random
+#: token or slug can hold one (FEB-32).
+VERIFICATION_SUBJECT = subject_for(EmailTemplate.EMAIL_VERIFICATION)
+
+
+def _verification(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [m for m in messages if m["subject"] == VERIFICATION_SUBJECT and m["codes"]]
+
+
 def code_mails(messages: list[dict[str, Any]]) -> int:
-    """How many of one recipient's messages (newest first) carry a code."""
-    return sum(1 for message in messages if message["codes"])
+    """How many of one recipient's messages (newest first) are verification mails with a code."""
+    return len(_verification(messages))
 
 
 def code_after(messages: list[dict[str, Any]], *, seen: int) -> str | None:
@@ -90,7 +101,7 @@ def code_after(messages: list[dict[str, Any]], *, seen: int) -> str | None:
     """
     if code_mails(messages) <= seen:
         return None
-    newest = next(message for message in messages if message["codes"])
+    newest = _verification(messages)[0]
     return str(newest["codes"][0])
 
 

@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from tests.e2e_stack.mailbox import code_after, code_mails
+from tests.e2e_stack.mailbox import VERIFICATION_SUBJECT, code_after, code_mails
 
 
-def _mail(code: str | None, *, subject: str = "Verify your email") -> dict[str, Any]:
+def _mail(code: str | None, *, subject: str = VERIFICATION_SUBJECT) -> dict[str, Any]:
     return {
         "to": ["owner@example.com"],
         "subject": subject,
@@ -60,3 +60,12 @@ def test_a_resend_reads_the_newest_of_its_own() -> None:
     assert code_mails(mailbox) == 3
     assert code_after(mailbox, seen=2) == "555555"
     assert code_after(mailbox, seen=3) is None
+
+
+def test_six_digits_in_an_invitation_are_not_a_code() -> None:
+    """frontend.yml 43576090907: an invitation whose token held six digits was read as the
+    member's verification code, and the verify failed."""
+    invitation = _mail("725948", subject="You are invited to a Wasla workspace")
+    assert code_mails([invitation]) == 0
+    assert code_after([invitation], seen=0) is None
+    assert code_after([_mail("314159"), invitation], seen=0) == "314159"

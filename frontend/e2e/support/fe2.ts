@@ -12,6 +12,18 @@ import { freshEmail, mailbox, signedForward } from "./helpers";
 export const WEB = APPS.web.origin;
 export const PASSWORD = "Correct-Horse-Battery-9";
 export const REFRESH_COOKIES = ["wasla_rt", "__Host-wasla_rt"];
+/**
+ * The verification mail's subject (app/services/email_templates.py, a constant). Codes are read
+ * from these mails only: the mailbox lists every six-digit run of any mail as a code, and an
+ * invitation's random token or slug can hold one (FEB-32, frontend.yml 43576090907).
+ */
+export const VERIFICATION_SUBJECT = "Verify your email address for Wasla";
+
+async function verificationMails(email: string) {
+  return (await mailbox.messagesTo(email)).filter(
+    (message) => message.subject === VERIFICATION_SUBJECT,
+  );
+}
 
 /** A documentation-range address unique to this test, so tests never share a rate-limit bucket. */
 export function testAddress(): string {
@@ -90,7 +102,7 @@ export async function waitForCode(
   attempts = 60,
 ): Promise<string> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const messages = await mailbox.messagesTo(email);
+    const messages = await verificationMails(email);
     const code = messages.flatMap((message) => message.codes).find((c) => !after.has(c));
     if (code) return code;
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -206,7 +218,7 @@ export async function resendUntilCooldown(page: Page, locale: Locale): Promise<n
 /** The newest code once the mailbox holds `count` messages for `email`. */
 export async function newestCode(email: string, count: number): Promise<string> {
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    const messages = await mailbox.messagesTo(email);
+    const messages = await verificationMails(email);
     if (messages.length >= count && messages[0]?.codes[0]) return messages[0].codes[0];
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
