@@ -11,8 +11,10 @@ blocking I/O that only shows up under load.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, Self
+from enum import StrEnum
+from typing import Any, Final, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import inspect
@@ -26,6 +28,7 @@ from app.channels.policy import (
     SendMechanism,
     TextUnit,
 )
+from app.core.media_types import CANONICAL_TYPES
 from app.db.models.channel import Channel, ContactIdentity, IdentityKind
 from app.db.models.conversation import (
     Conversation,
@@ -37,6 +40,12 @@ from app.db.models.conversation import (
     MessageOrigin,
     MessageStatus,
     ReplyActionSource,
+)
+from app.db.models.media import (
+    UNRESOLVED_MEDIA_STATUSES,
+    MediaStatus,
+    MediaStorageState,
+    MessageMedia,
 )
 from app.db.models.sentiment import ConversationPriority, SentimentLabel
 from app.schemas.bounds import TEMPLATE_COMPONENTS, check_json
@@ -144,6 +153,129 @@ class ReplyActionRead(BaseModel):
     source: ReplyActionSource
 
 
+class MediaKind(StrEnum):
+    """What sort of file an attachment is, for drawing it (FEB-03)."""
+
+    IMAGE = "image"
+    AUDIO = "audio"
+    VIDEO = "video"
+    DOCUMENT = "document"
+
+
+class MediaAvailability(StrEnum):
+    """Whether `GET …/media/{id}` can serve the file now, in the words a screen needs (FEB-03).
+
+    `unavailable` is one word for every reason the bytes cannot be served and
+    will not be - removed by retention, being removed, refused as not what was
+    written, or never stored (too large, a type nothing reads). The screen says
+    "not available"; why storage refused it is not the inbox's to show.
+    """
+
+    AVAILABLE = "available"
+    PENDING = "pending"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+
+
+class TranscriptStatus(StrEnum):
+    """Where reading the file got: a voice note's transcript, an image's description (FEB-03)."""
+
+    NONE = "none"
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+
+
+_UNSERVABLE_STORAGE: Final = frozenset(
+    {MediaStorageState.PURGING, MediaStorageState.PURGED, MediaStorageState.MISMATCHED}
+)
+_IN_FLIGHT: Final = frozenset({MediaStatus.PENDING, MediaStatus.DOWNLOADING})
+
+
+def media_availability(media: MessageMedia) -> MediaAvailability:
+    """The public state of one file: what the download route would do with it now."""
+    if media.storage_state is MediaStorageState.STORED:
+        return MediaAvailability.AVAILABLE
+    if media.storage_state in _UNSERVABLE_STORAGE:
+        return MediaAvailability.UNAVAILABLE
+    if media.storage_state is MediaStorageState.PENDING or media.status in _IN_FLIGHT:
+        return MediaAvailability.PENDING
+    if media.status is MediaStatus.FAILED:
+        return MediaAvailability.FAILED
+    return MediaAvailability.UNAVAILABLE
+
+
+def transcript_status(media: MessageMedia) -> TranscriptStatus:
+    if media.transcript is not None:
+        return TranscriptStatus.READY
+    if media.status in UNRESOLVED_MEDIA_STATUSES:
+        return TranscriptStatus.PENDING
+    if media.status is MediaStatus.FAILED:
+        return TranscriptStatus.FAILED
+    return TranscriptStatus.NONE
+
+
+def media_kind(media: MessageMedia, message_kind: MessageKind) -> MediaKind:
+    for kind in (MediaKind.IMAGE, MediaKind.AUDIO, MediaKind.VIDEO, MediaKind.DOCUMENT):
+        if message_kind.value == kind.value:
+            return kind
+    family = (media.mime_type or "").split("/", 1)[0]
+    return {
+        "image": MediaKind.IMAGE,
+        "audio": MediaKind.AUDIO,
+        "video": MediaKind.VIDEO,
+    }.get(family, MediaKind.DOCUMENT)
+
+
+class MessageMediaRead(BaseModel):
+    """One file of a message, as a screen draws it (FEB-03).
+
+    `id` is what `GET /conversations/{id}/media/{media_id}` takes. Never here:
+    the storage key, the provider's media id or locator, a URL, a hash, the
+    last error or retention dates - the file is reached through that route
+    and nothing else.
+    """
+
+    id: uuid.UUID
+    kind: MediaKind
+    # As the download route serves it: a type this system canonically supports,
+    # else `application/octet-stream`; null when none is known yet.
+    mime_type: str | None
+    # The stored name, as the sender's phone gave it - text, never markup.
+    filename: str | None
+    byte_size: int | None
+    is_voice: bool
+    transcript_status: TranscriptStatus
+    # What the file says (a transcript, a description), once `ready`.
+    transcript: str | None
+    status: MediaAvailability
+    position: int
+    # The message's caption, on its first file.
+    caption: str | None
+
+    @classmethod
+    def from_model(cls, media: MessageMedia, *, message: Message) -> Self:
+        mime = media.mime_type
+        state = transcript_status(media)
+        return cls(
+            id=media.id,
+            kind=media_kind(media, message.kind),
+            mime_type=(
+                None
+                if mime is None
+                else mime if mime in CANONICAL_TYPES else "application/octet-stream"
+            ),
+            filename=media.filename,
+            byte_size=media.byte_size or None,
+            is_voice=media.is_voice,
+            transcript_status=state,
+            transcript=media.transcript if state is TranscriptStatus.READY else None,
+            status=media_availability(media),
+            position=media.position,
+            caption=message.body if media.position == 0 else None,
+        )
+
+
 class MessageRead(BaseModel):
     id: uuid.UUID
     conversation_id: uuid.UUID
@@ -177,10 +309,14 @@ class MessageRead(BaseModel):
     read_at: datetime | None
     failure_reason: str | None
     created_at: datetime
+    # The message's files, in the provider's order; empty when it carries none
+    # (FEB-03). The routes read them a page at a time, in one query.
+    media: list[MessageMediaRead] = Field(default_factory=list)
 
     @classmethod
-    def from_model(cls, message: Message) -> Self:
+    def from_model(cls, message: Message, *, media: Sequence[MessageMedia] = ()) -> Self:
         return cls(
+            media=[MessageMediaRead.from_model(item, message=message) for item in media],
             id=message.id,
             conversation_id=message.conversation_id,
             provider_message_id=message.wa_message_id,
@@ -221,20 +357,50 @@ class TemplateSentRead(MessageRead):
 
 
 class ParticipantRead(BaseModel):
-    """Who a conversation is with, as its channel addresses them - never the value itself.
+    """Who a conversation is with (OMNI-015, FEB-04).
 
-    The identifier (a phone number, a business-scoped id) is personal data and
-    is not needed to render an inbox; `kind` says what sort of address it is, so
-    a client can say "username" rather than showing an empty phone field.
+    `kind` says what sort of address the channel uses for them. `handle` is how
+    a person recognises them on that channel: the WhatsApp number in E.164,
+    the same number every member already reads in the contact picker
+    (`GET /contacts`). An address that is not a phone number - a business-scoped
+    user id, a page-scoped id - is never a handle and is not returned: it means
+    nothing to a person and is not a number to call. `display_name` is the name
+    the channel gave, as the customer typed it: text, never markup.
     """
 
     id: uuid.UUID
     channel: Channel
     kind: IdentityKind
+    contact_id: uuid.UUID
+    display_name: str | None
+    handle: str | None
+    # The contact's open lead, when there is one: what the customer panel opens.
+    lead_id: uuid.UUID | None
 
     @classmethod
-    def from_model(cls, identity: ContactIdentity) -> Self:
-        return cls(id=identity.id, channel=identity.channel, kind=identity.kind)
+    def from_model(
+        cls,
+        identity: ContactIdentity,
+        *,
+        display_name: str | None,
+        lead_id: uuid.UUID | None,
+    ) -> Self:
+        return cls(
+            id=identity.id,
+            channel=identity.channel,
+            kind=identity.kind,
+            contact_id=identity.contact_id,
+            display_name=display_name,
+            handle=phone_handle(identity),
+            lead_id=lead_id,
+        )
+
+
+def phone_handle(identity: ContactIdentity) -> str | None:
+    """The identity as a number a person can read, or None when it is not a phone number."""
+    if identity.kind is not IdentityKind.PHONE or not identity.value.isdigit():
+        return None
+    return f"+{identity.value}"
 
 
 class ReplyPolicyRead(BaseModel):
@@ -322,7 +488,7 @@ class ConversationRead(BaseModel):
         *,
         service_window_open: bool,
         reply_policy: ReplyPolicy,
-        participant: ContactIdentity,
+        participant: ParticipantRead,
     ) -> Self:
         return cls(
             id=conversation.id,
@@ -330,7 +496,7 @@ class ConversationRead(BaseModel):
             account_id=conversation.account_id,
             connection_id=conversation.account_id,
             channel=conversation.channel,
-            participant=ParticipantRead.from_model(participant),
+            participant=participant,
             status=conversation.status,
             mode=conversation.mode,
             assigned_to_id=conversation.assigned_to_id,

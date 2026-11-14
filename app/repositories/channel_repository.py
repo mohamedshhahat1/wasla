@@ -15,7 +15,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, case, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.channels.throughput import SEND_WINDOW
@@ -30,6 +30,8 @@ from app.db.models.channel import (
     IdentityScope,
     IdentitySource,
 )
+from app.db.models.conversation import Contact
+from app.db.models.lead import Lead, LeadStatus
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
 logger = get_logger(__name__)
@@ -280,6 +282,15 @@ class ConnectionHealthCensus(BaseRepository[ChannelConnection]):
         ]
 
 
+@dataclass(frozen=True, slots=True)
+class Participant:
+    """Who a conversation is with: the identity it addresses, the name, the active lead."""
+
+    identity: ContactIdentity
+    display_name: str | None
+    lead_id: uuid.UUID | None
+
+
 class ContactIdentityRepository(TenantScopedRepository[ContactIdentity]):
     """How providers address one workspace's contacts."""
 
@@ -322,6 +333,43 @@ class ContactIdentityRepository(TenantScopedRepository[ContactIdentity]):
             return {}
         rows = await self._all(self._select().where(ContactIdentity.id.in_(identity_ids)))
         return {row.id: row for row in rows}
+
+    async def participants(
+        self, identity_ids: Collection[uuid.UUID]
+    ) -> dict[uuid.UUID, Participant]:
+        """Who each of these identities is, by identity id, in one query (FEB-04).
+
+        The identity, its contact's name as the channel gave it, and the
+        contact's active lead - `uq_leads_active_contact` allows at most one,
+        so the outer join never repeats a row. Every join is held to this
+        workspace: the contact and the lead by their own tenant column.
+        """
+        if not identity_ids:
+            return {}
+        query = (
+            select(ContactIdentity, Contact.display_name, Lead.id)
+            .join(
+                Contact,
+                and_(
+                    Contact.tenant_id == ContactIdentity.tenant_id,
+                    Contact.id == ContactIdentity.contact_id,
+                ),
+            )
+            .outerjoin(
+                Lead,
+                and_(
+                    Lead.tenant_id == ContactIdentity.tenant_id,
+                    Lead.contact_id == ContactIdentity.contact_id,
+                    Lead.status.not_in([LeadStatus.WON, LeadStatus.LOST]),
+                ),
+            )
+            .where(self._tenant_filter(), ContactIdentity.id.in_(identity_ids))
+        )
+        rows = await self.session.execute(query)
+        return {
+            identity.id: Participant(identity=identity, display_name=name, lead_id=lead_id)
+            for identity, name, lead_id in rows.all()
+        }
 
     async def map_for_contacts(
         self, contact_ids: Collection[uuid.UUID]

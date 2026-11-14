@@ -51,6 +51,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.sentiment import ConversationPriority
 from app.integrations.whatsapp.policy import WhatsAppChannelPolicy
+from app.repositories.channel_repository import Participant
 from tests.workspace_timezone import TEST_TIMEZONE
 
 pytestmark = pytest.mark.integration
@@ -125,6 +126,7 @@ class StubInbox:
         priority: ConversationPriority | None = None,
         channel: Channel | None = None,
         connection_id: uuid.UUID | None = None,
+        **views: Any,
     ) -> Page[Any]:
         self.conversation_calls.append(
             {
@@ -133,24 +135,30 @@ class StubInbox:
                 "priority": priority,
                 "channel": channel,
                 "connection_id": connection_id,
+                **views,
             }
         )
         return Page(items=[_conversation()], next_cursor=self.next_cursor)
 
-    async def participants(
-        self, conversations: list[Conversation]
-    ) -> dict[uuid.UUID, ContactIdentity]:
+    async def media_for(self, messages: list[Message]) -> dict[uuid.UUID, list[Any]]:
+        return {}
+
+    async def participants(self, conversations: list[Conversation]) -> dict[uuid.UUID, Participant]:
         return {
-            PARTICIPANT_ID: ContactIdentity(
-                id=PARTICIPANT_ID,
-                tenant_id=TENANT_ID,
-                contact_id=CONTACT_ID,
-                channel=Channel.WHATSAPP,
-                kind=IdentityKind.BSUID,
-                scope=IdentityScope.PROVIDER_ACCOUNT,
-                scope_ref="waba-synthetic",
-                value=PARTICIPANT_VALUE,
-                source=IdentitySource.PROVIDER,
+            PARTICIPANT_ID: Participant(
+                identity=ContactIdentity(
+                    id=PARTICIPANT_ID,
+                    tenant_id=TENANT_ID,
+                    contact_id=CONTACT_ID,
+                    channel=Channel.WHATSAPP,
+                    kind=IdentityKind.BSUID,
+                    scope=IdentityScope.PROVIDER_ACCOUNT,
+                    scope_ref="waba-synthetic",
+                    value=PARTICIPANT_VALUE,
+                    source=IdentitySource.PROVIDER,
+                ),
+                display_name=None,
+                lead_id=None,
             )
         }
 
@@ -244,6 +252,12 @@ async def test_the_cursor_reaches_the_service(client: AsyncClient, inbox: StubIn
             "priority": None,
             "channel": None,
             "connection_id": None,
+            # FEB-05's views, none asked for: the default view.
+            "status": None,
+            "assigned_to": None,
+            "mode": None,
+            "q": None,
+            "viewer_id": USER_ID,
         }
     ]
 
@@ -399,8 +413,8 @@ async def test_a_conversation_names_its_participant_without_the_identifier(
     client: AsyncClient, inbox: StubInbox
 ) -> None:
     """Who the conversation is with, as its channel addresses them - a kind,
-    never the phone number or business-scoped id itself, which an inbox does not
-    need and which is personal data."""
+    and never a business-scoped id: it is not a number anybody can read or call,
+    so a customer known only by one has no handle (FEB-04)."""
     response = await client.get(PATH)
     conversation = response.json()["items"][0]
 
@@ -408,6 +422,10 @@ async def test_a_conversation_names_its_participant_without_the_identifier(
         "id": str(PARTICIPANT_ID),
         "channel": "whatsapp",
         "kind": "bsuid",
+        "contact_id": str(CONTACT_ID),
+        "display_name": None,
+        "handle": None,
+        "lead_id": None,
     }
     assert PARTICIPANT_VALUE not in response.text
 
