@@ -56,6 +56,10 @@
   "search_term_invalid": "Search for 2 to 100 characters.",
   "cursor_view_mismatch": "The list changed its filters. Reload it from the top.",
   "inbox_view_with_updated_since": "This view cannot be combined with catching up. Reload the list.",
+  "stale_assignment": "Someone changed who owns this conversation. It has been reloaded.",
+  "reply_window_closed": "It has been more than 24 hours since this customer wrote. Send an approved template instead.",
+  "idempotency_key_reused": "This message could not be sent. Try again.",
+  "media_type_not_allowed": "This type of file cannot be sent.",
   "connection_lost": "The connection was lost. Check it and try again.",
   "fallback": "Something went wrong. Try again."
 }

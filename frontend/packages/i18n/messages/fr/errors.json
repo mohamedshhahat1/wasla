@@ -56,6 +56,10 @@
   "search_term_invalid": "Recherchez entre 2 et 100 caractères.",
   "cursor_view_mismatch": "Les filtres de la liste ont changé. Rechargez-la depuis le début.",
   "inbox_view_with_updated_since": "Cette vue ne peut pas être combinée avec la mise à jour. Rechargez la liste.",
+  "stale_assignment": "Quelqu'un a changé le responsable de cette conversation. Elle a été rechargée.",
+  "reply_window_closed": "Plus de 24 heures se sont écoulées depuis le dernier message de ce client. Envoyez plutôt un modèle approuvé.",
+  "idempotency_key_reused": "Ce message n'a pas pu être envoyé. Réessayez.",
+  "media_type_not_allowed": "Ce type de fichier ne peut pas être envoyé.",
   "connection_lost": "La connexion a été perdue. Vérifiez-la et réessayez.",
   "fallback": "Un problème est survenu. Réessayez."
 }

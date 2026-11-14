@@ -169,6 +169,10 @@ CONNECTION_SEND_REFUSED = "The provider refused to send through this connection.
 PROVIDER_THROTTLED = "The provider is rate limiting this connection."
 PAIR_RATE_LIMITED = "The provider limits messages from this number to this person for now."
 
+#: A key reused for a different message (FEB-06, EC4-02): a client's own bug, told
+#: apart from a real conflict so it makes a new key instead of reloading.
+IDEMPOTENCY_KEY_REUSED: Final = "idempotency_key_reused"
+
 # The sentence a send on a paused connection is refused with, per channel.
 _DISABLED: Final[dict[Channel, str]] = {Channel.WHATSAPP: "This WhatsApp number is disabled."}
 
@@ -312,7 +316,10 @@ def _require_same_request(
         and message.template_language == template_language
     )
     if not same:
-        raise ConflictError("That idempotency key was already used for a different message.")
+        raise ConflictError(
+            "That idempotency key was already used for a different message.",
+            error_code=IDEMPOTENCY_KEY_REUSED,
+        )
 
 
 def _media_family(kind: MediaClass) -> str:
@@ -1039,7 +1046,9 @@ class MessagingService:
             conversation, origin=origin, kind=send_kind, now=datetime.now(UTC)
         )
         if not decision.allowed:
-            raise PolicyRefusalError(decision.reason or "This message cannot be sent now.")
+            raise PolicyRefusalError(
+                decision.reason or "This message cannot be sent now.", error_code=decision.code
+            )
         # The policy's decision travels to the adapter (OMNI-033). Held here as
         # well as in the policy: a human-agent tag is a person's permission,
         # and no other origin may carry one whatever a policy said.
