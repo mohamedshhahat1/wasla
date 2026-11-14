@@ -8,6 +8,7 @@ import { cn } from "../cn";
 import { Icon } from "../icon";
 import { IconButton } from "../primitives/icon-button";
 import { focusRing } from "../primitives/styles";
+import { CountBadge } from "./inbox";
 
 /**
  * The signed-in frame (FE-3, UI3-02): the dark-blue top bar, the light-blue side navigation at
@@ -153,6 +154,10 @@ export interface NavItem {
   icon: LucideIcon;
   iconName: string;
   current?: boolean;
+  /** A count beside the label (FE-4: the Inbox's unread messages, "999+"); none when null. */
+  count?: string | null;
+  /** What a screen reader hears for the count ("3 unread messages"). */
+  countLabel?: string | null;
 }
 
 /**
@@ -186,7 +191,8 @@ export function NavList({
         const children = (
           <>
             <Icon icon={item.icon} name={item.iconName} />
-            <span>{item.label}</span>
+            <span className="flex-1">{item.label}</span>
+            {item.count ? <CountBadge value={item.count} label={item.countLabel ?? null} /> : null}
           </>
         );
         const props = {
