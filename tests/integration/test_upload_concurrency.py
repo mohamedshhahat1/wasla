@@ -100,8 +100,37 @@ async def test_two_uploads_to_one_workspace_succeed_while_a_slow_pdf_parses(
     assert checked_out == [0]
 
 
+class _ParseWindow:
+    """When the burst is inside extraction: every upload in, and the first one out.
+
+    Counted at `extraction.extract_pdf_pages_bounded`, which an upload reaches
+    only after `released` has handed its connection back, so the window holds
+    the uploads' parse and nothing else (FEB-33).
+    """
+
+    def __init__(self, expected: int) -> None:
+        self._expected = expected
+        self._entered = 0
+        self.all_entered = asyncio.Event()
+        self.first_left = asyncio.Event()
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        bounded = extraction.extract_pdf_pages_bounded
+
+        async def counted(*args: Any, **kwargs: Any) -> Any:
+            self._entered += 1
+            if self._entered >= self._expected:
+                self.all_entered.set()
+            try:
+                return await bounded(*args, **kwargs)
+            finally:
+                self.first_left.set()
+
+        monkeypatch.setattr(extraction, "extract_pdf_pages_bounded", counted)
+
+
 async def test_a_burst_of_slow_uploads_does_not_exhaust_the_pool(
-    indexing: Indexing, slow_child: None
+    indexing: Indexing, slow_child: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant_id = await indexing.workspace()
     async with indexing.database.session() as session:
@@ -113,15 +142,18 @@ async def test_a_burst_of_slow_uploads_does_not_exhaust_the_pool(
         for name in sorted(p.name for p in PDFS.glob("*.pdf"))[:burst]
     ]
     peak: list[int] = []
+    window = _ParseWindow(burst)
+    window.install(monkeypatch)
 
     async def watch() -> None:
-        # From one second in, when every upload has done its setup query and
-        # is parsing or waiting for a parse slot, until the first parses end.
-        # Before that each upload briefly holds a connection for its own
-        # reads - not what this test is about, and it made the peak depend on
-        # how fast the burst started (7 of 5 once in the migration lane).
-        await asyncio.sleep(1.0)
-        for _ in range(int((DELAY - 1.5) * 4)):
+        # While every upload is parsing or waiting for a parse slot, and until
+        # the first parse ends - opened by that condition, never by a clock.
+        # Before it each upload briefly holds a connection for its own reads,
+        # which is not what this test is about; a fixed one-second start
+        # counted them whenever the burst started slowly (7 of 5 once in the
+        # migration lane, FEB-33).
+        await asyncio.wait_for(window.all_entered.wait(), timeout=DELAY * 4)
+        while not window.first_left.is_set():
             peak.append(pool.checkedout())  # type: ignore[attr-defined]
             await asyncio.sleep(0.25)
 
@@ -130,9 +162,10 @@ async def test_a_burst_of_slow_uploads_does_not_exhaust_the_pool(
         *(_upload(indexing, tenant_id, pdf, DocumentSource.PDF) for pdf in pdfs),
         return_exceptions=True,
     )
-    watcher.cancel()
+    await watcher
     refused = [r for r in results if isinstance(r, BaseException)]
     assert not refused, refused
+    assert peak, "the parse window never opened"
     # Extraction is bounded to two at a time per process; queued uploads wait
     # for a slot holding no connection, so the pool never fills.
     assert max(peak) < pool.size()  # type: ignore[attr-defined]
