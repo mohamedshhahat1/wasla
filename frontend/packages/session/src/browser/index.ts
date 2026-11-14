@@ -34,8 +34,15 @@ export {
   SignedOut,
   TransientFailure,
   withBackoff,
+  WorkspaceSuspended,
   type BackoffOptions,
 } from "./backoff";
+export {
+  refreshClearsCookie,
+  refreshOutcome,
+  SESSION_KEEPING_REFUSALS,
+  type RefreshOutcome,
+} from "../refresh-outcome";
 
 import { RefreshCoordinator } from "./refresh-coordinator";
 import { SESSION_CHANNEL, SessionChannel } from "./session-channel";

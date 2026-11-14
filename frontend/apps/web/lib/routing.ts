@@ -16,7 +16,7 @@ export type PageNeed =
   | "workspace";
 
 export interface RouteState {
-  status: "loading" | "signed-out" | "signed-in" | "connection-lost";
+  status: "loading" | "signed-out" | "signed-in" | "connection-lost" | "workspace-suspended";
   /** null while /auth/me is loading. */
   verified: boolean | null;
   workspaceCount: number | null;
@@ -32,6 +32,8 @@ export function decideRoute(
 ): RouteDecision {
   if (state.status === "loading") return { kind: "wait" };
   if (state.status === "connection-lost") return { kind: "show" };
+  // FEF-24: signed in on a suspended workspace - PageGate shows its state; an auth page shows.
+  if (state.status === "workspace-suspended") return { kind: "show" };
   if (state.status === "signed-out") {
     if (need === "signed-out") return { kind: "show" };
     return { kind: "go", to: `/login?next=${encodeURIComponent(safeNext(here))}` };
