@@ -26,6 +26,7 @@ from app.core.rate_limit import (
     account_identity,
 )
 from app.core.security import (
+    TokenClaims,
     TokenType,
     create_access_token,
     create_refresh_token,
@@ -95,6 +96,13 @@ class WorkspaceAccess:
     access_token: str
     expires_in: int
     workspace: WorkspaceContext
+
+
+class _Unresolved:
+    """The refresh's workspace has not been read yet."""
+
+
+_UNRESOLVED: Final = _Unresolved()
 
 
 class AuthService:
@@ -488,6 +496,17 @@ class AuthService:
             expected_type=TokenType.REFRESH,
         )
 
+        # **A workspace that refuses is asked before the token is spent**
+        # (FEF-24). A suspended workspace, or one the person no longer belongs
+        # to, refuses the refresh - and a refusal that had spent the token left
+        # the browser holding a spent one, so its next "Check again" was a
+        # replay that tore every session of the account down. Asking first is
+        # a read: it issues nothing, so the race `spend` closes is untouched -
+        # two presentations that pass it still meet at `spend`, and one loses.
+        # A token already spent is not answered with the workspace's refusal:
+        # that is a replay, and it goes on to `spend`, which detects it.
+        workspace = await self._workspace_before_spend(claims, workspace_slug=workspace_slug)
+
         # Spend first. Everything below this line is reached only by a caller
         # that was the first to present this token.
         first = await self._token_store.spend(
@@ -519,8 +538,34 @@ class AuthService:
             )
             raise AuthenticationError(INVALID_CREDENTIALS)
 
-        workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+        if isinstance(workspace, _Unresolved):
+            workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
         return self._issue(user=user, workspace=workspace)
+
+    async def _workspace_before_spend(
+        self, claims: TokenClaims, *, workspace_slug: str | None
+    ) -> WorkspaceContext | None | _Unresolved:
+        """The refresh's workspace, read before its token is spent, or `_UNRESOLVED`.
+
+        Unresolved when the account cannot refresh at all - the checks after
+        `spend` refuse it, exactly as before. A workspace refusal is raised
+        here, with the token untouched, unless the token was already spent.
+        """
+        user = await self._users.get_by_id(claims.subject)
+        if (
+            user is None
+            or user.deleted_at is not None
+            or not user.is_active
+            or claims.token_version != user.token_version
+        ):
+            return _UNRESOLVED
+        try:
+            return await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+        except (PermissionDeniedError, TenantIsolationError):
+            if await self._token_store.is_revoked(claims.token_id):
+                # Spent already: a replay, whatever the workspace says.
+                return _UNRESOLVED
+            raise
 
     async def _tear_down_after_reuse(self, user_id: uuid.UUID) -> None:
         """End every session this account holds, and record why.
