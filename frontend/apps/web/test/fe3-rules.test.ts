@@ -7,7 +7,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
 import { ApiError, EVENT_TYPES, queryKey } from "@wasla/api-client";
@@ -29,6 +29,7 @@ import {
   allowanceExhausted,
   gateSignalOf,
   gateSignalOfError,
+  rereadGates,
   BANNER_ORDER,
   decideGates,
   GATE_QUERY_POLICY,
@@ -449,6 +450,29 @@ describe("GT-01: an error code on any call as a gate signal (M-Z12)", () => {
     for (const other of [null, undefined, new Error("membership_revoked"), { code: 403 }]) {
       expect(gateSignalOfError(other)).toBeNull();
     }
+  });
+
+  it("FEF-34: a recheck does not reuse a first read sent before the revocation", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = ["fef34", "workspace-gates"];
+    let release: (value: { status: string }) => void = () => undefined;
+    let calls = 0;
+    const observer = new QueryObserver(queryClient, {
+      queryKey: key,
+      queryFn: () => {
+        calls += 1;
+        if (calls === 1) return new Promise<{ status: string }>((done) => (release = done));
+        return Promise.reject(new ApiError({ status: 403, code: "membership_revoked" }));
+      },
+    });
+    const stop = observer.subscribe(() => undefined);
+    expect(calls).toBe(1);
+    const signal = rereadGates(queryClient, [key]);
+    release({ status: "active" });
+    expect(await signal).toBe("revoked");
+    expect(calls).toBe(2);
+    stop();
+    queryClient.clear();
   });
 });
 

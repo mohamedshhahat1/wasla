@@ -21,7 +21,7 @@ import {
   decideGates,
   GATE_QUERY_POLICY,
   gateSignalOf,
-  gateSignalOfError,
+  rereadGates,
   type AllowanceFacts,
   type BannerKey,
   type GateDecision,
@@ -176,16 +176,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     rechecking.current = true;
     try {
       // The gates first: their answer (a code) may be the revocation the profile must wait for.
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: gatesKey, exact: true }),
-        queryClient.invalidateQueries({ queryKey: entitlementsKey, exact: true }),
-      ]);
-      // FEF-34: those answers decide too - a first read may have met the revocation before the
-      // middleware below could see it, and re-reading the profile then routes the person away.
-      const revoked = [gatesKey, entitlementsKey].some(
-        (key) => gateSignalOfError(queryClient.getQueryState(key)?.error) === "revoked",
-      );
-      if (revoked) {
+      // FEF-34: read afresh and asked directly - a first read may have been sent before the
+      // revocation, or met it before the middleware below could see it; re-reading the profile
+      // then routes the person away.
+      if ((await rereadGates(queryClient, [gatesKey, entitlementsKey])) === "revoked") {
         revokedRef.current = true;
         setRevokedSignal(true);
       }
