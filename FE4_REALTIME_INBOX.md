@@ -15,7 +15,7 @@
 | A8 frontend.yml, docs, ADR-198 | done | — | f8f2bb1, 31c43a9 |
 | A9 mutation, diff guard, gates at FE4_HEAD | done | mutation/, logs/ | FE4_HEAD (§21) |
 | B merge, report, push | see §23–§24 | | |
-| CI, C previews, D cleanup | see addendum | | |
+| CI, C previews, D cleanup | done (addendum) | | d571765: frontend.yml 43735244892, ci.yml 43735244716 green; previews f3c3842b / d20591cf / 6f2e2b78 |
 
 ## 1. Executive Summary
 
@@ -357,3 +357,98 @@ the addendum.
 
 Every focused local gate is green at FE4_HEAD 652316a and the merge is made; the push follows this commit. The verdict line
 (FE-4 MERGED AND PUSHED, CI GREEN / RED / NOT OBSERVED) is written in the addendum once frontend.yml and ci.yml have run.
+
+---
+
+# Addendum — GitHub Actions, the fixes after the push, Part C and the verdict
+
+## A1. Runs
+
+| Push | Head | frontend.yml | ci.yml |
+|---|---|---|---|
+| 1 | 7ba4935 (merge 88d913e + report) | [43639725952](https://github.com/mohamedshhahat1/wasla/actions/runs/43639725952): FAILURE — Storybook (drawer without a name), Chromium IJ-07, Firefox IJ-03, WebKit IJ-07; api-down did not run | [43639726001](https://github.com/mohamedshhahat1/wasla/actions/runs/43639726001): FAILURE — 8 / 8189 (an old-revision seed, a stub, people left behind) |
+| 2 | 63c57d7 | [43645987272](https://github.com/mohamedshhahat1/wasla/actions/runs/43645987272): FAILURE — Chromium JR-04 ar, Firefox BE1 suspended reload, WebKit IJ-08 (api-down ran JR-11 beside IJ-08) | [43645987305](https://github.com/mohamedshhahat1/wasla/actions/runs/43645987305): FAILURE — 5 / 8192 (six users left by test_e2e_inbox_states) |
+| 3 | 2fbc9ba | [43652731659](https://github.com/mohamedshhahat1/wasla/actions/runs/43652731659): FAILURE — Firefox JR-04 ar + IJ-02 en, WebKit JR-04 en | [43652731732](https://github.com/mohamedshhahat1/wasla/actions/runs/43652731732): SUCCESS |
+| 4 | 229814c | [43688877493](https://github.com/mohamedshhahat1/wasla/actions/runs/43688877493): FAILURE — Firefox JR-04 en phone (FEF-34's second path) | [43688877502](https://github.com/mohamedshhahat1/wasla/actions/runs/43688877502): SUCCESS |
+| 5 | 1c923fb | [43695920903](https://github.com/mohamedshhahat1/wasla/actions/runs/43695920903): FAILURE — Firefox BE1 suspended reload, Firefox J1 ar phone, WebKit IJ-13 en | [43695920869](https://github.com/mohamedshhahat1/wasla/actions/runs/43695920869): SUCCESS |
+| 6 | 4550675 | [43716094045](https://github.com/mohamedshhahat1/wasla/actions/runs/43716094045): FAILURE — WebKit IJ-13, IJ-06, IJ-04/05 | [43716094062](https://github.com/mohamedshhahat1/wasla/actions/runs/43716094062): SUCCESS |
+| 7 | e9b8d65 | [43722323737](https://github.com/mohamedshhahat1/wasla/actions/runs/43722323737): FAILURE — Chromium JR-10 only | [43722323639](https://github.com/mohamedshhahat1/wasla/actions/runs/43722323639): SUCCESS |
+| 8 | d571765 | [43735244892](https://github.com/mohamedshhahat1/wasla/actions/runs/43735244892): **SUCCESS, every job** | [43735244716](https://github.com/mohamedshhahat1/wasla/actions/runs/43735244716): **SUCCESS, every job** |
+
+Green run 43735244892 (frontend.yml, d571765), job by job: install, drift, checks (typecheck, lint, unit, i18n,
+build, audit), Storybook (axe per story, RTL keyboard): success. E2E:
+
+| Part | Result | Duration |
+|---|---|---|
+| Chromium, desktop and phone | 178 passed / 18 skipped | 15m |
+| Firefox, desktop and phone | 170 passed / 26 skipped | 17m45 |
+| WebKit, desktop and phone; then the API restart, JR-11 and IJ-08 alone | 173 passed / 26 skipped | 19m41 |
+| Visual roles and the 60 / 30 / 10 check | 62 passed | 4m35 |
+
+Green run 43735244716 (ci.yml, d571765): lint / format / types, tests and migrations, migration-built schema, alert
+rules, Docker build: success.
+
+## A2. Fixes after the push (no band, bound, retry count or journey weakened; nothing skipped)
+
+| Commit | What | Found by |
+|---|---|---|
+| a91e453 | fix(ui): the customer panel's drawer is named by its title | push 1, Storybook axe |
+| 5e530f1 | test(e2e): IJ-07's stale assignments and IJ-03's paging wait on facts | push 1 |
+| 8d25978 | test: an old-revision seed, a stub, people left behind | push 1, ci.yml |
+| 9a0b91d | test(e2e): api-down runs one journey at a time | push 2 |
+| 68ddfe7 | test: the e2e inbox-state test leaves no people behind | push 2, ci.yml |
+| 627f2bb, 1b098ec | fix(web): FEF-34 — the gate middleware is in place before the first reads (layout effect); a recheck cancels the still-running first reads before reading the gates again | pushes 3 and 4, JR-04 |
+| 8f4f00f | fix(web): FEF-35 — a mark-as-unread is not undone by the screen showing it | push 5, IJ-13 |
+| a87b5e7 | fix(web,ui): FEF-36 — time zone forms submit once the zones are in; the Combobox shows a value set from outside | push 5, J1 |
+| e8437c1, 60764cc | fix(web): FEF-37 — the first stream open after the inbox loaded is a gap; a gap and the polling fallback re-read the unread total | local sweep, push 6 |
+| 9a72ea2 | test(e2e): BE1 records only the reloaded page's requests | push 5 |
+| 8fb0ea7 | test(e2e): IJ-06 counts the requests sent, not presses; IJ-04 scans after the dialog is gone | push 6 |
+| c2b9a71, 7e37ebc | fix(web): FEF-38 — sign-in and sign-up leave navigation to PageGate; the e2e retry helper added at push 4 removed | push 7, JR-10 |
+
+Each app fix has a unit test whose mutant (the fix removed) fails. Before pushes 6–8 the whole e2e suite ran locally
+at CI's 3 workers (Chromium, Firefox, WebKit, then API restart / api-down alone). Local-only noise, not counted as
+results: WebKit and Playwright workers crashing on Windows (0xC0000409), login / workspace-create 429s at 5+ workers,
+and one IJ-02 ar phone miss in a loaded Chromium run (12 / 12 alone, then the full Chromium suite 178 / 178).
+
+## A3. Part C — the previews
+
+- **Account.** `wrangler whoami` (4.158.0, run from the notes folder): "Mohamedshhahat1@gmail.com's Account",
+  1cc898637894546669e72610c46e7d0e.
+- **Build.** `build-workers-linux.mjs --env preview` in E:\wasla-fe4-preview at d571765, with PUBLIC_APP_ORIGIN,
+  PUBLIC_CONSOLE_ORIGIN and PUBLIC_MARKETING_ORIGIN set to the three workers.dev origins.
+- **Which outputs changed.** Console and marketing were also built at b77730a (FE-3's deployed sources) in
+  E:\wasla-fe4-preview-base. Marketing at b77730a is 29 files / 570,342 B (= FE-3's deploy); at d571765 29 files /
+  572,550 B — the shared stylesheet and the four locale pages differ. Console's CSS and JS chunks differ. Web changed
+  with FE-4 itself. All three redeployed.
+- **Smoke.** `workers:smoke` green: every page 200, session routes GET 405 / same-origin POST 503 session_unavailable
+  (= FE-3). Every wrangler.jsonc unchanged; no secret set.
+
+| Worker | URL | Previous version (FE-3) | New version | Upload (gzip) |
+|---|---|---|---|---|
+| wasla-preview-web | https://wasla-preview-web.wasla-marketing.workers.dev | 0ef04cfb-8e99-4303-ba43-2b9e937972c7 | f3c3842b-779c-4bb6-afe6-8281512a8300 | 8070.36 KiB (1635.05 KiB) |
+| wasla-preview-console | https://wasla-preview-console.wasla-marketing.workers.dev | 07d1bba6-0f7b-4f8a-932b-06c94383b4c0 | d20591cf-d1a1-48a8-88e8-81aedf636c51 | 6235.23 KiB (1319.30 KiB) |
+| wasla-preview-marketing | https://wasla-preview-marketing.wasla-marketing.workers.dev | 0b732c17-1e18-4c8c-ab71-0dde38bb9855 | 6f2e2b78-3240-4f75-9381-27846bad0490 | 0.35 KiB (0.24 KiB) |
+
+Live: web /login and /, console /, marketing /en/ and /ar/ answer 200; the live session route answers a same-origin
+POST with 503 session_unavailable and a cross-origin one with 403 session_request_refused. The previews still have no
+API: the inbox is tried locally (frontend/README.md); FEF-26 unchanged.
+
+## A4. Findings updated
+
+| ID | Finding | Status |
+|---|---|---|
+| FEF-34 | FE-3's gate race: a revoked member sent to /workspaces/new — the 403 met by reads started before the gate middleware, and a recheck reusing the still-running first reads | CLOSED (627f2bb, 1b098ec) |
+| FEF-35 | an open conversation re-read a conversation another member had just marked unread | CLOSED (8f4f00f) |
+| FEF-36 | FE-2's time zone forms: a press before the zones answered failed silently; the Combobox stayed blank | CLOSED (a87b5e7) |
+| FEF-37 | a message between the list's first read and the stream's first open was lost; the gap re-read missed the unread total | CLOSED (e8437c1, 60764cc) |
+| FEF-38 | FE-2's sign-in / sign-up navigated twice; the late second navigation pulled the person back home | CLOSED (c2b9a71, 7e37ebc) |
+| FEF-29 .. FEF-33 | as in §27 | unchanged |
+
+## A5. Final Verdict
+
+**FE-4 MERGED AND PUSHED, CI GREEN**: frontend.yml 43735244892 and ci.yml 43735244716 for d571765 are green in every
+job. This addendum's own runs are recorded in E:\wasla-cleanup\CLEANUP_fe4_2026-11-15.md.
+
+PREVIEWS UPDATED: wasla-preview-web, wasla-preview-console and wasla-preview-marketing, all three redeployed.
+
+CLEANUP: see E:\wasla-cleanup\CLEANUP_fe4_2026-11-15.md.
