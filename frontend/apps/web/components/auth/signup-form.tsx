@@ -2,7 +2,6 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import NextLink from "next/link";
-import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
@@ -36,7 +35,6 @@ type Values = z.infer<typeof schema>;
 export function SignupForm() {
   const t = useTranslations("auth");
   const { session } = useSession();
-  const router = useRouter();
   const [error, setError] = useState<unknown>(null);
   const [checkInbox, setCheckInbox] = useState(false);
   const slugEdited = useRef(false);
@@ -62,8 +60,8 @@ export function SignupForm() {
         ...values,
         full_name: values.full_name.trim() || null,
       });
+      // Signed in: PageGate sends the person to /verify (FEF-38: one place decides).
       if (outcome.kind === "check_inbox") setCheckInbox(true);
-      else router.replace("/verify");
     } catch (caught) {
       setError(caught);
     }
