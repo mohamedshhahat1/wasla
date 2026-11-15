@@ -46,20 +46,21 @@ export function pollInterval(pollAfterSeconds: number | null | undefined): numbe
 }
 
 /**
- * Tracks the stream so the inbox can tell a reconnect (a possible gap, RT-03) from the first open.
- * A stream that opens again after having been open once is treated as a gap: the server replays
- * from lastEventId when it can and sends `resync` when it cannot; reading the open view's first
- * page again costs one request and closes the case where neither arrives.
+ * Tracks the stream so the inbox knows when an open may have left a gap (RT-03). A stream that
+ * opens again after a drop is one: the server replays from lastEventId when it can and sends
+ * `resync` when it cannot; reading the open view's first page again costs one request and closes
+ * the case where neither arrives. So is the first open the inbox sees after seeing it closed
+ * (FEF-37): the lists were read before it, and a message that arrived between that read and the
+ * open has no frame and nothing to replay from. A stream already open when the inbox mounts is
+ * not - its frames cover everything after the first read.
  */
 export class StreamWatch {
-  #wasOpen = false;
   #down = false;
 
   /** Returns true when this state ends a gap. */
   next(kind: StreamKind): boolean {
     if (kind === "open") {
-      const gap = this.#wasOpen && this.#down;
-      this.#wasOpen = true;
+      const gap = this.#down;
       this.#down = false;
       return gap;
     }
@@ -71,6 +72,10 @@ export class StreamWatch {
 /**
  * IL-07: whether the open conversation may be marked read now - the tab is visible, the newest
  * loaded message is in view, and it is newer than what the team has already seen.
+ *
+ * `alreadySeen` is the newest message this screen has already had in view, read sent or not
+ * (FEF-35): when someone marks the conversation unread, its count rises with no new message, and
+ * the screen that was showing it must not read it again - only a newer message does.
  */
 export function mayMarkRead(input: {
   visible: boolean;
@@ -78,10 +83,10 @@ export function mayMarkRead(input: {
   newestMessageId: string | null;
   readMessageId: string | null;
   unreadCount: number;
-  alreadySent: string | null;
+  alreadySeen: string | null;
 }): boolean {
   if (!input.visible || !input.newestInView || !input.newestMessageId) return false;
-  if (input.alreadySent === input.newestMessageId) return false;
+  if (input.alreadySeen === input.newestMessageId) return false;
   if (input.readMessageId === input.newestMessageId) return false;
   // Only a customer message nobody has seen moves the team's position; a reply never needs it.
   return input.unreadCount > 0;

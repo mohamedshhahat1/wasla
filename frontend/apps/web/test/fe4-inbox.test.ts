@@ -214,14 +214,28 @@ describe("IL-06 / IL-07: the live list and the counts", () => {
       newestMessageId: "m2",
       readMessageId: "m1",
       unreadCount: 1,
-      alreadySent: null,
+      alreadySeen: null,
     };
     expect(mayMarkRead(base)).toBe(true);
     expect(mayMarkRead({ ...base, visible: false })).toBe(false);
     expect(mayMarkRead({ ...base, newestInView: false })).toBe(false);
     expect(mayMarkRead({ ...base, unreadCount: 0 })).toBe(false);
-    expect(mayMarkRead({ ...base, alreadySent: "m2" })).toBe(false);
+    expect(mayMarkRead({ ...base, alreadySeen: "m2" })).toBe(false);
     expect(mayMarkRead({ ...base, readMessageId: "m2" })).toBe(false);
+  });
+  it("FEF-35: a mark-as-unread is not undone by the screen that had the message in view", () => {
+    // Seen m2 with nothing unread; someone marks it unread: the count rises, m2 is still newest.
+    const after = {
+      visible: true,
+      newestInView: true,
+      newestMessageId: "m2",
+      readMessageId: "m1",
+      unreadCount: 1,
+      alreadySeen: "m2",
+    };
+    expect(mayMarkRead(after)).toBe(false);
+    // A newer message in view is read as usual.
+    expect(mayMarkRead({ ...after, newestMessageId: "m3" })).toBe(true);
   });
   it("a reply assigns only an unassigned conversation; opening never does (M-V38)", () => {
     expect(replyAssigns({ assigned_to_id: null })).toBe(true);
@@ -678,13 +692,17 @@ describe("RT-01 .. RT-04: the stream's invalidation map", () => {
     expect(pollInterval(60)).toBe(60_000);
     expect(pollInterval(null)).toBe(30_000);
   });
-  it("a reopened stream after being open is a gap; the first open is not", () => {
+  it("a reopened stream is a gap; so is the first open seen after it was closed (FEF-37)", () => {
     const watch = new StreamWatch();
     expect(watch.next("connecting")).toBe(false);
+    expect(watch.next("open")).toBe(true);
     expect(watch.next("open")).toBe(false);
     expect(watch.next("waiting")).toBe(false);
     expect(watch.next("open")).toBe(true);
     expect(watch.next("open")).toBe(false);
+    // Already open when the inbox mounts: its frames cover everything after the first read.
+    const mounted = new StreamWatch();
+    expect(mounted.next("open")).toBe(false);
   });
 });
 
