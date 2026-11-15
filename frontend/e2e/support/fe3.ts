@@ -189,17 +189,3 @@ declare global {
     __waslaFe3Flags?: { clockOffsetMs?: number; bypassStreamLock?: boolean };
   }
 }
-
-/**
- * A goto just after sign-in. Firefox aborts one that meets the app's own navigation then (the
- * log-in form's replace and its server data, NS_BINDING_ABORTED - frontend.yml 43652731659,
- * 43688877493): that error alone is tried once more; any other error, or a second abort, fails.
- */
-export async function gotoAfterSignIn(page: Page, url: string): Promise<void> {
-  try {
-    await page.goto(url);
-  } catch (error) {
-    if (!/NS_BINDING_ABORTED|interrupted by another navigation/.test(String(error))) throw error;
-    await page.goto(url);
-  }
-}

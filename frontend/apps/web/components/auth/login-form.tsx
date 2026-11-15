@@ -2,15 +2,14 @@
 
 import { zodResolver } from "@hookform/resolvers/zod";
 import NextLink from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 
-import { ApiError, unwrap } from "@wasla/api-client";
+import { ApiError } from "@wasla/api-client";
 import { Button, linkClasses } from "@wasla/ui";
 
-import { afterSignIn } from "../../lib/routing";
 import { z } from "../../lib/zod";
 import { AuthCard } from "../page-gate";
 import { useSession } from "../session-provider";
@@ -28,7 +27,6 @@ type Values = z.infer<typeof schema>;
 export function LoginForm() {
   const t = useTranslations("auth");
   const { session } = useSession();
-  const router = useRouter();
   const search = useSearchParams();
   const [error, setError] = useState<unknown>(null);
   const form = useForm<Values>({
@@ -41,14 +39,11 @@ export function LoginForm() {
   const onSubmit = form.handleSubmit(async (values) => {
     setError(null);
     try {
+      // Signed in: PageGate sends the person on (afterSignIn, with `next`) as soon as the session
+      // knows the profile - the one place that decides (FEF-38). A second replace here, made when
+      // this form's own /auth/me answered, could land after the person had already gone on and
+      // pull them back to home.
       await session.login(values.email, values.password, search.get("workspace"));
-      const me = await unwrap(session.api.GET("/api/v1/auth/me"));
-      router.replace(
-        afterSignIn(
-          { verified: Boolean(me.email_verified_at), workspaceCount: me.workspaces?.length ?? 0 },
-          search.get("next"),
-        ),
-      );
     } catch (caught) {
       setError(caught);
     }
