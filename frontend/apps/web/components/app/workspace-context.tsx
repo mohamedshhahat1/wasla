@@ -6,6 +6,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -20,6 +21,7 @@ import {
   decideGates,
   GATE_QUERY_POLICY,
   gateSignalOf,
+  gateSignalOfError,
   type AllowanceFacts,
   type BannerKey,
   type GateDecision,
@@ -155,7 +157,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // workspace for the switcher; with none, re-reading it would route them away (FE-2's AU-03)
   // before they are told why - the full state says it and offers "Create a workspace".
   const revokedRef = useRef(false);
-  revokedRef.current = revokedSignal;
+  // Never back to false while mounted (a switch remounts): a render that began before the signal
+  // must not undo it.
+  revokedRef.current = revokedRef.current || revokedSignal;
   const otherWorkspaces = (profile?.workspaces ?? []).filter(
     (item) => item.id !== workspaceId,
   ).length;
@@ -176,6 +180,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         queryClient.invalidateQueries({ queryKey: gatesKey, exact: true }),
         queryClient.invalidateQueries({ queryKey: entitlementsKey, exact: true }),
       ]);
+      // FEF-34: those answers decide too - a first read may have met the revocation before the
+      // middleware below could see it, and re-reading the profile then routes the person away.
+      const revoked = [gatesKey, entitlementsKey].some(
+        (key) => gateSignalOfError(queryClient.getQueryState(key)?.error) === "revoked",
+      );
+      if (revoked) {
+        revokedRef.current = true;
+        setRevokedSignal(true);
+      }
       await reloadUnlessStranded();
     } finally {
       rechecking.current = false;
@@ -188,7 +201,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [gates, summary?.status, gatesQuery.dataUpdatedAt]);
 
   // GT-01: one place turns the codes on any call of the session's client into gate signals.
-  useEffect(() => {
+  // A layout effect (FEF-34): registered before the passive effects that send the first reads -
+  // openapi-fetch takes its middleware list when a request starts.
+  useLayoutEffect(() => {
     const middleware: Middleware = {
       async onResponse({ response }) {
         if (response.ok || response.status < 400) return response;

@@ -190,6 +190,16 @@ export function gateSignalOf(code: string | null): GateSignal | null {
 }
 
 /**
+ * FEF-34: the gate signal a read's own error carries (an ApiError's code). A read sent before the
+ * client's middleware was registered answers without passing through it, so a recheck asks the
+ * answers themselves before it re-reads the profile.
+ */
+export function gateSignalOfError(error: unknown): GateSignal | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  return gateSignalOf(typeof code === "string" ? code : null);
+}
+
+/**
  * GT-02: how /workspace/gates and /billing/entitlements are read - once on entering a workspace,
  * then only when a gate signal invalidates them. Never on a mount, a focus or a reconnect, never
  * polled, so a later screen that also observes them adds no request.
