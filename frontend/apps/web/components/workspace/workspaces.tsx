@@ -13,7 +13,7 @@ import { Button, linkClasses } from "@wasla/ui";
 import { z } from "../../lib/zod";
 import { fieldErrorText, TextField } from "../auth/fields";
 import { FormAlert } from "../auth/form-alert";
-import { suggestSlug, TimezoneField } from "../auth/timezone-field";
+import { suggestSlug, TimezoneField, timezonesSettled, useTimezones } from "../auth/timezone-field";
 import { AuthCard } from "../page-gate";
 import { useSession } from "../session-provider";
 
@@ -37,6 +37,7 @@ export function CreateWorkspaceForm() {
   });
   const { errors, isSubmitting } = form.formState;
   const nameField = form.register("name");
+  const zones = useTimezones();
 
   const onSubmit = form.handleSubmit(async (values) => {
     setError(null);
@@ -97,7 +98,7 @@ export function CreateWorkspaceForm() {
           )}
         />
         <FormAlert error={error} />
-        <Button type="submit" disabled={isSubmitting}>
+        <Button type="submit" disabled={isSubmitting || !timezonesSettled(zones)}>
           {t("workspace.createSubmit")}
         </Button>
       </form>

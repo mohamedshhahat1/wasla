@@ -49,6 +49,14 @@ export function Combobox({
   const selected = options.find((option) => option.value === value) ?? null;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(selected?.label ?? "");
+  // A value set from outside - a default that arrives after the first render, a reset - shows in
+  // the box; while the person is typing (the list open) their text stays until they choose.
+  const selectedLabel = selected?.label ?? null;
+  const [labelShown, setLabelShown] = useState(selectedLabel);
+  if (selectedLabel !== labelShown) {
+    setLabelShown(selectedLabel);
+    if (!open) setQuery(selectedLabel ?? "");
+  }
   const [active, setActive] = useState(0);
 
   const matches = useMemo(() => {

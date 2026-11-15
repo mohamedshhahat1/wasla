@@ -150,6 +150,41 @@ function TurkishCombobox() {
   );
 }
 
+describe("Combobox shows a value set from outside (FEF-36)", () => {
+  const options = [
+    { value: "Africa/Cairo", label: "Cairo (UTC+02:00)" },
+    { value: "Europe/Istanbul", label: "Istanbul (UTC+03:00)" },
+  ];
+  const box = (value: string | null, list = options) => (
+    <UiProvider dir="ltr" locale="en">
+      <span id="zone">Time zone</span>
+      <Combobox
+        aria-labelledby="zone"
+        options={list}
+        value={value}
+        onValueChange={() => {}}
+        emptyText="No match"
+      />
+    </UiProvider>
+  );
+  it("a default chosen after the first render appears in the box", () => {
+    const { rerender } = render(box(null));
+    const input = screen.getByRole("combobox", { name: "Time zone" });
+    expect(input).toHaveValue("");
+    rerender(box("Africa/Cairo"));
+    expect(input).toHaveValue("Cairo (UTC+02:00)");
+    rerender(box("Europe/Istanbul"));
+    expect(input).toHaveValue("Istanbul (UTC+03:00)");
+  });
+  it("a value whose options arrive later appears once they do", () => {
+    const { rerender } = render(box("Africa/Cairo", []));
+    const input = screen.getByRole("combobox", { name: "Time zone" });
+    expect(input).toHaveValue("");
+    rerender(box("Africa/Cairo"));
+    expect(input).toHaveValue("Cairo (UTC+02:00)");
+  });
+});
+
 describe("Combobox folds case with the UI locale (plan section 20)", () => {
   it("in Turkish, 'i' finds İstanbul and İzmir but not Isparta (dotless I)", async () => {
     const user = userEvent.setup();

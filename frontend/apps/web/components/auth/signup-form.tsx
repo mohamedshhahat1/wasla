@@ -15,7 +15,7 @@ import { useSession } from "../session-provider";
 import { fieldErrorText, PasswordField, TextField } from "./fields";
 import { FormAlert, FormNote } from "./form-alert";
 import { GoogleButton } from "./google-button";
-import { suggestSlug, TimezoneField } from "./timezone-field";
+import { suggestSlug, TimezoneField, timezonesSettled, useTimezones } from "./timezone-field";
 
 /** Presence and shape only; the password policy and the slug rules are the API's (AU-01). */
 const schema = z.object({
@@ -52,6 +52,7 @@ export function SignupForm() {
     },
   });
   const { errors, isSubmitting } = form.formState;
+  const zones = useTimezones();
   const apiField = (field: string) => fieldErrorText(error, field, t);
 
   const onSubmit = form.handleSubmit(async (values) => {
@@ -149,7 +150,7 @@ export function SignupForm() {
           )}
         />
         <FormAlert error={error} />
-        <Button type="submit" disabled={isSubmitting}>
+        <Button type="submit" disabled={isSubmitting || !timezonesSettled(zones)}>
           {t("signup.submit")}
         </Button>
       </form>

@@ -14,6 +14,7 @@ import { messagesFor } from "@wasla/i18n";
 
 import enErrors from "../../../packages/i18n/messages/en/errors.json" with { type: "json" };
 import { FormAlert } from "../components/auth/form-alert";
+import { timezonesSettled } from "../components/auth/timezone-field";
 import {
   useParamsFromAddress,
   useTokenFromAddress,
@@ -114,5 +115,13 @@ describe("every error code is shown by code, with the request id (AU-01, AU-04)"
     const alert = screen.getByRole("alert");
     expect(alert.getAttribute("data-error-code")).toBe("unexpected_response");
     expect(alert.textContent).not.toContain("TypeError");
+  });
+});
+
+describe("a form with the time zone submits once the list has answered (FEF-36)", () => {
+  it("not while loading; after an answer or a failure", () => {
+    expect(timezonesSettled({ data: undefined, isError: false })).toBe(false);
+    expect(timezonesSettled({ data: { timezones: [], suggested: [] }, isError: false })).toBe(true);
+    expect(timezonesSettled({ data: undefined, isError: true })).toBe(true);
   });
 });

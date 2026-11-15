@@ -18,6 +18,26 @@ function deviceZone(): string | null {
   }
 }
 
+/** GET /timezones, shared by the field and the form that holds it (one request). */
+export function useTimezones() {
+  const { session } = useSession();
+  return useQuery({
+    queryKey: ["public", "timezones"],
+    queryFn: () => unwrap(session.api.GET("/api/v1/timezones")),
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * FEF-36: a form with this field submits once the list has answered - its default zone is set
+ * then. Pressed before, the press failed on the empty zone and the default, arriving a moment
+ * later, cleared that error: the button seemed to do nothing. A failed list lets it submit (the
+ * field says the list is unavailable).
+ */
+export function timezonesSettled(zones: { data?: unknown; isError: boolean }): boolean {
+  return zones.data !== undefined || zones.isError;
+}
+
 /** GET /timezones as a searchable list; the value is an IANA id. */
 export function TimezoneField({
   value,
@@ -29,12 +49,7 @@ export function TimezoneField({
   error?: string | undefined;
 }) {
   const t = useTranslations("auth");
-  const { session } = useSession();
-  const zones = useQuery({
-    queryKey: ["public", "timezones"],
-    queryFn: () => unwrap(session.api.GET("/api/v1/timezones")),
-    staleTime: Infinity,
-  });
+  const zones = useTimezones();
   const list = useMemo(() => zones.data?.timezones ?? [], [zones.data]);
 
   useEffect(() => {
