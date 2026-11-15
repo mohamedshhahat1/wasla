@@ -46,20 +46,21 @@ export function pollInterval(pollAfterSeconds: number | null | undefined): numbe
 }
 
 /**
- * Tracks the stream so the inbox can tell a reconnect (a possible gap, RT-03) from the first open.
- * A stream that opens again after having been open once is treated as a gap: the server replays
- * from lastEventId when it can and sends `resync` when it cannot; reading the open view's first
- * page again costs one request and closes the case where neither arrives.
+ * Tracks the stream so the inbox knows when an open may have left a gap (RT-03). A stream that
+ * opens again after a drop is one: the server replays from lastEventId when it can and sends
+ * `resync` when it cannot; reading the open view's first page again costs one request and closes
+ * the case where neither arrives. So is the first open the inbox sees after seeing it closed
+ * (FEF-37): the lists were read before it, and a message that arrived between that read and the
+ * open has no frame and nothing to replay from. A stream already open when the inbox mounts is
+ * not - its frames cover everything after the first read.
  */
 export class StreamWatch {
-  #wasOpen = false;
   #down = false;
 
   /** Returns true when this state ends a gap. */
   next(kind: StreamKind): boolean {
     if (kind === "open") {
-      const gap = this.#wasOpen && this.#down;
-      this.#wasOpen = true;
+      const gap = this.#down;
       this.#down = false;
       return gap;
     }

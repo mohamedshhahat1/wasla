@@ -692,13 +692,17 @@ describe("RT-01 .. RT-04: the stream's invalidation map", () => {
     expect(pollInterval(60)).toBe(60_000);
     expect(pollInterval(null)).toBe(30_000);
   });
-  it("a reopened stream after being open is a gap; the first open is not", () => {
+  it("a reopened stream is a gap; so is the first open seen after it was closed (FEF-37)", () => {
     const watch = new StreamWatch();
     expect(watch.next("connecting")).toBe(false);
+    expect(watch.next("open")).toBe(true);
     expect(watch.next("open")).toBe(false);
     expect(watch.next("waiting")).toBe(false);
     expect(watch.next("open")).toBe(true);
     expect(watch.next("open")).toBe(false);
+    // Already open when the inbox mounts: its frames cover everything after the first read.
+    const mounted = new StreamWatch();
+    expect(mounted.next("open")).toBe(false);
   });
 });
 

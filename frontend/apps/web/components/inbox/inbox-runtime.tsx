@@ -142,7 +142,8 @@ export function InboxRuntimeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => registerInboxHooks({ catchUp: (id) => void catchUp(id), gap }), [catchUp, gap]);
 
-  // A reconnect is treated as a possible gap (RT-03).
+  // A reconnect, or the first open after the inbox saw the stream closed, is a possible gap
+  // (RT-03, FEF-37).
   const watch = useRef(new StreamWatch());
   const liveKind = useRef(liveState.kind);
   const down = useRef<number | null>(null);
