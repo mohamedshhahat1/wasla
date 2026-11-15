@@ -42,8 +42,12 @@ async function hasRefreshCookie(context: BrowserContext): Promise<boolean> {
 }
 
 async function reloadIntoSuspended(page: Page, context: BrowserContext): Promise<string[]> {
+  // Only the reloaded document's requests: the page before it may still be opening its stream
+  // (frontend.yml 43695920903 recorded that page's stream GET, its ticket asked before). Its
+  // own refresh comes after the commit, and is required below - a late recording fails, never
+  // passes.
+  await page.reload({ waitUntil: "commit" });
   const seen = recordRequests(context);
-  await page.reload();
   const state = page.locator('[data-session="workspace-suspended"]');
   await expect(state).toBeVisible({ timeout: SUSPEND_BOUND_MS });
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
