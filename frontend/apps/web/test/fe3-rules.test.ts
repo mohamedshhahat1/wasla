@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 
-import { EVENT_TYPES, queryKey } from "@wasla/api-client";
+import { ApiError, EVENT_TYPES, queryKey } from "@wasla/api-client";
 
 import {
   canChooseConnections,
@@ -28,6 +28,7 @@ import {
 import {
   allowanceExhausted,
   gateSignalOf,
+  gateSignalOfError,
   BANNER_ORDER,
   decideGates,
   GATE_QUERY_POLICY,
@@ -435,6 +436,18 @@ describe("GT-01: an error code on any call as a gate signal (M-Z12)", () => {
     }
     for (const code of ["permission_denied", "not_found", "conflict", null]) {
       expect(gateSignalOf(code)).toBeNull();
+    }
+  });
+
+  it("FEF-34: a read's own error carries the same signal", () => {
+    const revoked = new ApiError({ status: 403, code: "membership_revoked" });
+    expect(gateSignalOfError(revoked)).toBe("revoked");
+    expect(gateSignalOfError(new ApiError({ status: 403, code: "workspace_suspended" }))).toBe(
+      "suspended",
+    );
+    expect(gateSignalOfError(new ApiError({ status: 403, code: "permission_denied" }))).toBeNull();
+    for (const other of [null, undefined, new Error("membership_revoked"), { code: 403 }]) {
+      expect(gateSignalOfError(other)).toBeNull();
     }
   });
 });

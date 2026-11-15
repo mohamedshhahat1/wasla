@@ -69,7 +69,14 @@ async function signIn(page: Page, context: BrowserContext, locale: Locale, email
 }
 
 async function openInbox(page: Page) {
-  await page.goto(`${WEB}/inbox`);
+  try {
+    await page.goto(`${WEB}/inbox`);
+  } catch (error) {
+    // Firefox aborts a goto that meets the app's own navigation just after sign-in
+    // (NS_BINDING_ABORTED, frontend.yml 43652731659): that error alone is tried once more.
+    if (!/NS_BINDING_ABORTED|interrupted by another navigation/.test(String(error))) throw error;
+    await page.goto(`${WEB}/inbox`);
+  }
   await expect(page.locator('[data-page="inbox"]')).toBeVisible({ timeout: 30_000 });
 }
 
