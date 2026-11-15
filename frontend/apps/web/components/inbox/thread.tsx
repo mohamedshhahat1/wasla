@@ -192,7 +192,7 @@ export function Thread({
 
   // IL-07: mark read once the newest message is in view in a visible tab.
   const newestServer = loaded.at(-1)?.id ?? null;
-  const sentFor = useRef<string | null>(null);
+  const seenNewest = useRef<string | null>(null);
   const markRead = useMutation({
     mutationFn: (messageId: string) =>
       unwrap(
@@ -219,14 +219,19 @@ export function Thread({
         newestMessageId: newestServer,
         readMessageId: conversation.read?.message_id ?? null,
         unreadCount: conversation.unread_count ?? 0,
-        alreadySent: sentFor.current,
+        alreadySeen: seenNewest.current,
       })
     ) {
+      // In view with nothing to send (already read, or a reply): this screen has seen it, so a
+      // later "Mark as unread" by anyone is not undone here (FEF-35).
+      if (visible && atBottom && newestServer && document.visibilityState === "visible") {
+        seenNewest.current = newestServer;
+      }
       return;
     }
     const timer = setTimeout(() => {
       if (!newestServer || document.visibilityState !== "visible") return;
-      sentFor.current = newestServer;
+      seenNewest.current = newestServer;
       markRead.mutate(newestServer);
     }, READ_DEBOUNCE_MS);
     return () => clearTimeout(timer);

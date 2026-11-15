@@ -71,6 +71,10 @@ export class StreamWatch {
 /**
  * IL-07: whether the open conversation may be marked read now - the tab is visible, the newest
  * loaded message is in view, and it is newer than what the team has already seen.
+ *
+ * `alreadySeen` is the newest message this screen has already had in view, read sent or not
+ * (FEF-35): when someone marks the conversation unread, its count rises with no new message, and
+ * the screen that was showing it must not read it again - only a newer message does.
  */
 export function mayMarkRead(input: {
   visible: boolean;
@@ -78,10 +82,10 @@ export function mayMarkRead(input: {
   newestMessageId: string | null;
   readMessageId: string | null;
   unreadCount: number;
-  alreadySent: string | null;
+  alreadySeen: string | null;
 }): boolean {
   if (!input.visible || !input.newestInView || !input.newestMessageId) return false;
-  if (input.alreadySent === input.newestMessageId) return false;
+  if (input.alreadySeen === input.newestMessageId) return false;
   if (input.readMessageId === input.newestMessageId) return false;
   // Only a customer message nobody has seen moves the team's position; a reply never needs it.
   return input.unreadCount > 0;

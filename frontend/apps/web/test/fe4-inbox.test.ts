@@ -214,14 +214,28 @@ describe("IL-06 / IL-07: the live list and the counts", () => {
       newestMessageId: "m2",
       readMessageId: "m1",
       unreadCount: 1,
-      alreadySent: null,
+      alreadySeen: null,
     };
     expect(mayMarkRead(base)).toBe(true);
     expect(mayMarkRead({ ...base, visible: false })).toBe(false);
     expect(mayMarkRead({ ...base, newestInView: false })).toBe(false);
     expect(mayMarkRead({ ...base, unreadCount: 0 })).toBe(false);
-    expect(mayMarkRead({ ...base, alreadySent: "m2" })).toBe(false);
+    expect(mayMarkRead({ ...base, alreadySeen: "m2" })).toBe(false);
     expect(mayMarkRead({ ...base, readMessageId: "m2" })).toBe(false);
+  });
+  it("FEF-35: a mark-as-unread is not undone by the screen that had the message in view", () => {
+    // Seen m2 with nothing unread; someone marks it unread: the count rises, m2 is still newest.
+    const after = {
+      visible: true,
+      newestInView: true,
+      newestMessageId: "m2",
+      readMessageId: "m1",
+      unreadCount: 1,
+      alreadySeen: "m2",
+    };
+    expect(mayMarkRead(after)).toBe(false);
+    // A newer message in view is read as usual.
+    expect(mayMarkRead({ ...after, newestMessageId: "m3" })).toBe(true);
   });
   it("a reply assigns only an unassigned conversation; opening never does (M-V38)", () => {
     expect(replyAssigns({ assigned_to_id: null })).toBe(true);

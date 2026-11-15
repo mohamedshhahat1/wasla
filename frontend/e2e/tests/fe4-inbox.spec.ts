@@ -574,6 +574,8 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await expect(page).toHaveURL(/unread=1/);
       await expect(row(page, conversation.id)).toBeVisible();
       expect(await kept(page)).not.toMatch(/three|Nour/);
+      // FEF-35: the member's screen, still showing it, did not read it again.
+      expect(reads).toHaveLength(1);
       await memberContext.close();
     });
   });
