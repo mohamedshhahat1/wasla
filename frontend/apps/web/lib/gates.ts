@@ -7,6 +7,8 @@
  * allowance from GET /billing/entitlements, the codes seen on any call and the stream's reasons.
  * Never an amount: nothing here carries one.
  */
+import type { QueryClient, QueryKey } from "@tanstack/react-query";
+
 import type { TenantRole } from "./navigation";
 
 export type SubscriptionStatus =
@@ -197,6 +199,25 @@ export function gateSignalOf(code: string | null): GateSignal | null {
 export function gateSignalOfError(error: unknown): GateSignal | null {
   const code = (error as { code?: unknown } | null)?.code;
   return gateSignalOf(typeof code === "string" ? code : null);
+}
+
+/**
+ * FEF-34: a recheck reads the gates afresh and returns what their answers say. A read still
+ * running was sent before the signal (a first load is shared, not restarted, by an invalidation):
+ * it is cancelled first, so the answers asked are the ones sent after it.
+ */
+export async function rereadGates(
+  queryClient: QueryClient,
+  keys: readonly QueryKey[],
+): Promise<GateSignal | null> {
+  await Promise.all(keys.map((queryKey) => queryClient.cancelQueries({ queryKey, exact: true })));
+  await Promise.all(
+    keys.map((queryKey) => queryClient.invalidateQueries({ queryKey, exact: true })),
+  );
+  const signals = keys.map((queryKey) =>
+    gateSignalOfError(queryClient.getQueryState(queryKey)?.error),
+  );
+  return signals.includes("revoked") ? "revoked" : (signals.find(Boolean) ?? null);
 }
 
 /**

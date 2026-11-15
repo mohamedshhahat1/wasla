@@ -26,6 +26,7 @@ import {
   connectNumber,
   freshNumber,
   gateState,
+  gotoAfterSignIn,
   memberOf,
   recordRequests,
   restore,
@@ -253,7 +254,7 @@ for (const locale of ["en", "ar"] as Locale[]) {
       const strangerContext = await actorContext(browser);
       const strangerPage = await strangerContext.newPage();
       await signIn(strangerPage, strangerContext, locale, stranger.email);
-      await strangerPage.goto(`${WEB}/channels/${connectionId}`);
+      await gotoAfterSignIn(strangerPage, `${WEB}/channels/${connectionId}`);
       await expect(strangerPage.locator('[data-page="connection-not-found"]')).toBeVisible();
       const theirs = await strangerPage.locator("main").innerText();
       await strangerPage.goto(`${WEB}/channels/00000000-0000-4000-8000-000000000000`);
