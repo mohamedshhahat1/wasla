@@ -65,6 +65,7 @@ import {
   FRAME_HANDLERS,
   handleFrame,
   HOME_CONVERSATIONS,
+  refreshAfterGap,
   registerInboxHooks,
   setCoalescer,
 } from "../lib/stream-handlers";
@@ -558,6 +559,37 @@ describe("CP-02: one Idempotency-Key per bubble", () => {
     expect(isRetryable(422, "recipient_opted_out")).toBe(false);
     expect(isRetryable(422, "reply_window_closed")).toBe(false);
     expect(isRetryable(409, "conflict")).toBe(false);
+  });
+});
+
+describe("RT-03: a gap reads everything a frame would have moved (FEF-37)", () => {
+  it("the lists' first pages, the unread total, the open conversation, its newest page", () => {
+    const queryClient = new QueryClient();
+    const gapScope = { workspaceId: "w", sessionGeneration: 1 };
+    const listKey = [...inboxPrefix(gapScope), "open"];
+    queryClient.setQueryData(listKey, {
+      pages: [{ items: [] }, { items: [] }],
+      pageParams: [null, "c"],
+    });
+    queryClient.setQueryData(unreadSummaryKey(gapScope), { unread_messages: 0 });
+    queryClient.setQueryData(conversationKey(gapScope, ID), { id: ID });
+    queryClient.setQueryData(messagesKey(gapScope, ID), {
+      pages: [{ items: [] }, { items: [] }],
+      pageParams: [null, "m"],
+    });
+    queryClient.setQueryData(conversationKey(gapScope, "other"), { id: "other" });
+    refreshAfterGap(queryClient, gapScope, ID);
+    const invalidated = (key: readonly unknown[]) =>
+      queryClient.getQueryState(key)?.isInvalidated ?? false;
+    expect(invalidated(listKey)).toBe(true);
+    expect(invalidated(unreadSummaryKey(gapScope))).toBe(true);
+    expect(invalidated(conversationKey(gapScope, ID))).toBe(true);
+    expect(invalidated(messagesKey(gapScope, ID))).toBe(true);
+    expect(invalidated(conversationKey(gapScope, "other"))).toBe(false);
+    expect((queryClient.getQueryData(listKey) as { pages: unknown[] }).pages).toHaveLength(1);
+    expect(
+      (queryClient.getQueryData(messagesKey(gapScope, ID)) as { pages: unknown[] }).pages,
+    ).toHaveLength(1);
   });
 });
 

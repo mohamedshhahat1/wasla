@@ -139,6 +139,35 @@ export function refreshInboxLists(queryClient: QueryClient, scope: QueryScope): 
   void queryClient.invalidateQueries({ queryKey: prefix });
 }
 
+/**
+ * RT-03: after a gap (a reconnect, or the first open after the inbox saw the stream closed -
+ * FEF-37) everything a frame would have moved is read again from the top: the lists' first pages,
+ * the unread total (FEF-37: the nav count and "Unread only" read it), the open conversation and
+ * its newest page, and the lead panel.
+ */
+export function refreshAfterGap(
+  queryClient: QueryClient,
+  scope: QueryScope,
+  openConversationId: string | null,
+): void {
+  refreshInboxLists(queryClient, scope);
+  void queryClient.invalidateQueries({ queryKey: unreadSummaryKey(scope) });
+  if (openConversationId) {
+    void queryClient.invalidateQueries({ queryKey: conversationKey(scope, openConversationId) });
+    queryClient.setQueryData<InfiniteData<unknown, unknown>>(
+      messagesKey(scope, openConversationId),
+      (data) =>
+        data && data.pages.length > 1
+          ? { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) }
+          : data,
+    );
+    void queryClient.invalidateQueries({ queryKey: messagesKey(scope, openConversationId) });
+  }
+  void queryClient.invalidateQueries({
+    queryKey: [scope.workspaceId, scope.sessionGeneration, LEAD],
+  });
+}
+
 function invalidateLists({ queryClient, scope }: FrameContext): void {
   coalescer.add(scopeKey(scope, "inbox"), () => refreshInboxLists(queryClient, scope));
 }

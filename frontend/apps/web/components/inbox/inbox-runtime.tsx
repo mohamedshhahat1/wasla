@@ -19,11 +19,11 @@ import {
 
 import { unwrap, type components } from "@wasla/api-client";
 
-import { conversationKey, LEAD, messagesKey } from "../../lib/inbox/keys";
+import { messagesKey, unreadSummaryKey } from "../../lib/inbox/keys";
 import { downSince, pollInterval, shouldPoll, StreamWatch } from "../../lib/inbox/live";
 import { countingUrls, Gate, MediaRegistry, type CountingUrls } from "../../lib/inbox/media";
 import { SendQueue } from "../../lib/inbox/send-queue";
-import { refreshInboxLists, registerInboxHooks } from "../../lib/stream-handlers";
+import { refreshAfterGap, refreshInboxLists, registerInboxHooks } from "../../lib/stream-handlers";
 import { appNow, hooksOn } from "../../lib/test-hooks";
 import { useWorkspace } from "../app/workspace-context";
 import { useSession } from "../session-provider";
@@ -119,24 +119,7 @@ export function InboxRuntimeProvider({ children }: { children: ReactNode }) {
 
   // RT-03: refetch from the top - the lists' first pages, the open conversation, its newest page.
   const gap = useMemo(
-    () => () => {
-      refreshInboxLists(queryClient, scope);
-      const open = openRef.current;
-      if (open) {
-        void queryClient.invalidateQueries({ queryKey: conversationKey(scope, open) });
-        queryClient.setQueryData<InfiniteData<MessagePage, string | null>>(
-          messagesKey(scope, open),
-          (data) =>
-            data && data.pages.length > 1
-              ? { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) }
-              : data,
-        );
-        void queryClient.invalidateQueries({ queryKey: messagesKey(scope, open) });
-      }
-      void queryClient.invalidateQueries({
-        queryKey: [scope.workspaceId, scope.sessionGeneration, LEAD],
-      });
-    },
+    () => () => refreshAfterGap(queryClient, scope, openRef.current),
     [queryClient, scope],
   );
 
@@ -164,6 +147,8 @@ export function InboxRuntimeProvider({ children }: { children: ReactNode }) {
         shouldPoll({ stream: liveKind.current, since, now: appNow(), visible: visible() })
       ) {
         refreshInboxLists(queryClient, scope);
+        // The unread total moves with the lists (FEF-37): no frame updates it while down.
+        void queryClient.invalidateQueries({ queryKey: unreadSummaryKey(scope) });
         const open = openRef.current;
         if (open) void catchUp(open).catch(() => undefined);
       }
