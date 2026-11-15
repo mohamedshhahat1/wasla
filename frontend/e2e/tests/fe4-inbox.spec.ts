@@ -254,6 +254,9 @@ for (const locale of ["en", "ar"] as Locale[]) {
       await textBubble.locator("[data-inert-link]").click();
       await expect(page.locator("[data-link-target]")).toHaveText("https://example.test/catalogue");
       await page.keyboard.press("Escape");
+      // Escape closes it - and it is gone before the scan below: a scan while it fades out
+      // measured its buttons at a few percent opacity (WebKit, frontend.yml 43716094045).
+      await expect(page.getByRole("dialog")).toHaveCount(0);
       for (const state of ["pending", "failed", "unavailable"]) {
         await expect(page.locator(`[data-media-state="${state}"]`).first()).toBeVisible();
       }
@@ -310,10 +313,19 @@ for (const locale of ["en", "ar"] as Locale[]) {
       );
       await page.locator("[data-composer-field]").fill("We will call you at noon.");
       await page.locator("[data-send]").click();
-      for (let attempt = 0; attempt < 10; attempt += 1) {
+      // Ten attempts fail, the eleventh goes through. The proof counts the requests the page made,
+      // not the presses: a press that lands while the bubble moves (the server's copy arriving
+      // over the stream) does nothing, and the person presses again (frontend.yml 43716094045).
+      for (let presses = 0; keys.length < 11; presses += 1) {
+        expect(presses, "presses for eleven attempts").toBeLessThan(20);
+        const sent = keys.length;
         const retry = page.locator("[data-retry]").first();
         await expect(retry).toBeVisible({ timeout: 20_000 });
         await retry.click();
+        await expect
+          .poll(() => keys.length, { timeout: 5_000 })
+          .toBeGreaterThan(sent)
+          .catch(() => undefined);
       }
       await expect(
         page.locator('[data-bubble="out"]').filter({ hasText: "We will call you at noon." }),
