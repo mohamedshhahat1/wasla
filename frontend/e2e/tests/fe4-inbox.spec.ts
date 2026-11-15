@@ -10,7 +10,7 @@ import type { Locale } from "@wasla/i18n";
 
 import { API_ORIGIN } from "../support/env";
 import { api, label, logInThroughTheApp, useAddress, useLocale, WEB } from "../support/fe2";
-import { gotoAfterSignIn, login, memberOf, recordRequests, streamOf } from "../support/fe3";
+import { login, memberOf, recordRequests, streamOf } from "../support/fe3";
 import {
   ARRIVAL_BOUND_MS,
   connectedOwner,
@@ -69,7 +69,7 @@ async function signIn(page: Page, context: BrowserContext, locale: Locale, email
 }
 
 async function openInbox(page: Page) {
-  await gotoAfterSignIn(page, `${WEB}/inbox`);
+  await page.goto(`${WEB}/inbox`);
   await expect(page.locator('[data-page="inbox"]')).toBeVisible({ timeout: 30_000 });
 }
 
