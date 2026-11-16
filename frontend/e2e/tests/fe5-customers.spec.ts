@@ -438,8 +438,11 @@ for (const locale of ["en", "ar"] as const) {
     await page.goto(`${WEB}/inbox/${conversation.id}`);
     const panel = page.locator("[data-panel-contact]");
     await expect(page.locator('[data-inbox-pane="conversation"]')).toBeVisible({ timeout: BOUND });
-    // From 1280 px the panel starts shown; below that it is a drawer or a step behind this control.
-    if (!(await panel.first().isVisible())) await page.locator("[data-show-panel]").first().click();
+    // From 1280 px the panel starts shown; below that it is a drawer or a step behind its control.
+    // The fact first: one of the two is on screen - never a guess from one instant.
+    const show = page.locator("[data-show-panel]").first();
+    await expect(panel.first().or(show).first()).toBeVisible({ timeout: BOUND });
+    if (!(await panel.first().isVisible())) await show.click();
     await expect(panel.first()).toBeVisible({ timeout: BOUND });
 
     // No lead yet: create one from the panel, linked to the customer and the conversation.
