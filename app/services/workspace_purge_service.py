@@ -156,6 +156,10 @@ PURGED_TABLES: tuple[str, ...] = (
     # contacts it belongs to. After `conversations` and `campaign_recipients`,
     # which name one; before `contacts`, which each one names.
     "contact_identities",
+    # The history of that consent (FEB-19): who opted out or was re-admitted,
+    # when and by whose hand. Personal data, erased with the contact and
+    # before it.
+    "contact_consent_events",
     # A person's marketing consent on each channel (ENT-19): personal data,
     # erased with the contact it belongs to and before it.
     "contact_channel_consents",
