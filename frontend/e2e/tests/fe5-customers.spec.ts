@@ -39,6 +39,13 @@ const C = "app.customers";
 const BOUND = ARRIVAL_BOUND_MS;
 
 async function axe(page: Page, state: string): Promise<void> {
+  // No overlay on its way out: a menu or a dialog that is closing still dims or covers the page,
+  // and WebKit measured text through it (frontend.yml 43882980521, 43893352671). No scan here
+  // needs an open menu; a scan of an open dialog is not affected.
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(page.locator('[role="dialog"][data-state="closed"]')).toHaveCount(0);
+  // And no control still in flight: a busy button is drawn dimmed until its answer has landed.
+  await expect(page.locator('button[aria-busy="true"]')).toHaveCount(0);
   await page.waitForFunction(() =>
     document
       .getAnimations()
@@ -58,7 +65,16 @@ async function axe(page: Page, state: string): Promise<void> {
   expect(
     result.violations
       .filter((v) => v.impact === "serious" || v.impact === "critical")
-      .map((v) => `${state}: ${v.id} ${v.help}`),
+      // The element and what was measured, so a red names its cause.
+      .map(
+        (v) =>
+          `${state}: ${v.id} ${v.help} | ${v.nodes
+            .map(
+              (node) =>
+                `${node.target.join(" ")} (${node.any.map((check) => check.message).join("; ")})`,
+            )
+            .join(" || ")}`,
+      ),
   ).toEqual([]);
 }
 
