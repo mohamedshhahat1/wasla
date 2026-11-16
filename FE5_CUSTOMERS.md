@@ -399,3 +399,62 @@ waiting: FEB-11 (FE-6), FEB-09 (FE-7), FEB-12 / EXT-FE-04 (FE-8).
 ## 33. Final Verdict
 
 In the addendum.
+
+---
+
+# Addendum 1 — the pushes and their runs (2026-11-16)
+
+This addendum records Part B's merge, the three pushes and GitHub's runs. Part C, Part D and the final verdict line follow
+in addendum 2, once the run this commit starts has finished.
+
+## 23. Merge and tree equality
+
+| Step | Commit | Proof |
+| --- | --- | --- |
+| Merge of FE5_HEAD | ec0454e (parents 9d15210, eb45619) | `git diff --exit-code eb45619 HEAD` = 0; Alembic head 0140; the 14 untracked paths unchanged |
+| Report | 2c62bd8 | one file, FE5_CUSTOMERS.md |
+| Merge of CI fixes 4560ce9, b3b9790 | 64f413c | tree equal to b3b9790 apart from this report |
+| Merge of CI fix 78552dd | e9eb921 | tree equal to 78552dd apart from this report |
+
+## 24-25. Pushes and GitHub Actions
+
+Every push without force, each after the previous `ci.yml` run had finished; origin = local after each.
+
+| Push | Head | frontend.yml | ci.yml |
+| --- | --- | --- | --- |
+| 1 | 2c62bd8 | [43882980521](https://github.com/mohamedshhahat1/wasla/actions/runs/43882980521): Chromium, Firefox, visual roles (Linux averages inside the bands), Storybook, checks, drift green; **WebKit red** - CJ-03 (webkit-phone), axe color-contrast on "contact opted out"; 187 passed, 1 failed | [43882980672](https://github.com/mohamedshhahat1/wasla/actions/runs/43882980672): **red** - 5 failed, 8233 passed, 17 skipped, in both test jobs |
+| 2 | 64f413c | [43893352671](https://github.com/mohamedshhahat1/wasla/actions/runs/43893352671): all green but **WebKit red** again - CJ-05..08 (webkit-desktop and -phone), the same rule on "lead with the stale notice"; 186 passed, 2 failed | [43893352627](https://github.com/mohamedshhahat1/wasla/actions/runs/43893352627): **green in every job** |
+| 3 | e9eb921 | [43905604482](https://github.com/mohamedshhahat1/wasla/actions/runs/43905604482): WebKit, Firefox, visual roles, Storybook, checks, drift green; **Chromium red** - FE-4's IJ-03 (ar, chromium-desktop); 195 passed, 1 failed | [43905604215](https://github.com/mohamedshhahat1/wasla/actions/runs/43905604215): **green in every job** |
+
+**The five backend failures of push 1** were tests outside this stage's local neighbour set - the cost the testing rule
+accepted. Fixed in b3b9790:
+
+- `test_workspace_switching.py` and `test_workspace_lifecycle.py` (ADR-038) hold that POST /auth/workspace answers 404 for a
+  withdrawn member; the resolver is shared, so the switch had begun to answer 403. `membership_revoked` is now told **only
+  on refresh** (`tell_withdrawn`), as FEB-34 asks; a sign-in and a switch answer as before. Neither test was changed.
+- `contact_consent_events` was in neither list of `workspace_purge_service` - it is personal data, purged before contacts.
+- `test_conversation_endpoints.py`: the list stub's expected call gained `contact_id: None`.
+- `test_campaign_page_migrations.py` (0120): the seed wrote contacts through the model, which now maps 0140's column on a
+  0119 database; written with explicit columns, as the conversation already was.
+
+**The WebKit reds** (pushes 1 and 2) were the same rule in two different journeys, in WebKit only. 4560ce9 made CJ-03 wait
+for its dialog to be gone; that was not enough. After the second red the work stopped for the owner's review (section 27);
+the owner said to go on. 78552dd makes the scan wait for no menu, no closing dialog and no busy button, and makes a failure
+name the element and the measured colours. WebKit is green on push 3. **The element that failed was never identified** -
+the fix is the wait, and the diagnostic is in place if it returns.
+
+**The Chromium red of push 3 (FEF-42).** FE-4's IJ-03, last step: after the cursor-mismatch restart, 34 of 35 rows were on
+screen and the older open conversation never appeared within 60 s. `conversation-list-pane.tsx`, `lib/inbox/**` and
+`fe4-inbox.spec.ts` are unchanged by this stage (empty diff from 9d15210), and IJ-03 passed in the other eight browser runs
+of these three pushes. Recorded as an intermittent finding in FE-4's paging; **not proven to fail at the start head** (an
+intermittent cannot be shown that way in one run), and not fixed here. No run was re-run; the run of this addendum's commit
+is a fresh full run of the same code.
+
+## Corrections to the report above
+
+- Section 2a (MR): `membership_revoked` is answered on refresh only (b3b9790); the sentence "a refresh without a slug
+  unchanged" stands, and a sign-in or a switch naming the workspace is unchanged too.
+- Section 20: the branch has 18 commits with the three CI fixes (4560ce9, b3b9790, 78552dd); `app/services/
+  workspace_purge_service.py`, `tests/integration/test_conversation_endpoints.py` and
+  `tests/integration/test_campaign_page_migrations.py` join A-BE's changed paths.
+- Section 27 gains FEF-42 (above): NOT CLOSED, FE-4's.
