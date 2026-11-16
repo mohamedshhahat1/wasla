@@ -95,6 +95,7 @@ export {
   PreviewNotice,
   RecordHeader,
   RecordList,
+  RecordPanel,
   ScoreField,
   StatusMenu,
   Timeline,

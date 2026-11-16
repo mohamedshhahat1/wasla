@@ -208,8 +208,9 @@ the filters - the screen's secondary), then the rows in one white card with "Loa
 or three lines: who (600 weight, in `<bdi>`), then the number or the interest, then quiet facts. No table and no horizontal
 scroll at 390. `/leads` has the page's one primary, "New lead"; `/contacts` has none.
 
-**A record page** opens with RecordHeader - the name as the h1, what stands beside it (a status, "Opted out"), a quiet line
-under it - then its sections as white cards, two columns from 1024 px (who and consent beside conversations and leads;
+**A record page** opens with RecordHeader on a `secondary-subtle` band - the name as the h1, what stands beside it (a
+status, "Opted out"), a quiet line under it. A lead's judgements (score, owner, other details) sit on the same surface
+(RecordPanel); with the header band they are the page's 30 %, measured (FE5_CUSTOMERS.md). The rest are white cards, two columns from 1024 px (who and consent beside conversations and leads;
 fields beside notes and activity) and one column below, in that reading order.
 
 **Inline edit** swaps text for a field without motion: Enter saves, Escape cancels, focus returns to the control that

@@ -270,7 +270,10 @@ export function RecordHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="flex flex-col gap-4" data-record-header="">
+    <header
+      className="flex flex-col gap-4 rounded-xl bg-secondary-subtle p-5 sm:p-6"
+      data-record-header=""
+    >
       <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         <div className="flex min-w-0 flex-col gap-2">
           <div className="flex flex-wrap items-center gap-3">
@@ -289,6 +292,24 @@ export function RecordHeader({
       </div>
       {facts}
     </header>
+  );
+}
+
+/**
+ * A record's facts and judgements - how it is known, its score, its owner - on the secondary
+ * surface: with the header band, the 30 % of a record page. Forms, notes and the timeline stay on
+ * white cards.
+ */
+export function RecordPanel({
+  children,
+  ...rest
+}: {
+  children: ReactNode;
+} & Record<`data-${string}` | `aria-${string}`, string | undefined>) {
+  return (
+    <section className="rounded-xl bg-secondary-subtle p-6 sm:p-8" data-record-panel="" {...rest}>
+      {children}
+    </section>
   );
 }
 

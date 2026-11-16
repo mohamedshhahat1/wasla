@@ -28,6 +28,7 @@ import {
   NoteComposer,
   NoteList,
   RecordHeader,
+  RecordPanel,
   ScoreField,
   Select,
   Textarea,
@@ -621,7 +622,7 @@ export function LeadDetail({ id }: { id: string }) {
             {({ values, setTags }) => <TagEditor tags={values.tags} onChange={setTags} />}
           </FieldSection>
 
-          <Card as="section" data-section="score">
+          <RecordPanel data-section="score">
             <ScoreField
               label={t("lead.scoreLabel")}
               hint={t("lead.scoreHint", {
@@ -636,9 +637,9 @@ export function LeadDetail({ id }: { id: string }) {
               error={score.isError ? errors(codeOf(score.error)) : undefined}
               onSave={(value) => score.mutate(value)}
             />
-          </Card>
+          </RecordPanel>
 
-          <Card as="section" data-section="owner">
+          <RecordPanel data-section="owner">
             <div className="flex flex-col gap-2">
               <span id={ownerId} className="text-sm font-medium text-text">
                 {t("lead.ownerLabel")}
@@ -668,10 +669,10 @@ export function LeadDetail({ id }: { id: string }) {
                 </p>
               ) : null}
             </div>
-          </Card>
+          </RecordPanel>
 
           {custom.length ? (
-            <Card as="section" data-section="custom">
+            <RecordPanel data-section="custom">
               <h2 className="m-0 mb-4 text-xl font-semibold text-text">{t("lead.custom")}</h2>
               <KeyValueList
                 items={custom.map(([key, value]) => ({
@@ -684,7 +685,7 @@ export function LeadDetail({ id }: { id: string }) {
                   ),
                 }))}
               />
-            </Card>
+            </RecordPanel>
           ) : null}
         </div>
 

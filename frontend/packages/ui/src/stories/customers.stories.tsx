@@ -15,6 +15,7 @@ import {
   PreviewNotice,
   RecordHeader,
   RecordList,
+  RecordPanel,
   ScoreField,
   StatusMenu,
   Timeline,
@@ -390,15 +391,17 @@ export const StatusAndScore: Story = {
           moves={[{ value: "new", label: t.statuses.new }]}
           onMove={() => undefined}
         />
-        <ScoreField
-          label={t.score}
-          hint={t.scoreHint}
-          value={40}
-          min={0}
-          max={100}
-          saveLabel={t.saveScore}
-          onSave={() => undefined}
-        />
+        <RecordPanel>
+          <ScoreField
+            label={t.score}
+            hint={t.scoreHint}
+            value={40}
+            min={0}
+            max={100}
+            saveLabel={t.saveScore}
+            onSave={() => undefined}
+          />
+        </RecordPanel>
         <FieldConfirmedMark label={t.confirmed} />
       </div>
     );

@@ -21,6 +21,7 @@ import {
   PreviewNotice,
   RecordHeader,
   RecordList,
+  RecordPanel,
   ScoreField,
   StatusMenu,
   Timeline,
@@ -74,6 +75,17 @@ describe("customer text is never markup (M-T34, M-T35)", () => {
     const { container } = render(<RecordHeader title={MARKUP} />);
     expect(container.querySelector("h1 bdi")?.textContent).toBe(MARKUP);
     expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("a record panel is a section on the secondary surface that carries its marker", () => {
+    const { container } = render(
+      <RecordPanel data-section="score">
+        <p>Score</p>
+      </RecordPanel>,
+    );
+    const panel = container.querySelector("section[data-record-panel]");
+    expect(panel?.getAttribute("data-section")).toBe("score");
+    expect(panel?.className).toContain("bg-secondary-subtle");
   });
 
   it("a note renders as text with its line breaks kept and dir=auto", () => {
