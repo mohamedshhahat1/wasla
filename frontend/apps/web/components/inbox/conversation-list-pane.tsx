@@ -32,6 +32,7 @@ import {
   applyListUpdateNow,
   capCount,
   firstPageOnly,
+  NEXT_PAGE_KEEPS_REFETCH,
   onlyAppends,
   restartsFromTop,
 } from "../../lib/inbox/live";
@@ -197,7 +198,7 @@ export function ConversationListPane({
           list.hasNextPage &&
           !list.isFetchingNextPage
         ) {
-          void list.fetchNextPage();
+          void list.fetchNextPage(NEXT_PAGE_KEEPS_REFETCH);
         }
       });
       observer.current.observe(node);
@@ -385,7 +386,7 @@ export function ConversationListPane({
           loadingLabel={t("loading")}
           state={state}
           {...(list.hasNextPage ? { loadMoreLabel: t("loadMore") } : {})}
-          onLoadMore={() => void list.fetchNextPage()}
+          onLoadMore={() => void list.fetchNextPage(NEXT_PAGE_KEEPS_REFETCH)}
           loadingMore={list.isFetchingNextPage}
           updateLabel={waiting ? t("updated") : null}
           onShowUpdate={() => {

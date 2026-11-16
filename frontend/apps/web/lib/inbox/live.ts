@@ -127,6 +127,14 @@ export function restartsFromTop(input: {
   );
 }
 
+/**
+ * IL-04 (FEF-42): a next page never cancels a refetch already running. The list refetches from the
+ * top after a cursor mismatch, and on stream frames; "Load more" (a press or the observer) during
+ * that refetch would cancel it and leave the empty page that ended the list in place, so the older
+ * rows could never load. With this option the press joins the running fetch and is asked again.
+ */
+export const NEXT_PAGE_KEEPS_REFETCH = { cancelRefetch: false } as const;
+
 /** IL-04: the loaded pages cut back to the first one, so a refetch reads from the top only. */
 export function firstPageOnly<P>(
   data: { pages: P[]; pageParams: (string | null)[] } | undefined,
