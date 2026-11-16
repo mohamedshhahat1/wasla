@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PROD_COMPOSE = ROOT / "docker-compose.prod.yml"
 DEV_COMPOSE = ROOT / "docker-compose.yml"
 ENV_EXAMPLE = ROOT / ".env.example"
+NGINX_CONF = ROOT / "nginx" / "nginx.conf"
 
 
 # Which process reads each optional integration, keyed by the settings prefix
@@ -558,3 +559,135 @@ def test_production_never_allows_a_backup_that_stays_on_this_host() -> None:
             f"{service} is told it may keep backups on this host. Naming it in a "
             "comment is fine; setting it here is not."
         )
+
+
+# --------------------------------------------------------------------- nginx
+#
+# FEB-35 (NX-01 .. NX-04): the proxy's access log never writes a query string.
+# A search term, a filter and the event stream's ticket all travel there, and
+# the application's own logs record none of them - a proxy in front that wrote
+# the request line would undo that from outside the application.
+
+#: What an access-log format may never contain: the request line, the raw
+#: request target, the arguments, the referring page and credentials.
+FORBIDDEN_LOG_VARIABLES = (
+    "$request ",
+    "$request'",
+    '$request"',
+    "$request_uri",
+    "$args",
+    "$arg_",
+    "$query_string",
+    "$is_args",
+    "$http_referer",
+    "$http_authorization",
+    "$http_cookie",
+    "$sent_http_set_cookie",
+)
+#: nginx's own formats: `combined` (built in) and `main` (the image's
+#: nginx.conf). Both write the request line and the referrer.
+NGINX_OWN_FORMATS = {"combined", "main"}
+
+
+def _nginx_directives() -> list[str]:
+    """The file's directives, comments stripped, one string per `;` or block opener."""
+    lines = [line.split("#", 1)[0] for line in NGINX_CONF.read_text(encoding="utf-8").splitlines()]
+    return [part.strip() for part in re.split(r"[;{}]", " ".join(lines)) if part.strip()]
+
+
+def _nginx_server_blocks() -> list[str]:
+    """Each `server { ... }` of the file (upstream's `server api:8000` is not one)."""
+    text = "\n".join(
+        line.split("#", 1)[0] for line in NGINX_CONF.read_text(encoding="utf-8").splitlines()
+    )
+    blocks: list[str] = []
+    for match in re.finditer(r"^server\s*\{", text, flags=re.MULTILINE):
+        depth, index = 1, match.end()
+        while depth:
+            depth += {"{": 1, "}": -1}.get(text[index], 0)
+            index += 1
+        blocks.append(text[match.end() : index - 1])
+    return blocks
+
+
+def _log_formats() -> dict[str, str]:
+    formats: dict[str, str] = {}
+    for directive in _nginx_directives():
+        if directive.startswith("log_format "):
+            _, name, body = directive.split(None, 2)
+            formats[name] = body
+    return formats
+
+
+def test_no_nginx_log_format_can_write_a_query_string() -> None:
+    """NX-T1: no format holds the request line, the target, the arguments or the referrer."""
+    formats = _log_formats()
+    assert formats, "the file declares its own access-log format"
+    for name, body in formats.items():
+        found = [variable for variable in FORBIDDEN_LOG_VARIABLES if variable in body + " "]
+        assert not found, f"log_format {name} writes {found}"
+        assert "$uri" in body, f"log_format {name} records the path"
+
+
+def test_every_nginx_access_log_names_a_declared_format_or_is_off() -> None:
+    """NX-T1, NX-T2: never nginx's own `combined` or `main`, and never a format left to default."""
+    formats = _log_formats()
+    logs = [d.split() for d in _nginx_directives() if d.startswith("access_log ")]
+    assert logs
+    for words in logs:
+        if words[1] == "off":
+            continue
+        assert len(words) >= 3, f"{' '.join(words)} names no format: nginx would use `combined`"
+        assert words[2] not in NGINX_OWN_FORMATS, " ".join(words)
+        assert words[2] in formats, " ".join(words)
+
+
+def test_every_nginx_server_sets_its_own_access_log() -> None:
+    """NX-T2: a `server` that set none would inherit the image's `main` format from `http`."""
+    blocks = _nginx_server_blocks()
+    assert len(blocks) == 2
+    formats = _log_formats()
+    for block in blocks:
+        own = [
+            line.split()
+            for line in (part.strip() for part in re.split(r"[;{}]", _top_level(block)))
+            if line.startswith("access_log ")
+        ]
+        assert own, "a server block without an access_log of its own"
+        assert all(words[1] == "off" or words[2] in formats for words in own)
+
+
+def _top_level(block: str) -> str:
+    """The directives of a block that are not inside a nested block."""
+    out, depth = [], 0
+    for character in block:
+        if character == "{":
+            depth += 1
+            out.append(";")
+        elif character == "}":
+            depth -= 1
+            out.append(";")
+        elif depth == 0:
+            out.append(character)
+    return "".join(out)
+
+
+def test_nginx_keeps_what_it_always_set() -> None:
+    """NX-T3: the log lines are all that changed - limits, headers, timeouts and refusals stand."""
+    directives = _nginx_directives()
+    for expected in (
+        "client_max_body_size 10m",
+        "client_body_timeout 30s",
+        'add_header X-Content-Type-Options "nosniff" always',
+        'add_header X-Frame-Options "DENY" always',
+        'add_header Referrer-Policy "no-referrer" always',
+        "proxy_read_timeout 75s",
+        "proxy_read_timeout 1h",
+        "proxy_buffering off",
+        "return 404",
+        "return 301 https://$host$request_uri",
+        "server_tokens off",
+    ):
+        assert expected in directives, expected
+    assert directives.count("access_log off") == 2
+    assert not [d for d in directives if d.startswith(("log_subrequest", "rewrite_log"))]
