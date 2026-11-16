@@ -167,6 +167,7 @@ def _view_tag(
     channel: Channel | None,
     connection_id: uuid.UUID | None,
     unread: bool = False,
+    contact_id: uuid.UUID | None = None,
 ) -> str | None:
     """A short tag naming one view, or None for the default view (no filter at all).
 
@@ -185,6 +186,10 @@ def _view_tag(
     # already holds - is unchanged by the unread filter's arrival (UR-09).
     if unread:
         parts.append("unread")
+    # The same rule for one customer's conversations (CD-08): a cursor of one
+    # contact's list is refused on another's, and no other tag moves.
+    if contact_id is not None:
+        parts.append(f"contact:{contact_id}")
     if all(part is None for part in parts):
         return None
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:12]
@@ -248,6 +253,7 @@ class InboxService:
         q: str | None = None,
         viewer_id: uuid.UUID | None = None,
         unread: bool = False,
+        contact_id: uuid.UUID | None = None,
     ) -> Page[Conversation]:
         """Everything not closed, most recently active first - or one view of the inbox.
 
@@ -259,7 +265,8 @@ class InboxService:
 
         The views (FEB-05): `status` (`open`, `pending`, `closed`, `all`),
         `assigned_to` (`me`, `none`, a member's id), `mode` and `q` - the
-        customer's name or number. One ordering for all of them; a cursor
+        customer's name or number - and `contact_id`, one customer's
+        conversations (FEB-19). One ordering for all of them; a cursor
         carries a tag of the view it was made under, and another view refuses
         it (`cursor_view_mismatch`) rather than answering a page of the wrong
         list. The default view's cursor carries no tag, exactly as before.
@@ -276,6 +283,7 @@ class InboxService:
             channel=channel,
             connection_id=connection_id,
             unread=unread,
+            contact_id=contact_id,
         )
         after = _view_cursor(cursor, view)
         rows = await self._conversations.list_open(
@@ -289,6 +297,7 @@ class InboxService:
             mode=mode,
             search=search,
             unread=unread,
+            contact_id=contact_id,
         )
         page = paginate(
             rows,

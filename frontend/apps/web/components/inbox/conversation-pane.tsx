@@ -331,9 +331,10 @@ export function ConversationPane({
           ) : null}
           <span className="text-sm text-text-muted">
             {data.assigned_to_id ? (
-              <>
-                {t("assignedTo")} <bdi>{assignee}</bdi>
-              </>
+              // FEF-33: one ICU message, the name isolated inside it.
+              <span data-assigned-to="">
+                {t.rich("assignedTo", { name: () => <bdi>{assignee}</bdi> })}
+              </span>
             ) : (
               assignee
             )}

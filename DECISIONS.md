@@ -8398,3 +8398,61 @@ second stream; media through Cache Storage; a key into messages for the read mar
 
 **Consequences.** FE-5 plugs the contact detail and lead editing into the panel; FE-6 adds document events to the map. The
 search term reaches the API's query string by design; the nginx example's `$request` log (FEB-35) stays the owner's.
+
+## ADR-199 — Customers And Leads (FE-5): The Contact Read And Its History, A Refused Refresh For A Withdrawn Member, Folded Search, Moves The API Offers
+
+**Status.** Accepted, 2026-11-16 (FE-5; report FE5_CUSTOMERS.md). FRONTEND_PLAN.md section 29's FE-5: APP-CUS-01..03 and
+APP-INBOX-03's FEB-19 part, on FE-4's contract (ADR-198); FEB-19, FEB-34 with FEF-27 (BE1), FEB-35, FEF-26, FEF-28, FEF-33 by
+the owner's request; FEB-06's codes for these screens. No ADR number is kept for the postponed "Tend" restyle.
+
+**Context.** A contact was only a marketing opt-out: no read, no name a person could give, and a clear forgot when and by
+whom the stop was recorded. Consent is per channel (ADR-131), not person-wide. The lead graph lived in one Python table a
+screen would have had to copy. A refresh into a workspace the person had been removed from answered the same 404 as a
+stranger's. The nginx example inherited the image's `main` log format, which writes the request line and the referrer.
+
+**Decision.**
+
+1. *The contact (CD, FEB-19).* `GET /contacts/{id}` (ContactRead: identities, `profile_name`, the member-given `name`,
+   `display_name = name ?? profile_name`, consent channel by channel with a summary `opted_out`, first contact and the newest
+   inbound time in one aggregate). `PATCH /contacts/{id}` takes the name only (`extra="forbid"`; trimmed; empty is 422
+   `contact_name_invalid`; unchanged writes nothing); any member; audited as `contact_renamed`; last writer wins. An identity
+   is never editable and no route creates, merges or deletes a contact. Alembic 0140: `contacts.name` and the append-only
+   `contact_consent_events`, written by `app.services.opt_out` in the transaction that changes the state and only on a
+   change. `GET /contacts/{id}/consent-events` is any member's (the audit log stays an administrator's record); an opt-out
+   older than the table is one synthesized, flagged last row. `GET /conversations?contact_id=` is bound into BE1's view
+   cursor. A rename publishes `conversation.updated` with `participant` per conversation, so FE-4's map needs no new row.
+2. *A withdrawn member's refresh (MR, FEB-34).* 403 `membership_revoked` only for a person who held a membership of the
+   named workspace, raised before rotation so the token is not spent; a stranger, a deleted workspace and an unknown slug
+   keep the generic 404 (no oracle). A refresh that names no workspace is unchanged: only active memberships are candidates.
+3. *The session (SE).* `membership_revoked` joins `workspace_suspended` as a refusal that keeps the session: the browser
+   shows the access-removed state with "Open another workspace" (one refresh that names no workspace) and "Sign out". A
+   reload names no workspace, so it already lands where the person still belongs. A sign-in that opens no workspace because
+   every workspace is suspended shows the suspended state instead of the shell (`onlySuspendedWorkspaces`).
+4. *nginx (NX, FEB-35).* One format, `wasla_safe`, with `$uri` and never the request line, the arguments or the referrer,
+   named by every `server` because the file is included inside the image's `http` block. A deployment-configuration test
+   fails if a forbidden variable or a built-in format returns. The error log still writes the request line on upstream
+   errors; that residual and its retention duty are documented, not claimed closed.
+5. *Leads (LG, EC5).* `LeadRead.next_statuses` is read from the one graph the service judges by (the code's graph allows
+   skips docs/CRM.md's drawing did not show; the code wins). `lead_status_transition_not_allowed` and
+   `assignee_not_active_member` name two refusals a screen must tell apart; status and sentence unchanged.
+6. *Search (TF).* One SQL predicate (`contains_folded`: `translate` then `lower`, both sides) behind the contacts, leads and
+   inbox searches: the four i-letters are one letter and s-cedilla, soft g, c-cedilla and the umlauts match the letter under
+   the mark, in every workspace. The browser sends the term as typed and never folds it.
+7. *The screens (CL, LL, LD, PX).* A search term and a tag live in component memory only; the URL carries ids and closed
+   vocabularies. A lead section PATCHes only what changed (emptied is null). The status menu offers `next_statuses` and
+   sends `expected_status`; an assignment sends `expected_assigned_to_id`; a stale change reloads and is told, never
+   re-sent. Nothing is optimistic. A control a role cannot use is absent, never disabled; the statistics query is never
+   created for a member. Customer text is React text in `<bdi>` / `dir="auto"`; a link in a note asks first.
+8. *Previews (PR, FEF-26).* `PUBLIC_PREVIEW_NO_API`, inlined at build time for `preview` builds only, turns "Connection
+   lost" into a notice that the preview has no server. No probe, no hostname test, no mock data.
+9. *Sentences (IC, FEF-33).* A sentence that joins words to a value is one ICU message; the value is rendered through a
+   rich tag into `<bdi>`.
+
+**Rejected.** A client-side copy of the lead graph; folding in the browser; the audit log as the members' consent source; a
+person-wide opt-out the model does not have; a contact edit beyond the name; an expected-value precondition on one name;
+a kanban board, a data grid or a chart package; optimistic lead actions; a stream event for contacts or leads; mock data
+or a mock server on the previews; raising nginx's error-log level to hide request lines.
+
+**Consequences.** FE-6 and FE-7 reuse the record composites (RecordHeader, InlineEditField, StatusMenu, Timeline) and the
+role rule. The first deploy that uses the nginx example must set the error log's retention as docs/DEPLOYMENT.md says. The
+ar / fr / tr texts are drafts (FEQ-08).

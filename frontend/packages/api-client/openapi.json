@@ -852,6 +852,7 @@
           "knowledge_base_deleted",
           "knowledge_settings_updated",
           "knowledge_embedding_switch",
+          "contact_renamed",
           "platform_overview_read",
           "platform_workspaces_read",
           "platform_audit_log_read",
@@ -3402,6 +3403,116 @@
         "title": "ConnectionStatus",
         "type": "string"
       },
+      "ConsentAction": {
+        "description": "What happened to a person's marketing consent on one channel.",
+        "enum": [
+          "opted_out",
+          "opt_out_cleared"
+        ],
+        "title": "ConsentAction",
+        "type": "string"
+      },
+      "ConsentEventActor": {
+        "description": "The member who recorded or cleared an opt-out; kept by name after they leave.",
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name"
+        ],
+        "title": "ConsentEventActor",
+        "type": "object"
+      },
+      "ConsentEventRead": {
+        "description": "One change of a contact's marketing consent on one channel (CD-06).\n\n`source` is who decided (`customer`, `team`) and `via` by which evidence.\n`by` is the member who recorded it, null when the customer or the provider\ndid. A row with `before_history: true` is an opt-out recorded before the\nhistory was kept: it has no `id`, `source`, `via` or `by`, and `at` is the\nrefusal's own time.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ConsentAction"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "before_history": {
+            "title": "Before History",
+            "type": "boolean"
+          },
+          "by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConsentEventActor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "channel": {
+            "$ref": "#/components/schemas/Channel"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OptOutSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "via": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OptOutVia"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "channel",
+          "action",
+          "source",
+          "via",
+          "by",
+          "at",
+          "before_history"
+        ],
+        "title": "ConsentEventRead",
+        "type": "object"
+      },
       "ContactIdentityRead": {
         "description": "One way a channel addresses this person: a phone number, a business-scoped id.",
         "properties": {
@@ -3484,6 +3595,133 @@
           "identities"
         ],
         "title": "ContactOptOutRead",
+        "type": "object"
+      },
+      "ContactRead": {
+        "description": "A customer as a member reads them.\n\n`profile_name` is the name the channel gave - customer text, never markup -\nand `name` the one a member gave, or null. `display_name` is the name to\nshow: `name`, else `profile_name`, else null; a conversation's\n`participant.display_name` follows the same rule.\n\nConsent is per channel (ENT-19): `channels` reads exactly as the opt-out\nanswer does. `opted_out` is true when any channel is opted out and\n`opted_out_at` is the earliest standing refusal - a summary for a badge,\nnever a person-wide switch.\n\n`created_at` is when this business first heard from them; `last_inbound_at`\ntheir newest message on any conversation, or null.",
+        "properties": {
+          "channels": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelConsentRead"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "identities": {
+            "items": {
+              "$ref": "#/components/schemas/ContactIdentityRead"
+            },
+            "title": "Identities",
+            "type": "array"
+          },
+          "last_inbound_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Inbound At"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "opted_out": {
+            "title": "Opted Out",
+            "type": "boolean"
+          },
+          "opted_out_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Opted Out At"
+          },
+          "profile_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Name"
+          }
+        },
+        "required": [
+          "id",
+          "identities",
+          "profile_name",
+          "name",
+          "display_name",
+          "channels",
+          "opted_out",
+          "opted_out_at",
+          "created_at",
+          "last_inbound_at"
+        ],
+        "title": "ContactRead",
+        "type": "object"
+      },
+      "ContactUpdateRequest": {
+        "additionalProperties": false,
+        "description": "The one edit: the name the team gives the customer.\n\n`name` is required: a string sets it, null takes it away. It is trimmed;\none that is empty afterwards is refused (422 `contact_name_invalid`) - send\nnull to clear. Any other key is refused: an identity is never edited.",
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ContactUpdateRequest",
         "type": "object"
       },
       "ConversationListPage": {
@@ -4009,6 +4247,33 @@
           "items"
         ],
         "title": "CursorPage[CampaignRead]",
+        "type": "object"
+      },
+      "CursorPage_ConsentEventRead_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ConsentEventRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "CursorPage[ConsentEventRead]",
         "type": "object"
       },
       "CursorPage_DocumentRead_": {
@@ -9129,6 +9394,13 @@
             ],
             "title": "Name"
           },
+          "next_statuses": {
+            "items": {
+              "$ref": "#/components/schemas/LeadStatus"
+            },
+            "title": "Next Statuses",
+            "type": "array"
+          },
           "phone": {
             "anyOf": [
               {
@@ -9186,6 +9458,7 @@
           "budget_amount",
           "budget_currency",
           "status",
+          "next_statuses",
           "source",
           "score",
           "assigned_to_id",
@@ -11820,6 +12093,17 @@
               }
             ]
           },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
           "opted_out_at": {
             "anyOf": [
               {
@@ -11847,6 +12131,7 @@
         "required": [
           "id",
           "display_name",
+          "name",
           "wa_id",
           "lead",
           "last_inbound_at",
@@ -25376,7 +25661,7 @@
     },
     "/api/v1/contacts": {
       "get": {
-        "description": "The campaigns page's contact picker (PG-07), newest activity first.\n\n`q`: digits search the WhatsApp number, anything else the contact's name\nor their active lead's. `account_id`: contacts with a conversation on that\nnumber, each with whether a campaign from it could reach them;\n`eligible_for_campaign=true` keeps only those (it needs `account_id`, 422\n`account_required` otherwise). Any member.",
+        "description": "The campaigns page's contact picker (PG-07), newest activity first.\n\n`q`: digits search the WhatsApp number, anything else the contact's name -\nthe one a member gave or the channel's - or their active lead's, with\nTurkish letters folded (the dotted and dotless i are one letter).\n`account_id`: contacts with a conversation on that number, each with\nwhether a campaign from it could reach them;\n`eligible_for_campaign=true` keeps only those (it needs `account_id`, 422\n`account_required` otherwise). Any member.",
         "operationId": "list_contacts_api_v1_contacts_get",
         "parameters": [
           {
@@ -25491,6 +25776,220 @@
           }
         ],
         "summary": "Find contacts",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}": {
+      "get": {
+        "description": "Who a customer is (FEB-19): identities, names, consent channel by channel.\n\nAny member. Another workspace's contact is the same 404 as an unknown id.",
+        "operationId": "get_contact_api_v1_contacts__contact_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read a contact",
+        "tags": [
+          "contacts"
+        ]
+      },
+      "patch": {
+        "description": "Give the customer a name, change it, or take it away with null (FEB-19).\n\nThe only field: the channel's own name and the identities are not a\nperson's to edit. Any member. The same value again changes nothing; a\nchange is recorded in the audit log and re-read by open inboxes\n(`conversation.updated`, fields `participant`).",
+        "operationId": "update_contact_api_v1_contacts__contact_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Name a contact",
+        "tags": [
+          "contacts"
+        ]
+      }
+    },
+    "/api/v1/contacts/{contact_id}/consent-events": {
+      "get": {
+        "description": "Every opt-out and every clear of this contact, newest first (FEB-19).\n\nAny member. An opt-out recorded before the history was kept closes the\nlist as one row marked `before_history`.",
+        "operationId": "list_consent_events_api_v1_contacts__contact_id__consent_events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Contact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorPage_ConsentEventRead_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "A contact's consent history",
         "tags": [
           "contacts"
         ]
@@ -25634,7 +26133,7 @@
     },
     "/api/v1/conversations": {
       "get": {
-        "description": "Open conversations, most recently active first.\n\nPaged by cursor rather than offset: the inbox is written to while it is\nbeing read, and an offset would let an arriving conversation push a row\nacross the page boundary.\n\n`priority` narrows the list without reordering it, so the flagged queue can\nbe worked deliberately while the default view stays as it was. `channel`\nand `connection_id` narrow it the same way, to one channel or one\nconnection.\n\n**Views** (FEB-05): `status` - `open`, `pending`, `closed` or `all`; without\nit, everything not closed, as before. `assigned_to` - `me`, `none` or a\nmember's id (one of another workspace matches nothing). `mode` - `ai` or\n`human`. `q` - the customer's name or number. `unread=true` - only\nconversations holding a customer message nobody has seen (UR-09). They\ncombine, and keep the\nsame order. A `next_cursor` belongs to the view it came from: presented\nwith other filters it is refused, 422 `cursor_view_mismatch`.\n\n**Catching up** (RT-04): `updated_since` (with its offset) lists every\nconversation changed at or after it - closed ones too - oldest change\nfirst. The first page carries an `ETag`: send it back as `If-None-Match`\nand an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30\nwith no event stream open, 60 with one.",
+        "description": "Open conversations, most recently active first.\n\nPaged by cursor rather than offset: the inbox is written to while it is\nbeing read, and an offset would let an arriving conversation push a row\nacross the page boundary.\n\n`priority` narrows the list without reordering it, so the flagged queue can\nbe worked deliberately while the default view stays as it was. `channel`\nand `connection_id` narrow it the same way, to one channel or one\nconnection.\n\n**Views** (FEB-05): `status` - `open`, `pending`, `closed` or `all`; without\nit, everything not closed, as before. `assigned_to` - `me`, `none` or a\nmember's id (one of another workspace matches nothing). `mode` - `ai` or\n`human`. `q` - the customer's name or number. `unread=true` - only\nconversations holding a customer message nobody has seen (UR-09).\n`contact_id` - one customer's conversations (FEB-19); with `status=all`,\nevery one of them; a contact of another workspace matches nothing. They\ncombine, and keep the same order. A `next_cursor` belongs to the view it came from: presented\nwith other filters it is refused, 422 `cursor_view_mismatch`.\n\n**Catching up** (RT-04): `updated_since` (with its offset) lists every\nconversation changed at or after it - closed ones too - oldest change\nfirst. The first page carries an `ETag`: send it back as `If-None-Match`\nand an unchanged inbox answers 304. Poll after `poll_after_seconds`: 30\nwith no event stream open, 60 with one.",
         "operationId": "list_conversations_api_v1_conversations_get",
         "parameters": [
           {
@@ -25793,6 +26292,25 @@
               "description": "Only conversations with a customer message nobody has seen (UR-09).",
               "title": "Unread",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "Only this customer's conversations (FEB-19).",
+            "in": "query",
+            "name": "contact_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only this customer's conversations (FEB-19).",
+              "title": "Contact Id"
             }
           },
           {

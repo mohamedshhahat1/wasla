@@ -2,8 +2,9 @@
 
 /**
  * APP-INBOX-03 (PN-01): who the customer is - from the conversation's participant - and their lead
- * (GET /leads/{id}) when there is one. Read only: the contact detail, its history and lead editing
- * are FE-5's (FEB-19, APP-CUS-03), so no link is drawn to a screen that does not exist.
+ * (GET /leads/{id}) when there is one. FE-5 (PX-01 .. PX-04) adds the contact's and the lead's
+ * actions beside what FE-4 drew: the name the team gives, the opt-out, the lead's status moves,
+ * "Open customer" / "Open lead" and "Create lead" - each in ../customers/panel-actions.tsx.
  */
 import { useQuery } from "@tanstack/react-query";
 import { Copy } from "lucide-react";
@@ -16,6 +17,7 @@ import { IconButton, KeyValueList } from "@wasla/ui";
 import { leadKey } from "../../lib/inbox/keys";
 import { fullTime } from "../../lib/inbox/time";
 import { useWorkspace } from "../app/workspace-context";
+import { PanelContact, PanelCreateLead, PanelLead } from "../customers/panel-actions";
 import { useSession } from "../session-provider";
 import { useMembers, useNumbers, whoOf, type ConversationRead } from "./people";
 
@@ -100,6 +102,7 @@ export function CustomerPanelBody({ conversation }: { conversation: Conversation
             {t("copied")}
           </p>
         ) : null}
+        <PanelContact conversation={conversation} />
       </div>
 
       <div className="flex flex-col gap-3">
@@ -140,7 +143,10 @@ export function CustomerPanelBody({ conversation }: { conversation: Conversation
         <h3 className="m-0 text-md font-semibold text-text">{t("lead")}</h3>
         {!leadId ||
         (lead.isError && lead.error instanceof ApiError && lead.error.status === 404) ? (
-          <p className="m-0 text-sm text-text-muted">{t("noLead")}</p>
+          <>
+            <p className="m-0 text-sm text-text-muted">{t("noLead")}</p>
+            <PanelCreateLead conversation={conversation} />
+          </>
         ) : lead.isPending ? (
           <p role="status" className="m-0 text-sm text-text-muted">
             {t("loading")}
@@ -148,53 +154,56 @@ export function CustomerPanelBody({ conversation }: { conversation: Conversation
         ) : lead.isError ? (
           <p className="m-0 text-sm text-text">{t("leadError")}</p>
         ) : (
-          <KeyValueList
-            items={[
-              {
-                key: "status",
-                label: t("leadStatus"),
-                value: t(`leadStatusValue.${lead.data.status}`),
-              },
-              {
-                key: "score",
-                label: t("score"),
-                value: <bdi>{format.number(lead.data.score, { numberingSystem: "latn" })}</bdi>,
-              },
-              { key: "source", label: t("source"), value: <bdi>{lead.data.source}</bdi> },
-              {
-                key: "owner",
-                label: t("leadOwner"),
-                value: <bdi>{nameOf(lead.data.assigned_to_id)}</bdi>,
-              },
-              ...(lead.data.interest
-                ? [
-                    {
-                      key: "interest",
-                      label: t("interest"),
-                      value: <bdi dir="auto">{lead.data.interest}</bdi>,
-                    },
-                  ]
-                : []),
-              ...(lead.data.tags.length
-                ? [
-                    {
-                      key: "tags",
-                      label: t("tags"),
-                      value: <bdi dir="auto">{lead.data.tags.join(", ")}</bdi>,
-                    },
-                  ]
-                : []),
-              ...(lead.data.last_activity_at
-                ? [
-                    {
-                      key: "activity",
-                      label: t("leadActivity"),
-                      value: fullTime(lead.data.last_activity_at, locale),
-                    },
-                  ]
-                : []),
-            ]}
-          />
+          <>
+            <PanelLead lead={lead.data} />
+            <KeyValueList
+              items={[
+                {
+                  key: "status",
+                  label: t("leadStatus"),
+                  value: t(`leadStatusValue.${lead.data.status}`),
+                },
+                {
+                  key: "score",
+                  label: t("score"),
+                  value: <bdi>{format.number(lead.data.score, { numberingSystem: "latn" })}</bdi>,
+                },
+                { key: "source", label: t("source"), value: <bdi>{lead.data.source}</bdi> },
+                {
+                  key: "owner",
+                  label: t("leadOwner"),
+                  value: <bdi>{nameOf(lead.data.assigned_to_id)}</bdi>,
+                },
+                ...(lead.data.interest
+                  ? [
+                      {
+                        key: "interest",
+                        label: t("interest"),
+                        value: <bdi dir="auto">{lead.data.interest}</bdi>,
+                      },
+                    ]
+                  : []),
+                ...(lead.data.tags.length
+                  ? [
+                      {
+                        key: "tags",
+                        label: t("tags"),
+                        value: <bdi dir="auto">{lead.data.tags.join(", ")}</bdi>,
+                      },
+                    ]
+                  : []),
+                ...(lead.data.last_activity_at
+                  ? [
+                      {
+                        key: "activity",
+                        label: t("leadActivity"),
+                        value: fullTime(lead.data.last_activity_at, locale),
+                      },
+                    ]
+                  : []),
+              ]}
+            />
+          </>
         )}
       </div>
     </>

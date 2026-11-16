@@ -24,9 +24,9 @@ from sqlalchemy.orm import aliased
 from app.core.pagination import Cursor
 from app.db.models.channel import Channel
 from app.db.models.consent import ContactChannelConsent
-from app.db.models.conversation import Contact, Conversation
+from app.db.models.conversation import Contact, Conversation, shown_name
 from app.db.models.lead import Lead, LeadStatus
-from app.repositories.base import TenantScopedRepository, escape_like
+from app.repositories.base import TenantScopedRepository, contains_folded, escape_like
 from app.repositories.consent_repository import refused
 
 #: Why a contact on the number asked about cannot be sent a campaign from it.
@@ -40,7 +40,10 @@ class PickedContact:
     """One row of the picker."""
 
     id: uuid.UUID
+    #: The name to show: the member-given one, else the channel's (CD-05).
     display_name: str | None
+    #: The name a member gave, or None.
+    name: str | None
     wa_id: str | None
     lead_id: uuid.UUID | None
     lead_name: str | None
@@ -81,11 +84,13 @@ class ContactPickerRepository(TenantScopedRepository[Contact]):
         digits = q.lstrip("+").replace(" ", "")
         if digits.isdigit():
             return statement.where(Contact.wa_id.ilike(f"%{escape_like(digits)}%", escape="\\"))
-        pattern = f"%{escape_like(q)}%"
+        # The name a member gave, the channel's, or the active lead's - Turkish
+        # letters folded on both sides (CD-05, TF-02).
         return statement.where(
             or_(
-                Contact.display_name.ilike(pattern, escape="\\"),
-                Lead.name.ilike(pattern, escape="\\"),
+                contains_folded(Contact.name, q),
+                contains_folded(Contact.display_name, q),
+                contains_folded(Lead.name, q),
             )
         )
 
@@ -144,6 +149,7 @@ class ContactPickerRepository(TenantScopedRepository[Contact]):
             select(
                 Contact.id,
                 Contact.display_name,
+                Contact.name,
                 Contact.wa_id,
                 Lead.id,
                 Lead.name,
@@ -174,12 +180,23 @@ class ContactPickerRepository(TenantScopedRepository[Contact]):
             ).limit(limit)
         )
         picked: list[tuple[PickedContact, Cursor]] = []
-        for contact_id, name, wa_id, lead_id, lead_name, status, inbound, opted in rows.all():
+        for (
+            contact_id,
+            profile_name,
+            name,
+            wa_id,
+            lead_id,
+            lead_name,
+            status,
+            inbound,
+            opted,
+        ) in rows.all():
             picked.append(
                 (
                     PickedContact(
                         id=contact_id,
-                        display_name=name,
+                        display_name=shown_name(name, profile_name),
+                        name=name,
                         wa_id=wa_id,
                         lead_id=lead_id,
                         lead_name=lead_name,
@@ -210,6 +227,7 @@ class ContactPickerRepository(TenantScopedRepository[Contact]):
             select(
                 Contact.id,
                 Contact.display_name,
+                Contact.name,
                 Contact.wa_id,
                 Lead.id,
                 Lead.name,
@@ -233,7 +251,8 @@ class ContactPickerRepository(TenantScopedRepository[Contact]):
             (
                 PickedContact(
                     id=contact_id,
-                    display_name=name,
+                    display_name=shown_name(name, profile_name),
+                    name=name,
                     wa_id=wa_id,
                     lead_id=lead_id,
                     lead_name=lead_name,
@@ -245,7 +264,17 @@ class ContactPickerRepository(TenantScopedRepository[Contact]):
                 ),
                 Cursor(sort_value=seen, id=contact_id),
             )
-            for contact_id, name, wa_id, lead_id, lead_name, status, seen, opted in rows.all()
+            for (
+                contact_id,
+                profile_name,
+                name,
+                wa_id,
+                lead_id,
+                lead_name,
+                status,
+                seen,
+                opted,
+            ) in rows.all()
         ]
 
 

@@ -28,6 +28,7 @@ import {
 } from "../support/fe2";
 import { connectNumber, freshNumber, gateState, memberOf, restore, suspend } from "../support/fe3";
 import { connectedOwner, conversationOf, freshCustomer, inbound, text } from "../support/fe4";
+import { createLead } from "../support/fe5";
 
 interface Shares {
   dominant: number;
@@ -375,6 +376,63 @@ for (const locale of LOCALES) {
           page.getByRole("dialog"),
         );
       }
+    });
+
+    // FE-5 (VQ5-02): the customers screens join the averages - the contacts list and one contact,
+    // the leads list with the owner's numbers and one lead, and the new-lead dialog as itself.
+    test(`web-fe5 customers ${locale}`, async ({ page, context }, testInfo) => {
+      await useLocale(context, locale);
+      await useAddress(context);
+      const line = await connectedOwner("vis5");
+      let contactId = "";
+      for (const name of ["Nour Hassan", "Omar Said", "Laila Adel"]) {
+        const sender = freshCustomer();
+        await inbound(line, sender, text(`Hello, this is ${name}.`), name);
+        contactId = (await conversationOf(line.owner, sender)).contact_id;
+      }
+      let leadId = "";
+      for (const name of ["Nour Hassan", "Omar Said"]) {
+        leadId = (
+          await createLead(line.owner, {
+            name,
+            interest: "Apartment finishing, 150 square metres",
+            budget_amount: "500000",
+            budget_currency: "EGP",
+          })
+        ).id;
+      }
+      await logInThroughTheApp(page, locale, line.owner.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+
+      await page.goto(`${WEB}/contacts`);
+      await expect(page.locator("[data-contact-row]")).toHaveCount(3, { timeout: 30_000 });
+      await capture(page, testInfo, "web-contacts", locale);
+
+      await page.goto(`${WEB}/contacts/${contactId}`);
+      await expect(page.locator('[data-screen="contact"]')).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('[data-section="conversations"] li').first()).toBeVisible({
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-contact", locale);
+
+      await page.goto(`${WEB}/leads`);
+      await expect(page.locator("[data-lead-row]")).toHaveCount(2, { timeout: 30_000 });
+      await expect(page.locator("[data-lead-statistics]")).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-leads", locale);
+
+      // The dialog is measured as itself at 1280 (FE-4's rule for a modal); on a phone the list and
+      // the record steps are the compositions.
+      if (!testInfo.project.name.endsWith("phone")) {
+        await page.locator("[data-new-lead]").click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+        await capture(page, testInfo, "web-lead-new", locale, "screen", page.getByRole("dialog"));
+        await page.keyboard.press("Escape");
+      }
+
+      await page.goto(`${WEB}/leads/${leadId}`);
+      await expect(page.locator('[data-screen="lead"]')).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator("[data-timeline-entry]").first()).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-lead", locale);
     });
 
     test(`web-home-member ${locale}`, async ({ page, context }, testInfo) => {

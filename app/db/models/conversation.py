@@ -218,6 +218,19 @@ RESOLVED_DELIVERY_STATES: Final[frozenset[MessageDeliveryState]] = frozenset(
 )
 
 
+#: The longest name a member may give a contact: a lead's name bound (CD-02).
+MAX_CONTACT_NAME_LENGTH: Final = 200
+
+
+def shown_name(name: str | None, profile_name: str | None) -> str | None:
+    """The name a customer is shown under: the member-given one, else the channel's (CD-05).
+
+    The one rule behind `ContactRead.display_name` and a conversation's
+    `participant.display_name`, so the two cannot disagree.
+    """
+    return name if name else profile_name
+
+
 class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     """A customer: the person the CRM knows, in one workspace.
 
@@ -258,7 +271,13 @@ class Contact(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
 
     # Deprecated: read a contact's identities instead (docs/API.md).
     wa_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The name the channel gave: what the customer typed on their profile. The
+    # webhook keeps it current, and nothing else writes it.
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # The name a member gave (FEB-19, CD-02). NULL is "no name given". Never
+    # written by the webhook, the agent or anything automatic, and shown before
+    # the channel's name wherever a customer is named (`shown_name`). 0140.
+    name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # When this workspace last sent the person a marketing template - from any
     # campaign, or by hand (FREQ-01). Claimed by one conditional UPDATE in the

@@ -216,6 +216,10 @@ async def list_conversations(
         bool,
         Query(description="Only conversations with a customer message nobody has seen (UR-09)."),
     ] = False,
+    contact_id: Annotated[
+        uuid.UUID | None,
+        Query(description="Only this customer's conversations (FEB-19)."),
+    ] = None,
     q: Annotated[
         str | None,
         Query(
@@ -242,9 +246,10 @@ async def list_conversations(
     it, everything not closed, as before. `assigned_to` - `me`, `none` or a
     member's id (one of another workspace matches nothing). `mode` - `ai` or
     `human`. `q` - the customer's name or number. `unread=true` - only
-    conversations holding a customer message nobody has seen (UR-09). They
-    combine, and keep the
-    same order. A `next_cursor` belongs to the view it came from: presented
+    conversations holding a customer message nobody has seen (UR-09).
+    `contact_id` - one customer's conversations (FEB-19); with `status=all`,
+    every one of them; a contact of another workspace matches nothing. They
+    combine, and keep the same order. A `next_cursor` belongs to the view it came from: presented
     with other filters it is refused, 422 `cursor_view_mismatch`.
 
     **Catching up** (RT-04): `updated_since` (with its offset) lists every
@@ -259,12 +264,14 @@ async def list_conversations(
                 "updated_since needs a UTC offset, for example 2026-10-30T09:00:00+02:00.",
                 error_code="updated_since_needs_offset",
             )
-        if unread or any(value is not None for value in (view_status, assigned_to, mode, q)):
+        if unread or any(
+            value is not None for value in (view_status, assigned_to, mode, q, contact_id)
+        ):
             # Catching up lists every change, closed ones included; a view of
             # it would hide the very changes the client is catching up on.
             raise ValidationError(
-                "updated_since lists every change; it takes no status, assigned_to, mode, q "
-                "or unread.",
+                "updated_since lists every change; it takes no status, assigned_to, mode, q, "
+                "unread or contact_id.",
                 error_code="inbox_view_with_updated_since",
             )
         page = await inbox.list_changed_since(since=updated_since, limit=limit, cursor=cursor)
@@ -281,6 +288,7 @@ async def list_conversations(
             q=q,
             viewer_id=workspace.user.id,
             unread=unread,
+            contact_id=contact_id,
         )
     try:
         streaming = await open_streams(

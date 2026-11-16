@@ -33,18 +33,22 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     PrimaryKeyConstraint,
+    func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TenantScopedMixin, TimestampMixin
+from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.campaign import (
     OPT_OUT_SOURCE_TYPE,
     OPT_OUT_VIA_TYPE,
@@ -52,6 +56,7 @@ from app.db.models.campaign import (
     OptOutVia,
 )
 from app.db.models.channel import CHANNEL_TYPE, Channel
+from app.db.models.enums import _enum_type
 
 
 class ContactChannelConsent(Base, TenantScopedMixin, TimestampMixin):
@@ -101,4 +106,66 @@ class ContactChannelConsent(Base, TenantScopedMixin, TimestampMixin):
         return self.marketing_opt_out_at is None
 
 
-__all__ = ["ContactChannelConsent"]
+class ConsentAction(StrEnum):
+    """What happened to a person's marketing consent on one channel."""
+
+    OPTED_OUT = "opted_out"
+    OPT_OUT_CLEARED = "opt_out_cleared"
+
+
+CONSENT_ACTION_TYPE = _enum_type(ConsentAction, name="consent_action")
+
+
+class ContactConsentEvent(Base, UUIDPrimaryKeyMixin, TenantScopedMixin):
+    """One change of a person's marketing consent on one channel (FEB-19, CD-06).
+
+    `contact_channel_consents` holds the state and overwrites it: a clear
+    forgets when the stop was recorded and by which evidence. This is the
+    history - append-only, written by `app.services.opt_out` in the transaction
+    that changes the state and by nothing else, and never updated or deleted
+    by a route.
+
+    `source` and `via` are the state's own vocabulary (who decided, by which
+    evidence). `actor_user_id` is the member who recorded or cleared it, null
+    when the customer or the provider did. The time is the server's clock at
+    the insert, like a lead's activity (CRM-16), so two events of one
+    transaction still order.
+
+    An opt-out older than this table has no row; the API shows it from the
+    state's own timestamp, marked as predating the history.
+    """
+
+    __tablename__ = "contact_consent_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "contact_id"],
+            ["contacts.tenant_id", "contacts.id"],
+            name="fk_contact_consent_events_tenant_contact",
+            ondelete="CASCADE",
+        ),
+        # Restated, not inherited: see TenantScopedMixin.
+        Index("ix_contact_consent_events_tenant_id", "tenant_id"),
+        # One contact's history, newest first, paged by (created_at, id).
+        Index(
+            "ix_contact_consent_events_contact",
+            "tenant_id",
+            "contact_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+    )
+
+    contact_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    channel: Mapped[Channel] = mapped_column(CHANNEL_TYPE, nullable=False)
+    action: Mapped[ConsentAction] = mapped_column(CONSENT_ACTION_TYPE, nullable=False)
+    source: Mapped[OptOutSource] = mapped_column(OPT_OUT_SOURCE_TYPE, nullable=False)
+    via: Mapped[OptOutVia] = mapped_column(OPT_OUT_VIA_TYPE, nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+
+__all__ = ["CONSENT_ACTION_TYPE", "ConsentAction", "ContactChannelConsent", "ContactConsentEvent"]

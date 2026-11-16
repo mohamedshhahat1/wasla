@@ -29,7 +29,7 @@ from app.db.models.conversation import (
     MessageStatus,
 )
 from app.db.models.sentiment import ConversationPriority
-from app.repositories.base import BaseRepository, TenantScopedRepository, escape_like
+from app.repositories.base import BaseRepository, TenantScopedRepository, contains_folded
 from app.repositories.read_state_repository import has_unread
 
 # The constraint the idempotency claim races on. Named so the conflict handler
@@ -378,6 +378,7 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         mode: ConversationMode | None = None,
         search: InboxSearch | None = None,
         unread: bool = False,
+        contact_id: uuid.UUID | None = None,
     ) -> list[Conversation]:
         """Everything not closed, most recently active first - or the inbox view asked for.
 
@@ -432,12 +433,16 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
         # (UR-09). Another filter on the same order, so it pages like the rest.
         if unread:
             query = query.where(has_unread())
+        # One customer's conversations (FEB-19, CD-08). A contact of another
+        # workspace matches nothing: the tenant predicate is already on the query.
+        if contact_id is not None:
+            query = query.where(Conversation.contact_id == contact_id)
         if after is not None:
             query = query.where(_after_nullable(Conversation, after))
         return await self._all(query)
 
     def _matches(self, search: InboxSearch) -> ColumnElement[bool]:
-        """The customer's name as the channel gave it, or their number (FEB-05).
+        """The customer's name - a member's or the channel's - or their number (FEB-05).
 
         Both held to this workspace by their own tenant column, and to the
         conversation's own contact and participant - never a contact elsewhere.
@@ -451,7 +456,12 @@ class ConversationRepository(TenantScopedRepository[Conversation]):
                 Contact.tenant_id == self.tenant_id,
                 Contact.tenant_id == Conversation.tenant_id,
                 Contact.id == Conversation.contact_id,
-                Contact.display_name.ilike(f"%{escape_like(search.text)}%", escape="\\"),
+                # The name a member gave or the channel's, Turkish letters
+                # folded on both sides (CD-05, TF-02).
+                or_(
+                    contains_folded(Contact.name, search.text),
+                    contains_folded(Contact.display_name, search.text),
+                ),
             )
             .exists()
         )

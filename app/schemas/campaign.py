@@ -755,6 +755,38 @@ class ChannelConsentRead(BaseModel):
     identities: list[ContactIdentityRead]
 
 
+def consent_channels(
+    identities: Sequence[ContactIdentity], consents: Sequence[ContactChannelConsent]
+) -> list[ChannelConsentRead]:
+    """A person's consent channel by channel, with the identities each covers (ENT-19).
+
+    One entry for every channel the person has an identity or a recorded
+    consent on, in vocabulary order. Shared by the opt-out answer and the
+    contact read (FEB-19), so the two describe consent the same way.
+    """
+    by_channel = {consent.channel: consent for consent in consents}
+    present = {identity.channel for identity in identities} | set(by_channel)
+    channels = []
+    for channel in ordered(present):
+        consent = by_channel.get(channel)
+        channels.append(
+            ChannelConsentRead(
+                channel=channel,
+                opted_out=consent is not None and not consent.accepts_marketing,
+                marketing_opt_out_at=consent.marketing_opt_out_at if consent else None,
+                opt_out_source=consent.opt_out_source if consent else None,
+                opt_out_via=consent.opt_out_via if consent else None,
+                resumed_at=consent.resumed_at if consent else None,
+                identities=[
+                    ContactIdentityRead.from_model(identity)
+                    for identity in identities
+                    if identity.channel is channel
+                ],
+            )
+        )
+    return channels
+
+
 class ContactOptOutRead(BaseModel):
     """A person's marketing consent, channel by channel (ENT-19).
 
@@ -786,26 +818,7 @@ class ContactOptOutRead(BaseModel):
         identities: Sequence[ContactIdentity],
         consents: Sequence[ContactChannelConsent],
     ) -> Self:
-        by_channel = {consent.channel: consent for consent in consents}
-        present = {identity.channel for identity in identities} | set(by_channel)
-        channels = []
-        for channel in ordered(present):
-            consent = by_channel.get(channel)
-            channels.append(
-                ChannelConsentRead(
-                    channel=channel,
-                    opted_out=consent is not None and not consent.accepts_marketing,
-                    marketing_opt_out_at=consent.marketing_opt_out_at if consent else None,
-                    opt_out_source=consent.opt_out_source if consent else None,
-                    opt_out_via=consent.opt_out_via if consent else None,
-                    resumed_at=consent.resumed_at if consent else None,
-                    identities=[
-                        ContactIdentityRead.from_model(identity)
-                        for identity in identities
-                        if identity.channel is channel
-                    ],
-                )
-            )
+        channels = consent_channels(identities, consents)
         return cls(
             id=contact.id,
             wa_id=contact.wa_id,
@@ -847,4 +860,5 @@ __all__ = [
     "RecipientListResponse",
     "RecipientRead",
     "TestSendRequest",
+    "consent_channels",
 ]

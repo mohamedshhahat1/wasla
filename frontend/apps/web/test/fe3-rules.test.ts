@@ -388,10 +388,22 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
       expect(served.has(entry.route)).toBe(true);
     });
   }
-  it("FE-3 registers Home and Channels, FE-4 Inbox between them, for every role", () => {
-    expect(NAVIGATION.map((entry) => entry.route)).toEqual(["/", "/inbox", "/channels"]);
+  it("FE-3 registers Home and Channels, FE-4 Inbox and FE-5 Customers and Leads between them, for every role", () => {
+    expect(NAVIGATION.map((entry) => entry.route)).toEqual([
+      "/",
+      "/inbox",
+      "/contacts",
+      "/leads",
+      "/channels",
+    ]);
     for (const role of ALL_ROLES)
-      expect(entriesFor(role).map((entry) => entry.key)).toEqual(["home", "inbox", "channels"]);
+      expect(entriesFor(role).map((entry) => entry.key)).toEqual([
+        "home",
+        "inbox",
+        "contacts",
+        "leads",
+        "channels",
+      ]);
     expect(entriesFor(null)).toEqual([]);
   });
   it("the current entry follows the path", () => {

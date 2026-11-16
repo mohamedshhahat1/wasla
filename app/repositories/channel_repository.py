@@ -30,7 +30,7 @@ from app.db.models.channel import (
     IdentityScope,
     IdentitySource,
 )
-from app.db.models.conversation import Contact
+from app.db.models.conversation import Contact, shown_name
 from app.db.models.lead import Lead, LeadStatus
 from app.repositories.base import BaseRepository, TenantScopedRepository
 
@@ -339,7 +339,8 @@ class ContactIdentityRepository(TenantScopedRepository[ContactIdentity]):
     ) -> dict[uuid.UUID, Participant]:
         """Who each of these identities is, by identity id, in one query (FEB-04).
 
-        The identity, its contact's name as the channel gave it, and the
+        The identity, its contact's name - the one a member gave, else the
+        channel's (`shown_name`) - and the
         contact's active lead - `uq_leads_active_contact` allows at most one,
         so the outer join never repeats a row. Every join is held to this
         workspace: the contact and the lead by their own tenant column.
@@ -347,7 +348,7 @@ class ContactIdentityRepository(TenantScopedRepository[ContactIdentity]):
         if not identity_ids:
             return {}
         query = (
-            select(ContactIdentity, Contact.display_name, Lead.id)
+            select(ContactIdentity, Contact.display_name, Contact.name, Lead.id)
             .join(
                 Contact,
                 and_(
@@ -367,8 +368,13 @@ class ContactIdentityRepository(TenantScopedRepository[ContactIdentity]):
         )
         rows = await self.session.execute(query)
         return {
-            identity.id: Participant(identity=identity, display_name=name, lead_id=lead_id)
-            for identity, name, lead_id in rows.all()
+            identity.id: Participant(
+                identity=identity,
+                # The member-given name before the channel's (CD-05).
+                display_name=shown_name(name, profile_name),
+                lead_id=lead_id,
+            )
+            for identity, profile_name, name, lead_id in rows.all()
         }
 
     async def map_for_contacts(

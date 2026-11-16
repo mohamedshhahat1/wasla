@@ -183,6 +183,19 @@ class UserMembershipRepository(BaseRepository[Membership]):
         )
         return await self._all(statement)
 
+    async def was_withdrawn(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        """Whether this person held a membership of that workspace that is no longer active.
+
+        Read only on a refusal path (FEB-34), keyed by the person's own id like
+        every read here: it decides which refusal they are told, never access.
+        """
+        statement = self._select().where(
+            Membership.user_id == user_id,
+            Membership.tenant_id == tenant_id,
+            Membership.status != MembershipStatus.ACTIVE,
+        )
+        return await self._first(statement) is not None
+
     async def list_owned_live_workspaces(
         self, user_id: uuid.UUID
     ) -> list[tuple[Membership, Tenant]]:

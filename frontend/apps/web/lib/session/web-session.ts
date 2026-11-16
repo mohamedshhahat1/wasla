@@ -13,6 +13,7 @@ import {
   TokenHolder,
   TransientFailure,
   withBackoff,
+  MembershipRevoked,
   WorkspaceSuspended,
   refreshOutcome,
   type ChannelLike,
@@ -29,9 +30,19 @@ import { ApiError, createApiClient, normaliseError, networkErrorOf, type WaslaCl
  * `workspace-suspended` (FEF-24): the refresh was refused only because the workspace is
  * suspended - the person is signed in (the cookie is kept), holds no usable token for it, and
  * the page shows the suspended state with "Check again" (`restore`) and "Sign out".
+ *
+ * `membership-revoked` (FEB-34, FEF-27): the refresh was refused only because the person's
+ * membership of that workspace was withdrawn - they are signed in (the cookie is kept) and the
+ * page shows the "access removed" state with "Open another workspace" (`openAnotherWorkspace`)
+ * and "Sign out".
  */
 export type SessionStatus =
-  "loading" | "signed-out" | "signed-in" | "connection-lost" | "workspace-suspended";
+  | "loading"
+  | "signed-out"
+  | "signed-in"
+  | "connection-lost"
+  | "workspace-suspended"
+  | "membership-revoked";
 
 /** What a session route answers on success (never a refresh token). */
 export interface SessionGrant {
@@ -145,6 +156,7 @@ export class WebSession {
     } catch (error) {
       if (error instanceof ConnectionLost) this.#setStatus("connection-lost");
       else if (error instanceof WorkspaceSuspended) this.#setStatus("workspace-suspended");
+      else if (error instanceof MembershipRevoked) this.#setStatus("membership-revoked");
       else this.#setStatus("signed-out");
     }
   }
@@ -171,6 +183,7 @@ export class WebSession {
         }
         if (error instanceof ConnectionLost) this.#setStatus("connection-lost");
         if (error instanceof WorkspaceSuspended) this.#setStatus("workspace-suspended");
+        if (error instanceof MembershipRevoked) this.#setStatus("membership-revoked");
         throw error;
       });
   }
@@ -204,6 +217,15 @@ export class WebSession {
     const bearer = await this.accessToken();
     const grant = await this.#post<SessionGrant>("switch", { workspace_slug: slug }, bearer);
     this.#adopt(grant);
+  }
+
+  /**
+   * FEF-27: out of the "access removed" state - one refresh that names no workspace, so the API
+   * picks one the person still belongs to (or none: the page then offers to create one). The
+   * refusal left the refresh token unspent, so this is the first use of it.
+   */
+  async openAnotherWorkspace(): Promise<void> {
+    this.#adopt(await this.#post<SessionGrant>("refresh", {}));
   }
 
   async googleAuthorizeUrl(): Promise<string> {
@@ -271,6 +293,8 @@ export class WebSession {
     switch (refreshOutcome(response.status, refusal.code)) {
       case "workspace-suspended":
         throw new WorkspaceSuspended();
+      case "membership-revoked":
+        throw new MembershipRevoked();
       case "signed-out":
         throw new SignedOut(refusal.code);
       case "transient":

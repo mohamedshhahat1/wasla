@@ -97,6 +97,9 @@ if (isMain) {
     COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
     CI: "1",
   };
+  // FEF-26: the previews have no API behind them, and their build says so. A preview build that
+  // does get an API sets PUBLIC_PREVIEW_NO_API=false; no other environment ever carries it.
+  if (environment === "preview") env.PUBLIC_PREVIEW_NO_API = "true";
   for (const [name, value] of Object.entries(process.env)) {
     if (name.startsWith("PUBLIC_") && value) env[name] = value;
   }

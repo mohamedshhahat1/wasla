@@ -201,6 +201,47 @@ step's heading.
 | emil-design-eng | no motion on bubbles, rows and badges; the drawer's entry and faster exit; no step transitions      |
 | impeccable      | the audit of the new screens (FE4_REALTIME_INBOX.md)                                                |
 
+## Customers and leads (FE-5, ADR-199)
+
+**Lists.** `/contacts` and `/leads` are one column: the page heading, a filter band on `secondary-subtle` (the search and
+the filters - the screen's secondary), then the rows in one white card with "Load more" under them. A row is one link, two
+or three lines: who (600 weight, in `<bdi>`), then the number or the interest, then quiet facts. No table and no horizontal
+scroll at 390. `/leads` has the page's one primary, "New lead"; `/contacts` has none.
+
+**A record page** opens with RecordHeader on a `secondary-subtle` band - the name as the h1, what stands beside it (a
+status, "Opted out"), a quiet line under it. A lead's judgements (score, owner, other details) sit on the same surface
+(RecordPanel); with the header band they are the page's 30 %, measured (FE5_CUSTOMERS.md). The rest are white cards, two columns from 1024 px (who and consent beside conversations and leads;
+fields beside notes and activity) and one column below, in that reading order.
+
+**Inline edit** swaps text for a field without motion: Enter saves, Escape cancels, focus returns to the control that
+opened it, the bound as a counter, the error under the field. Save is primary only while the field is open.
+
+**Status.** New, Contacted, Qualified and Proposal are neutral badges; Won uses `success`, Lost `danger`, "Opted out"
+`warning` - status colour only for those three, always with the word. The status control lists only the moves the API
+offers; with none it draws no menu, only words ("Won - closed"). A change someone else made first is an inline line that
+says where the record stands now. The score is a number with its label; no colour scale.
+
+**Roles.** A control a role cannot use is absent, never disabled: a member sees an owner as text and no "Clear opt-out".
+
+**Notes and the timeline.** Notes are plain text with their line breaks (`dir="auto"`), newest first, with no edit or
+delete; a link is a button that asks first. The timeline is one sentence per entry with a small round mark for who acted
+(a person, the AI, the system); previous and new values sit under it, each in `<bdi>`.
+
+**The statistics strip** is four plain StatCards of counts for owners and administrators - no chart, no accent.
+
+**PreviewNotice** is the sign-in page's layout with one sentence and one primary link; it exists only in a preview build
+without an API.
+
+**Motion.** Nothing on rows, badges, timeline entries, the inline edit's swap or a status landing; the dialog and the menu
+are FE-1's. 0 s under reduced motion.
+
+| Skill (FE-5)    | Decided                                                                                               |
+| --------------- | ----------------------------------------------------------------------------------------------------- |
+| ui-ux-pro-max   | inline-edit keys and focus return, errors beside their control, list rows instead of a table at 390   |
+| taste-skill     | the filter band as the secondary, one primary per view, plain stat cards against the hero-metric look |
+| emil-design-eng | no motion on rows, badges, the edit swap and the timeline                                             |
+| impeccable      | the context and audit of the new screens (FE5_CUSTOMERS.md)                                           |
+
 ## Right to left
 
 Logical properties only (the lint forbids physical sides). The brand panel sits at the inline end

@@ -16,7 +16,13 @@ export type PageNeed =
   | "workspace";
 
 export interface RouteState {
-  status: "loading" | "signed-out" | "signed-in" | "connection-lost" | "workspace-suspended";
+  status:
+    | "loading"
+    | "signed-out"
+    | "signed-in"
+    | "connection-lost"
+    | "workspace-suspended"
+    | "membership-revoked";
   /** null while /auth/me is loading. */
   verified: boolean | null;
   workspaceCount: number | null;
@@ -34,6 +40,8 @@ export function decideRoute(
   if (state.status === "connection-lost") return { kind: "show" };
   // FEF-24: signed in on a suspended workspace - PageGate shows its state; an auth page shows.
   if (state.status === "workspace-suspended") return { kind: "show" };
+  // FEF-27: signed in, the membership of that workspace withdrawn - PageGate shows its state.
+  if (state.status === "membership-revoked") return { kind: "show" };
   if (state.status === "signed-out") {
     if (need === "signed-out") return { kind: "show" };
     return { kind: "go", to: `/login?next=${encodeURIComponent(safeNext(here))}` };
@@ -45,6 +53,22 @@ export function decideRoute(
   if (need === "workspace" && state.workspaceCount === 0)
     return { kind: "go", to: "/workspaces/new" };
   return { kind: "show" };
+}
+
+/**
+ * FEF-28: a sign-in that names no workspace opens a session without one when every workspace the
+ * person belongs to is suspended (the API never opens a suspended workspace). That is GT-03's
+ * suspended state - not the shell, whose every read would fail. False while anything is unknown,
+ * for a person with no workspace at all, and as soon as one workspace is usable.
+ */
+export function onlySuspendedWorkspaces(
+  status: RouteState["status"],
+  hasActiveWorkspace: boolean,
+  workspaces: ReadonlyArray<{ status?: string | null }> | null | undefined,
+): boolean {
+  if (status !== "signed-in" || hasActiveWorkspace) return false;
+  if (!workspaces || workspaces.length === 0) return false;
+  return workspaces.every((workspace) => workspace.status === "suspended");
 }
 
 /** WK-03: unverified → /verify; no workspace → /workspaces/new; else the asked page (same origin). */

@@ -34,6 +34,7 @@ export {
   SignedOut,
   TransientFailure,
   withBackoff,
+  MembershipRevoked,
   WorkspaceSuspended,
   type BackoffOptions,
 } from "./backoff";

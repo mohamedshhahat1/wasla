@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from typing import Any, Final
 
-from sqlalchemy import ColumnElement, Select, select
+from sqlalchemy import ColumnElement, Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import TenantIsolationError
@@ -109,3 +110,28 @@ class TenantScopedRepository[ModelT: Base](BaseRepository[ModelT], ABC):
 def escape_like(value: str) -> str:
     """`value` matched literally inside a LIKE pattern escaped with a backslash."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+#: The letters a Turkish keyboard writes that a search treats as their plain
+#: neighbour (TF-02): the four i-letters are one letter, and s-cedilla, soft g,
+#: c-cedilla and the two umlauts match the letter under the mark. Folded before
+#: `lower()`, because PostgreSQL lower-cases a dotted capital I to an i plus a
+#: combining dot under some collations, which then matches nothing.
+_FOLD_FROM: Final = "\u0130I\u0131\u015e\u015f\u011e\u011f\u00c7\u00e7\u00d6\u00f6\u00dc\u00fc"
+_FOLD_TO: Final = "iiissggccoouu"
+
+
+def folded(expression: Any) -> ColumnElement[str]:
+    """`expression` as every name search compares it: Turkish letters folded, then lower-cased."""
+    return func.lower(func.translate(expression, _FOLD_FROM, _FOLD_TO))
+
+
+def contains_folded(column: Any, term: str) -> ColumnElement[bool]:
+    """Whether `column` contains `term`, case-insensitively and with Turkish letters folded.
+
+    The one predicate behind every name search - contacts, leads and the inbox
+    (TF-02) - applied to both sides, so "ipek" finds a dotted capital I and
+    "ISIK" a dotless one, in every workspace. `term` is matched literally:
+    `%` and `_` are ordinary text.
+    """
+    return folded(column).like(folded(f"%{escape_like(term)}%"), escape="\\")

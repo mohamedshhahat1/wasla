@@ -718,11 +718,11 @@ class AuthService:
         newly invited people exist before they belong anywhere.
         """
         memberships = await self._memberships.list_for_user(user.id)
-        if not memberships:
-            return None
 
         if workspace_slug is None:
-            # Oldest membership first: the workspace they started with.
+            # Oldest membership first: the workspace they started with. Only
+            # active memberships are listed, so a withdrawn one is never the
+            # workspace a refresh without a slug lands in (MR-03).
             for membership in memberships:
                 tenant = await self._tenants.get_by_id(membership.tenant_id)
                 if tenant is not None and tenant.is_active:
@@ -737,6 +737,25 @@ class AuthService:
             None,
         )
         if tenant is None or requested is None:
+            # Somebody whose membership *here* was withdrawn is told so (FEB-34),
+            # with the code every workspace route already answers them (FEB-07):
+            # they knew the workspace, and "not found" only made a reload look
+            # broken. A deleted workspace withdraws every membership and keeps
+            # the generic answer - the person was not removed, it is gone. The
+            # lookup runs only on this refusal path.
+            if (
+                tenant is not None
+                and tenant.deleted_at is None
+                and await self._memberships.was_withdrawn(user.id, tenant.id)
+            ):
+                raise PermissionDeniedError(
+                    "You no longer have access to this workspace.",
+                    error_code="membership_revoked",
+                )
+            if not memberships:
+                # No membership anywhere, and never one here: a session that
+                # names no workspace, as before.
+                return None
             # One answer for "no such workspace" and "you are not in it".
             # Distinguishing them would let anyone map which workspaces exist.
             raise TenantIsolationError()

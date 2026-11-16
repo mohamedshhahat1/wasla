@@ -8,7 +8,9 @@
   "nav": {
     "home": "Home",
     "channels": "Channels",
-    "inbox": "Inbox"
+    "inbox": "Inbox",
+    "contacts": "Customers",
+    "leads": "Leads"
   },
   "account": {
     "label": "Account",
@@ -51,7 +53,10 @@
       "title": "You no longer have access to this workspace",
       "body": "Your membership here has ended.",
       "switch": "Switch to another workspace from the menu above.",
-      "create": "Create a workspace"
+      "create": "Create a workspace",
+      "sessionBody": "Your access to this workspace was removed.",
+      "openAnother": "Open another workspace",
+      "openFailed": "Another workspace could not be opened. Try again, or sign out."
     },
     "payment": {
       "owner": "Payment is required to keep this workspace running.",
@@ -336,7 +341,7 @@
         "other": "Message"
       }
     },
-    "assignedTo": "Assigned to",
+    "assignedTo": "Assigned to <name></name>",
     "assign": "Assign",
     "assignToMe": "Assign to me",
     "unassign": "Unassign",
@@ -494,7 +499,241 @@
       "leadOwner": "Owner",
       "interest": "Interested in",
       "tags": "Tags",
-      "leadActivity": "Last lead activity"
+      "leadActivity": "Last lead activity",
+      "consent": "Marketing messages",
+      "createLead": "Create lead"
+    }
+  },
+  "customers": {
+    "filters": "Search and filters",
+    "reference": "Reference:",
+    "retry": "Try again",
+    "loadMore": "Load more",
+    "loading": "Loading",
+    "save": "Save",
+    "cancel": "Cancel",
+    "close": "Close",
+    "clearSearch": "Clear",
+    "searchTooLong": "Use {max} characters or fewer.",
+    "people": {
+      "you": "You",
+      "former": "A former member",
+      "unassigned": "Unassigned",
+      "ai": "AI",
+      "system": "System"
+    },
+    "leadStatus": {
+      "new": "New",
+      "contacted": "Contacted",
+      "qualified": "Qualified",
+      "proposal": "Proposal",
+      "won": "Won",
+      "lost": "Lost"
+    },
+    "leadSource": {
+      "whatsapp": "WhatsApp",
+      "agent": "AI agent",
+      "manual": "Added by the team",
+      "import": "Imported"
+    },
+    "identityKind": {
+      "phone": "Phone number",
+      "bsuid": "WhatsApp user id",
+      "psid": "Messenger id",
+      "igsid": "Instagram id"
+    },
+    "facts": {
+      "score": "Score",
+      "owner": "Owner",
+      "budget": "Budget",
+      "source": "Source"
+    },
+    "contacts": {
+      "title": "Customers",
+      "description": "Everyone who has written to this workspace.",
+      "allNumbers": "All numbers",
+      "emptyTitle": "No customers yet",
+      "emptyBody": "A customer appears here the first time they message one of your numbers.",
+      "errorTitle": "The customers could not be loaded",
+      "listLabel": "Customers",
+      "loading": "Loading customers",
+      "noMatch": "No customer matches “<term></term>”",
+      "numberFilter": "Your number",
+      "searchLabel": "Search by name or number",
+      "shown": "{count, plural, one {{shown} customer shown} other {{shown} customers shown}}",
+      "unnamed": "Unnamed customer"
+    },
+    "contact": {
+      "back": "Back to customers",
+      "notFoundTitle": "This customer was not found",
+      "notFoundBody": "It may belong to another workspace, or the link is wrong.",
+      "errorTitle": "The customer could not be loaded",
+      "loading": "Loading the customer",
+      "profileName": "WhatsApp name: <name></name>",
+      "nameLabel": "Name your team uses",
+      "editName": "Edit name",
+      "giveName": "Give a name",
+      "useProfileName": "Use the WhatsApp name",
+      "nameHint": "Only your team sees this name. The customer's WhatsApp name is kept.",
+      "identities": "Known as",
+      "copy": "Copy",
+      "copied": "Copied",
+      "firstSeen": "First wrote on {date}",
+      "conversations": "Conversations",
+      "noConversations": "No conversations yet.",
+      "leads": "Leads",
+      "noLeads": "No lead for this customer yet."
+    },
+    "consent": {
+      "title": "Marketing messages",
+      "optedOutBadge": "Opted out",
+      "optedOutSince": "Opted out since {date}",
+      "receiving": "Receiving messages",
+      "record": "Record opt-out",
+      "clear": "Clear opt-out",
+      "recordTitle": "Record that this customer opted out?",
+      "recordBody": "Campaigns, follow-ups and template messages to this customer stop. The customer can still write to you, and replies in the conversation still work. Only an owner or an administrator can undo this.",
+      "clearTitle": "Clear this opt-out?",
+      "clearBody": "Campaigns, follow-ups and template messages may reach this customer again. Do this only when the customer asked for it.",
+      "clearConfirm": "The customer asked to receive messages again",
+      "history": "History",
+      "historyEmpty": "Nothing has been recorded.",
+      "event": {
+        "beforeHistory": "Opted out (before history was kept)",
+        "optedOutByCustomer": "Opted out by the customer",
+        "clearedByCustomer": "The customer asked to receive messages again",
+        "optedOutBy": "Opt-out recorded by <name></name>",
+        "clearedBy": "Opt-out cleared by <name></name>",
+        "optedOutByTeam": "Opt-out recorded by the team",
+        "clearedByTeam": "Opt-out cleared by the team"
+      }
+    },
+    "leads": {
+      "title": "Leads",
+      "description": "The people your team and the AI are working to win.",
+      "errorTitle": "The leads could not be loaded",
+      "loading": "Loading leads",
+      "noMatch": "No lead matches these filters",
+      "clearFilters": "Clear filters",
+      "emptyTitle": "No leads yet",
+      "emptyBody": "The AI creates a lead when a conversation shows interest. You can also add one yourself.",
+      "listLabel": "Leads",
+      "unnamed": "Unnamed lead",
+      "shown": "{count, plural, one {{shown} lead shown} other {{shown} leads shown}}",
+      "searchLabel": "Search leads",
+      "tagLabel": "Tag",
+      "statusFilter": "Status",
+      "anyStatus": "Any status",
+      "sourceFilter": "Source",
+      "anySource": "Any source",
+      "assigneeFilter": "Owner",
+      "anyone": "Anyone",
+      "mine": "Mine"
+    },
+    "stats": {
+      "label": "Lead numbers",
+      "total": "All leads",
+      "open": "Open",
+      "unassigned": "Unassigned",
+      "won": "Won"
+    },
+    "create": {
+      "open": "New lead",
+      "title": "New lead",
+      "description": "Fill in what you know. You can change it later.",
+      "submit": "Create lead",
+      "openExisting": "Open the existing lead"
+    },
+    "fields": {
+      "name": "Name",
+      "phone": "Phone",
+      "email": "Email",
+      "interest": "Interested in",
+      "budget": "Budget",
+      "budgetHint": "Digits only, for example 500000.",
+      "currency": "Currency",
+      "currencyHint": "Three letters, for example EGP.",
+      "tags": "Tags",
+      "addTag": "Add tag",
+      "removeTag": "Remove the tag {tag}",
+      "tagsHint": "Up to {max} tags.",
+      "confirmed": "Confirmed by a person",
+      "confirmedHint": "A detail you save is marked as confirmed by a person. The AI never overwrites a confirmed detail."
+    },
+    "problems": {
+      "tooLong": "Use {max} characters or fewer.",
+      "email": "Enter an email address like name@example.com.",
+      "phone": "Enter a phone number with digits only, for example +20 10 5550 0000.",
+      "budget": "Enter the amount in digits only, for example 500000.",
+      "currency": "Enter a three-letter currency code, for example EGP.",
+      "invalid": "This text contains a character that cannot be saved."
+    },
+    "status": {
+      "change": "Change status",
+      "wonClosed": "Won — closed",
+      "closed": "Closed",
+      "reopen": "Reopen as new",
+      "moveTo": {
+        "new": "Move to New",
+        "contacted": "Move to Contacted",
+        "qualified": "Move to Qualified",
+        "proposal": "Move to Proposal",
+        "won": "Mark as won",
+        "lost": "Mark as lost"
+      },
+      "stale": "Someone else changed the status. It is now {status}."
+    },
+    "lead": {
+      "back": "Back to leads",
+      "open": "Open lead",
+      "notFoundTitle": "This lead was not found",
+      "notFoundBody": "It may belong to another workspace, or the link is wrong.",
+      "errorTitle": "The lead could not be loaded",
+      "loading": "Loading the lead",
+      "source": "Source: {source}",
+      "score": "Score: {score}",
+      "owner": "Owner: <name></name>",
+      "openCustomer": "Open customer",
+      "openConversation": "Open conversation",
+      "staleOwner": "Someone changed the owner — it is now <name></name>.",
+      "details": "Contact details",
+      "deal": "The deal",
+      "scoreLabel": "Score",
+      "scoreHint": "A whole number from {min} to {max}. The AI never changes a score.",
+      "ownerLabel": "Owner",
+      "custom": "Other details"
+    },
+    "notes": {
+      "title": "Notes",
+      "label": "Add a note",
+      "hint": "Notes are never sent to the customer. A note cannot be edited or removed.",
+      "add": "Add note",
+      "empty": "No notes yet."
+    },
+    "activity": {
+      "title": "Activity",
+      "empty": "Nothing has happened yet.",
+      "nothing": "empty",
+      "created": "{actor, select, user {<name></name> created the lead} agent {The AI created the lead from a conversation} other {The lead was created}}",
+      "statusChanged": "{actor, select, user {<name></name> moved the lead from <from></from> to <to></to>} agent {The AI moved the lead from <from></from> to <to></to>} other {The status changed from <from></from> to <to></to>}}",
+      "assigned": "{actor, select, user {<name></name> gave the lead to <to></to>} agent {The AI gave the lead to <to></to>} other {The lead was given to <to></to>}}",
+      "unassigned": "{actor, select, user {<name></name> removed the owner} agent {The AI removed the owner} other {The owner was removed}}",
+      "ownerLeft": "The owner left the workspace, so the lead has no owner",
+      "scoreChanged": "{actor, select, user {<name></name> changed the score from <from></from> to <to></to>} agent {The AI changed the score from <from></from> to <to></to>} other {The score changed from <from></from> to <to></to>}}",
+      "noteAdded": "{actor, select, user {<name></name> added a note} agent {The AI added a note} other {A note was added}}",
+      "fieldsUpdated": "{actor, select, user {<name></name> updated <fields></fields>} agent {The AI filled in <fields></fields>} other {<fields></fields> changed}}",
+      "change": "{field}: <from></from> → <to></to>",
+      "unknown": "{actor, select, user {<name></name> changed the lead} agent {The AI changed the lead} other {The lead changed}}",
+      "field": {
+        "name": "the name",
+        "phone": "the phone",
+        "email": "the email",
+        "interest": "the interest",
+        "budget_amount": "the budget",
+        "budget_currency": "the currency",
+        "tags": "the tags",
+        "custom_fields": "other details"
+      }
     }
   }
 }

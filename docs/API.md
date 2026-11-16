@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **262 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **265 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -28,11 +28,11 @@ conclusion drawn from it is vacuously true.
 | Status | Raised by | Meaning |
 | --- | --- | --- |
 | 401 | `AuthenticationError` | Missing, malformed or no-longer-valid credentials |
-| 403 | `PermissionDeniedError` | Authenticated, but not permitted in this workspace. Codes a client tells apart (ADR-194): `workspace_suspended` - the workspace is suspended ("This workspace is not available."; switching or logging into it answers "This workspace is suspended." with the same code - FEB-06, ADR-196); `membership_revoked` - the caller's membership in this workspace was withdrawn; `email_verification_required`; otherwise `permission_denied`. Somebody who never belonged to the workspace gets the 404 below, never one of these |
+| 403 | `PermissionDeniedError` | Authenticated, but not permitted in this workspace. Codes a client tells apart (ADR-194): `workspace_suspended` - the workspace is suspended ("This workspace is not available."; switching or logging into it answers "This workspace is suspended." with the same code - FEB-06, ADR-196); `membership_revoked` - the caller's membership in this workspace was withdrawn (also what a refresh **into** that workspace answers, with the refresh token left unspent - FEB-34, ADR-199; a workspace since deleted, one the caller never belonged to and an unknown slug keep the 404); `email_verification_required`; otherwise `permission_denied`. Somebody who never belonged to the workspace gets the 404 below, never one of these |
 | 402 | `PlanLimitExceededError` (`plan_limit_exceeded`), `PaymentRequiredError` (`payment_required`) | The plan does not stretch that far; the plan asked for is not paid for |
-| 404 | `NotFoundError`, `TenantIsolationError` | Absent, or outside the caller's workspace |
-| 409 | `ConflictError` | Uniqueness or state conflict. Two entitlement codes (ADR-131): `channel_capacity_exceeded` - every channel slot is taken - and `channel_type_not_allowed` - the plan in force does not include that channel; and `whatsapp_number_already_connected` - the WhatsApp number is already held by a workspace (which one is never said; FEB-06, ADR-196). Inbox (FEB-06, ADR-198): `stale_assignment` - the assignee changed since you read it (who has it now is never said; read the conversation again); `idempotency_key_reused` - an `Idempotency-Key` sent again with a different message (make a new key) |
-| 422 | `ValidationError` | Rejected by a business rule. Inbox codes (FEB-05, ADR-197): `search_term_invalid` - `q` outside 2..100 characters; `cursor_view_mismatch` - a `next_cursor` presented with other inbox filters than the view it came from; `inbox_view_with_updated_since` - `status`, `assigned_to`, `mode`, `q` or `unread` together with `updated_since`. Sending (FEB-06, ADR-198): `reply_window_closed` - free text or a file after the channel's reply window closed (send an approved template); `media_type_not_allowed` - a file whose bytes are no type Wasla accepts, contradict the type it was sent as, or a type the channel does not take |
+| 404 | `NotFoundError`, `TenantIsolationError` | Absent, or outside the caller's workspace. One code of its own (FEB-06, ADR-199): `assignee_not_active_member` - a lead assigned to somebody who is not an active member here (the same sentence; it tells the picker to re-read its members, not that the lead is gone) |
+| 409 | `ConflictError` | Uniqueness or state conflict. Two entitlement codes (ADR-131): `channel_capacity_exceeded` - every channel slot is taken - and `channel_type_not_allowed` - the plan in force does not include that channel; and `whatsapp_number_already_connected` - the WhatsApp number is already held by a workspace (which one is never said; FEB-06, ADR-196). Inbox (FEB-06, ADR-198): `stale_assignment` - the assignee changed since you read it (who has it now is never said; read the conversation again); `idempotency_key_reused` - an `Idempotency-Key` sent again with a different message (make a new key). Leads (CRM.md): `stale_lead_status`, `open_lead_exists`, and `stale_assignment` for a lead's owner |
+| 422 | `ValidationError` | Rejected by a business rule. Inbox codes (FEB-05, ADR-197): `search_term_invalid` - `q` outside 2..100 characters; `cursor_view_mismatch` - a `next_cursor` presented with other inbox filters than the view it came from; `inbox_view_with_updated_since` - `status`, `assigned_to`, `mode`, `q` or `unread` or `contact_id` together with `updated_since`. Sending (FEB-06, ADR-198): `reply_window_closed` - free text or a file after the channel's reply window closed (send an approved template); `media_type_not_allowed` - a file whose bytes are no type Wasla accepts, contradict the type it was sent as, or a type the channel does not take. Customers (FEB-06, ADR-199): `lead_status_transition_not_allowed` - a move the pipeline's graph forbids from where the lead stands (read the lead again: `next_statuses` says what is allowed); `contact_name_invalid` - a contact's name that is empty once trimmed (send `null` to remove it) |
 | 429 | `RateLimitedError` | Upstream is rate limiting |
 | 502 | `ExternalServiceError` | A provider failed |
 | 503 | `DependencyUnavailableError` | A dependency or platform credential is unavailable |
@@ -46,7 +46,7 @@ ADR-191):
 
 | File | What |
 | --- | --- |
-| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (262 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (265 operations less `/metrics`, which keeps itself out of the schema) |
 | `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
 
 `python -m scripts.export_openapi` writes both from the application factory, in
@@ -704,7 +704,7 @@ Four behaviours worth knowing:
 
 - **`PATCH` distinguishes an omitted field from an explicit null.** Omitting a field leaves it alone; sending `null` clears it. Anything touched becomes human-verified and is then protected from AI extraction — including a field you deliberately cleared.
 - **Creating a second lead for a customer who already has an open one answers `409`.** One opportunity, one record; close the first or update it. A customer whose lead is `won` or `lost` can start a new one.
-- **An illegal status move answers `422`.** The permitted transitions are a graph, not a free-for-all — see [CRM.md](CRM.md). Setting the status a lead already has succeeds and changes nothing, so a retry is safe.
+- **An illegal status move answers `422 lead_status_transition_not_allowed`.** `next_statuses` on every lead lists the moves allowed from where it stands, in pipeline order, so an interface offers those and never copies the graph. The permitted transitions are a graph, not a free-for-all — see [CRM.md](CRM.md). Setting the status a lead already has succeeds and changes nothing, so a retry is safe.
 - **`human_verified_fields` is returned on every lead.** It names the fields an agent will not overwrite, so an interface can show which values are pinned.
 
 ## Follow-ups
@@ -876,15 +876,24 @@ The campaigns page (ADR-145..ADR-150; the element-by-element contract is
 
 ## Contacts
 
-**Status: Implemented.** The marketing opt-out and the campaigns page's contact picker; a contact is created by the webhook from what Meta reports and has nothing else a person edits.
+**Status: Implemented.** Finding contacts (also the campaigns page's picker), reading one, the name the team gives it, its consent history and the marketing opt-out (FEB-19, ADR-199). A contact is created by the webhook from what the channel reports; its identities are never typed, edited, merged or deleted, and the one thing a person edits is the name.
 
 | Method | Path | Role |
 | --- | --- | --- |
 | GET | `/api/v1/contacts?q=&account_id=&eligible_for_campaign=&limit=&cursor=` | Any workspace member (PG-07) |
+| GET | `/api/v1/contacts/{contact_id}` | Any workspace member |
+| PATCH | `/api/v1/contacts/{contact_id}` | Any workspace member. Body `{"name": string \| null}` |
+| GET | `/api/v1/contacts/{contact_id}/consent-events?limit=&cursor=` | Any workspace member |
 | POST | `/api/v1/contacts/{contact_id}/opt-out` | Any workspace member. Body `{"channel", "source"?}` |
 | DELETE | `/api/v1/contacts/{contact_id}/opt-out?channel=` | Owner or admin |
 
-The picker answers `{items: [{id, display_name, wa_id, lead: {id, name, status} | null, last_inbound_at, opted_out_at, eligible_for_campaign, ineligible_reason}], next_cursor}`, newest activity first, at most 50 a page. `q` of digits searches the number, otherwise the name or the active lead's name. With `account_id`: contacts with a conversation on that number and whether a campaign from it could reach them; `eligible_for_campaign=true` needs `account_id` (`422 account_required`).
+**A contact** reads as `{id, identities: [{id, channel, kind, value}], profile_name, name, display_name, channels, opted_out, opted_out_at, created_at, last_inbound_at}`. `profile_name` is the name the channel gave - customer text, never markup - and is kept current by the webhook; `name` is the one a member gave, or null; `display_name` is the name to show, `name ?? profile_name`, and a conversation's `participant.display_name` follows the same rule. `channels` is the per-channel consent exactly as the opt-out answer writes it; `opted_out` (any channel) and `opted_out_at` (the earliest standing refusal) are a summary for a badge. `last_inbound_at` is the newest customer message on any of the contact's conversations. Another workspace's contact is the same 404 as an unknown id.
+
+**Naming** (`PATCH`): `name` is required - a string (trimmed, at most 200 characters, kept exactly otherwise) or `null` to take it away; empty once trimmed is `422 contact_name_invalid`, and any other key is refused. The same value again changes nothing. A change is one audit entry (`contact_renamed`, with both values) and one `conversation.updated` event per conversation of the contact, its `fields` naming `participant`, so open inboxes re-read who they are talking to. The last write wins.
+
+**The consent history** lists every opt-out and every clear, newest first, 50 a page: `{id, channel, action: opted_out | opt_out_cleared, source, via, by: {user_id, display_name} | null, at, before_history}`. `by` is the member who recorded it (kept by name after they leave) and null when the customer or the provider did. An opt-out older than the history has no stored row: it closes the list as one item with `before_history: true`, no `id`, and the refusal's own time. One customer's conversations are `GET /api/v1/conversations?contact_id=` (below); their leads, `GET /api/v1/leads?contact_id=`.
+
+The picker answers `{items: [{id, display_name, name, wa_id, lead: {id, name, status} | null, last_inbound_at, opted_out_at, eligible_for_campaign, ineligible_reason}], next_cursor}`, newest activity first, at most 50 a page. `display_name` is the name to show and `name` the member-given one. `q` of digits searches the number, otherwise the name - a member's or the channel's - or the active lead's name, with Turkish letters folded as in every name search (the dotted and dotless i are one letter; s-cedilla, soft g, c-cedilla and the umlauts match their plain letter). With `account_id`: contacts with a conversation on that number and whether a campaign from it could reach them; `eligible_for_campaign=true` needs `account_id` (`422 account_required`).
 
 Recording is any member's to do — the person handling the conversation is the one a customer says "stop" to. Clearing takes an administrator, because undoing somebody's own refusal should be deliberate.
 

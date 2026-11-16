@@ -8,7 +8,9 @@
   "nav": {
     "home": "Ana sayfa",
     "channels": "Kanallar",
-    "inbox": "Gelen kutusu"
+    "inbox": "Gelen kutusu",
+    "contacts": "Müşteriler",
+    "leads": "Potansiyel müşteriler"
   },
   "account": {
     "label": "Hesap",
@@ -51,7 +53,10 @@
       "title": "Artık bu çalışma alanına erişiminiz yok",
       "body": "Buradaki üyeliğiniz sona erdi.",
       "switch": "Yukarıdaki menüden başka bir çalışma alanına geçin.",
-      "create": "Çalışma alanı oluştur"
+      "create": "Çalışma alanı oluştur",
+      "sessionBody": "Bu çalışma alanına erişiminiz kaldırıldı.",
+      "openAnother": "Başka bir çalışma alanı aç",
+      "openFailed": "Başka bir çalışma alanı açılamadı. Yeniden deneyin veya oturumu kapatın."
     },
     "payment": {
       "owner": "Bu çalışma alanının çalışmaya devam etmesi için ödeme gerekiyor.",
@@ -336,7 +341,7 @@
         "other": "Mesaj"
       }
     },
-    "assignedTo": "Atanan",
+    "assignedTo": "<name></name> adlı kişiye atandı",
     "assign": "Ata",
     "assignToMe": "Bana ata",
     "unassign": "Atamayı kaldır",
@@ -494,7 +499,241 @@
       "leadOwner": "Sorumlu",
       "interest": "İlgilendiği",
       "tags": "Etiketler",
-      "leadActivity": "Potansiyel müşterinin son etkinliği"
+      "leadActivity": "Potansiyel müşterinin son etkinliği",
+      "consent": "Pazarlama mesajları",
+      "createLead": "Potansiyel müşteri oluştur"
+    }
+  },
+  "customers": {
+    "filters": "Arama ve filtreler",
+    "reference": "Referans:",
+    "retry": "Yeniden dene",
+    "loadMore": "Daha fazla yükle",
+    "loading": "Yükleniyor",
+    "save": "Kaydet",
+    "cancel": "İptal",
+    "close": "Kapat",
+    "clearSearch": "Temizle",
+    "searchTooLong": "En fazla {max} karakter kullanın.",
+    "people": {
+      "you": "Siz",
+      "former": "Eski bir üye",
+      "unassigned": "Atanmamış",
+      "ai": "Yapay zekâ",
+      "system": "Sistem"
+    },
+    "leadStatus": {
+      "new": "Yeni",
+      "contacted": "İletişim kuruldu",
+      "qualified": "Nitelikli",
+      "proposal": "Teklif",
+      "won": "Kazanıldı",
+      "lost": "Kaybedildi"
+    },
+    "leadSource": {
+      "whatsapp": "WhatsApp",
+      "agent": "Yapay zekâ temsilcisi",
+      "manual": "Ekip ekledi",
+      "import": "İçe aktarıldı"
+    },
+    "identityKind": {
+      "phone": "Telefon numarası",
+      "bsuid": "WhatsApp kullanıcı kimliği",
+      "psid": "Messenger kimliği",
+      "igsid": "Instagram kimliği"
+    },
+    "facts": {
+      "score": "Puan",
+      "owner": "Sorumlu",
+      "budget": "Bütçe",
+      "source": "Kaynak"
+    },
+    "contacts": {
+      "title": "Müşteriler",
+      "description": "Bu çalışma alanına yazan herkes.",
+      "allNumbers": "Tüm numaralar",
+      "emptyTitle": "Henüz müşteri yok",
+      "emptyBody": "Bir müşteri, numaralarınızdan birine ilk mesajını gönderdiğinde burada görünür.",
+      "errorTitle": "Müşteriler yüklenemedi",
+      "listLabel": "Müşteriler",
+      "loading": "Müşteriler yükleniyor",
+      "noMatch": "“<term></term>” ile eşleşen müşteri yok",
+      "numberFilter": "Numaranız",
+      "searchLabel": "Ada veya numaraya göre ara",
+      "shown": "{count, plural, one {{shown} müşteri gösteriliyor} other {{shown} müşteri gösteriliyor}}",
+      "unnamed": "Adsız müşteri"
+    },
+    "contact": {
+      "back": "Müşterilere dön",
+      "notFoundTitle": "Bu müşteri bulunamadı",
+      "notFoundBody": "Başka bir çalışma alanına ait olabilir veya bağlantı yanlış olabilir.",
+      "errorTitle": "Müşteri yüklenemedi",
+      "loading": "Müşteri yükleniyor",
+      "profileName": "WhatsApp adı: <name></name>",
+      "nameLabel": "Ekibinizin kullandığı ad",
+      "editName": "Adı düzenle",
+      "giveName": "Ad ver",
+      "useProfileName": "WhatsApp adını kullan",
+      "nameHint": "Bu adı yalnızca ekibiniz görür. Müşterinin WhatsApp adı saklanır.",
+      "identities": "Bilinen kimlikler",
+      "copy": "Kopyala",
+      "copied": "Kopyalandı",
+      "firstSeen": "İlk mesaj: {date}",
+      "conversations": "Konuşmalar",
+      "noConversations": "Henüz konuşma yok.",
+      "leads": "Potansiyel müşteriler",
+      "noLeads": "Bu müşteri için henüz potansiyel müşteri kaydı yok."
+    },
+    "consent": {
+      "title": "Pazarlama mesajları",
+      "optedOutBadge": "Abonelikten çıktı",
+      "optedOutSince": "{date} tarihinden beri abonelikten çıkmış",
+      "receiving": "Mesaj alıyor",
+      "record": "Abonelikten çıkışı kaydet",
+      "clear": "Abonelikten çıkışı kaldır",
+      "recordTitle": "Bu müşterinin abonelikten çıktığı kaydedilsin mi?",
+      "recordBody": "Bu müşteriye giden kampanyalar, takip mesajları ve şablon mesajları durur. Müşteri size yine yazabilir ve konuşmadaki yanıtlar çalışmaya devam eder. Bunu yalnızca bir sahip veya yönetici geri alabilir.",
+      "clearTitle": "Bu abonelikten çıkış kaldırılsın mı?",
+      "clearBody": "Kampanyalar, takip mesajları ve şablon mesajları bu müşteriye yeniden ulaşabilir. Bunu yalnızca müşteri istediğinde yapın.",
+      "clearConfirm": "Müşteri yeniden mesaj almak istedi",
+      "history": "Geçmiş",
+      "historyEmpty": "Hiçbir şey kaydedilmedi.",
+      "event": {
+        "beforeHistory": "Abonelikten çıktı (geçmiş tutulmadan önce)",
+        "optedOutByCustomer": "Müşteri abonelikten çıktı",
+        "clearedByCustomer": "Müşteri yeniden mesaj almak istedi",
+        "optedOutBy": "<name></name> abonelikten çıkışı kaydetti",
+        "clearedBy": "<name></name> abonelikten çıkışı kaldırdı",
+        "optedOutByTeam": "Ekip abonelikten çıkışı kaydetti",
+        "clearedByTeam": "Ekip abonelikten çıkışı kaldırdı"
+      }
+    },
+    "leads": {
+      "title": "Potansiyel müşteriler",
+      "description": "Ekibinizin ve yapay zekânın kazanmaya çalıştığı kişiler.",
+      "errorTitle": "Potansiyel müşteriler yüklenemedi",
+      "loading": "Potansiyel müşteriler yükleniyor",
+      "noMatch": "Bu filtrelerle eşleşen potansiyel müşteri yok",
+      "clearFilters": "Filtreleri temizle",
+      "emptyTitle": "Henüz potansiyel müşteri yok",
+      "emptyBody": "Bir konuşma ilgi gösterdiğinde yapay zekâ bir potansiyel müşteri oluşturur. Kendiniz de ekleyebilirsiniz.",
+      "listLabel": "Potansiyel müşteriler",
+      "unnamed": "Adsız potansiyel müşteri",
+      "shown": "{count, plural, one {{shown} potansiyel müşteri gösteriliyor} other {{shown} potansiyel müşteri gösteriliyor}}",
+      "searchLabel": "Potansiyel müşterilerde ara",
+      "tagLabel": "Etiket",
+      "statusFilter": "Durum",
+      "anyStatus": "Tüm durumlar",
+      "sourceFilter": "Kaynak",
+      "anySource": "Tüm kaynaklar",
+      "assigneeFilter": "Sorumlu",
+      "anyone": "Herkes",
+      "mine": "Benimkiler"
+    },
+    "stats": {
+      "label": "Potansiyel müşteri sayıları",
+      "total": "Tümü",
+      "open": "Açık",
+      "unassigned": "Atanmamış",
+      "won": "Kazanıldı"
+    },
+    "create": {
+      "open": "Yeni potansiyel müşteri",
+      "title": "Yeni potansiyel müşteri",
+      "description": "Bildiklerinizi doldurun. Sonra değiştirebilirsiniz.",
+      "submit": "Potansiyel müşteri oluştur",
+      "openExisting": "Mevcut kaydı aç"
+    },
+    "fields": {
+      "name": "Ad",
+      "phone": "Telefon",
+      "email": "E-posta",
+      "interest": "İlgilendiği konu",
+      "budget": "Bütçe",
+      "budgetHint": "Yalnızca rakam, örneğin 500000.",
+      "currency": "Para birimi",
+      "currencyHint": "Üç harf, örneğin EGP.",
+      "tags": "Etiketler",
+      "addTag": "Etiket ekle",
+      "removeTag": "{tag} etiketini kaldır",
+      "tagsHint": "En fazla {max} etiket.",
+      "confirmed": "Bir kişi onayladı",
+      "confirmedHint": "Kaydettiğiniz bir bilgi, bir kişi tarafından onaylandı olarak işaretlenir. Yapay zekâ onaylanmış bir bilginin üzerine asla yazmaz."
+    },
+    "problems": {
+      "tooLong": "En fazla {max} karakter kullanın.",
+      "email": "name@example.com gibi bir e-posta adresi girin.",
+      "phone": "Yalnızca rakamlarla bir telefon numarası girin, örneğin +20 10 5550 0000.",
+      "budget": "Tutarı yalnızca rakamlarla girin, örneğin 500000.",
+      "currency": "Üç harfli bir para birimi kodu girin, örneğin EGP.",
+      "invalid": "Bu metin kaydedilemeyen bir karakter içeriyor."
+    },
+    "status": {
+      "change": "Durumu değiştir",
+      "wonClosed": "Kazanıldı — kapandı",
+      "closed": "Kapandı",
+      "reopen": "Yeni olarak yeniden aç",
+      "moveTo": {
+        "new": "Yeni durumuna taşı",
+        "contacted": "İletişim kuruldu durumuna taşı",
+        "qualified": "Nitelikli durumuna taşı",
+        "proposal": "Teklif durumuna taşı",
+        "won": "Kazanıldı olarak işaretle",
+        "lost": "Kaybedildi olarak işaretle"
+      },
+      "stale": "Durumu başka biri değiştirdi. Şimdiki durum: {status}."
+    },
+    "lead": {
+      "back": "Potansiyel müşterilere dön",
+      "open": "Kaydı aç",
+      "notFoundTitle": "Bu potansiyel müşteri bulunamadı",
+      "notFoundBody": "Başka bir çalışma alanına ait olabilir veya bağlantı yanlış olabilir.",
+      "errorTitle": "Potansiyel müşteri yüklenemedi",
+      "loading": "Potansiyel müşteri yükleniyor",
+      "source": "Kaynak: {source}",
+      "score": "Puan: {score}",
+      "owner": "Sorumlu: <name></name>",
+      "openCustomer": "Müşteriyi aç",
+      "openConversation": "Konuşmayı aç",
+      "staleOwner": "Biri sorumluyu değiştirdi — şimdi <name></name>.",
+      "details": "İletişim bilgileri",
+      "deal": "Anlaşma",
+      "scoreLabel": "Puan",
+      "scoreHint": "{min} ile {max} arasında bir tam sayı. Yapay zekâ puanı asla değiştirmez.",
+      "ownerLabel": "Sorumlu",
+      "custom": "Diğer ayrıntılar"
+    },
+    "notes": {
+      "title": "Notlar",
+      "label": "Not ekle",
+      "hint": "Notlar müşteriye asla gönderilmez. Bir not düzenlenemez veya silinemez.",
+      "add": "Notu ekle",
+      "empty": "Henüz not yok."
+    },
+    "activity": {
+      "title": "Etkinlik",
+      "empty": "Henüz bir şey olmadı.",
+      "nothing": "boş",
+      "created": "{actor, select, user {<name></name> kaydı oluşturdu} agent {Yapay zekâ kaydı bir konuşmadan oluşturdu} other {Kayıt oluşturuldu}}",
+      "statusChanged": "{actor, select, user {<name></name> kaydı <from></from> durumundan <to></to> durumuna taşıdı} agent {Yapay zekâ kaydı <from></from> durumundan <to></to> durumuna taşıdı} other {Durum <from></from> iken <to></to> oldu}}",
+      "assigned": "{actor, select, user {<name></name> kaydı <to></to> adlı kişiye verdi} agent {Yapay zekâ kaydı <to></to> adlı kişiye verdi} other {Kayıt <to></to> adlı kişiye verildi}}",
+      "unassigned": "{actor, select, user {<name></name> sorumluyu kaldırdı} agent {Yapay zekâ sorumluyu kaldırdı} other {Sorumlu kaldırıldı}}",
+      "ownerLeft": "Sorumlu çalışma alanından ayrıldı; kaydın sorumlusu yok",
+      "scoreChanged": "{actor, select, user {<name></name> puanı <from></from> iken <to></to> yaptı} agent {Yapay zekâ puanı <from></from> iken <to></to> yaptı} other {Puan <from></from> iken <to></to> oldu}}",
+      "noteAdded": "{actor, select, user {<name></name> bir not ekledi} agent {Yapay zekâ bir not ekledi} other {Bir not eklendi}}",
+      "fieldsUpdated": "{actor, select, user {<name></name> şunları güncelledi: <fields></fields>} agent {Yapay zekâ şunları doldurdu: <fields></fields>} other {Değişti: <fields></fields>}}",
+      "change": "{field}: <from></from> → <to></to>",
+      "unknown": "{actor, select, user {<name></name> kaydı değiştirdi} agent {Yapay zekâ kaydı değiştirdi} other {Kayıt değişti}}",
+      "field": {
+        "name": "ad",
+        "phone": "telefon",
+        "email": "e-posta",
+        "interest": "ilgi",
+        "budget_amount": "bütçe",
+        "budget_currency": "para birimi",
+        "tags": "etiketler",
+        "custom_fields": "diğer ayrıntılar"
+      }
     }
   }
 }

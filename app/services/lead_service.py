@@ -42,7 +42,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, ValidationError
+from app.core.exceptions import ConflictError, TenantIsolationError, ValidationError
 from app.core.logging import get_logger
 from app.core.pagination import Cursor, Page, paginate
 from app.db.models.conversation import Conversation, ConversationMode
@@ -83,6 +83,12 @@ STALE_LEAD_STATUS = "stale_lead_status"
 STALE_ASSIGNMENT = "stale_assignment"
 #: A reopened lead would be the customer's second open one (CRM-13).
 OPEN_LEAD_EXISTS = "open_lead_exists"
+#: The `error_code` of a move the pipeline's graph does not allow (FEB-06,
+#: EC5-02): the screen showing it was stale about where the lead stands.
+LEAD_STATUS_TRANSITION_NOT_ALLOWED = "lead_status_transition_not_allowed"
+#: The `error_code` of an assignment to somebody who is not an active member
+#: here (EC5-02) - told apart from a lead that is not found.
+ASSIGNEE_NOT_ACTIVE_MEMBER = "assignee_not_active_member"
 
 # Deliberately permissive. This rejects text that is obviously not an address
 # rather than trying to decide deliverability, which no regular expression can.
@@ -423,7 +429,10 @@ class LeadService:
             return lead
 
         if not lead.can_transition_to(status):
-            raise ValidationError(f"A lead cannot move from {lead.status.value} to {status.value}.")
+            raise ValidationError(
+                f"A lead cannot move from {lead.status.value} to {status.value}.",
+                error_code=LEAD_STATUS_TRANSITION_NOT_ALLOWED,
+            )
 
         if lead.is_closed and lead.contact_id is not None:
             # Reopening. The customer may have a newer open lead by now, and
@@ -509,7 +518,15 @@ class LeadService:
         (PD-CRM-4).
         """
         if assigned_to_id is not None:
-            await self._memberships.hold_active_for_user(assigned_to_id)
+            try:
+                await self._memberships.hold_active_for_user(assigned_to_id)
+            except TenantIsolationError as error:
+                # The same 404 and sentence as ever, with a code of its own
+                # (EC5-02): the picker re-reads its members instead of the
+                # page saying the lead is gone.
+                raise TenantIsolationError(
+                    error.message, error_code=ASSIGNEE_NOT_ACTIVE_MEMBER
+                ) from error
         lead = await self._leads.lock_by_id(lead_id)
         if lead.assigned_to_id != expected_assigned_to_id:
             raise ConflictError(
