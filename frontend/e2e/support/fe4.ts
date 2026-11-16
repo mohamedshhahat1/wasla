@@ -95,6 +95,8 @@ export const text = (body: string) => ({ type: "text", text: { body } });
 
 export interface ConversationRow {
   id: string;
+  /** FE-5: the contact the conversation belongs to. */
+  contact_id: string;
   participant: { handle: string | null; display_name: string | null };
   assigned_to_id: string | null;
   unread_count: number;
