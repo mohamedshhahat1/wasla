@@ -263,6 +263,8 @@ async def test_the_cursor_reaches_the_service(client: AsyncClient, inbox: StubIn
             "viewer_id": USER_ID,
             # UR-09's unread filter, not asked for.
             "unread": False,
+            # FEB-19's contact filter, not asked for.
+            "contact_id": None,
         }
     ]
 

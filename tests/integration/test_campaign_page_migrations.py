@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import insert, text
+from sqlalchemy import insert, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -34,7 +34,7 @@ from app.db.models.conversation import (
 )
 from app.db.models.whatsapp_template import TemplateCategory
 from app.repositories.conversation_repository import MessageRepository
-from tests.integration.test_campaigns import _account, _customer, _template, _tenant
+from tests.integration.test_campaigns import _account, _template, _tenant
 
 pytestmark = pytest.mark.integration
 
@@ -78,21 +78,21 @@ async def _seed(url: str) -> dict[str, tuple[uuid.UUID, datetime | None]]:
                 name: str = "spring_offer",
                 state: MessageDeliveryState = MessageDeliveryState.SENT,
             ) -> tuple[uuid.UUID, datetime]:
-                contact = await _customer(
-                    session,
-                    tenant=tenant,
-                    account=account,
-                    wa_id=f"2010{abs(hash(case)) % 10**8:08d}",
-                    with_conversation=False,
+                # The database is at 0119: the contact and the conversation are written with the
+                # columns they set, never through the models, which also map what later revisions
+                # add (0139's read state, 0140's member-given name) and would name those columns
+                # in their INSERT and SELECT.
+                contact_id = await session.scalar(
+                    insert(Contact)
+                    .values(tenant_id=tenant.id, wa_id=f"2010{abs(hash(case)) % 10**8:08d}")
+                    .returning(Contact.id)
                 )
-                # The database is at 0119: the conversation is written with the columns it sets,
-                # never through the model, which also maps what later revisions add (0139's read
-                # state) and would name those columns in its INSERT and SELECT.
+                assert contact_id is not None
                 conversation_id = await session.scalar(
                     insert(Conversation)
                     .values(
                         tenant_id=tenant.id,
-                        contact_id=contact.id,
+                        contact_id=contact_id,
                         account_id=account.id,
                         status=ConversationStatus.OPEN,
                         mode=ConversationMode.AI,
@@ -112,7 +112,7 @@ async def _seed(url: str) -> dict[str, tuple[uuid.UUID, datetime | None]]:
                 await session.flush()
                 message.sent_at = now - ago
                 message.delivery_state = state
-                return contact.id, now - ago
+                return contact_id, now - ago
 
             recent, at = await sent("recent", ago=timedelta(hours=2))
             expected["recent"] = (recent, at)
@@ -130,9 +130,9 @@ async def _seed(url: str) -> dict[str, tuple[uuid.UUID, datetime | None]]:
             expected["human"] = (by_hand, at)
             newer, _ = await sent("newer", ago=timedelta(hours=3))
             claimed = now - timedelta(minutes=10)
-            contact = await session.get(Contact, newer)
-            assert contact is not None
-            contact.last_marketing_sent_at = claimed
+            await session.execute(
+                update(Contact).where(Contact.id == newer).values(last_marketing_sent_at=claimed)
+            )
             expected["newer"] = (newer, claimed)
             await session.commit()
     finally:

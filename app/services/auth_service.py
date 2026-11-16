@@ -539,7 +539,9 @@ class AuthService:
             raise AuthenticationError(INVALID_CREDENTIALS)
 
         if isinstance(workspace, _Unresolved):
-            workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+            workspace = await self._resolve_workspace(
+                user=user, workspace_slug=workspace_slug, tell_withdrawn=True
+            )
         return self._issue(user=user, workspace=workspace)
 
     async def _workspace_before_spend(
@@ -566,7 +568,9 @@ class AuthService:
         ):
             return _UNRESOLVED
         try:
-            workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+            workspace = await self._resolve_workspace(
+                user=user, workspace_slug=workspace_slug, tell_withdrawn=True
+            )
             # Memberships, none of them in a workspace that may open: a deleted
             # workspace withdraws its memberships (ADR-194), so what remains is
             # suspended.
@@ -711,8 +715,13 @@ class AuthService:
         *,
         user: User,
         workspace_slug: str | None,
+        tell_withdrawn: bool = False,
     ) -> WorkspaceContext | None:
         """Decide which workspace a new session opens.
+
+        `tell_withdrawn` is the refresh's alone (FEB-34): only there is a person
+        whose membership of the named workspace was withdrawn told so by its
+        code. A sign-in and a switch keep the generic answer they always gave.
 
         A user with no membership still gets a session: platform staff and
         newly invited people exist before they belong anywhere.
@@ -744,7 +753,8 @@ class AuthService:
             # the generic answer - the person was not removed, it is gone. The
             # lookup runs only on this refusal path.
             if (
-                tenant is not None
+                tell_withdrawn
+                and tenant is not None
                 and tenant.deleted_at is None
                 and await self._memberships.was_withdrawn(user.id, tenant.id)
             ):
