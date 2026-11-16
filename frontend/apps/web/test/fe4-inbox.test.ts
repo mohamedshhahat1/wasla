@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { QueryClient } from "@tanstack/react-query";
+import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
 import { EVENT_TYPES, queryKey } from "@wasla/api-client";
@@ -32,6 +32,7 @@ import {
   capCount,
   firstPageOnly,
   mayMarkRead,
+  NEXT_PAGE_KEEPS_REFETCH,
   onlyAppends,
   pollInterval,
   restartsFromTop,
@@ -173,6 +174,44 @@ describe("IL-04: a cursor of another view reads the list again from the top, onc
       firstPageOnly({ pages: ["one", "two", "empty"], pageParams: [null, "c1", "bad"] }),
     ).toEqual({ pages: ["one"], pageParams: [null] });
     expect(firstPageOnly(undefined)).toBeUndefined();
+  });
+  // FEF-42 (frontend.yml 43905604482): "Load more" during the refetch from the top cancelled it,
+  // and the empty page that ended the list stayed - the older rows never loaded.
+  async function loadMoreDuringRefetch(options?: { cancelRefetch: boolean }) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const seen: { cursor: string | null; signal: AbortSignal }[] = [];
+    let release: () => void = () => undefined;
+    let blockFirstPage = false;
+    const observer = new InfiniteQueryObserver(client, {
+      queryKey: ["fef-42"],
+      initialPageParam: null as string | null,
+      queryFn: async ({ pageParam, signal }: { pageParam: string | null; signal: AbortSignal }) => {
+        seen.push({ cursor: pageParam, signal });
+        if (pageParam === null && blockFirstPage)
+          await new Promise<void>((resolve) => (release = resolve));
+        return { items: [pageParam ?? "top"], next_cursor: pageParam === null ? "c1" : null };
+      },
+      getNextPageParam: (last: { next_cursor: string | null }) => last.next_cursor,
+    });
+    const unsubscribe = observer.subscribe(() => undefined);
+    await vi.waitFor(() => expect(observer.getCurrentResult().data?.pages).toHaveLength(1));
+    blockFirstPage = true;
+    const refetch = observer.refetch();
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    const next = observer.fetchNextPage(options);
+    release();
+    await Promise.allSettled([refetch, next]);
+    unsubscribe();
+    client.clear();
+    return { refetchSignal: seen[1]!.signal, cursors: seen.map((entry) => entry.cursor) };
+  }
+  it("a next page never cancels the refetch already running (FEF-42)", async () => {
+    const kept = await loadMoreDuringRefetch(NEXT_PAGE_KEEPS_REFETCH);
+    expect(kept.refetchSignal.aborted).toBe(false);
+    expect(kept.cursors).toEqual([null, null]);
+    // Control: TanStack's default cancels it - the race the e2e run met.
+    const control = await loadMoreDuringRefetch();
+    expect(control.refetchSignal.aborted).toBe(true);
   });
 });
 
