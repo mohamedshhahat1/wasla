@@ -60,6 +60,11 @@
   "reply_window_closed": "Plus de 24 heures se sont écoulées depuis le dernier message de ce client. Envoyez plutôt un modèle approuvé.",
   "idempotency_key_reused": "Ce message n'a pas pu être envoyé. Réessayez.",
   "media_type_not_allowed": "Ce type de fichier ne peut pas être envoyé.",
+  "lead_status_transition_not_allowed": "Ce prospect ne peut plus passer à ce statut. Il a été rechargé.",
+  "assignee_not_active_member": "Cette personne n'est plus membre de cet espace de travail. Choisissez quelqu'un d'autre.",
+  "contact_name_invalid": "Saisissez un nom ou supprimez-le.",
+  "stale_lead_status": "Quelqu'un d'autre a changé le statut de ce prospect. Il a été rechargé.",
+  "open_lead_exists": "Ce client a déjà un prospect ouvert.",
   "connection_lost": "La connexion a été perdue. Vérifiez-la et réessayez.",
   "fallback": "Un problème est survenu. Réessayez."
 }

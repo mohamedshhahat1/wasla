@@ -10,6 +10,8 @@ Fields: `tenant_id`, `contact_id`, `account_id`, `assigned_to_id`, `mode`, `stat
 
 A conversation is scoped by connected WhatsApp number as well as by contact: a business with a sales number and a support number is holding two genuinely separate conversations with the same person.
 
+**A contact's name** (FEB-19, ADR-199). `contacts.display_name` is the channel's profile name, kept current by the webhook; `contacts.name` is the name a member gave, written only by `PATCH /contacts/{id}` and shown before the profile name wherever a customer is named - the contact read, a conversation's participant, both searches. A lead's own `name` is separate and is not changed by it. **Consent history**: every opt-out and every lifting of one writes a row to `contact_consent_events` (channel, action, source, via, the member who did it) in the transaction that changes `contact_channel_consents`, through the one writer in `app/services/opt_out.py`; nothing updates or deletes a row.
+
 **Contact identity is Meta's canonical `wa_id`** (CRM-20). A contact is unique per `(tenant_id, wa_id)`, and only the webhook creates contacts, from the digits-only `wa_id` Meta sends, so `+20…` and `20…` never meet today. Any future path that creates a contact from a typed or imported phone number must normalise to that same form before it looks one up, or it will create a second identity for the same person.
 
 `ConversationStatus.PENDING` is **reserved and unreachable**: nothing writes it, and a conversation is `OPEN` or `CLOSED`. It stays in the enum because removing a PostgreSQL enum label is a table rewrite, and nothing is gained by it.
@@ -54,6 +56,8 @@ NEW ──→ CONTACTED ──→ QUALIFIED ──→ PROPOSAL ──→ WON
  │           │             │            │
  └───────────┴─────────────┴────────────┴──────→ LOST ──→ NEW
 ```
+
+The drawing shows the main line; the graph also lets a lead skip one step forward (`NEW` to `QUALIFIED`, `CONTACTED` to `PROPOSAL`, `QUALIFIED` to `WON`). Every lead the API returns carries `next_statuses` - the moves allowed from its committed status, in pipeline order, read from that one graph (ADR-199) - so a screen offers exactly those. A move the graph forbids answers 422 `lead_status_transition_not_allowed`.
 
 `WON` is terminal: a returning customer is a new lead, and rewriting the old row would destroy the record of the deal that closed. `LOST` reopens to `NEW` only. Setting the status a lead already has succeeds and changes nothing, so a retried job is safe.
 

@@ -60,6 +60,11 @@
   "reply_window_closed": "It has been more than 24 hours since this customer wrote. Send an approved template instead.",
   "idempotency_key_reused": "This message could not be sent. Try again.",
   "media_type_not_allowed": "This type of file cannot be sent.",
+  "lead_status_transition_not_allowed": "This lead can no longer move to that status. It has been reloaded.",
+  "assignee_not_active_member": "That person is no longer a member of this workspace. Choose someone else.",
+  "contact_name_invalid": "Enter a name, or remove it.",
+  "stale_lead_status": "Someone else changed this lead's status. It has been reloaded.",
+  "open_lead_exists": "This customer already has an open lead.",
   "connection_lost": "The connection was lost. Check it and try again.",
   "fallback": "Something went wrong. Try again."
 }
