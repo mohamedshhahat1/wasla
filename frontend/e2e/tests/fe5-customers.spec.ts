@@ -204,6 +204,9 @@ test("CJ-03 / CJ-04: a member names a customer and records a stop; an owner clea
   await expect(page.locator('[data-consent-state="opted-out"]')).toBeVisible({ timeout: BOUND });
   await expect(page.locator("[data-consent-history] li")).toHaveCount(1, { timeout: BOUND });
   await expect(page.locator("[data-clear-opt-out]")).toHaveCount(0);
+  // The scan waits for the dialog to be gone: WebKit measured text through its fading scrim
+  // (frontend.yml 43882980521).
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await axe(page, "contact opted out");
 
   // The owner clears it, deliberately.
