@@ -8,7 +8,9 @@
   "nav": {
     "home": "Accueil",
     "channels": "Canaux",
-    "inbox": "Boîte de réception"
+    "inbox": "Boîte de réception",
+    "contacts": "Clients",
+    "leads": "Prospects"
   },
   "account": {
     "label": "Compte",
@@ -51,7 +53,10 @@
       "title": "Vous n'avez plus accès à cet espace de travail",
       "body": "Votre adhésion ici a pris fin.",
       "switch": "Passez à un autre espace de travail depuis le menu ci-dessus.",
-      "create": "Créer un espace de travail"
+      "create": "Créer un espace de travail",
+      "sessionBody": "Votre accès à cet espace de travail a été retiré.",
+      "openAnother": "Ouvrir un autre espace de travail",
+      "openFailed": "Impossible d'ouvrir un autre espace de travail. Réessayez ou déconnectez-vous."
     },
     "payment": {
       "owner": "Un paiement est nécessaire pour que cet espace de travail continue de fonctionner.",
@@ -336,7 +341,7 @@
         "other": "Message"
       }
     },
-    "assignedTo": "Attribuée à",
+    "assignedTo": "Attribuée à <name></name>",
     "assign": "Attribuer",
     "assignToMe": "M'attribuer",
     "unassign": "Retirer l'attribution",
@@ -494,7 +499,241 @@
       "leadOwner": "Responsable",
       "interest": "Intéressé par",
       "tags": "Étiquettes",
-      "leadActivity": "Dernière activité du prospect"
+      "leadActivity": "Dernière activité du prospect",
+      "consent": "Messages marketing",
+      "createLead": "Créer un prospect"
+    }
+  },
+  "customers": {
+    "filters": "Recherche et filtres",
+    "reference": "Référence :",
+    "retry": "Réessayer",
+    "loadMore": "Charger plus",
+    "loading": "Chargement",
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "close": "Fermer",
+    "clearSearch": "Effacer",
+    "searchTooLong": "Utilisez {max} caractères au maximum.",
+    "people": {
+      "you": "Vous",
+      "former": "Un ancien membre",
+      "unassigned": "Non attribué",
+      "ai": "IA",
+      "system": "Système"
+    },
+    "leadStatus": {
+      "new": "Nouveau",
+      "contacted": "Contacté",
+      "qualified": "Qualifié",
+      "proposal": "Proposition",
+      "won": "Gagné",
+      "lost": "Perdu"
+    },
+    "leadSource": {
+      "whatsapp": "WhatsApp",
+      "agent": "Agent IA",
+      "manual": "Ajouté par l'équipe",
+      "import": "Importé"
+    },
+    "identityKind": {
+      "phone": "Numéro de téléphone",
+      "bsuid": "Identifiant utilisateur WhatsApp",
+      "psid": "Identifiant Messenger",
+      "igsid": "Identifiant Instagram"
+    },
+    "facts": {
+      "score": "Score",
+      "owner": "Responsable",
+      "budget": "Budget",
+      "source": "Source"
+    },
+    "contacts": {
+      "title": "Clients",
+      "description": "Toutes les personnes qui ont écrit à cet espace de travail.",
+      "allNumbers": "Tous les numéros",
+      "emptyTitle": "Aucun client pour l'instant",
+      "emptyBody": "Un client apparaît ici dès son premier message à l'un de vos numéros.",
+      "errorTitle": "Impossible de charger les clients",
+      "listLabel": "Clients",
+      "loading": "Chargement des clients",
+      "noMatch": "Aucun client ne correspond à « <term></term> »",
+      "numberFilter": "Votre numéro",
+      "searchLabel": "Rechercher par nom ou numéro",
+      "shown": "{count, plural, one {{shown} client affiché} many {{shown} clients affichés} other {{shown} clients affichés}}",
+      "unnamed": "Client sans nom"
+    },
+    "contact": {
+      "back": "Retour aux clients",
+      "notFoundTitle": "Ce client est introuvable",
+      "notFoundBody": "Il appartient peut-être à un autre espace de travail, ou le lien est incorrect.",
+      "errorTitle": "Impossible de charger le client",
+      "loading": "Chargement du client",
+      "profileName": "Nom WhatsApp : <name></name>",
+      "nameLabel": "Nom utilisé par votre équipe",
+      "editName": "Modifier le nom",
+      "giveName": "Donner un nom",
+      "useProfileName": "Utiliser le nom WhatsApp",
+      "nameHint": "Seule votre équipe voit ce nom. Le nom WhatsApp du client est conservé.",
+      "identities": "Connu sous",
+      "copy": "Copier",
+      "copied": "Copié",
+      "firstSeen": "Premier message le {date}",
+      "conversations": "Conversations",
+      "noConversations": "Aucune conversation pour l'instant.",
+      "leads": "Prospects",
+      "noLeads": "Aucun prospect pour ce client pour l'instant."
+    },
+    "consent": {
+      "title": "Messages marketing",
+      "optedOutBadge": "Désinscrit",
+      "optedOutSince": "Désinscrit depuis le {date}",
+      "receiving": "Reçoit les messages",
+      "record": "Enregistrer la désinscription",
+      "clear": "Lever la désinscription",
+      "recordTitle": "Enregistrer que ce client s'est désinscrit ?",
+      "recordBody": "Les campagnes, les relances et les messages modèles vers ce client s'arrêtent. Le client peut toujours vous écrire, et les réponses dans la conversation fonctionnent encore. Seul un propriétaire ou un administrateur peut annuler cela.",
+      "clearTitle": "Lever cette désinscription ?",
+      "clearBody": "Les campagnes, les relances et les messages modèles pourront de nouveau atteindre ce client. Ne le faites que si le client l'a demandé.",
+      "clearConfirm": "Le client a demandé à recevoir de nouveau des messages",
+      "history": "Historique",
+      "historyEmpty": "Rien n'a été enregistré.",
+      "event": {
+        "beforeHistory": "Désinscrit (avant la tenue de l'historique)",
+        "optedOutByCustomer": "Désinscription par le client",
+        "clearedByCustomer": "Le client a demandé à recevoir de nouveau des messages",
+        "optedOutBy": "Désinscription enregistrée par <name></name>",
+        "clearedBy": "Désinscription levée par <name></name>",
+        "optedOutByTeam": "Désinscription enregistrée par l'équipe",
+        "clearedByTeam": "Désinscription levée par l'équipe"
+      }
+    },
+    "leads": {
+      "title": "Prospects",
+      "description": "Les personnes que votre équipe et l'IA cherchent à convaincre.",
+      "errorTitle": "Impossible de charger les prospects",
+      "loading": "Chargement des prospects",
+      "noMatch": "Aucun prospect ne correspond à ces filtres",
+      "clearFilters": "Effacer les filtres",
+      "emptyTitle": "Aucun prospect pour l'instant",
+      "emptyBody": "L'IA crée un prospect lorsqu'une conversation montre de l'intérêt. Vous pouvez aussi en ajouter un vous-même.",
+      "listLabel": "Prospects",
+      "unnamed": "Prospect sans nom",
+      "shown": "{count, plural, one {{shown} prospect affiché} many {{shown} prospects affichés} other {{shown} prospects affichés}}",
+      "searchLabel": "Rechercher des prospects",
+      "tagLabel": "Étiquette",
+      "statusFilter": "Statut",
+      "anyStatus": "Tous les statuts",
+      "sourceFilter": "Source",
+      "anySource": "Toutes les sources",
+      "assigneeFilter": "Responsable",
+      "anyone": "Tout le monde",
+      "mine": "Les miens"
+    },
+    "stats": {
+      "label": "Chiffres des prospects",
+      "total": "Tous les prospects",
+      "open": "Ouverts",
+      "unassigned": "Non attribués",
+      "won": "Gagnés"
+    },
+    "create": {
+      "open": "Nouveau prospect",
+      "title": "Nouveau prospect",
+      "description": "Renseignez ce que vous savez. Vous pourrez le modifier plus tard.",
+      "submit": "Créer le prospect",
+      "openExisting": "Ouvrir le prospect existant"
+    },
+    "fields": {
+      "name": "Nom",
+      "phone": "Téléphone",
+      "email": "E-mail",
+      "interest": "Intéressé par",
+      "budget": "Budget",
+      "budgetHint": "Chiffres uniquement, par exemple 500000.",
+      "currency": "Devise",
+      "currencyHint": "Trois lettres, par exemple EGP.",
+      "tags": "Étiquettes",
+      "addTag": "Ajouter une étiquette",
+      "removeTag": "Retirer l'étiquette {tag}",
+      "tagsHint": "Jusqu'à {max} étiquettes.",
+      "confirmed": "Confirmé par une personne",
+      "confirmedHint": "Un détail que vous enregistrez est marqué comme confirmé par une personne. L'IA ne remplace jamais un détail confirmé."
+    },
+    "problems": {
+      "tooLong": "Utilisez {max} caractères au maximum.",
+      "email": "Saisissez une adresse e-mail comme name@example.com.",
+      "phone": "Saisissez un numéro de téléphone en chiffres, par exemple +20 10 5550 0000.",
+      "budget": "Saisissez le montant en chiffres uniquement, par exemple 500000.",
+      "currency": "Saisissez un code de devise à trois lettres, par exemple EGP.",
+      "invalid": "Ce texte contient un caractère qui ne peut pas être enregistré."
+    },
+    "status": {
+      "change": "Changer le statut",
+      "wonClosed": "Gagné — clôturé",
+      "closed": "Clôturé",
+      "reopen": "Rouvrir comme nouveau",
+      "moveTo": {
+        "new": "Passer à Nouveau",
+        "contacted": "Passer à Contacté",
+        "qualified": "Passer à Qualifié",
+        "proposal": "Passer à Proposition",
+        "won": "Marquer comme gagné",
+        "lost": "Marquer comme perdu"
+      },
+      "stale": "Quelqu'un d'autre a changé le statut. Il est maintenant : {status}."
+    },
+    "lead": {
+      "back": "Retour aux prospects",
+      "open": "Ouvrir le prospect",
+      "notFoundTitle": "Ce prospect est introuvable",
+      "notFoundBody": "Il appartient peut-être à un autre espace de travail, ou le lien est incorrect.",
+      "errorTitle": "Impossible de charger le prospect",
+      "loading": "Chargement du prospect",
+      "source": "Source : {source}",
+      "score": "Score : {score}",
+      "owner": "Responsable : <name></name>",
+      "openCustomer": "Ouvrir le client",
+      "openConversation": "Ouvrir la conversation",
+      "staleOwner": "Quelqu'un a changé le responsable — c'est maintenant <name></name>.",
+      "details": "Coordonnées",
+      "deal": "L'affaire",
+      "scoreLabel": "Score",
+      "scoreHint": "Un nombre entier de {min} à {max}. L'IA ne modifie jamais un score.",
+      "ownerLabel": "Responsable",
+      "custom": "Autres détails"
+    },
+    "notes": {
+      "title": "Notes",
+      "label": "Ajouter une note",
+      "hint": "Les notes ne sont jamais envoyées au client. Une note ne peut être ni modifiée ni supprimée.",
+      "add": "Ajouter la note",
+      "empty": "Aucune note pour l'instant."
+    },
+    "activity": {
+      "title": "Activité",
+      "empty": "Rien ne s'est encore passé.",
+      "nothing": "vide",
+      "created": "{actor, select, user {<name></name> a créé le prospect} agent {L'IA a créé le prospect à partir d'une conversation} other {Le prospect a été créé}}",
+      "statusChanged": "{actor, select, user {<name></name> a fait passer le prospect de <from></from> à <to></to>} agent {L'IA a fait passer le prospect de <from></from> à <to></to>} other {Le statut est passé de <from></from> à <to></to>}}",
+      "assigned": "{actor, select, user {<name></name> a confié le prospect à <to></to>} agent {L'IA a confié le prospect à <to></to>} other {Le prospect a été confié à <to></to>}}",
+      "unassigned": "{actor, select, user {<name></name> a retiré le responsable} agent {L'IA a retiré le responsable} other {Le responsable a été retiré}}",
+      "ownerLeft": "Le responsable a quitté l'espace de travail : le prospect n'a plus de responsable",
+      "scoreChanged": "{actor, select, user {<name></name> a changé le score de <from></from> à <to></to>} agent {L'IA a changé le score de <from></from> à <to></to>} other {Le score est passé de <from></from> à <to></to>}}",
+      "noteAdded": "{actor, select, user {<name></name> a ajouté une note} agent {L'IA a ajouté une note} other {Une note a été ajoutée}}",
+      "fieldsUpdated": "{actor, select, user {<name></name> a mis à jour <fields></fields>} agent {L'IA a renseigné <fields></fields>} other {Modification : <fields></fields>}}",
+      "change": "{field} : <from></from> → <to></to>",
+      "unknown": "{actor, select, user {<name></name> a modifié le prospect} agent {L'IA a modifié le prospect} other {Le prospect a été modifié}}",
+      "field": {
+        "name": "le nom",
+        "phone": "le téléphone",
+        "email": "l'e-mail",
+        "interest": "l'intérêt",
+        "budget_amount": "le budget",
+        "budget_currency": "la devise",
+        "tags": "les étiquettes",
+        "custom_fields": "d'autres détails"
+      }
     }
   }
 }
