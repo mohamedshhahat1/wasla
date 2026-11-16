@@ -24,7 +24,7 @@ from app.db.models.lead import (
     LeadSource,
     LeadStatus,
 )
-from app.repositories.base import TenantScopedRepository
+from app.repositories.base import TenantScopedRepository, contains_folded
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,13 +185,14 @@ class LeadRepository(TenantScopedRepository[Lead]):
             # text search would need its own index and its own language config.
             # Escaped so a customer named "100%" is searched for, not matched by
             # everything.
-            pattern = f"%{_escape_like(filters.search)}%"
+            # Turkish letters folded on both sides, by the predicate every
+            # name search shares (TF-02).
             query = query.where(
                 or_(
-                    Lead.name.ilike(pattern, escape="\\"),
-                    Lead.email.ilike(pattern, escape="\\"),
-                    Lead.phone.ilike(pattern, escape="\\"),
-                    Lead.interest.ilike(pattern, escape="\\"),
+                    contains_folded(Lead.name, filters.search),
+                    contains_folded(Lead.email, filters.search),
+                    contains_folded(Lead.phone, filters.search),
+                    contains_folded(Lead.interest, filters.search),
                 )
             )
         return query
@@ -386,13 +387,3 @@ class LeadActivityRepository(TenantScopedRepository[LeadActivity]):
                 data=data,
             )
         )
-
-
-def _escape_like(value: str) -> str:
-    """Neutralise LIKE wildcards in user-supplied search text.
-
-    Without this a search for `%` matches every lead in the workspace, and one
-    for `_` matches every single-character name - which reads as a broken search
-    box rather than as an injection, but is the same mistake.
-    """
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

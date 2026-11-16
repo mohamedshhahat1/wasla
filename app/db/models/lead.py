@@ -130,6 +130,17 @@ ALLOWED_TRANSITIONS: Final[dict[LeadStatus, frozenset[LeadStatus]]] = {
     LeadStatus.LOST: frozenset({LeadStatus.NEW}),
 }
 
+
+def next_statuses(status: LeadStatus) -> list[LeadStatus]:
+    """The moves the graph allows from `status`, in pipeline order (LG-01).
+
+    What `LeadRead.next_statuses` offers a screen, read from the graph the
+    service judges a move by - never a second copy of it.
+    """
+    allowed = ALLOWED_TRANSITIONS[status]
+    return [candidate for candidate in LeadStatus if candidate in allowed]
+
+
 # Columns an AI agent is allowed to fill in. Everything outside this set -
 # status, score, assignment, tags - is a judgement a person or an explicit rule
 # makes, not something to infer from a sentence a customer typed.

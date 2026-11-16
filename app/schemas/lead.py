@@ -28,6 +28,7 @@ from app.db.models.lead import (
     LeadNote,
     LeadSource,
     LeadStatus,
+    next_statuses,
 )
 from app.repositories.lead_repository import LeadStatistics
 from app.schemas.bounds import LEAD_CUSTOM_FIELDS, check_json
@@ -185,6 +186,10 @@ class LeadRead(BaseModel):
     budget_amount: Decimal | None
     budget_currency: str | None
     status: LeadStatus
+    # The moves the pipeline allows from `status`, in pipeline order (LG-01):
+    # what a screen offers. A move can still answer 409 `stale_lead_status`
+    # or `open_lead_exists`.
+    next_statuses: list[LeadStatus]
     source: LeadSource
     score: int
     assigned_to_id: uuid.UUID | None
@@ -211,6 +216,7 @@ class LeadRead(BaseModel):
             budget_amount=lead.budget_amount,
             budget_currency=lead.budget_currency,
             status=lead.status,
+            next_statuses=next_statuses(lead.status),
             source=lead.source,
             score=lead.score,
             assigned_to_id=lead.assigned_to_id,
