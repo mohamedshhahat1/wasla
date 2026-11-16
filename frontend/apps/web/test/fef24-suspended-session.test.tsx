@@ -98,10 +98,12 @@ describe("the browser session reads a refused refresh (SU-04)", () => {
     expect(session.status).toBe("signed-out");
   });
 
-  it("403 membership_revoked on load → signed out, as before", async () => {
+  // FE-5 (FEB-34, FEF-27): this row was "signed out, as before" until the API began to answer
+  // the code on refresh; it is now its own state (fe5-session.test.tsx holds the rest).
+  it("403 membership_revoked on load → membership-revoked, not signed out", async () => {
     const session = sessionAnswering(403, "membership_revoked");
     await session.restore();
-    expect(session.status).toBe("signed-out");
+    expect(session.status).toBe("membership-revoked");
   });
 });
 

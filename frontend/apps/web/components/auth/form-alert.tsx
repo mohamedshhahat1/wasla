@@ -5,6 +5,8 @@ import { useTranslations } from "next-intl";
 import { ApiError } from "@wasla/api-client";
 import { errorMessageKey } from "@wasla/i18n";
 
+import { previewWithoutApi } from "../../lib/env";
+
 /** What a form shows for an error: a translated sentence by code, and the reference (AU-01, AU-04). */
 export function useErrorText() {
   const t = useTranslations();
@@ -14,6 +16,14 @@ export function useErrorText() {
     if (apiError.code === "rate_limited" && apiError.retryAfterSeconds !== null) {
       return {
         text: `${t("errors.rate_limited")} ${t("common.retryIn", { seconds: Math.ceil(apiError.retryAfterSeconds) })}`,
+        requestId: apiError.requestId,
+        code: apiError.code,
+      };
+    }
+    // FEF-26: a preview build has no server to sign in to, and says that - not "try again later".
+    if (apiError.code === "session_unavailable" && previewWithoutApi()) {
+      return {
+        text: t("auth.previewNoServer"),
         requestId: apiError.requestId,
         code: apiError.code,
       };

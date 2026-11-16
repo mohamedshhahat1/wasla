@@ -18,7 +18,8 @@ const TABLE: Array<[number, string | null, RefreshOutcome, boolean]> = [
   [401, "invalid_token", "signed-out", true],
   [401, null, "signed-out", true],
   [403, "workspace_suspended", "workspace-suspended", false],
-  [403, "membership_revoked", "signed-out", true],
+  // FEB-34 / FEF-27 (ADR-199): a withdrawn membership keeps the session, like a suspension.
+  [403, "membership_revoked", "membership-revoked", false],
   [403, "session_request_refused", "signed-out", true],
   [403, null, "signed-out", true],
   [404, "not_found", "error", false],

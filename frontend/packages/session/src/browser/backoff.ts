@@ -37,6 +37,19 @@ export class WorkspaceSuspended extends Error {
   }
 }
 
+/**
+ * The refresh was refused because the person's membership of the workspace was withdrawn
+ * (FEB-34): they stay signed in - the cookie is kept and the token was not spent - and the page
+ * shows the "access removed" state, from which they open another workspace or sign out.
+ */
+export class MembershipRevoked extends Error {
+  readonly code = "membership_revoked";
+  constructor() {
+    super("membership_revoked");
+    this.name = "MembershipRevoked";
+  }
+}
+
 /** The network kept failing until the access token expired. */
 export class ConnectionLost extends Error {
   constructor() {
@@ -72,7 +85,13 @@ export async function withBackoff<T>(
     try {
       return await attempt();
     } catch (error) {
-      if (error instanceof SignedOut || error instanceof WorkspaceSuspended) throw error;
+      if (
+        error instanceof SignedOut ||
+        error instanceof WorkspaceSuspended ||
+        error instanceof MembershipRevoked
+      ) {
+        throw error;
+      }
       const expiresAt = options.expiresAt();
       const wait = backoffDelay(tries + 1);
       if (expiresAt === null || options.clock.now() + wait >= expiresAt) throw new ConnectionLost();
