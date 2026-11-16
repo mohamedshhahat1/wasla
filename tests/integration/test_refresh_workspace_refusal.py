@@ -12,6 +12,8 @@ whatever the workspace says.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -155,12 +157,12 @@ async def test_a_spent_token_is_still_a_replay_when_the_workspace_refuses(
     assert await _reuse_entries(db_session) == 1
 
 
-async def test_a_withdrawn_membership_refuses_as_before_and_leaves_the_token_unspent(
+async def test_a_withdrawn_membership_refuses_by_its_code_and_leaves_the_token_unspent(
     auth: AuthService, db_session: AsyncSession, redis: _RedisClient, settings: Settings
 ) -> None:
-    """SU-03: with another workspace to open, a refresh into the withdrawn one answers the
-    generic not-found it always did (FEB-34 records `membership_revoked` there as a later
-    decision) - and the token is not spent."""
+    """FEB-34 (MR-02): a refresh into a workspace whose membership was withdrawn answers 403
+    `membership_revoked`, FEB-07's code and sentence, and the token is not spent - it still
+    opens the workspace the person has left, and the withdrawn one again once reinstated."""
     session = await _register(auth, db_session)
     user = (
         await db_session.execute(select(User).where(User.email == "refusal@example.test"))
@@ -180,8 +182,11 @@ async def test_a_withdrawn_membership_refuses_as_before_and_leaves_the_token_uns
     membership.status = MembershipStatus.REVOKED
     await db_session.flush()
 
-    with pytest.raises(TenantIsolationError):
+    with pytest.raises(PermissionDeniedError) as refused:
         await auth.refresh(refresh_token=session.refresh_token, workspace_slug=SLUG)
+    assert refused.value.error_code == "membership_revoked"
+    assert refused.value.status_code == 403
+    assert refused.value.message == "You no longer have access to this workspace."
     assert not await _spent(redis, session.refresh_token, settings)
 
     membership.status = MembershipStatus.ACTIVE
@@ -190,11 +195,12 @@ async def test_a_withdrawn_membership_refuses_as_before_and_leaves_the_token_uns
     assert refreshed.refresh_token != session.refresh_token
 
 
-async def test_a_sole_withdrawn_membership_still_opens_a_session_without_a_workspace(
-    auth: AuthService, db_session: AsyncSession
+async def test_a_sole_withdrawn_membership_is_refused_by_name_and_opens_no_workspace_without(
+    auth: AuthService, db_session: AsyncSession, redis: _RedisClient, settings: Settings
 ) -> None:
-    """Unchanged (recorded for FEB-34): with no workspace left, the refresh is not refused - it
-    opens a session that names none, as a person with no membership gets."""
+    """FEB-34 (MR-02, MR-03): with no workspace left, a refresh *into* the withdrawn one is the
+    same 403 `membership_revoked`, token unspent; a refresh that names none is not refused - it
+    opens a session without a workspace, as a person with no membership gets."""
     session = await _register(auth, db_session)
     tenant = await _tenant(db_session)
     membership = (
@@ -203,8 +209,46 @@ async def test_a_sole_withdrawn_membership_still_opens_a_session_without_a_works
     membership.status = MembershipStatus.REVOKED
     await db_session.flush()
 
-    refreshed = await auth.refresh(refresh_token=session.refresh_token, workspace_slug=SLUG)
+    with pytest.raises(PermissionDeniedError) as refused:
+        await auth.refresh(refresh_token=session.refresh_token, workspace_slug=SLUG)
+    assert refused.value.error_code == "membership_revoked"
+    assert not await _spent(redis, session.refresh_token, settings)
+
+    refreshed = await auth.refresh(refresh_token=session.refresh_token)
     assert refreshed.workspace is None
+
+
+async def test_a_stranger_a_deleted_workspace_and_an_unknown_slug_keep_the_generic_answer(
+    auth: AuthService, db_session: AsyncSession, redis: _RedisClient, settings: Settings
+) -> None:
+    """MR-05: `membership_revoked` is told only to somebody who was a member of a workspace
+    that still exists. Never a member, a workspace since deleted, a slug nobody holds: the
+    not-found each always got, and the token unspent."""
+    session = await _register(auth, db_session)
+    user = (
+        await db_session.execute(select(User).where(User.email == "refusal@example.test"))
+    ).scalar_one()
+    strange = Tenant(name="Strange", slug=f"{SLUG}-strange", timezone=TEST_TIMEZONE)
+    gone = Tenant(name="Gone", slug=f"{SLUG}-gone", timezone=TEST_TIMEZONE)
+    db_session.add_all([strange, gone])
+    await db_session.flush()
+    db_session.add(
+        Membership(
+            tenant_id=gone.id,
+            user_id=user.id,
+            role=TenantRole.MEMBER,
+            status=MembershipStatus.REVOKED,
+        )
+    )
+    gone.deleted_at = datetime.now(UTC)
+    await db_session.flush()
+
+    for slug in (f"{SLUG}-strange", f"{SLUG}-gone", f"{SLUG}-nobody"):
+        with pytest.raises(TenantIsolationError) as refused:
+            await auth.refresh(refresh_token=session.refresh_token, workspace_slug=slug)
+        assert refused.value.error_code == "not_found", slug
+        assert refused.value.status_code == 404
+    assert not await _spent(redis, session.refresh_token, settings)
 
 
 async def test_a_reload_names_no_workspace_and_is_refused_when_every_one_is_suspended(
