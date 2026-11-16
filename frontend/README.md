@@ -140,6 +140,21 @@ out as before.
   `docker exec wasla-fe-e2e-api python -m tests.e2e_stack.inbox_states window-closed <conversation id> | templates <slug> |
 media <conversation id> pending|failed|unavailable | voice-note <conversation id>`.
 
+## Customers and leads (FE-5, ADR-199)
+
+- **Routes** - `/contacts`, `/contacts/[id]`, `/leads`, `/leads/[id]`. Components in `components/customers/`, rules in
+  `lib/customers/` (`view.ts`: what may live in a URL; `lead-form.ts`: the dirty-field PATCH, the budget rule, the bodies
+  of a status move and an assignment; `keys.ts`: the query keys). The inbox panel's additions are in
+  `components/customers/panel-actions.tsx`.
+- **Not live** - these screens read on mount, on window focus and after their own changes; the stream's map is unchanged.
+- **Walking it locally** - with FE-0's profile up and a connected number (see the inbox above), a customer's first message
+  through the fake webhook makes a contact; open `/contacts`, then the contact. Add a lead with "New lead" on `/leads`,
+  or "Create lead" on a contact or in the inbox panel. The states a few calls cannot reach:
+  `docker exec wasla-fe-e2e-api python -m tests.e2e_stack.customer_states second-identity <contact id> | agent-lead <lead id> |
+old-opt-out <contact id>`.
+- **Previews** - `node scripts/build-workers-linux.mjs --env preview` sets `PUBLIC_PREVIEW_NO_API=true`: a preview without an
+  API says so instead of "Connection lost". Set it to `false` for a preview that has an API.
+
 ## Changing the look
 
 The design language is [packages/ui/DESIGN.md](packages/ui/DESIGN.md): one blue family and white in three
