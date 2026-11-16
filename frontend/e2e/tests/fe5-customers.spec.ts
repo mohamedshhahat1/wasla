@@ -86,9 +86,16 @@ function answerOf(page: Page, method: string, path: RegExp): Promise<Response> {
 }
 
 async function openMove(page: Page, locale: Locale, status: string) {
-  await page.locator("[data-status-trigger]").first().click();
+  // The fact first: the menu of the move before this one is gone and the control is at rest.
+  const trigger = page.locator("[data-status-trigger]").first();
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect(trigger).toBeEnabled();
+  await trigger.click();
   const key = `${C}.status.moveTo.${status}`;
-  return page.getByRole("menuitem", { name: label(locale, key) });
+  const item = page.getByRole("menuitem", { name: label(locale, key) });
+  await expect(item).toBeVisible();
+  return item;
 }
 
 for (const locale of ["en", "tr"] as const) {
@@ -430,16 +437,9 @@ for (const locale of ["en", "ar"] as const) {
     // Assign it through the API so the header says who owns it (FEF-33's sentence).
     await page.goto(`${WEB}/inbox/${conversation.id}`);
     const panel = page.locator("[data-panel-contact]");
-    if (!(await panel.isVisible().catch(() => false))) {
-      const show = page.getByRole("button", { name: label(locale, "app.inbox.panel.show") });
-      if (
-        await show
-          .first()
-          .isVisible()
-          .catch(() => false)
-      )
-        await show.first().click();
-    }
+    await expect(page.locator('[data-inbox-pane="conversation"]')).toBeVisible({ timeout: BOUND });
+    // From 1280 px the panel starts shown; below that it is a drawer or a step behind this control.
+    if (!(await panel.first().isVisible())) await page.locator("[data-show-panel]").first().click();
     await expect(panel.first()).toBeVisible({ timeout: BOUND });
 
     // No lead yet: create one from the panel, linked to the customer and the conversation.

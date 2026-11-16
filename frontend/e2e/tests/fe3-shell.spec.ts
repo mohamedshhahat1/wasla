@@ -130,8 +130,14 @@ for (const locale of ["en", "ar"] as Locale[]) {
       const nav = page
         .getByRole("navigation", { name: label(locale, "app.navLabel") })
         .filter({ visible: true });
-      // FE-4 registers the inbox: Home, Inbox, Channels - still only what exists.
-      await expect(nav.getByRole("link")).toHaveCount(3);
+      // FE-4 registers the inbox and FE-5 Customers and Leads: Home, Inbox, Customers, Leads,
+      // Channels - still only what exists.
+      await expect(nav.getByRole("link")).toHaveCount(5);
+      for (const key of ["app.nav.contacts", "app.nav.leads"]) {
+        await expect(nav.getByRole("link", { name: label(locale, key), exact: true })).toHaveCount(
+          1,
+        );
+      }
       await expect(nav.getByRole("link", { name: label(locale, "app.nav.inbox") })).toHaveCount(1);
       await expect(nav.getByRole("link", { name: label(locale, "app.nav.home") })).toHaveAttribute(
         "aria-current",

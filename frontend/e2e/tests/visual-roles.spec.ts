@@ -420,10 +420,14 @@ for (const locale of LOCALES) {
       await expect(page.locator("[data-lead-statistics]")).toBeVisible({ timeout: 30_000 });
       await capture(page, testInfo, "web-leads", locale);
 
-      await page.locator("[data-new-lead]").click();
-      await expect(page.getByRole("dialog")).toBeVisible();
-      await capture(page, testInfo, "web-lead-new", locale, "screen", page.getByRole("dialog"));
-      await page.keyboard.press("Escape");
+      // The dialog is measured as itself at 1280 (FE-4's rule for a modal); on a phone the list and
+      // the record steps are the compositions.
+      if (!testInfo.project.name.endsWith("phone")) {
+        await page.locator("[data-new-lead]").click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+        await capture(page, testInfo, "web-lead-new", locale, "screen", page.getByRole("dialog"));
+        await page.keyboard.press("Escape");
+      }
 
       await page.goto(`${WEB}/leads/${leadId}`);
       await expect(page.locator('[data-screen="lead"]')).toBeVisible({ timeout: 30_000 });
