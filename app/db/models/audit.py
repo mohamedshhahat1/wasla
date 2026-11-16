@@ -508,6 +508,10 @@ class AuditAction(StrEnum):
     # command, recorded as the system.
     KNOWLEDGE_EMBEDDING_SWITCH = "knowledge_embedding_switch"
 
+    # A member gave a customer a name, changed it or took it away (FEB-19).
+    # `meta` holds the previous and the new value.
+    CONTACT_RENAMED = "contact_renamed"
+
     # Platform staff reading across workspaces (ADR-095). The one place this
     # vocabulary records a *read*, and the exception is argued rather than
     # assumed: ordinary reads are not audited because a row per page view would
@@ -723,6 +727,8 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "knowledge_settings_updated",
     # 0136
     "knowledge_embedding_switch",
+    # 0140
+    "contact_renamed",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

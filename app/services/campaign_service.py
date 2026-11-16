@@ -3558,6 +3558,7 @@ class CampaignService:
         channel: Channel,
         source: OptOutSource,
         at: datetime | None = None,
+        actor_id: uuid.UUID | None = None,
     ) -> Contact:
         """Record that this person wants no marketing on `channel` (ENT-19).
 
@@ -3576,6 +3577,7 @@ class CampaignService:
             source=source,
             via=OptOutVia.TEAM,
             at=at or datetime.now(UTC),
+            actor_user_id=actor_id,
         )
         return contact
 
@@ -3595,7 +3597,9 @@ class CampaignService:
         ).for_contact(contact_id)
         return identities, consents
 
-    async def clear_opt_out(self, contact_id: uuid.UUID, *, channel: Channel) -> Contact:
+    async def clear_opt_out(
+        self, contact_id: uuid.UUID, *, channel: Channel, actor_id: uuid.UUID | None = None
+    ) -> Contact:
         """Let this person receive marketing on `channel` again (ENT-19).
 
         A person's own decision to stop is not one a workspace should undo
@@ -3614,6 +3618,7 @@ class CampaignService:
             source=OptOutSource.TEAM,
             via=OptOutVia.TEAM,
             at=datetime.now(UTC),
+            actor_user_id=actor_id,
         )
         return contact
 

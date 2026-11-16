@@ -52,6 +52,7 @@ from app.services.campaign_planner import CampaignPlanner
 from app.services.campaign_segment_service import CampaignSegmentService
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
+from app.services.contact_service import ContactService
 from app.services.credential_service import CredentialService
 from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.entitlement_service import Entitlement, EntitlementService
@@ -593,6 +594,14 @@ def get_lead_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> Lead
 
 
 LeadServiceDep = Annotated[LeadService, Depends(get_lead_service)]
+
+
+def get_contact_service(session: SessionDep, workspace: ActiveWorkspaceDep) -> ContactService:
+    """Workspace-scoped, so no route can pass a tenant id of its own choosing (FEB-19)."""
+    return ContactService(session=session, tenant_id=workspace.tenant.id)
+
+
+ContactServiceDep = Annotated[ContactService, Depends(get_contact_service)]
 
 
 def get_channel_registry() -> ChannelRegistry:

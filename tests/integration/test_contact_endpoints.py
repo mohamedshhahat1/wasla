@@ -105,6 +105,7 @@ class StubCampaigns:
         channel: Channel,
         source: OptOutSource,
         at: datetime | None = None,
+        actor_id: uuid.UUID | None = None,
     ) -> Contact:
         self.set_calls.append({"contact_id": contact_id, "channel": channel, "source": source})
         self.consents[channel] = ContactChannelConsent(
@@ -117,7 +118,9 @@ class StubCampaigns:
         )
         return self._contact()
 
-    async def clear_opt_out(self, contact_id: uuid.UUID, *, channel: Channel) -> Contact:
+    async def clear_opt_out(
+        self, contact_id: uuid.UUID, *, channel: Channel, actor_id: uuid.UUID | None = None
+    ) -> Contact:
         self.cleared.append((contact_id, channel))
         self.consents[channel] = ContactChannelConsent(
             tenant_id=TENANT_ID, contact_id=contact_id, channel=channel, resumed_at=MOMENT

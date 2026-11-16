@@ -1,10 +1,17 @@
 """Contact endpoints.
 
-A contact is created by the webhook from what Meta reports and has nothing a
-person edits but the marketing opt-out, so this is not a CRUD resource and
-deliberately does not read like one. The one listing is the campaigns page's
-contact picker (PG-07): search by name or number, and - on a chosen number -
-who a campaign could reach.
+A contact is created by the webhook from what the channel reports, and its
+identities are never typed or edited (CRM-20, ADR-122), so this is not a CRUD
+resource and deliberately does not read like one. What a member can do:
+
+- **find** contacts - the listing, which is also the campaigns page's contact
+  picker (PG-07): search by name or number, and - on a chosen number - who a
+  campaign could reach;
+- **read** one (FEB-19): its identities, the channel's profile name, the name
+  the team gave, its consent channel by channel;
+- **name** it: the one edit, kept apart from the profile name and shown before
+  it wherever the customer is named;
+- **read its consent history**: every opt-out and every clear, newest first.
 
 An opt-out is per channel (ENT-19): a STOP on WhatsApp covers every WhatsApp
 number of the workspace and nothing on Instagram or Messenger, so both
@@ -16,7 +23,8 @@ an opt-out is any member's to do: the person handling the conversation is the
 one a customer says "stop sending me these" to, and making them find an
 administrator first is how the request gets lost. **Clearing** one takes an
 administrator, because undoing somebody's own refusal is a decision a workspace
-should have to make deliberately.
+should have to make deliberately. Both are remembered in the history, with the
+member who did it.
 """
 
 from __future__ import annotations
@@ -28,14 +36,26 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from app.api.dependencies import ActiveWorkspaceDep, CampaignServiceDep, TenantAdminDep
+from app.api.dependencies import (
+    ActiveWorkspaceDep,
+    CampaignServiceDep,
+    ContactServiceDep,
+    TenantAdminDep,
+)
 from app.api.route import CommittingRoute
 from app.core.dependencies import SessionDep
+from app.core.exceptions import ValidationError
 from app.core.pagination import MAX_CURSOR_LENGTH
 from app.db.models.channel import Channel
 from app.db.models.lead import LeadStatus
 from app.repositories.contact_picker_repository import PickedContact
 from app.schemas.campaign import ContactOptOutRead, OptOutRequest
+from app.schemas.contact import (
+    CONTACT_NAME_INVALID,
+    ConsentEventRead,
+    ContactRead,
+    ContactUpdateRequest,
+)
 from app.schemas.conversation import CursorPage
 from app.services.contact_picker import ContactPicker
 
@@ -56,7 +76,10 @@ class PickedContactRead(BaseModel):
     """One contact as the picker shows it."""
 
     id: uuid.UUID
+    # The name to show: the one a member gave, else the channel's (CD-05).
     display_name: str | None
+    # The name a member gave, or null (FEB-19).
+    name: str | None
     wa_id: str | None
     lead: PickedContactLead | None
     # On a number: that conversation's last inbound message. Without one: when
@@ -74,6 +97,7 @@ class PickedContactRead(BaseModel):
         return cls(
             id=row.id,
             display_name=row.display_name,
+            name=row.name,
             wa_id=row.wa_id,
             lead=(
                 PickedContactLead(id=row.lead_id, name=row.lead_name, status=row.lead_status)
@@ -99,9 +123,11 @@ async def list_contacts(
 ) -> CursorPage[PickedContactRead]:
     """The campaigns page's contact picker (PG-07), newest activity first.
 
-    `q`: digits search the WhatsApp number, anything else the contact's name
-    or their active lead's. `account_id`: contacts with a conversation on that
-    number, each with whether a campaign from it could reach them;
+    `q`: digits search the WhatsApp number, anything else the contact's name -
+    the one a member gave or the channel's - or their active lead's, with
+    Turkish letters folded (the dotted and dotless i are one letter).
+    `account_id`: contacts with a conversation on that number, each with
+    whether a campaign from it could reach them;
     `eligible_for_campaign=true` keeps only those (it needs `account_id`, 422
     `account_required` otherwise). Any member.
     """
@@ -114,6 +140,61 @@ async def list_contacts(
     )
     return CursorPage[PickedContactRead](
         items=[PickedContactRead.from_row(row) for row in page.items],
+        next_cursor=page.next_cursor,
+    )
+
+
+@router.get("/{contact_id}", response_model=ContactRead, summary="Read a contact")
+async def get_contact(contact_id: uuid.UUID, contacts: ContactServiceDep) -> ContactRead:
+    """Who a customer is (FEB-19): identities, names, consent channel by channel.
+
+    Any member. Another workspace's contact is the same 404 as an unknown id.
+    """
+    return ContactRead.from_view(await contacts.read(contact_id))
+
+
+@router.patch("/{contact_id}", response_model=ContactRead, summary="Name a contact")
+async def update_contact(
+    contact_id: uuid.UUID,
+    payload: ContactUpdateRequest,
+    workspace: ActiveWorkspaceDep,
+    contacts: ContactServiceDep,
+) -> ContactRead:
+    """Give the customer a name, change it, or take it away with null (FEB-19).
+
+    The only field: the channel's own name and the identities are not a
+    person's to edit. Any member. The same value again changes nothing; a
+    change is recorded in the audit log and re-read by open inboxes
+    (`conversation.updated`, fields `participant`).
+    """
+    if payload.name == "":
+        raise ValidationError(
+            "A name cannot be empty. Send null to remove it.",
+            error_code=CONTACT_NAME_INVALID,
+        )
+    view = await contacts.rename(contact_id, name=payload.name, actor=workspace.user)
+    return ContactRead.from_view(view)
+
+
+@router.get(
+    "/{contact_id}/consent-events",
+    response_model=CursorPage[ConsentEventRead],
+    summary="A contact's consent history",
+)
+async def list_consent_events(
+    contact_id: uuid.UUID,
+    contacts: ContactServiceDep,
+    limit: Annotated[int, Query(ge=1, le=MAX_PICKER_PAGE)] = MAX_PICKER_PAGE,
+    cursor: Annotated[str | None, Query(max_length=MAX_CURSOR_LENGTH)] = None,
+) -> CursorPage[ConsentEventRead]:
+    """Every opt-out and every clear of this contact, newest first (FEB-19).
+
+    Any member. An opt-out recorded before the history was kept closes the
+    list as one row marked `before_history`.
+    """
+    page = await contacts.consent_events(contact_id, limit=limit, cursor=cursor)
+    return CursorPage[ConsentEventRead](
+        items=[ConsentEventRead.from_view(item) for item in page.items],
         next_cursor=page.next_cursor,
     )
 
@@ -132,7 +213,10 @@ async def record_opt_out(
     decided. Other channels are untouched (ENT-19).
     """
     contact = await campaigns.set_opt_out(
-        contact_id=contact_id, channel=payload.channel, source=payload.source
+        contact_id=contact_id,
+        channel=payload.channel,
+        source=payload.source,
+        actor_id=workspace.user.id,
     )
     identities, consents = await campaigns.opt_out_view(contact.id)
     return ContactOptOutRead.from_model(contact, identities=identities, consents=consents)
@@ -150,6 +234,6 @@ async def clear_opt_out(
     Mostly for the case a colleague recorded one in error. Nothing automatic
     reaches this: a customer writing again after opting out is not re-enrolled.
     """
-    contact = await campaigns.clear_opt_out(contact_id, channel=channel)
+    contact = await campaigns.clear_opt_out(contact_id, channel=channel, actor_id=workspace.user.id)
     identities, consents = await campaigns.opt_out_view(contact.id)
     return ContactOptOutRead.from_model(contact, identities=identities, consents=consents)

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.db.models.campaign import OptOutSource, OptOutVia
 from app.db.models.channel import Channel
+from app.db.models.consent import ConsentAction, ContactConsentEvent
 from app.db.models.follow_up_sequence import SequenceEndReason
 from app.repositories.consent_repository import ContactConsentRepository
 from app.services.campaign_results import attribute_opt_out
@@ -146,6 +147,7 @@ async def record_opt_out(
     source: OptOutSource,
     via: OptOutVia,
     at: datetime,
+    actor_user_id: uuid.UUID | None = None,
 ) -> bool:
     """Record that this person wants no marketing on `channel`. Returns whether anything changed.
 
@@ -156,6 +158,9 @@ async def record_opt_out(
     other channel. Idempotent, and it never moves the timestamp: the first
     refusal is the one a dispute about a marketing message turns on. `source`
     is who decided; `via` is by which evidence.
+
+    A change - and only a change - is remembered in the consent history, in
+    this transaction (CD-07); `actor_user_id` is the member who recorded it.
     """
     consent = await ContactConsentRepository(session, tenant_id=tenant_id).lock(contact_id, channel)
     if consent.marketing_opt_out_at is not None:
@@ -163,6 +168,16 @@ async def record_opt_out(
     consent.marketing_opt_out_at = at
     consent.opt_out_source = source
     consent.opt_out_via = via
+    _remember(
+        session,
+        tenant_id=tenant_id,
+        contact_id=contact_id,
+        channel=channel,
+        action=ConsentAction.OPTED_OUT,
+        source=source,
+        via=via,
+        actor_user_id=actor_user_id,
+    )
     # The automatic reminders on that channel stop with it (FUS-06), in this
     # transaction. Imported here: the sequence service reads consent.
     from app.services.follow_up_sequences import SequenceService
@@ -197,6 +212,7 @@ async def record_resume(
     via: OptOutVia,
     at: datetime,
     lifts: frozenset[OptOutVia] | None = None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> bool:
     """Record a re-admission to marketing on `channel`. Returns whether an opt-out was lifted.
 
@@ -219,6 +235,18 @@ async def record_resume(
     consent.marketing_opt_out_at = None
     consent.opt_out_source = None
     consent.opt_out_via = None
+    # Only a lifted opt-out is history (CD-07): a resume that found nothing to
+    # lift changed nothing a person can see.
+    _remember(
+        session,
+        tenant_id=tenant_id,
+        contact_id=contact_id,
+        channel=channel,
+        action=ConsentAction.OPT_OUT_CLEARED,
+        source=source,
+        via=via,
+        actor_user_id=actor_user_id,
+    )
     logger.info(
         "campaign.opt_out_cleared",
         extra={
@@ -229,6 +257,31 @@ async def record_resume(
         },
     )
     return True
+
+
+def _remember(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    contact_id: uuid.UUID,
+    channel: Channel,
+    action: ConsentAction,
+    source: OptOutSource,
+    via: OptOutVia,
+    actor_user_id: uuid.UUID | None,
+) -> None:
+    """Stage one row of the consent history beside the change it records."""
+    session.add(
+        ContactConsentEvent(
+            tenant_id=tenant_id,
+            contact_id=contact_id,
+            channel=channel,
+            action=action,
+            source=source,
+            via=via,
+            actor_user_id=actor_user_id,
+        )
+    )
 
 
 __all__ = [
