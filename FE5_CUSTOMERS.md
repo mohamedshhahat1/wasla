@@ -458,3 +458,118 @@ is a fresh full run of the same code.
   workspace_purge_service.py`, `tests/integration/test_conversation_endpoints.py` and
   `tests/integration/test_campaign_page_migrations.py` join A-BE's changed paths.
 - Section 27 gains FEF-42 (above): NOT CLOSED, FE-4's.
+
+---
+
+# Addendum 2 — the fourth push, the previews and the verdict (2026-11-16)
+
+## The red that addendum 1 left, and why a fourth push was needed
+
+Addendum 1 expected its own commit to start a fresh full run of `frontend.yml`. It did not: `frontend.yml` runs only
+when `frontend/**`, the contract export or the workflow changes, and c8c980b changed only this report (its `ci.yml`
+run 43921471192 was green). The last `frontend.yml` on the code was therefore push 3's red (43905604482, FE-4's IJ-03
+in Chromium).
+
+## FEF-42 — found, explained, fixed
+
+The trace of 43905604482 shows the mechanism. After the 422 `cursor_view_mismatch` the list returns an empty page that
+ends the list, cuts its pages to the first one and refetches from the top. A next page asked during that refetch (IL-04's
+observer, or a press) used TanStack's default `cancelRefetch: true`: the refetch from the top was aborted (status -1 in
+the trace), the stale cursor was read again, and the list ended with no next page — 34 of 35 rows, the oldest never
+loaded.
+
+IJ-03 could not be shown to fail at the start head in one run (it is intermittent), so under section 27 it is treated
+as this stage's: fixed in ONE commit, **c64b1d6** — both next-page calls in `conversation-list-pane.tsx` pass
+`NEXT_PAGE_KEEPS_REFETCH` (`{ cancelRefetch: false }`, `lib/inbox/live.ts`), so a press joins a running fetch and is
+asked again. A unit test in `test/fe4-inbox.test.ts` drives a real `QueryClient` through the race: with the option the
+refetch's signal is never aborted; the control (TanStack's default) is aborted — the race the run met.
+
+| Check | Result |
+| --- | --- |
+| web unit tests | 507 passed (506 + 1) |
+| web typecheck, lint, prettier | clean |
+| IJ-03 alone, Chromium desktop, en + ar, `--repeat-each=3`, FE-0's profile on image 9cf87e29543c | 6 passed (2.0 min) |
+
+A first local attempt ran the profile's API on port 8010 while the web build points at :8000 (the origin table);
+every sign-in answered "service unavailable" — a setup error, not a result; re-run on :8000. The profile was taken
+down with `down -v` after each attempt and no `next start` server was left (FEF-32 checked).
+
+## Push 4
+
+| Step | Commit | Proof |
+| --- | --- | --- |
+| Fix | c64b1d6 (fix branch) | three files, +51 / -3 |
+| Merge | a2febaf (parents c8c980b, c64b1d6) | `git diff --exit-code c64b1d6 HEAD -- frontend` = 0 |
+| Push | origin c8c980b → a2febaf | no `ci.yml` run in progress before it (43921471192 completed); no force |
+
+| Run | Result |
+| --- | --- |
+| frontend.yml [43943748550](https://github.com/mohamedshhahat1/wasla/actions/runs/43943748550) | **green in every job**: install, drift, checks (1 min), Storybook (4 min); Chromium 196 passed / 18 skipped (17 min); Firefox 188 / 26 (20 min); WebKit 191 / 26 with the API restart, JR-11 and IJ-08 (21 min); visual roles 66 passed (5 min) |
+| ci.yml [43943748322](https://github.com/mohamedshhahat1/wasla/actions/runs/43943748322) | **green in every job**: alert rules, Docker build, migration-built schema, lint / format / types, tests and migrations (8238 passed, 17 skipped, 2 deselected) |
+
+FE-4's FE_COUNTS were Chromium 178 / 18, Firefox 170 / 26, WebKit 173 / 26, visual roles 62; the differences are this
+stage's specs and screens.
+
+## 26. Part C — the previews
+
+C: had 4.9 GB free before the build (below section 6's 6 GB); the owner answered "Continue anyway" (2026-11-16, recorded
+in the draft). E:\wasla-fe5-fix was re-pointed, detached and clean, to a2febaf; no install on the host.
+
+- **Account.** `wrangler whoami` (4.158.0): "Mohamedshhahat1@gmail.com's Account", 1cc89863… (= FE-4's).
+- **Which Workers.** `git diff --name-only d571765 a2febaf` over each app, its `@wasla/*` packages and the lockfile:
+  web 56 paths, console 23, marketing 17 → all three rebuilt and redeployed.
+- **Build.** `build-workers-linux.mjs --env preview` with the three workers.dev origins and `PUBLIC_PREVIEW_NO_API=true`
+  (PR-01); `PUBLIC_GOOGLE_ENABLED` and `WASLA_E2E_ROUTES` unset. web and console outputs 3,687 files each; marketing 29
+  files / 572,990 B. C: 9.1 GB free after.
+- **Smoke.** `workers:smoke` (with the preview app origin): every page 200; `/session/login` and `/session/refresh` GET 405,
+  same-origin POST 503 `session_unavailable`; console `/` 200, unknown page 404. (A first run without
+  `PUBLIC_APP_ORIGIN` sent the development origin and was correctly refused 403 — the script's input, not the build.)
+- **Every wrangler.jsonc unchanged** since d571765: workers.dev only, no route, no custom domain, only OpenNext's ASSETS
+  binding. No secret set. Nothing on iwasla.tech.
+
+| Worker | URL | Previous version (FE-4) | New version | Upload (gzip) |
+|---|---|---|---|---|
+| wasla-preview-web | https://wasla-preview-web.wasla-marketing.workers.dev | f3c3842b-779c-4bb6-afe6-8281512a8300 | df3720f3-f913-402e-af0f-81fbe161313e | 8457.96 KiB (1703.32 KiB) |
+| wasla-preview-console | https://wasla-preview-console.wasla-marketing.workers.dev | d20591cf-d1a1-48a8-88e8-81aedf636c51 | 84855297-dce0-46b8-93b7-01a47b9eba70 | 6361.01 KiB (1343.48 KiB) |
+| wasla-preview-marketing | https://wasla-preview-marketing.wasla-marketing.workers.dev | 6f2e2b78-3240-4f75-9381-27846bad0490 | 369e2448-637c-4b9f-928c-c0c1e0b9a98d | 0.35 KiB (0.24 KiB) |
+
+Every bundle is under the free plan's 3 MiB gzip. The previous versions stay listed so the owner can roll back in the
+dashboard.
+
+**Live checks (PV5-02).**
+
+| Check | Result |
+| --- | --- |
+| web `/`, `/login`, `/contacts`, `/leads`; console `/`; marketing `/ar/` | 200 (marketing `/` 302 to its locale page, as before) |
+| security headers on web `/login` | HSTS, CSP with a nonce and `strict-dynamic`, nosniff, referrer policy, permissions policy present |
+| PC-04 on web `/session/refresh` | GET 405; cross-origin POST 403; header-less POST 403; same-origin POST 503 `session_unavailable` |
+| web `/` in Chrome (FEF-26) | PreviewNotice "This is a preview of Wasla — These are Wasla's screens only. There is no server behind this preview, so you cannot sign in here." with "See the sign-in page"; the same in Arabic; never "Connection lost" |
+| web `/login`, a submission with obviously fake values | the inline sentence "This is a preview of Wasla's screens. There is no server behind it, so you cannot sign in here." |
+| console messages on `/` | none |
+
+`/contacts` and `/leads` have no session on a preview, so they follow FE-2's routing; the customers screens themselves
+are shown through the contact sheet and the local walk-through. Checked in Chrome only; the WebKit pass of PV5-02 was
+not run on the live URLs (frontend.yml's WebKit e2e covers the same pages on Linux) — recorded.
+
+Captures (not committed): `E:\wasla-fe5-notes\screens\partc\` — `web-root-preview-notice-en.jpg`,
+`web-root-preview-notice-ar.jpg`, `web-login-preview-sentence-en.jpg`.
+
+## 27. Findings — changes
+
+| ID | Status |
+| --- | --- |
+| FEF-42 (FE-4's list: a next page cancelled the refetch from the top) | CLOSED — c64b1d6, its unit test, IJ-03 6 / 6 locally and green in three browsers on 43943748550 |
+| FEF-26 (the previews' "/" said "Connection lost") | CLOSED — the notice live on wasla-preview-web in en and ar |
+
+## 33. Final verdict
+
+**FE-5 MERGED AND PUSHED, CI GREEN** — origin a2febaf; frontend.yml 43943748550 and ci.yml 43943748322 green in every
+job (this addendum's own `ci.yml` run is recorded in the cleanup record).
+
+**PREVIEWS UPDATED** — wasla-preview-web, -console and -marketing redeployed from a2febaf (versions above).
+
+**NEXT: THE OWNER PICKS** — FE-6 (AI agent and knowledge base, FEB-11 optional), FE-8 (subscription and payment, after
+FEB-12 / FEB-13), FE-7 (team and settings, after FEB-09), or the WhatsApp Embedded Signup backend stage; FE-9 and FE-10
+may start in parallel after their own backend items.
+
+Cleanup (Part D): recorded in `E:\wasla-cleanup\CLEANUP_fe5_2026-11-16.md`.
