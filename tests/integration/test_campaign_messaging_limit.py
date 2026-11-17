@@ -18,6 +18,7 @@ floor(0.8 x 250) = 200.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import uuid
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -71,6 +72,11 @@ DAY = timedelta(hours=24)
 # --------------------------------------------------------------------------- helpers
 
 
+# One sequence per run, started at a random place: every call gets its own block of numbers, so a
+# workspace that takes people in many calls never gets the same number twice (FEB-40).
+_CONTACT_BLOCKS = itertools.count(uuid.uuid4().int % 10**6)
+
+
 async def add_contacts(
     database: Database,
     workspace: Workspace,
@@ -83,7 +89,7 @@ async def add_contacts(
     account = account_id or workspace.account_id
     found: list[uuid.UUID] = []
     async with database.session_factory() as session:
-        base = uuid.uuid4().int % 10**6
+        base = next(_CONTACT_BLOCKS) % 10**6
         for index in range(count):
             contact = Contact(tenant_id=workspace.tenant_id, wa_id=f"21{base:06d}{index:05d}")
             session.add(contact)
@@ -792,3 +798,29 @@ async def test_the_last_place_in_the_window_goes_to_exactly_one_of_two_racing_ca
         await erase(database)
         await database.dispose()
         await db_b.dispose()
+
+
+async def test_the_people_a_test_adds_never_repeat_in_one_workspace(
+    prepared_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FEB-40: add_contacts' numbers come from a sequence, not a fresh random draw per call.
+
+    The racing test adds one person per round, 40 rounds, to the same workspace; a random 6-digit
+    base per call made two rounds draw the same number about once in a thousand runs, and the
+    second insert broke uq_contacts_tenant_id_wa_id (ci.yml 44136703951). Here the random source
+    repeats on purpose: the people must still differ.
+    """
+    meta = FakeMeta(messaging_limit="TIER_250")
+    _, database = worker(prepared_database, meta, name="seq")
+    fixed = uuid.UUID(int=4_210_830)
+    try:
+        await quiesce(database)
+        workspace = await seed(database, recipients=0, waba_id=new_waba())
+        monkeypatch.setattr(uuid, "uuid4", lambda: fixed)
+        first = await add_contacts(database, workspace, 1, last_inbound_at=datetime.now(UTC))
+        second = await add_contacts(database, workspace, 1, last_inbound_at=datetime.now(UTC))
+        monkeypatch.undo()
+        assert first != second
+    finally:
+        await erase(database)
+        await database.dispose()
