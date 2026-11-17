@@ -299,6 +299,8 @@ test("AJ-04: upload → waiting → indexing → ready on screen; polling stops;
 
   await page.locator('[data-action="upload"]').click();
   const upload = page.getByRole("dialog");
+  // The field is enabled once the server's limits have arrived (KD-03): a file is chosen then.
+  await expect(upload.locator("input[type=file]")).toBeEnabled({ timeout: ARRIVAL_BOUND_MS });
   await upload
     .locator("input[type=file]")
     .setInputFiles(memoryFile("prices.txt", PRICE_TEXT.length + 1));
@@ -369,6 +371,7 @@ test("AJ-05: pre-checks send nothing; a duplicate is replaced; a failed document
   await page.locator('[data-action="upload"]').click();
   const dialog = page.getByRole("dialog");
   const file = dialog.locator("input[type=file]");
+  await expect(file).toBeEnabled({ timeout: ARRIVAL_BOUND_MS });
   await file.setInputFiles(memoryFile("setup.exe", 10, "application/octet-stream"));
   await expect(dialog.getByRole("alert")).toContainText(".pdf");
   await file.setInputFiles(memoryFile("prices.pdf", pdfMax + 1, "application/pdf"));

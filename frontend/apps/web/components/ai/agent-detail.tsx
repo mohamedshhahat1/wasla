@@ -53,6 +53,7 @@ import {
   type AgentAction,
 } from "../../lib/ai/agent-status";
 import { agentKey, agentsKey } from "../../lib/ai/keys";
+import { focusIfLost } from "../../lib/focus";
 import { useWorkspace } from "../app/workspace-context";
 import { codeOf, isNotFound, useCounter, useIsAdmin, useNumber } from "../customers/shared";
 import { useCodeText } from "../inbox/error-text";
@@ -544,6 +545,17 @@ function StatusSection({ agent }: { agent: AgentRead }) {
   const { session } = useSession();
   const { scope } = useWorkspace();
   const [confirming, setConfirming] = useState(false);
+  const panel = useRef<HTMLDivElement>(null);
+  // The pressed button is replaced by the next state's actions: focus goes to the first of them
+  // (or the sentence when none is left) instead of being lost (KY-02).
+  const [settledAt, setSettledAt] = useState(0);
+  useEffect(() => {
+    if (!settledAt || !panel.current) return;
+    focusIfLost(
+      panel.current.querySelector<HTMLElement>("[data-action]") ??
+        panel.current.querySelector<HTMLElement>("[data-status-sentence]"),
+    );
+  }, [settledAt, agent.status, agent.is_default]);
   const act = useMutation({
     mutationFn: (action: AgentAction) => {
       const body = actionBody(action);
@@ -564,7 +576,7 @@ function StatusSection({ agent }: { agent: AgentRead }) {
       Promise.all([
         client.invalidateQueries({ queryKey: agentKey(scope, agent.id) }),
         client.invalidateQueries({ queryKey: agentsKey(scope) }),
-      ]),
+      ]).then(() => setSettledAt(Date.now())),
   });
   const run = (action: AgentAction) => {
     if (needsDisableConfirmation(agent, action)) {
@@ -575,7 +587,7 @@ function StatusSection({ agent }: { agent: AgentRead }) {
   };
   const sentence = statusSentence(agent);
   return (
-    <div className="flex flex-col gap-4" data-agent-status={agent.status}>
+    <div ref={panel} className="flex flex-col gap-4" data-agent-status={agent.status}>
       {sentence === "disabledDefault" ? (
         <Banner
           tone="warning"
@@ -583,7 +595,7 @@ function StatusSection({ agent }: { agent: AgentRead }) {
           name="agent-default-off"
         />
       ) : (
-        <p className="m-0 text-md text-text" data-status-sentence={sentence}>
+        <p className="m-0 text-md text-text" tabIndex={-1} data-status-sentence={sentence}>
           {t(`status.sentence.${sentence}`)}
         </p>
       )}
@@ -647,6 +659,12 @@ export function AgentDetail({ id }: { id: string }) {
     retry: (count, error) => !isNotFound(error) && count < 2,
   });
   const options = useAgentOptions();
+  // Arriving from "New agent", the dialog's field that held focus is gone: the page's heading
+  // takes it, so Tab starts on this page in every browser (KY-02).
+  const loaded = Boolean(agent.data && options.data);
+  useEffect(() => {
+    if (loaded) focusIfLost(document.getElementById("agent-title"));
+  }, [loaded]);
 
   if (agent.isError || options.isError) {
     const error = agent.error ?? options.error;

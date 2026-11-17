@@ -245,6 +245,8 @@ for (const locale of LOCALES) {
       await useLocale(context, locale);
       await useAddress(context);
       const owner = await verifiedOwner("vis");
+      // FE-3's measured home has an answering agent; the warning is measured apart (VQ6-02).
+      await answeringAgent(owner);
       await logInThroughTheApp(page, locale, owner.email);
       await expect(page.getByTestId("signed-in")).toBeVisible({ timeout: 30_000 });
       await capture(page, testInfo, "web-signed-in", locale);
@@ -267,6 +269,8 @@ for (const locale of LOCALES) {
       await useLocale(context, locale);
       await useAddress(context);
       const owner = await verifiedOwner("vis3");
+      // FE-3's measured home has an answering agent; the warning is measured apart (VQ6-02).
+      await answeringAgent(owner);
       await logInThroughTheApp(page, locale, owner.email);
       await expect(page.getByTestId("onboarding-checklist")).toBeVisible({ timeout: 30_000 });
       // Every card answered: a capture of "Loading..." would measure the wrong screen.
@@ -493,6 +497,8 @@ for (const locale of LOCALES) {
       await useLocale(context, locale);
       await useAddress(context);
       const owner = await verifiedOwner("vis3m");
+      // FE-3's measured home has an answering agent; the warning is measured apart (VQ6-02).
+      await answeringAgent(owner);
       const mate = await memberOf(owner);
       await logInThroughTheApp(page, locale, mate.email);
       await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
