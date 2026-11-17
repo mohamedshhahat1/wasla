@@ -305,3 +305,26 @@ Live checks: web `/`, `/login`, `/ai/agents`, `/knowledge`, `/contacts`, console
 the same). In Chrome, `/`, `/ai/agents` and `/knowledge` without a session show the PreviewNotice ("This is a preview of
 Wasla"); no console error. The AI and knowledge screens themselves are seen through the contact sheet and the local
 walk-through (the previews have no API).
+
+## Addendum 2 — push 5: a flaky campaign test (FEB-40)
+
+The addendum's ci.yml (44136703951, on 5cadc22, docs only) failed in "Migration-built schema": one test,
+`test_the_last_place_in_the_window_goes_to_exactly_one_of_two_racing_campaigns`
+(`tests/integration/test_campaign_messaging_limit.py`), with `UniqueViolationError` on `uq_contacts_tenant_id_wa_id`.
+Nothing FE-6 changed: the test's helper `add_contacts` drew a fresh random 6-digit block per call and numbered from 00000;
+the racing test adds one person per round, 40 rounds, to the same workspace, so two rounds can draw the same block —
+about 0.16 % per run, about 0.3 % per push (it runs in two jobs). The failing number 2142108300000 is block 421083 drawn
+twice. Push 4 drew differently and passed.
+
+| ID | Finding | Status |
+| --- | --- | --- |
+| FEB-40 | `add_contacts` (campaigns stage's test helper) could repeat a contact number within one workspace | CLOSED (62cc0b8): the blocks come from one sequence per run, started at a random place; a new test makes the random source repeat on purpose — it failed with CI's exact `UniqueViolationError` before the change and passes after; the file's 16 tests pass locally; ruff, black, mypy clean. Other helpers with the same random pattern (`test_campaign_cost.py`, `test_capacity_reductions.py`, `test_media_*_recovery.py`, `test_conversation_read_state.py`) mostly add one contact per new workspace, where a repeat cannot collide — listed for a later look, not changed |
+
+Push 5: fix 62cc0b8, merge baa0664 (tree equal to the fix), pushed without force (the owner: do not wait for the running
+run; push 5 cancelled the rest of 44136703951). ci.yml **44146445974 success in every job**: Tests and migrations 8292
+passed, 17 skipped, 2 deselected (8291 + the new test); Migration-built schema, Lint / format / types, Docker build, Alert
+rules green. frontend.yml did not run (a backend test only, outside its paths); 44122041585 on 5267367 remains the
+frontend verdict run, and nothing under `frontend/` changed since.
+
+**Verdict unchanged: FE-6 MERGED AND PUSHED, CI GREEN. PREVIEWS UPDATED. CLEANUP COMPLETE WITH ITEMS LEFT FOR REVIEW**
+(`E:\wasla-fe6-fix`, `E:\wasla-fe6-notes` — the safety check refused their recursive delete; for the owner).
