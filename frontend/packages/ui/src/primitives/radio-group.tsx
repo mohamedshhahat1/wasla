@@ -1,7 +1,7 @@
 "use client";
 
 import { RadioGroup as RadioPrimitive } from "radix-ui";
-import type { ComponentProps, ReactNode } from "react";
+import type { ComponentProps, KeyboardEvent, ReactNode } from "react";
 
 import { cn } from "../cn";
 import { focusRing } from "./styles";
@@ -19,9 +19,28 @@ export interface RadioGroupProps extends Omit<
   options: RadioOption[];
 }
 
-export function RadioGroup({ options, className, ...props }: RadioGroupProps) {
+/**
+ * Shift+Tab out of the group. Radix makes its container focusable (so Tab can enter a group with no
+ * tab stop yet) and takes it out of the order on Shift+Tab through a state update - which lands
+ * after the browser has chosen where focus goes. Firefox chooses the container, the container hands
+ * focus back to the checked radio, and the keyboard is trapped (KY-02 on GitHub, FE-6). Taking the
+ * container out on the element itself, before the browser moves, lets focus leave backwards in
+ * every browser; Radix's own render restores the value once focus has left.
+ */
+function leaveBackwards(event: KeyboardEvent<HTMLDivElement>): void {
+  if (event.key === "Tab" && event.shiftKey) event.currentTarget.tabIndex = -1;
+}
+
+export function RadioGroup({ options, className, onKeyDownCapture, ...props }: RadioGroupProps) {
   return (
-    <RadioPrimitive.Root className={cn("flex flex-col gap-2", className)} {...props}>
+    <RadioPrimitive.Root
+      className={cn("flex flex-col gap-2", className)}
+      onKeyDownCapture={(event) => {
+        leaveBackwards(event);
+        onKeyDownCapture?.(event);
+      }}
+      {...props}
+    >
       {options.map((option) => {
         const id = `${props.name ?? "radio"}-${option.value}`;
         return (
