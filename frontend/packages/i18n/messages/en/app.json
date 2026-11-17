@@ -10,7 +10,9 @@
     "channels": "Channels",
     "inbox": "Inbox",
     "contacts": "Customers",
-    "leads": "Leads"
+    "leads": "Leads",
+    "ai": "AI agent",
+    "knowledge": "Knowledge"
   },
   "account": {
     "label": "Account",
@@ -120,7 +122,9 @@
     "agent": "Set up the AI agent",
     "knowledge": "Add knowledge",
     "team": "Invite a teammate",
-    "plan": "Choose a plan"
+    "plan": "Choose a plan",
+    "agentAction": "Set up the AI agent",
+    "knowledgeAction": "Add knowledge"
   },
   "roles": {
     "onlyAdmins": "Only owners and admins can connect and change channels.",
@@ -735,5 +739,356 @@
         "custom_fields": "other details"
       }
     }
+  },
+  "homeWarnings": {
+    "noAgentTitle": "No AI agent is answering customers.",
+    "noAgentAdmin": "Customers get no automatic answer until an active agent is the default.",
+    "noAgentAction": "Set up the AI agent",
+    "defaultInactiveAdmin": "Your default agent is turned off, so customers get no automatic answer.",
+    "defaultInactiveAction": "Turn it on",
+    "noAgentMember": "An owner or administrator can turn one on.",
+    "unreachableTitle": "Your knowledge has ready documents, but no answering agent can search them.",
+    "unreachableAction": "Check the agent's tools"
+  },
+  "ai": {
+    "title": "AI agent",
+    "line": "The AI employee that answers your customers, and what it may use.",
+    "listLabel": "AI agents",
+    "newAgent": "New agent",
+    "loading": "Loading…",
+    "loadError": "Could not load this. Try again.",
+    "retry": "Try again",
+    "reference": "Reference",
+    "empty": "No AI agent yet. Customers get no automatic answer until an active agent is the default.",
+    "emptyAction": "Create the first agent",
+    "draftNote": "New agents start as drafts. Activate one and make it the default to answer customers.",
+    "limit100": "Showing the first 100 agents.",
+    "model": "Model",
+    "updated": "Updated",
+    "answers": "Answers customers",
+    "notFound": "This agent does not exist in this workspace.",
+    "backToList": "Back to AI agents",
+    "status": {
+      "draft": "Draft",
+      "active": "Active",
+      "disabled": "Disabled",
+      "sentence": {
+        "draft": "Draft — not answering customers.",
+        "activeIdle": "Active — not answering customers. Only the default agent answers.",
+        "answering": "Active and answering customers.",
+        "disabled": "Disabled — not answering customers.",
+        "disabledDefault": "This agent is the default but disabled: customers get no automatic answer."
+      },
+      "defaultIdle": "Default, not answering"
+    },
+    "actions": {
+      "activate": "Activate",
+      "makeDefault": "Make default",
+      "disable": "Disable"
+    },
+    "disableTitle": "Turn off the agent that answers customers?",
+    "disableBody": "Customers will get no automatic answer until another active agent is the default.",
+    "disableConfirm": "Disable",
+    "cancel": "Cancel",
+    "close": "Close",
+    "create": {
+      "title": "New agent",
+      "description": "It starts as a draft and answers nobody until you activate it and make it the default.",
+      "name": "Name",
+      "instructions": "Instructions",
+      "instructionsHint": "What the agent should do and how it should talk. Plain text.",
+      "submit": "Create agent",
+      "knowledgeGrant": "New agents can search your knowledge."
+    },
+    "sections": {
+      "identity": "Who it is",
+      "instructions": "What it is told",
+      "behaviour": "How it behaves",
+      "tools": "What it may use",
+      "status": "Whether it answers"
+    },
+    "fields": {
+      "name": "Name",
+      "description": "Description",
+      "descriptionHint": "A line for your team. It can be changed, not removed.",
+      "instructions": "Instructions",
+      "instructionsHint": "Plain text, no formatting. The agent reads it before every answer.",
+      "model": "Model",
+      "modelHint": "Only the models this deployment runs.",
+      "modelDefault": "{model} (default)",
+      "modelFixed": "Set by this deployment.",
+      "temperature": "Creativity",
+      "temperatureHint": "0 keeps answers predictable; higher values vary them. From {min} to {max}.",
+      "maxOutputTokens": "Longest reply",
+      "maxOutputTokensHint": "In tokens, up to {max} on this deployment.",
+      "memoryMessages": "Messages remembered",
+      "memoryMessagesHint": "How many recent messages the agent reads, from {min} to {max}.",
+      "memoryBudget": "Memory size",
+      "memoryBudgetHint": "Tokens of conversation it may read, from {min} to {max}.",
+      "escalation": "Hand over to a person when the customer sounds",
+      "escalationHint": "The conversation moves to your team and the agent stops replying.",
+      "escalationOff": "Off — never hand over automatically",
+      "escalationNeutral": "Neutral or worse",
+      "escalationNegative": "Negative or worse",
+      "escalationAngry": "Angry"
+    },
+    "problems": {
+      "required": "This is required.",
+      "tooLong": "This is too long.",
+      "notANumber": "Enter a number.",
+      "notAWholeNumber": "Enter a whole number.",
+      "outOfRange": "Outside what this deployment allows.",
+      "descriptionCannotBeRemoved": "A description cannot be removed, only changed.",
+      "modelNotOffered": "This deployment does not run that model."
+    },
+    "save": "Save changes",
+    "discard": "Discard",
+    "saved": "Saved.",
+    "unsavedTitle": "Discard your changes?",
+    "unsavedBody": "What you changed on this page has not been saved.",
+    "unsavedConfirm": "Discard changes",
+    "readOnly": "You can read how this agent is set up. An owner or administrator can change it.",
+    "on": "On",
+    "off": "Off",
+    "tools": {
+      "label": "Tools",
+      "line": "Each tool is something the agent may do while it answers.",
+      "unknown": "A tool from a newer version of Wasla.",
+      "gone": "No longer available",
+      "goneLine": "Grants for tools this version no longer runs.",
+      "remove": "Remove",
+      "request_human_handoff": {
+        "label": "Hand over to a person",
+        "description": "Moves the conversation to your team when the customer asks for a person or the agent cannot help."
+      },
+      "search_knowledge": {
+        "label": "Search your knowledge",
+        "description": "Answers from the documents in your knowledge bases."
+      },
+      "record_lead_details": {
+        "label": "Record lead details",
+        "description": "Saves the customer's name, interest and budget to their lead."
+      },
+      "schedule_follow_up": {
+        "label": "Schedule a follow-up",
+        "description": "Plans a message to the customer for later, within WhatsApp's rules."
+      },
+      "scope": {
+        "legend": "Which knowledge it searches",
+        "all": "Every knowledge base",
+        "chosen": "Only these",
+        "none": "Choose at least one knowledge base.",
+        "save": "Save the choice",
+        "readAll": "Searches every knowledge base.",
+        "readChosen": "Searches: {names}",
+        "noBases": "There are no knowledge bases yet.",
+        "more": "Show more knowledge bases"
+      }
+    },
+    "unreachable": "Your knowledge has ready documents, but no answering agent can search them. Turn on “Search your knowledge” for the answering agent."
+  },
+  "knowledge": {
+    "title": "Knowledge",
+    "line": "What your agents answer from. Agents state it to customers as fact.",
+    "listLabel": "Knowledge bases",
+    "newBase": "New knowledge base",
+    "empty": "No knowledge base yet. Create one, then add documents your agents can answer from.",
+    "created": "Created",
+    "loadMore": "Load more",
+    "notForRole": "Knowledge is managed by owners and administrators.",
+    "notFound": "This knowledge base does not exist in this workspace.",
+    "backToList": "Back to knowledge",
+    "create": {
+      "title": "New knowledge base",
+      "name": "Name",
+      "description": "Description (optional)",
+      "submit": "Create"
+    },
+    "edit": {
+      "name": "Name",
+      "description": "Description",
+      "editName": "Rename",
+      "editDescription": "Edit description",
+      "save": "Save",
+      "cancel": "Cancel"
+    },
+    "delete": {
+      "action": "Delete knowledge base",
+      "emptyTitle": "Delete this knowledge base?",
+      "emptyBody": "It holds no documents.",
+      "fullTitle": "Delete this knowledge base and its documents?",
+      "fullBody": "This knowledge base has documents. Deleting it deletes every document in it; agents stop answering from them.",
+      "count": "{count, plural, one {# document goes with it.} other {# documents go with it.}}",
+      "countAtLeast": "{count, plural, one {At least # document goes with it.} other {At least # documents go with it.}}",
+      "typeName": "Type the knowledge base's name to delete it.",
+      "confirm": "Delete",
+      "deleted": "Knowledge base deleted.",
+      "incomplete": "Not every document could be deleted. Try again.",
+      "tryAgain": "Try again"
+    },
+    "settings": {
+      "title": "Answer settings",
+      "line": "How agents search your knowledge. The defaults suit most workspaces.",
+      "default": "Uses the default",
+      "workspace": "Set for this workspace",
+      "useDefault": "Use the default",
+      "hybrid": {
+        "label": "Match exact words too",
+        "description": "Searches by meaning and by the words themselves, so names and codes are found."
+      },
+      "rerank": {
+        "label": "Re-order the results",
+        "description": "Checks the best passages again before the agent reads them."
+      },
+      "confidence_tiers": {
+        "label": "Say how sure it is",
+        "description": "Weak matches are given to the agent as uncertain, so it does not state them as fact."
+      },
+      "pre_retrieval": {
+        "label": "Search before the first reply",
+        "description": "Looks in your knowledge before the agent starts to answer."
+      },
+      "parallel_sentiment": {
+        "label": "Read the mood at the same time",
+        "description": "Judges how the customer sounds while the answer is prepared."
+      },
+      "number_grounding": {
+        "label": "Check numbers it quotes",
+        "description": "Compares prices and figures in a reply with your documents.",
+        "off": "Off",
+        "observe": "Only note mismatches",
+        "correct": "Correct mismatches",
+        "strict": "Refuse to send a mismatch"
+      },
+      "on": "On",
+      "off": "Off"
+    },
+    "search": {
+      "title": "Test a question",
+      "line": "See which passages would answer it. Each test counts as one search.",
+      "question": "Question",
+      "base": "Search in",
+      "everyBase": "Every knowledge base",
+      "submit": "Test (counts as one search)",
+      "found": "{count, plural, one {Found # passage} other {Found # passages}}",
+      "none": "No answer found in your knowledge.",
+      "passages": "Passages",
+      "strong": "Strong match",
+      "possible": "Possible match",
+      "weak": "Weak match",
+      "versions": "Two versions of this document may both be answering: {title}",
+      "unavailable": "Search is unavailable right now."
+    },
+    "gaps": {
+      "title": "Unanswered questions",
+      "line": "What customers asked that nothing in your knowledge answered.",
+      "days": "Period",
+      "daysOption": "{days, plural, one {# day} other {# days}}",
+      "label": "Unanswered questions",
+      "searches": "Asked",
+      "lastAsked": "Last asked",
+      "none": "Nothing went unanswered in this period.",
+      "off": "Unanswered questions are switched off for this deployment."
+    },
+    "documents": {
+      "label": "Documents",
+      "upload": "Upload",
+      "addText": "Add text",
+      "empty": "No documents yet. Upload a file or add text — agents answer from what is here.",
+      "filter": "Show",
+      "allStatuses": "Every status",
+      "search": "Find by title",
+      "searchHint": "Searches the titles of this knowledge base.",
+      "noMatch": "No document matches.",
+      "status": {
+        "pending": "Waiting",
+        "processing": "Indexing",
+        "ready": "Ready",
+        "failed": "Failed"
+      },
+      "type": {
+        "text": "Text",
+        "markdown": "Markdown",
+        "pdf": "PDF",
+        "csv": "CSV",
+        "xlsx": "Spreadsheet",
+        "docx": "Word",
+        "html": "Web page"
+      },
+      "needsReindex": "Needs re-indexing",
+      "reindexing": "Re-indexing…",
+      "rowName": "{title}, {status}, {time}",
+      "settledReady": "{count, plural, one {# document ready.} other {# documents ready.}}",
+      "settledFailed": "{count, plural, one {# document failed.} other {# documents failed.}}",
+      "refreshFailed": "Couldn't refresh the statuses. Still trying."
+    },
+    "upload": {
+      "title": "Upload a document",
+      "file": "File",
+      "choose": "Choose a file",
+      "hint": "PDF, Word and spreadsheet files up to {binary}; text, Markdown, CSV and web pages up to {text}.",
+      "chosen": "{name}, {size}",
+      "titleField": "Title",
+      "validFrom": "Valid from (optional)",
+      "validUntil": "Valid until (optional)",
+      "submit": "Upload",
+      "sending": "Uploading…",
+      "typeRefused": "This type of file is not supported. Use: {extensions}",
+      "sizeRefused": "This file is {size}; {kind} files can be up to {max}.",
+      "emptyRefused": "This file is empty.",
+      "dates": "“Valid until” must be after “Valid from”.",
+      "exists": "A document from this file already exists.",
+      "replaceIt": "Replace it",
+      "otherBase": "This file is already in another knowledge base.",
+      "sameContent": "A document with the same content already exists.",
+      "openIt": "Open it"
+    },
+    "text": {
+      "title": "Add text",
+      "titleField": "Title",
+      "content": "Text",
+      "contentHint": "Plain text your agents can answer from.",
+      "submit": "Add"
+    },
+    "panel": {
+      "label": "Document",
+      "close": "Close",
+      "status": "Status",
+      "error": "Why it failed",
+      "warnings": "Extraction notes",
+      "warning": {
+        "digits_glued_to_arabic": "{count, plural, one {# line had digits joined to Arabic text.} other {# lines had digits joined to Arabic text.}}",
+        "arabic_indic_leading_zero": "{count, plural, one {# number had an Arabic-Indic leading zero.} other {# numbers had an Arabic-Indic leading zero.}}",
+        "other": "{key}: {count}"
+      },
+      "type": "Type",
+      "file": "File",
+      "size": "Size",
+      "chunks": "Passages",
+      "ingested": "Indexed",
+      "added": "Added",
+      "validFrom": "Valid from",
+      "validUntil": "Valid until",
+      "replaces": "Replaces another document",
+      "original": "Original file kept",
+      "originalYes": "Yes",
+      "originalNo": "No",
+      "attempt": "Indexing attempt",
+      "attemptValue": "{attempts, plural, one {# try} other {# tries}}",
+      "replace": "Replace content",
+      "replaceFile": "With a file",
+      "replaceText": "With text",
+      "retry": "Retry indexing",
+      "delete": "Delete",
+      "deleteTitle": "Delete this document?",
+      "deleteBody": "Agents stop answering from it. This cannot be undone.",
+      "deleteConfirm": "Delete",
+      "similar": "Similar documents",
+      "similarNone": "No similar documents.",
+      "notFound": "This document no longer exists."
+    },
+    "reference": "Reference",
+    "retry": "Try again",
+    "loading": "Loading…"
   }
 }

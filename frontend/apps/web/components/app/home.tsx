@@ -6,11 +6,14 @@ import { useFormatter, useTranslations } from "next-intl";
 import type { ReactNode } from "react";
 
 import { ApiError, queryKey, unwrap } from "@wasla/api-client";
-import { Button, Card, Meter, PageHeader, StatCard } from "@wasla/ui";
+import { Banner, Button, buttonClasses, Card, Meter, PageHeader, StatCard } from "@wasla/ui";
 
+import { answeringAgent, noAnsweringAgent } from "../../lib/ai/agent-status";
 import { canManageChannels } from "../../lib/channels";
 import { allowanceExhausted } from "../../lib/gates";
+import { agentHref } from "../../lib/knowledge/view";
 import { HOME_CONVERSATIONS } from "../../lib/stream-handlers";
+import { useAgents } from "../ai/agents-list";
 import { useSession } from "../session-provider";
 import { OnboardingChecklist } from "./onboarding-checklist";
 import { useWorkspace } from "./workspace-context";
@@ -68,6 +71,68 @@ function SectionTitle({ children }: { children: ReactNode }) {
   return <h2 className="m-0 text-lg font-semibold text-text">{children}</h2>;
 }
 
+/**
+ * HM6-01 / HM6-02: until an ACTIVE default agent exists, every member is told nobody answers
+ * customers (owners and administrators get the way to fix it); and owners and administrators are
+ * told when ready documents are out of every answering agent's reach. Read from the agents list
+ * the checklist already reads - no new request.
+ */
+function AnswerWarnings({ manager }: { manager: boolean }) {
+  const t = useTranslations("app.homeWarnings");
+  const agents = useAgents();
+  if (!agents.data) return null;
+  const missing = noAnsweringAgent(agents.data);
+  const unreachable = manager && agents.data.some((agent) => agent.knowledge_unreachable);
+  const answering = answeringAgent(agents.data);
+  if (!missing && !unreachable) return null;
+  return (
+    <div className="flex flex-col gap-3" data-home-warnings="">
+      {missing ? (
+        <Banner
+          tone="warning"
+          name="no-answering-agent"
+          title={t("noAgentTitle")}
+          action={
+            manager ? (
+              <NextLink
+                href={
+                  missing.kind === "defaultInactive" ? agentHref(missing.agentId) : "/ai/agents"
+                }
+                className={buttonClasses("secondary")}
+              >
+                {missing.kind === "defaultInactive"
+                  ? t("defaultInactiveAction")
+                  : t("noAgentAction")}
+              </NextLink>
+            ) : undefined
+          }
+        >
+          {manager
+            ? missing.kind === "defaultInactive"
+              ? t("defaultInactiveAdmin")
+              : t("noAgentAdmin")
+            : t("noAgentMember")}
+        </Banner>
+      ) : null}
+      {unreachable ? (
+        <Banner
+          tone="warning"
+          name="knowledge-unreachable"
+          title={t("unreachableTitle")}
+          action={
+            <NextLink
+              href={answering ? agentHref(answering.id) : "/ai/agents"}
+              className={buttonClasses("secondary")}
+            >
+              {t("unreachableAction")}
+            </NextLink>
+          }
+        />
+      ) : null}
+    </div>
+  );
+}
+
 /** APP-HOME (HM-01, HM-02). */
 export function Home() {
   const t = useTranslations("app");
@@ -120,6 +185,8 @@ export function Home() {
         />
         {signedInAs}
       </div>
+
+      <AnswerWarnings manager={manager} />
 
       {manager ? <OnboardingChecklist /> : null}
 

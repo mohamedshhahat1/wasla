@@ -260,8 +260,8 @@ describe("GT-09: one place decides; the full states win; the order holds", () =>
 describe("HM-03: the checklist from five reads", () => {
   const all: ChecklistInputs = {
     connections: [{ status: "active" }],
-    agents: [{ is_default: true }],
-    bases: [{}],
+    agents: [{ is_default: true, status: "active" }],
+    readyDocuments: [{}],
     members: [{ status: "active" }, { status: "active" }],
     subscriptionStatus: "active",
   };
@@ -274,7 +274,7 @@ describe("HM-03: the checklist from five reads", () => {
     const states = checklistStates({
       connections: [],
       agents: [],
-      bases: [],
+      readyDocuments: [],
       members: [{ status: "active" }],
       subscriptionStatus: "none",
     });
@@ -285,7 +285,15 @@ describe("HM-03: the checklist from five reads", () => {
     expect(checklistStates({ ...all, connections: [{ status: "disabled" }] }).channel).toBe(
       "undone",
     );
-    expect(checklistStates({ ...all, agents: [{ is_default: false }] }).agent).toBe("undone");
+    expect(
+      checklistStates({ ...all, agents: [{ is_default: false, status: "active" }] }).agent,
+    ).toBe("undone");
+    // HM6-03 (M-U31): a disabled default answers nobody, so the step is not done.
+    expect(
+      checklistStates({ ...all, agents: [{ is_default: true, status: "disabled" }] }).agent,
+    ).toBe("undone");
+    // HM6-03 (M-U32): no ready document, no knowledge step.
+    expect(checklistStates({ ...all, readyDocuments: [] }).knowledge).toBe("undone");
     expect(
       checklistStates({ ...all, members: [{ status: "active" }, { status: "revoked" }] }).team,
     ).toBe("undone");
@@ -307,11 +315,11 @@ describe("HM-03: the checklist from five reads", () => {
   }
   it("while any read is loading the list claims no state", () => {
     expect(checklistLoading(all)).toBe(false);
-    expect(checklistLoading({ ...all, bases: null })).toBe(true);
+    expect(checklistLoading({ ...all, readyDocuments: null })).toBe(true);
     expect(checklistLoading({ ...all, agents: "error" })).toBe(false);
   });
   it("a failed read is 'could not check', never done; loading likewise", () => {
-    const states = checklistStates({ ...all, agents: "error", bases: null });
+    const states = checklistStates({ ...all, agents: "error", readyDocuments: null });
     expect(states.agent).toBe("unknown");
     expect(states.knowledge).toBe("unknown");
     expect(checklistOpen(states)).toBe(true);
@@ -388,13 +396,15 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
       expect(served.has(entry.route)).toBe(true);
     });
   }
-  it("FE-3 registers Home and Channels, FE-4 Inbox and FE-5 Customers and Leads between them, for every role", () => {
+  it("FE-3 registers Home and Channels, FE-4 Inbox, FE-5 Customers and Leads, FE-6 the AI agent and Knowledge", () => {
     expect(NAVIGATION.map((entry) => entry.route)).toEqual([
       "/",
       "/inbox",
       "/contacts",
       "/leads",
       "/channels",
+      "/ai/agents",
+      "/knowledge",
     ]);
     for (const role of ALL_ROLES)
       expect(entriesFor(role).map((entry) => entry.key)).toEqual([
@@ -403,8 +413,13 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
         "contacts",
         "leads",
         "channels",
+        "ai",
+        // FE-6 (OQ-3, M-U33): Knowledge is an owner's and an administrator's; a member never sees it.
+        ...(role === "member" ? [] : ["knowledge"]),
       ]);
     expect(entriesFor(null)).toEqual([]);
+    expect(currentEntry("/ai/agents/abc")).toBe("ai");
+    expect(currentEntry("/knowledge/abc")).toBe("knowledge");
   });
   it("the current entry follows the path", () => {
     expect(currentEntry("/")).toBe("home");
