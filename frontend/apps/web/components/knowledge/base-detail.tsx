@@ -48,6 +48,7 @@ import {
   Textarea,
 } from "@wasla/ui";
 
+import { focusIfLost } from "../../lib/focus";
 import { NEXT_PAGE_KEEPS_REFETCH } from "../../lib/inbox/live";
 import {
   basesKey,
@@ -560,6 +561,12 @@ function BaseScreen({ id }: { id: string }) {
       ),
     retry: (count, error) => !isNotFound(error) && count < 2,
   });
+  // Arriving from "New knowledge base", the dialog's field that held focus is gone: the heading
+  // takes it, so Tab starts on this page in every browser (KY-02).
+  const loaded = Boolean(base.data);
+  useEffect(() => {
+    if (loaded) focusIfLost(document.getElementById("base-title"));
+  }, [loaded]);
 
   const [typed, setTyped] = useState("");
   const [term, setTerm] = useState("");

@@ -1,4 +1,4 @@
-"""The e2e seed's knowledge states (FE-6, EC6-04): parsed before connecting, written as read back."""
+"""The e2e seed's knowledge states (FE-6, EC6-04): parsed before connecting, written as read."""
 
 from __future__ import annotations
 
