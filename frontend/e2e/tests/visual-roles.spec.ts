@@ -29,6 +29,7 @@ import {
 import { connectNumber, freshNumber, gateState, memberOf, restore, suspend } from "../support/fe3";
 import { connectedOwner, conversationOf, freshCustomer, inbound, text } from "../support/fe4";
 import { createLead } from "../support/fe5";
+import { answeringAgent, baseWithDocument, settled } from "../support/fe6";
 
 interface Shares {
   dominant: number;
@@ -433,6 +434,59 @@ for (const locale of LOCALES) {
       await expect(page.locator('[data-screen="lead"]')).toBeVisible({ timeout: 30_000 });
       await expect(page.locator("[data-timeline-entry]").first()).toBeVisible({ timeout: 30_000 });
       await capture(page, testInfo, "web-lead", locale);
+    });
+
+    // FE-6 (VQ6-02): the AI and knowledge screens join the averages - the agents list and an
+    // agent page, the knowledge bases and a base with its documents and the panel open, and the
+    // upload dialog as itself; home with the "no answering agent" banner is a status state,
+    // measured apart.
+    test(`web-fe6 ai and knowledge ${locale}`, async ({ page, context }, testInfo) => {
+      await useLocale(context, locale);
+      await useAddress(context);
+      const owner = await verifiedOwner("vis6");
+      await logInThroughTheApp(page, locale, owner.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('[data-banner="no-answering-agent"]')).toBeVisible({
+        timeout: 30_000,
+      });
+      // Every card answered: a capture of "Loading..." would measure the wrong screen.
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-home-no-agent", locale, "gate");
+
+      // The trial plan allows one agent: the list is measured with that one.
+      const agentId = await answeringAgent(owner, "Sales agent");
+      const { baseId, documentId } = await baseWithDocument(owner, "Prices");
+      await baseWithDocument(owner, "Policies", "Refund policy");
+      await settled(owner, documentId);
+
+      await page.goto(`${WEB}/ai/agents`);
+      await expect(page.locator("[data-agent-row]")).toHaveCount(1, { timeout: 30_000 });
+      await capture(page, testInfo, "web-agents", locale);
+
+      await page.goto(`${WEB}/ai/agents/${agentId}`);
+      await expect(page.locator("[data-agent-tools] [data-tool-row]").first()).toBeVisible({
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-agent", locale);
+
+      await page.goto(`${WEB}/knowledge`);
+      await expect(page.locator("[data-base-row]")).toHaveCount(2, { timeout: 30_000 });
+      await capture(page, testInfo, "web-knowledge", locale);
+
+      await page.goto(`${WEB}/knowledge/${baseId}?doc=${documentId}`);
+      await expect(page.locator("[data-document-row]")).toHaveCount(1, { timeout: 30_000 });
+      await expect(page.locator("#document-panel-heading")).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-knowledge-base", locale);
+
+      if (!testInfo.project.name.endsWith("phone")) {
+        await page.goto(`${WEB}/knowledge/${baseId}`);
+        await page.locator('[data-action="upload"]').click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+        await capture(page, testInfo, "web-upload", locale, "screen", page.getByRole("dialog"));
+        await page.keyboard.press("Escape");
+      }
     });
 
     test(`web-home-member ${locale}`, async ({ page, context }, testInfo) => {

@@ -16,6 +16,7 @@ from app import __version__
 from app.api import health, metrics
 from app.api.openapi import install_error_envelope
 from app.api.v1 import api_router
+from app.api.v1.knowledge import NEXT_CURSOR_HEADER
 from app.core.config import Settings, get_settings
 from app.core.events import drain as drain_events
 from app.core.events import install as install_events
@@ -186,7 +187,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
-            expose_headers=[resolved.request_id_header],
+            # The knowledge lists answer their next page in a header (FEB-39);
+            # a browser on an allowed origin cannot read one not listed here.
+            expose_headers=[resolved.request_id_header, NEXT_CURSOR_HEADER],
         )
 
     register_exception_handlers(app)

@@ -619,7 +619,9 @@ export function LeadDetail({ id }: { id: string }) {
           </FieldSection>
 
           <FieldSection lead={data} fields={TAGS} title={t("fields.tags")} onSaved={stored}>
-            {({ values, setTags }) => <TagEditor tags={values.tags} onChange={setTags} />}
+            {({ values, setTags }) => (
+              <TagEditor tags={values.tags} onChange={setTags} labelHidden />
+            )}
           </FieldSection>
 
           <RecordPanel data-section="score">
@@ -655,7 +657,6 @@ export function LeadDetail({ id }: { id: string }) {
                       const to = value === NONE ? null : value;
                       if (to !== (data.assigned_to_id ?? null)) assign.mutate(to);
                     }}
-                    data-owner-select=""
                   />
                 </div>
               ) : (

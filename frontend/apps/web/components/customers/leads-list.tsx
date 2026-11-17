@@ -362,7 +362,6 @@ export function LeadsList() {
                 ...memberOptions,
               ]}
               onValueChange={(value) => go({ ...view, assignee: value === ANY ? null : value })}
-              data-filter="assignee"
             />
           </div>
         </div>

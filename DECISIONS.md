@@ -8456,3 +8456,49 @@ or a mock server on the previews; raising nginx's error-log level to hide reques
 **Consequences.** FE-6 and FE-7 reuse the record composites (RecordHeader, InlineEditField, StatusMenu, Timeline) and the
 role rule. The first deploy that uses the nginx example must set the error log's retention as docs/DEPLOYMENT.md says. The
 ar / fr / tr texts are drafts (FEQ-08).
+
+## ADR-200 — The AI Agent And Knowledge (FE-6): What A Deployment Lets An Agent Be, The Server's Own Upload Limits, Polling That Stops, The Answering Agent Said Plainly
+
+**Status.** Accepted, 2026-11-17 (FE-6; report FE6_AI_KNOWLEDGE.md). FRONTEND_PLAN.md section 29's FE-6: APP-AI-01,
+APP-KB-01/02, with FEB-37, FEB-38, FEB-39 built, FEB-11 decided from the code, FEB-06's codes for these screens, and the
+owner's FE-5 leftovers (FEF-39, FEF-40, FEF-41, the keyboard-only journey and the focus sweep, the eleven mutants not run,
+nginx's error-log retention). No ADR number is kept for the postponed "Tend" restyle.
+
+**Context.** An agent page could learn the deployment's permitted models and output ceiling only by being refused; the
+upload limits lived in constants and Settings the OpenAPI document does not carry (the plan's "5 MiB" is the body cap - a
+PDF, workbook or Word file is refused above 300,000 bytes); the knowledge-bases list answered its next page in a header a
+browser on the app origin could not read; a knowledge base given a used name answered 500; several refusals a screen must
+tell apart carried only a class code. The ingestion worker publishes no event for a document's status.
+
+**Decision.**
+
+- `GET /agents/options` (FEB-37) answers the permitted models (the default first, then the allow-list; `null` when
+  unrestricted), the default model, the output ceiling and the schema's bounds - from `AgentService.permitted_models()`,
+  the one resolver behind the refusal too, and the schema's own constants. Open to every member; names and numbers only.
+- `GET /knowledge/limits` (FEB-38) answers per source its extensions, media type and byte limit, the body cap, the PDF
+  page and character limits and the title bound - from `document_formats.max_upload_bytes()`, its extension table and
+  `knowledge_limits`, the objects the checks use. The screen's pre-check is this rule; a refused file is never sent.
+- `X-Next-Cursor` joins the request id in CORS `expose_headers` (FEB-39); the allowed origins are unchanged.
+- FEB-11 is not built: the screen polls the list (3 s, ×1.5 up to 15 s, paused while hidden, stopped at ready / failed).
+  Deferred and scale-triggered: past ~50 documents pending at once in one tab, or more than one poll per second per
+  workspace. An event, when it comes, replaces only the interval.
+- Specific codes, same status and sentence: `agent_name_exists`, `agent_not_active`, `agent_model_not_permitted`,
+  `agent_output_tokens_exceed_ceiling`, `knowledge_scope_invalid`, `knowledge_base_name_exists` (FEB-40: was a 500; now a
+  409 checked in the service), `knowledge_gap_report_disabled` (still a 404).
+- nginx's output is bounded in the shipped example (json-file, 10m × 5), the retention duty and a "Before the first deploy"
+  list are in docs/DEPLOYMENT.md, and a deployment test fails if the bound goes away. The error log still writes what
+  nginx writes (ADR-199's residual).
+- The screens: agents list and page (only changed fields PATCHed, "Off" as `null`, the model only from the deployment's
+  list, "Make default" only for an active agent, turning off the answering agent behind a dialog, a member reads and sees
+  no control); tools as switches with search_knowledge's scope (`null` for every base); knowledge for owners and
+  administrators only (OQ-3) - bases with "Load more" from the header cursor, a typed confirmation for a base with
+  documents, answer settings with "Use the default", a test question (counts as a search), unanswered questions or a plain
+  "switched off"; documents with upload pre-checks, add text, duplicates, the panel (replace, retry, delete, similar). Home
+  warns every role until an ACTIVE default exists; the checklist counts an active default and a ready document.
+
+**Rejected.** A stream event now (a contract change for an owner-only screen); a client-side copy of the limits or the
+model list; a "try the agent" chat (no API); the search preview's diagnostics on the owner's screen; a drag-and-drop or
+editor library.
+
+**Consequences.** FE-7 reuses the read-only view pattern and the role rule; FE-8 owns the billing link a
+`plan_limit_exceeded` will point to. The ar / fr / tr texts are drafts (FEQ-08).

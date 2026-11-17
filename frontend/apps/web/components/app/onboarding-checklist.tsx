@@ -17,6 +17,8 @@ import {
   type ChecklistStep,
   type Read,
 } from "../../lib/checklist";
+import { READY_DOCUMENT } from "../../lib/knowledge/keys";
+import { useAgents } from "../ai/agents-list";
 import { useSession } from "../session-provider";
 import { useWorkspace } from "./workspace-context";
 
@@ -26,8 +28,10 @@ function readOf<T>(query: { data: T | undefined; isError: boolean }): Read<T> {
 }
 
 /** The steps that have a screen in FE-3 get a link; the others say they come later (SH-03). */
-const STEP_LINKS: Partial<Record<ChecklistStep, string>> = {
-  channel: "/channels/connect/whatsapp",
+const STEP_LINKS: Partial<Record<ChecklistStep, { href: string; action: string }>> = {
+  channel: { href: "/channels/connect/whatsapp", action: "channelAction" },
+  agent: { href: "/ai/agents", action: "agentAction" },
+  knowledge: { href: "/knowledge", action: "knowledgeAction" },
 };
 
 /**
@@ -45,14 +49,17 @@ export function OnboardingChecklist() {
     queryKey: queryKey(scope, "channel-connections"),
     queryFn: () => unwrap(session.api.GET("/api/v1/channel-connections")),
   });
-  const agents = useQuery({
-    queryKey: queryKey(scope, "agents"),
-    queryFn: () => unwrap(session.api.GET("/api/v1/agents")),
-  });
-  const bases = useQuery({
-    queryKey: queryKey(scope, "knowledge-bases"),
+  // The one agents read home, the checklist and the agents screen share (HM6-01).
+  const agents = useAgents();
+  // One ready document is enough to know the step is done (HM6-03): one row, never a count.
+  const readyDocuments = useQuery({
+    queryKey: queryKey(scope, READY_DOCUMENT, { limit: 1 }),
     queryFn: () =>
-      unwrap(session.api.GET("/api/v1/knowledge/bases", { params: { query: { limit: 1 } } })),
+      unwrap(
+        session.api.GET("/api/v1/knowledge/documents", {
+          params: { query: { status: "ready", limit: 1 } },
+        }),
+      ),
   });
   const members = useQuery({
     queryKey: queryKey(scope, "members"),
@@ -62,7 +69,10 @@ export function OnboardingChecklist() {
   const inputs: ChecklistInputs = {
     connections: readOf(connections),
     agents: readOf(agents),
-    bases: readOf(bases),
+    readyDocuments: (() => {
+      const read = readOf(readyDocuments);
+      return read === "error" || read === null ? read : read.items;
+    })(),
     members: (() => {
       const read = readOf(members);
       return read === "error" || read === null ? read : read.members;
@@ -87,19 +97,19 @@ export function OnboardingChecklist() {
   const done = CHECKLIST_STEPS.filter((step) => states[step] === "done").length;
 
   const items: ChecklistItem[] = CHECKLIST_STEPS.map((step) => {
-    const href = STEP_LINKS[step];
+    const link = STEP_LINKS[step];
     const state = states[step];
     return {
       key: step,
       label: t(`checklist.${step}`),
       state,
-      ...(href
+      ...(link
         ? state === "done"
           ? {}
           : {
               action: (
-                <NextLink href={href} className={buttonClasses("secondary")}>
-                  {t("checklist.channelAction")}
+                <NextLink href={link.href} className={buttonClasses("secondary")}>
+                  {t(`checklist.${link.action}` as "checklist.channelAction")}
                 </NextLink>
               ),
             }

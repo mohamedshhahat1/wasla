@@ -691,3 +691,48 @@ def test_nginx_keeps_what_it_always_set() -> None:
         assert expected in directives, expected
     assert directives.count("access_log off") == 2
     assert not [d for d in directives if d.startswith(("log_subrequest", "rewrite_log"))]
+
+
+# ------------------------------------------------------- nginx's log retention
+
+#: The largest a single log file and the number of files nginx's output may
+#: keep on the host (NL-T1). The shipped values sit well under both.
+NGINX_LOG_MAX_SIZE_MB = 50
+NGINX_LOG_MAX_FILES = 10
+DEPLOYMENT_DOC = ROOT / "docs" / "DEPLOYMENT.md"
+
+
+def _service_block(text: str, service: str) -> str:
+    block = re.search(rf"^  {service}:\n(.*?)(?=^  \w|\Z)", text, re.M | re.S)
+    assert block is not None, f"no service named {service} in the compose file"
+    return block.group(1)
+
+
+def _size_in_mb(value: str) -> float:
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kmg])", value.strip().lower())
+    assert match is not None, f"max-size {value!r} is not a bounded size"
+    number, unit = float(match.group(1)), match.group(2)
+    return number * {"k": 1 / 1024, "m": 1.0, "g": 1024.0}[unit]
+
+
+def test_nginx_output_is_bounded_on_the_host() -> None:
+    """NL-T1: nginx's error log (stderr) cannot grow without bound (FEB-35's residual, ADR-200)."""
+    block = _service_block(PROD_COMPOSE.read_text(encoding="utf-8"), "nginx")
+    logging = re.search(r"^    logging:\n(.*?)(?=^    \w|\Z)", block, re.M | re.S)
+    assert logging is not None, "the nginx service has no logging block: Docker keeps it unbounded"
+    body = logging.group(1)
+    assert re.search(r"^      driver: json-file$", body, re.M), "nginx must log through json-file"
+    size = re.search(r'^        max-size: "([^"]+)"$', body, re.M)
+    files = re.search(r'^        max-file: "(\d+)"$', body, re.M)
+    assert size is not None and files is not None, "both max-size and max-file must be set"
+    assert 0 < _size_in_mb(size.group(1)) <= NGINX_LOG_MAX_SIZE_MB
+    assert 1 <= int(files.group(1)) <= NGINX_LOG_MAX_FILES
+
+
+def test_the_deploy_guide_lists_the_log_retention_before_the_first_deploy() -> None:
+    """NL-T2: the retention duty is on the operator's first-deploy list."""
+    text = DEPLOYMENT_DOC.read_text(encoding="utf-8")
+    section = re.search(r"^### Before the first deploy\n(.*?)(?=^#|\Z)", text, re.M | re.S)
+    assert section is not None, "docs/DEPLOYMENT.md has no 'Before the first deploy' list"
+    assert "- [ ] **nginx's log retention**" in section.group(1)
+    assert "- [ ] **nginx's log readers restricted**" in section.group(1)

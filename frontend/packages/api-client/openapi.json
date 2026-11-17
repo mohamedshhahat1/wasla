@@ -126,6 +126,39 @@
         "title": "ActorKind",
         "type": "string"
       },
+      "AgentBounds": {
+        "description": "The fixed bounds of an agent's fields, read from this module's constants.",
+        "properties": {
+          "description": {
+            "$ref": "#/components/schemas/LengthBound"
+          },
+          "memory_message_limit": {
+            "$ref": "#/components/schemas/RangeBound"
+          },
+          "memory_token_budget": {
+            "$ref": "#/components/schemas/RangeBound"
+          },
+          "name": {
+            "$ref": "#/components/schemas/LengthBound"
+          },
+          "system_prompt": {
+            "$ref": "#/components/schemas/LengthBound"
+          },
+          "temperature": {
+            "$ref": "#/components/schemas/RangeBound"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "system_prompt",
+          "temperature",
+          "memory_message_limit",
+          "memory_token_budget"
+        ],
+        "title": "AgentBounds",
+        "type": "object"
+      },
       "AgentCreate": {
         "additionalProperties": false,
         "description": "A new agent. It starts as a draft whatever else is sent.",
@@ -219,6 +252,48 @@
           "system_prompt"
         ],
         "title": "AgentCreate",
+        "type": "object"
+      },
+      "AgentOptionsRead": {
+        "description": "What this deployment lets an agent be (FEB-37).\n\n`models` is the permitted list, the default first - or null when the\ndeployment restricts nothing. Numbers and model names only: no key, no\nprovider address, nothing of any workspace.",
+        "properties": {
+          "bounds": {
+            "$ref": "#/components/schemas/AgentBounds"
+          },
+          "default_knowledge_grant": {
+            "title": "Default Knowledge Grant",
+            "type": "boolean"
+          },
+          "default_model": {
+            "title": "Default Model",
+            "type": "string"
+          },
+          "max_output_tokens": {
+            "$ref": "#/components/schemas/OutputTokenOptions"
+          },
+          "models": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Models"
+          }
+        },
+        "required": [
+          "models",
+          "default_model",
+          "max_output_tokens",
+          "bounds",
+          "default_knowledge_grant"
+        ],
+        "title": "AgentOptionsRead",
         "type": "object"
       },
       "AgentRead": {
@@ -8737,6 +8812,43 @@
         "title": "KnowledgeGapReport",
         "type": "object"
       },
+      "KnowledgeLimitsRead": {
+        "description": "What a document may be on this deployment (FEB-38).\n\nRead from the objects the upload's own checks use, so a screen's pre-check\nis the server's rule. Holds nothing of any workspace.",
+        "properties": {
+          "max_characters": {
+            "title": "Max Characters",
+            "type": "integer"
+          },
+          "max_pdf_pages": {
+            "title": "Max Pdf Pages",
+            "type": "integer"
+          },
+          "max_request_bytes": {
+            "title": "Max Request Bytes",
+            "type": "integer"
+          },
+          "max_title_length": {
+            "title": "Max Title Length",
+            "type": "integer"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceLimitRead"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources",
+          "max_request_bytes",
+          "max_pdf_pages",
+          "max_characters",
+          "max_title_length"
+        ],
+        "title": "KnowledgeLimitsRead",
+        "type": "object"
+      },
       "KnowledgeSettingsRead": {
         "description": "A workspace's retrieval switches: what it set, and what is in effect (G9).",
         "properties": {
@@ -9696,6 +9808,20 @@
           }
         },
         "title": "LeadUpdateRequest",
+        "type": "object"
+      },
+      "LengthBound": {
+        "description": "The longest a text field may be.",
+        "properties": {
+          "max_length": {
+            "title": "Max Length",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_length"
+        ],
+        "title": "LengthBound",
         "type": "object"
       },
       "LimitChange": {
@@ -11124,6 +11250,25 @@
         ],
         "title": "OutOfWindow",
         "type": "string"
+      },
+      "OutputTokenOptions": {
+        "description": "What `max_output_tokens` may be on this deployment.",
+        "properties": {
+          "ceiling": {
+            "title": "Ceiling",
+            "type": "integer"
+          },
+          "default": {
+            "title": "Default",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "default",
+          "ceiling"
+        ],
+        "title": "OutputTokenOptions",
+        "type": "object"
       },
       "OwnershipRepairRequest": {
         "additionalProperties": false,
@@ -15685,6 +15830,25 @@
         "title": "ProposedPriceRead",
         "type": "object"
       },
+      "RangeBound": {
+        "description": "The smallest and largest a number may be.",
+        "properties": {
+          "max": {
+            "title": "Max",
+            "type": "number"
+          },
+          "min": {
+            "title": "Min",
+            "type": "number"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "title": "RangeBound",
+        "type": "object"
+      },
       "RateCardDetailRead": {
         "description": "A card with its rates and how they differ from the active card (the preview).",
         "properties": {
@@ -17272,6 +17436,40 @@
           "expires_in"
         ],
         "title": "SessionResponse",
+        "type": "object"
+      },
+      "SourceLimitRead": {
+        "description": "What an upload of one format may be.",
+        "properties": {
+          "extensions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Extensions",
+            "type": "array"
+          },
+          "max_bytes": {
+            "title": "Max Bytes",
+            "type": "integer"
+          },
+          "media_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Media Types",
+            "type": "array"
+          },
+          "source": {
+            "$ref": "#/components/schemas/DocumentSource"
+          }
+        },
+        "required": [
+          "source",
+          "extensions",
+          "media_types",
+          "max_bytes"
+        ],
+        "title": "SourceLimitRead",
         "type": "object"
       },
       "SubscriptionCancel": {
@@ -20657,6 +20855,43 @@
           }
         ],
         "summary": "List Available Tools",
+        "tags": [
+          "agents"
+        ]
+      }
+    },
+    "/api/v1/agents/options": {
+      "get": {
+        "description": "What this deployment lets an agent be: models, the output ceiling, the bounds.\n\nThe same for every workspace of the deployment and open to any member, who\nreads the agent page. A static path, declared before `/{agent_id}`.",
+        "operationId": "read_agent_options_api_v1_agents_options_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentOptionsRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Agent Options",
         "tags": [
           "agents"
         ]
@@ -29563,6 +29798,43 @@
           }
         ],
         "summary": "Knowledge Gaps",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
+    "/api/v1/knowledge/limits": {
+      "get": {
+        "description": "What a document may be: per format its extensions, media type and size (FEB-38).\n\nRead from the same objects the upload checks, so a screen never sends a\nfile the server would refuse for its type or size. Open to any member; it\nholds nothing of the workspace.",
+        "operationId": "read_knowledge_limits_api_v1_knowledge_limits_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeLimitsRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Knowledge Limits",
         "tags": [
           "knowledge"
         ]

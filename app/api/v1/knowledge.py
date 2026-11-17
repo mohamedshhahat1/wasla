@@ -44,6 +44,7 @@ from app.db.models.knowledge import DocumentSource, DocumentStatus
 from app.repositories.knowledge_repository import KnowledgeGapRepository
 from app.schemas.conversation import CursorPage
 from app.schemas.knowledge import (
+    MAX_DOCUMENT_TITLE_LENGTH,
     DocumentCreateRequest,
     DocumentRead,
     DocumentReplaceRequest,
@@ -53,19 +54,48 @@ from app.schemas.knowledge import (
     KnowledgeBaseUpdateRequest,
     KnowledgeGapRead,
     KnowledgeGapReport,
+    KnowledgeLimitsRead,
     KnowledgeSettingsRead,
     KnowledgeSettingsUpdate,
     SearchRequest,
     SearchResponse,
+    SourceLimitRead,
 )
 from app.schemas.text import StorableText
-from app.services import document_formats
+from app.services import document_formats, knowledge_limits
 
 router = APIRouter(route_class=CommittingRoute, prefix="/knowledge", tags=["knowledge"])
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 CursorQuery = Annotated[str | None, Query(max_length=200)]
 NEXT_CURSOR_HEADER = "X-Next-Cursor"
+
+
+@router.get("/limits", response_model=KnowledgeLimitsRead)
+async def read_knowledge_limits(
+    workspace: ActiveWorkspaceDep, settings: SettingsDep
+) -> KnowledgeLimitsRead:
+    """What a document may be: per format its extensions, media type and size (FEB-38).
+
+    Read from the same objects the upload checks, so a screen never sends a
+    file the server would refuse for its type or size. Open to any member; it
+    holds nothing of the workspace.
+    """
+    return KnowledgeLimitsRead(
+        sources=[
+            SourceLimitRead(
+                source=source,
+                extensions=list(document_formats.upload_extensions(source)),
+                media_types=[document_formats.MEDIA_TYPES[source]],
+                max_bytes=document_formats.max_upload_bytes(source),
+            )
+            for source in DocumentSource
+        ],
+        max_request_bytes=settings.max_document_request_bytes,
+        max_pdf_pages=knowledge_limits.MAX_PDF_PAGES,
+        max_characters=knowledge_limits.MAX_SUBMITTED_CHARACTERS,
+        max_title_length=MAX_DOCUMENT_TITLE_LENGTH,
+    )
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -102,7 +132,10 @@ async def knowledge_gaps(
     the default until the Privacy audit has reviewed it.
     """
     if not settings.rag_gap_report_enabled:
-        raise NotFoundError("The knowledge-gap report is not enabled.")
+        raise NotFoundError(
+            "The knowledge-gap report is not enabled.",
+            error_code="knowledge_gap_report_disabled",
+        )
     topics = await KnowledgeGapRepository(session, tenant_id=admin.tenant.id).topics(
         since=datetime.now(UTC) - timedelta(days=days), limit=limit
     )
@@ -392,7 +425,7 @@ async def _read_upload(file: UploadFile) -> bytes:
 async def upload_document(
     knowledge_base_id: uuid.UUID,
     file: Annotated[UploadFile, File()],
-    title: Annotated[StorableText, Form(min_length=1, max_length=300)],
+    title: Annotated[StorableText, Form(min_length=1, max_length=MAX_DOCUMENT_TITLE_LENGTH)],
     knowledge: KnowledgeServiceDep,
     admin: TenantAdminDep,
     entitlements: EntitlementServiceDep,
@@ -450,7 +483,9 @@ async def upload_document_content(
     knowledge: KnowledgeServiceDep,
     admin: TenantAdminDep,
     source: Annotated[DocumentSource | None, Form()] = None,
-    title: Annotated[StorableText | None, Form(min_length=1, max_length=300)] = None,
+    title: Annotated[
+        StorableText | None, Form(min_length=1, max_length=MAX_DOCUMENT_TITLE_LENGTH)
+    ] = None,
 ) -> DocumentSubmission:
     """`PUT /documents/{id}/content` as a multipart file (RQ-22): replaces, never duplicates."""
     chosen = document_formats.upload_source(source, file.filename)

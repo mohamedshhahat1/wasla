@@ -84,7 +84,8 @@ export function Banner({
       )}
     >
       <Icon icon={icon.icon} name={icon.name} className={cn("mt-1", iconTone[tone])} />
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
+      {/* A basis, so on a phone the action wraps under the words instead of squeezing them (FE-6). */}
+      <div className="flex min-w-0 flex-1 basis-60 flex-col gap-1">
         <p className="m-0 text-md font-semibold text-text">{title}</p>
         {children ? <div className="m-0 text-sm text-text">{children}</div> : null}
       </div>
@@ -156,7 +157,9 @@ const badgeTone: Record<StatusTone, string> = {
   warning: "bg-warning-subtle text-warning",
   info: "bg-info-subtle text-info",
   success: "bg-success-subtle text-success",
-  neutral: "bg-secondary-subtle text-text",
+  // An inset ring in the border-strong role keeps the pill on the secondary band, whose fill is
+  // the same as the badge's (FEF-39); inset, so no badge grows or moves.
+  neutral: "bg-secondary-subtle text-text ring-1 ring-inset ring-border-strong",
 };
 
 /** A small status pill: text and an icon, never colour alone. */

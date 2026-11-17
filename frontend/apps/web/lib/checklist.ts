@@ -15,8 +15,9 @@ export type Read<T> = T | "error" | null;
 
 export interface ChecklistInputs {
   connections: Read<ReadonlyArray<{ status: string }>>;
-  agents: Read<ReadonlyArray<{ is_default: boolean }>>;
-  bases: Read<ReadonlyArray<unknown>>;
+  agents: Read<ReadonlyArray<{ is_default: boolean; status: string }>>;
+  /** At most one ready document of the workspace (FE-6, HM6-03): any row means one exists. */
+  readyDocuments: Read<ReadonlyArray<unknown>>;
   members: Read<ReadonlyArray<{ status: string }>>;
   subscriptionStatus: Read<SubscriptionStatus | "none">;
 }
@@ -29,10 +30,13 @@ function state<T>(read: Read<T>, done: (value: T) => boolean): StepState {
 export function checklistStates(inputs: ChecklistInputs): Record<ChecklistStep, StepState> {
   return {
     channel: state(inputs.connections, (rows) => rows.some((row) => row.status === "active")),
-    // A new workspace answers nothing until a default agent exists (plan J2).
-    agent: state(inputs.agents, (rows) => rows.some((row) => row.is_default)),
-    // The list carries no document count: "at least one knowledge base" (recorded, HM-03).
-    knowledge: state(inputs.bases, (rows) => rows.length > 0),
+    // A new workspace answers nothing until an ACTIVE default agent exists (plan J2, HM6-03): a
+    // disabled default answers nobody, so it does not count.
+    agent: state(inputs.agents, (rows) =>
+      rows.some((row) => row.is_default && row.status === "active"),
+    ),
+    // A ready document, not merely a knowledge base (HM6-03 replaces FE-3's HM-03 stand-in).
+    knowledge: state(inputs.readyDocuments, (rows) => rows.length > 0),
     team: state(inputs.members, (rows) => rows.filter((row) => row.status === "active").length > 1),
     plan: state(
       inputs.subscriptionStatus,
@@ -51,7 +55,7 @@ export function checklistLoading(inputs: ChecklistInputs): boolean {
   return [
     inputs.connections,
     inputs.agents,
-    inputs.bases,
+    inputs.readyDocuments,
     inputs.members,
     inputs.subscriptionStatus,
   ].some((read) => read === null);

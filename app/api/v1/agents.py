@@ -15,11 +15,14 @@ from app.api.dependencies import AgentServiceDep, AgentSlotDep, TenantAdminDep
 from app.api.route import CommittingRoute
 from app.schemas.agent import (
     AgentCreate,
+    AgentOptionsRead,
     AgentRead,
     AgentUpdate,
+    OutputTokenOptions,
     ToolGrantRead,
     ToolGrantRequest,
     ToolSpecRead,
+    agent_bounds,
 )
 from app.services.agent_service import UNSET
 
@@ -72,6 +75,25 @@ async def list_available_tools(service: AgentServiceDep) -> list[ToolSpecRead]:
     A static path so it can never be mistaken for an agent identifier.
     """
     return [ToolSpecRead.model_validate(spec) for spec in service.available_tools()]
+
+
+@router.get("/options")
+async def read_agent_options(service: AgentServiceDep) -> AgentOptionsRead:
+    """What this deployment lets an agent be: models, the output ceiling, the bounds.
+
+    The same for every workspace of the deployment and open to any member, who
+    reads the agent page. A static path, declared before `/{agent_id}`.
+    """
+    models = service.permitted_models()
+    return AgentOptionsRead(
+        models=list(models) if models is not None else None,
+        default_model=service.default_model,
+        max_output_tokens=OutputTokenOptions(
+            default=service.output_token_ceiling, ceiling=service.output_token_ceiling
+        ),
+        bounds=agent_bounds(),
+        default_knowledge_grant=service.default_knowledge_grant,
+    )
 
 
 @router.get("/{agent_id}")

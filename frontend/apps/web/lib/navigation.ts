@@ -3,16 +3,29 @@
  * here when it builds the screen - never a placeholder, a "coming soon" item or a disabled link.
  * A unit test holds every route to a page in app/**.
  */
-import { Contact, House, Inbox, RadioTower, Target, type LucideIcon } from "lucide-react";
+import {
+  BookOpenText,
+  Bot,
+  Contact,
+  House,
+  Inbox,
+  RadioTower,
+  Target,
+  type LucideIcon,
+} from "lucide-react";
 
 export type TenantRole = "tenant_owner" | "tenant_admin" | "member";
 
 export const ALL_ROLES: readonly TenantRole[] = ["tenant_owner", "tenant_admin", "member"];
+/** Knowledge is managed by owners and administrators (plan APP-KB-01, OQ-3). */
+export const ADMIN_ROLES: readonly TenantRole[] = ["tenant_owner", "tenant_admin"];
 
 export interface NavEntry {
   key: string;
-  /** The route; a request path whose first segment matches it makes the entry current. */
+  /** The route the entry links to. */
   route: string;
+  /** The first path segment that makes the entry current, when it is not the route's own. */
+  match?: string;
   /** The key under app.nav.* */
   labelKey: string;
   icon: LucideIcon;
@@ -68,6 +81,25 @@ export const NAVIGATION: readonly NavEntry[] = [
     roles: ALL_ROLES,
     page: "app/(app)/channels/page.tsx",
   },
+  {
+    key: "ai",
+    route: "/ai/agents",
+    match: "/ai",
+    labelKey: "ai",
+    icon: Bot,
+    iconName: "Bot",
+    roles: ALL_ROLES,
+    page: "app/(app)/ai/agents/page.tsx",
+  },
+  {
+    key: "knowledge",
+    route: "/knowledge",
+    labelKey: "knowledge",
+    icon: BookOpenText,
+    iconName: "BookOpenText",
+    roles: ADMIN_ROLES,
+    page: "app/(app)/knowledge/page.tsx",
+  },
 ];
 
 /** The entries a role sees. */
@@ -80,5 +112,8 @@ export function currentEntry(pathname: string): string | null {
   const path = pathname.replace(/\/+$/, "") || "/";
   if (path === "/") return "home";
   const first = `/${path.split("/")[1] ?? ""}`;
-  return NAVIGATION.find((entry) => entry.route !== "/" && entry.route === first)?.key ?? null;
+  return (
+    NAVIGATION.find((entry) => entry.route !== "/" && (entry.match ?? entry.route) === first)
+      ?.key ?? null
+  );
 }

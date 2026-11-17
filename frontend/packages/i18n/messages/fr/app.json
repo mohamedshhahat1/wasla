@@ -10,7 +10,9 @@
     "channels": "Canaux",
     "inbox": "Boîte de réception",
     "contacts": "Clients",
-    "leads": "Prospects"
+    "leads": "Prospects",
+    "ai": "Agent IA",
+    "knowledge": "Connaissances"
   },
   "account": {
     "label": "Compte",
@@ -120,7 +122,9 @@
     "agent": "Configurer l'agent IA",
     "knowledge": "Ajouter des connaissances",
     "team": "Inviter un coéquipier",
-    "plan": "Choisir une offre"
+    "plan": "Choisir une offre",
+    "agentAction": "Configurer l’agent IA",
+    "knowledgeAction": "Ajouter des connaissances"
   },
   "roles": {
     "onlyAdmins": "Seuls les propriétaires et les administrateurs peuvent connecter et modifier les canaux.",
@@ -735,5 +739,356 @@
         "custom_fields": "d'autres détails"
       }
     }
+  },
+  "homeWarnings": {
+    "noAgentTitle": "Aucun agent IA ne répond aux clients.",
+    "noAgentAdmin": "Les clients n’ont aucune réponse automatique tant qu’aucun agent actif n’est l’agent par défaut.",
+    "noAgentAction": "Configurer l’agent IA",
+    "defaultInactiveAdmin": "Votre agent par défaut est désactivé : les clients n’ont aucune réponse automatique.",
+    "defaultInactiveAction": "L’activer",
+    "noAgentMember": "Un propriétaire ou un administrateur peut en activer un.",
+    "unreachableTitle": "Vos connaissances ont des documents prêts, mais aucun agent qui répond ne peut les consulter.",
+    "unreachableAction": "Vérifier les outils de l’agent"
+  },
+  "ai": {
+    "title": "Agent IA",
+    "line": "L’employé IA qui répond à vos clients, et ce qu’il peut utiliser.",
+    "listLabel": "Agents IA",
+    "newAgent": "Nouvel agent",
+    "loading": "Chargement…",
+    "loadError": "Chargement impossible. Réessayez.",
+    "retry": "Réessayer",
+    "reference": "Référence",
+    "empty": "Aucun agent IA pour l’instant. Les clients n’ont aucune réponse automatique tant qu’aucun agent actif n’est l’agent par défaut.",
+    "emptyAction": "Créer le premier agent",
+    "draftNote": "Les nouveaux agents commencent en brouillon. Activez-en un et faites-en l’agent par défaut pour répondre aux clients.",
+    "limit100": "Affichage des 100 premiers agents.",
+    "model": "Modèle",
+    "updated": "Modifié",
+    "answers": "Répond aux clients",
+    "notFound": "Cet agent n’existe pas dans cet espace de travail.",
+    "backToList": "Retour aux agents IA",
+    "status": {
+      "draft": "Brouillon",
+      "active": "Actif",
+      "disabled": "Désactivé",
+      "sentence": {
+        "draft": "Brouillon — ne répond pas aux clients.",
+        "activeIdle": "Actif — ne répond pas aux clients. Seul l’agent par défaut répond.",
+        "answering": "Actif et répond aux clients.",
+        "disabled": "Désactivé — ne répond pas aux clients.",
+        "disabledDefault": "Cet agent est l’agent par défaut mais il est désactivé : les clients n’ont aucune réponse automatique."
+      },
+      "defaultIdle": "Par défaut, ne répond pas"
+    },
+    "actions": {
+      "activate": "Activer",
+      "makeDefault": "Définir par défaut",
+      "disable": "Désactiver"
+    },
+    "disableTitle": "Désactiver l’agent qui répond aux clients ?",
+    "disableBody": "Les clients n’auront aucune réponse automatique tant qu’un autre agent actif ne sera pas l’agent par défaut.",
+    "disableConfirm": "Désactiver",
+    "cancel": "Annuler",
+    "close": "Fermer",
+    "create": {
+      "title": "Nouvel agent",
+      "description": "Il commence en brouillon et ne répond à personne tant que vous ne l’activez pas et n’en faites pas l’agent par défaut.",
+      "name": "Nom",
+      "instructions": "Instructions",
+      "instructionsHint": "Ce que l’agent doit faire et comment il doit parler. Texte brut.",
+      "submit": "Créer l’agent",
+      "knowledgeGrant": "Les nouveaux agents peuvent consulter vos connaissances."
+    },
+    "sections": {
+      "identity": "Qui il est",
+      "instructions": "Ce qu’on lui dit",
+      "behaviour": "Comment il se comporte",
+      "tools": "Ce qu’il peut utiliser",
+      "status": "S’il répond"
+    },
+    "fields": {
+      "name": "Nom",
+      "description": "Description",
+      "descriptionHint": "Une ligne pour votre équipe. Elle peut être modifiée, pas supprimée.",
+      "instructions": "Instructions",
+      "instructionsHint": "Texte brut, sans mise en forme. L’agent le lit avant chaque réponse.",
+      "model": "Modèle",
+      "modelHint": "Seulement les modèles que ce déploiement utilise.",
+      "modelDefault": "{model} (par défaut)",
+      "modelFixed": "Fixé par ce déploiement.",
+      "temperature": "Créativité",
+      "temperatureHint": "0 rend les réponses prévisibles ; une valeur plus haute les varie. De {min} à {max}.",
+      "maxOutputTokens": "Réponse la plus longue",
+      "maxOutputTokensHint": "En jetons, jusqu’à {max} sur ce déploiement.",
+      "memoryMessages": "Messages retenus",
+      "memoryMessagesHint": "Combien de messages récents l’agent lit, de {min} à {max}.",
+      "memoryBudget": "Taille de la mémoire",
+      "memoryBudgetHint": "Jetons de conversation qu’il peut lire, de {min} à {max}.",
+      "escalation": "Passer la main à une personne quand le client semble",
+      "escalationHint": "La conversation passe à votre équipe et l’agent cesse de répondre.",
+      "escalationOff": "Désactivé — ne jamais passer la main automatiquement",
+      "escalationNeutral": "Neutre ou pire",
+      "escalationNegative": "Négatif ou pire",
+      "escalationAngry": "En colère"
+    },
+    "problems": {
+      "required": "Ce champ est obligatoire.",
+      "tooLong": "C’est trop long.",
+      "notANumber": "Saisissez un nombre.",
+      "notAWholeNumber": "Saisissez un nombre entier.",
+      "outOfRange": "En dehors de ce que ce déploiement autorise.",
+      "descriptionCannotBeRemoved": "Une description ne peut pas être supprimée, seulement modifiée.",
+      "modelNotOffered": "Ce déploiement n’utilise pas ce modèle."
+    },
+    "save": "Enregistrer",
+    "discard": "Annuler les modifications",
+    "saved": "Enregistré.",
+    "unsavedTitle": "Abandonner vos modifications ?",
+    "unsavedBody": "Ce que vous avez modifié sur cette page n’est pas enregistré.",
+    "unsavedConfirm": "Abandonner",
+    "readOnly": "Vous pouvez lire la configuration de cet agent. Un propriétaire ou un administrateur peut la modifier.",
+    "on": "Activé",
+    "off": "Désactivé",
+    "tools": {
+      "label": "Outils",
+      "line": "Chaque outil est une action que l’agent peut faire pendant qu’il répond.",
+      "unknown": "Un outil d’une version plus récente de Wasla.",
+      "gone": "Plus disponible",
+      "goneLine": "Autorisations d’outils que cette version n’exécute plus.",
+      "remove": "Retirer",
+      "request_human_handoff": {
+        "label": "Passer la main à une personne",
+        "description": "Transfère la conversation à votre équipe quand le client demande une personne ou que l’agent ne peut pas aider."
+      },
+      "search_knowledge": {
+        "label": "Consulter vos connaissances",
+        "description": "Répond à partir des documents de vos bases de connaissances."
+      },
+      "record_lead_details": {
+        "label": "Enregistrer le prospect",
+        "description": "Enregistre le nom, l’intérêt et le budget du client sur son prospect."
+      },
+      "schedule_follow_up": {
+        "label": "Planifier une relance",
+        "description": "Prévoit un message au client pour plus tard, dans le respect des règles de WhatsApp."
+      },
+      "scope": {
+        "legend": "Quelles connaissances il consulte",
+        "all": "Toutes les bases de connaissances",
+        "chosen": "Seulement celles-ci",
+        "none": "Choisissez au moins une base de connaissances.",
+        "save": "Enregistrer le choix",
+        "readAll": "Consulte toutes les bases de connaissances.",
+        "readChosen": "Consulte : {names}",
+        "noBases": "Aucune base de connaissances pour l’instant.",
+        "more": "Afficher plus de bases de connaissances"
+      }
+    },
+    "unreachable": "Vos connaissances ont des documents prêts, mais aucun agent qui répond ne peut les consulter. Activez « Consulter vos connaissances » pour l’agent qui répond."
+  },
+  "knowledge": {
+    "title": "Connaissances",
+    "line": "Ce à partir de quoi vos agents répondent. Les agents le présentent aux clients comme un fait.",
+    "listLabel": "Bases de connaissances",
+    "newBase": "Nouvelle base de connaissances",
+    "empty": "Aucune base de connaissances pour l’instant. Créez-en une, puis ajoutez des documents.",
+    "created": "Créée",
+    "loadMore": "Afficher plus",
+    "notForRole": "Les connaissances sont gérées par les propriétaires et les administrateurs.",
+    "notFound": "Cette base de connaissances n’existe pas dans cet espace de travail.",
+    "backToList": "Retour aux connaissances",
+    "create": {
+      "title": "Nouvelle base de connaissances",
+      "name": "Nom",
+      "description": "Description (facultative)",
+      "submit": "Créer"
+    },
+    "edit": {
+      "name": "Nom",
+      "description": "Description",
+      "editName": "Renommer",
+      "editDescription": "Modifier la description",
+      "save": "Enregistrer",
+      "cancel": "Annuler"
+    },
+    "delete": {
+      "action": "Supprimer la base de connaissances",
+      "emptyTitle": "Supprimer cette base de connaissances ?",
+      "emptyBody": "Elle ne contient aucun document.",
+      "fullTitle": "Supprimer cette base de connaissances et ses documents ?",
+      "fullBody": "Cette base contient des documents. La supprimer supprime chacun d’eux ; les agents cessent d’y répondre.",
+      "count": "{count, plural, one {# document part avec elle.} many {# documents partent avec elle.} other {# documents partent avec elle.}}",
+      "countAtLeast": "{count, plural, one {Au moins # document part avec elle.} many {Au moins # documents partent avec elle.} other {Au moins # documents partent avec elle.}}",
+      "typeName": "Saisissez le nom de la base de connaissances pour la supprimer.",
+      "confirm": "Supprimer",
+      "deleted": "Base de connaissances supprimée.",
+      "incomplete": "Tous les documents n’ont pas pu être supprimés. Réessayez.",
+      "tryAgain": "Réessayer"
+    },
+    "settings": {
+      "title": "Réglages des réponses",
+      "line": "Comment les agents consultent vos connaissances. Les valeurs par défaut conviennent à la plupart.",
+      "default": "Utilise la valeur par défaut",
+      "workspace": "Défini pour cet espace de travail",
+      "useDefault": "Utiliser la valeur par défaut",
+      "hybrid": {
+        "label": "Chercher aussi les mots exacts",
+        "description": "Cherche par le sens et par les mots eux-mêmes, pour trouver noms et codes."
+      },
+      "rerank": {
+        "label": "Réordonner les résultats",
+        "description": "Revérifie les meilleurs passages avant que l’agent ne les lise."
+      },
+      "confidence_tiers": {
+        "label": "Indiquer le degré de certitude",
+        "description": "Les correspondances faibles sont données à l’agent comme incertaines."
+      },
+      "pre_retrieval": {
+        "label": "Chercher avant la première réponse",
+        "description": "Consulte vos connaissances avant que l’agent ne commence à répondre."
+      },
+      "parallel_sentiment": {
+        "label": "Lire l’humeur en même temps",
+        "description": "Évalue le ton du client pendant que la réponse se prépare."
+      },
+      "number_grounding": {
+        "label": "Vérifier les chiffres cités",
+        "description": "Compare les prix et les chiffres d’une réponse avec vos documents.",
+        "off": "Désactivé",
+        "observe": "Seulement noter les écarts",
+        "correct": "Corriger les écarts",
+        "strict": "Refuser d’envoyer un écart"
+      },
+      "on": "Activé",
+      "off": "Désactivé"
+    },
+    "search": {
+      "title": "Tester une question",
+      "line": "Voyez quels passages y répondraient. Chaque test compte pour une recherche.",
+      "question": "Question",
+      "base": "Chercher dans",
+      "everyBase": "Toutes les bases de connaissances",
+      "submit": "Tester (compte pour une recherche)",
+      "found": "{count, plural, one {# passage trouvé} many {# passages trouvés} other {# passages trouvés}}",
+      "none": "Aucune réponse trouvée dans vos connaissances.",
+      "passages": "Passages",
+      "strong": "Correspondance forte",
+      "possible": "Correspondance possible",
+      "weak": "Correspondance faible",
+      "versions": "Deux versions de ce document répondent peut-être : {title}",
+      "unavailable": "La recherche est indisponible pour le moment."
+    },
+    "gaps": {
+      "title": "Questions sans réponse",
+      "line": "Ce que les clients ont demandé et que rien dans vos connaissances n’a couvert.",
+      "days": "Période",
+      "daysOption": "{days, plural, one {# jour} many {# jours} other {# jours}}",
+      "label": "Questions sans réponse",
+      "searches": "Posée",
+      "lastAsked": "Dernière fois",
+      "none": "Rien n’est resté sans réponse sur cette période.",
+      "off": "Les questions sans réponse sont désactivées sur ce déploiement."
+    },
+    "documents": {
+      "label": "Documents",
+      "upload": "Importer",
+      "addText": "Ajouter du texte",
+      "empty": "Aucun document pour l’instant. Importez un fichier ou ajoutez du texte — les agents répondent à partir de ce qui est ici.",
+      "filter": "Afficher",
+      "allStatuses": "Tous les statuts",
+      "search": "Chercher par titre",
+      "searchHint": "Cherche dans les titres de cette base de connaissances.",
+      "noMatch": "Aucun document ne correspond.",
+      "status": {
+        "pending": "En attente",
+        "processing": "Indexation",
+        "ready": "Prêt",
+        "failed": "Échec"
+      },
+      "type": {
+        "text": "Texte",
+        "markdown": "Markdown",
+        "pdf": "PDF",
+        "csv": "CSV",
+        "xlsx": "Tableur",
+        "docx": "Word",
+        "html": "Page web"
+      },
+      "needsReindex": "À réindexer",
+      "reindexing": "Réindexation…",
+      "rowName": "{title}, {status}, {time}",
+      "settledReady": "{count, plural, one {# document prêt.} many {# documents prêts.} other {# documents prêts.}}",
+      "settledFailed": "{count, plural, one {# document en échec.} many {# documents en échec.} other {# documents en échec.}}",
+      "refreshFailed": "Impossible d’actualiser les statuts. Nouvel essai en cours."
+    },
+    "upload": {
+      "title": "Importer un document",
+      "file": "Fichier",
+      "choose": "Choisir un fichier",
+      "hint": "PDF, Word et tableurs jusqu’à {binary} ; texte, Markdown, CSV et pages web jusqu’à {text}.",
+      "chosen": "{name}, {size}",
+      "titleField": "Titre",
+      "validFrom": "Valable à partir du (facultatif)",
+      "validUntil": "Valable jusqu’au (facultatif)",
+      "submit": "Importer",
+      "sending": "Importation…",
+      "typeRefused": "Ce type de fichier n’est pas pris en charge. Utilisez : {extensions}",
+      "sizeRefused": "Ce fichier fait {size} ; les fichiers {kind} peuvent faire jusqu’à {max}.",
+      "emptyRefused": "Ce fichier est vide.",
+      "dates": "« Valable jusqu’au » doit être après « Valable à partir du ».",
+      "exists": "Un document issu de ce fichier existe déjà.",
+      "replaceIt": "Le remplacer",
+      "otherBase": "Ce fichier se trouve déjà dans une autre base de connaissances.",
+      "sameContent": "Un document au contenu identique existe déjà.",
+      "openIt": "L’ouvrir"
+    },
+    "text": {
+      "title": "Ajouter du texte",
+      "titleField": "Titre",
+      "content": "Texte",
+      "contentHint": "Du texte brut à partir duquel vos agents peuvent répondre.",
+      "submit": "Ajouter"
+    },
+    "panel": {
+      "label": "Document",
+      "close": "Fermer",
+      "status": "Statut",
+      "error": "Raison de l’échec",
+      "warnings": "Notes d’extraction",
+      "warning": {
+        "digits_glued_to_arabic": "{count, plural, one {# ligne avait des chiffres collés à du texte arabe.} many {# lignes avaient des chiffres collés à du texte arabe.} other {# lignes avaient des chiffres collés à du texte arabe.}}",
+        "arabic_indic_leading_zero": "{count, plural, one {# nombre avait un zéro initial indo-arabe.} many {# nombres avaient un zéro initial indo-arabe.} other {# nombres avaient un zéro initial indo-arabe.}}",
+        "other": "{key} : {count}"
+      },
+      "type": "Type",
+      "file": "Fichier",
+      "size": "Taille",
+      "chunks": "Passages",
+      "ingested": "Indexé",
+      "added": "Ajouté",
+      "validFrom": "Valable à partir du",
+      "validUntil": "Valable jusqu’au",
+      "replaces": "Remplace un autre document",
+      "original": "Fichier d’origine conservé",
+      "originalYes": "Oui",
+      "originalNo": "Non",
+      "attempt": "Tentative d’indexation",
+      "attemptValue": "{attempts, plural, one {# essai} many {# essais} other {# essais}}",
+      "replace": "Remplacer le contenu",
+      "replaceFile": "Par un fichier",
+      "replaceText": "Par du texte",
+      "retry": "Relancer l’indexation",
+      "delete": "Supprimer",
+      "deleteTitle": "Supprimer ce document ?",
+      "deleteBody": "Les agents cessent d’y répondre. C’est irréversible.",
+      "deleteConfirm": "Supprimer",
+      "similar": "Documents similaires",
+      "similarNone": "Aucun document similaire.",
+      "notFound": "Ce document n’existe plus."
+    },
+    "reference": "Référence",
+    "retry": "Réessayer",
+    "loading": "Chargement…"
   }
 }

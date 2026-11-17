@@ -46,6 +46,10 @@ Every stage has its own ceiling, because each earlier one can be defeated in a w
 
 The chunk and passage limits are checked again by the worker before any provider call, so a document stored under older, looser rules cannot spend what a new upload cannot.
 
+**What a screen can read before it sends (FEB-38, ADR-200).** `GET /knowledge/limits` answers each source's extensions, media type and upload size limit (300,000 bytes for `pdf`, `xlsx`, `docx`; 1,600,000 for `text`, `markdown`, `csv`, `html`), the request body cap, the page and character limits and the title length - read from the same objects as the checks above, never a copy.
+
+**How a screen follows a document's status (FEB-11, ADR-200).** There is no stream event for it: the ingestion worker publishes nothing, and `EVENT_TYPES` has no knowledge type. A screen polls the document list while a row is `pending` or `processing` - every 3 seconds, backing off to 15, paused while the tab is hidden, stopped at `ready` or `failed`. FEB-11 (a `document.updated` event) is deferred and scale-triggered: past about 50 documents pending at once in one tab, or polling measured above one request per second per workspace.
+
 **Text is validated at the boundary (RAG-11).** NUL characters and lone surrogates are refused with a `422` instead of failing at the driver as a `500`; text with nothing visible in it — zero-width characters, direction marks, whitespace — is refused rather than indexed as an empty passage. Other control characters stay legal: document text is never logged, reaches the API and the model JSON-encoded, and reaches the model only as structured tool output.
 
 ## Ingestion pipeline

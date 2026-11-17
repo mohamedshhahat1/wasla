@@ -691,6 +691,14 @@ services:
         # from the proxy alone, not from every container on the network.
         ipv4_address: 10.89.0.10
     restart: always
+    # nginx's error log goes to stderr in this image and can hold a request line
+    # with its query string (ADR-199). Bounded here so it cannot grow without
+    # limit: about 50 MB, oldest file dropped first. See docs/DEPLOYMENT.md.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   # ------------------------------------------------------------- monitoring
   #

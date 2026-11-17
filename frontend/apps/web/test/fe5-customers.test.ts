@@ -275,7 +275,8 @@ describe("the bounds restate the contract (openapi.json)", () => {
 describe("the navigation (CL-01)", () => {
   it("Customers and Leads are entries of every role, and a record's page keeps its entry current", () => {
     const keys = NAVIGATION.map((entry) => entry.key);
-    expect(keys).toEqual(["home", "inbox", "contacts", "leads", "channels"]);
+    // FE-6 appends "ai" and "knowledge" after them; FE-5's entries keep their place.
+    expect(keys.slice(0, 5)).toEqual(["home", "inbox", "contacts", "leads", "channels"]);
     expect(currentEntry(`/contacts/${ID}`)).toBe("contacts");
     expect(currentEntry(`/leads/${ID}`)).toBe("leads");
   });

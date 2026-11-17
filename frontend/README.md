@@ -155,6 +155,24 @@ old-opt-out <contact id>`.
 - **Previews** - `node scripts/build-workers-linux.mjs --env preview` sets `PUBLIC_PREVIEW_NO_API=true`: a preview without an
   API says so instead of "Connection lost". Set it to `false` for a preview that has an API.
 
+## The AI agent and knowledge (FE-6, ADR-200)
+
+`/ai/agents` and `/ai/agents/[id]` (every member reads; owners and administrators edit), `/knowledge` and
+`/knowledge/[baseId]` (owners and administrators). Home warns every role until an active agent is the default.
+
+To walk it locally on FE-0's e2e profile (test values only):
+
+```bash
+docker compose -f ../docker-compose.e2e.yml --profile e2e up -d
+WASLA_E2E_ROUTES=1 pnpm exec turbo run build --filter=@wasla/web
+pnpm --dir apps/web exec next start -p 3000
+```
+
+Sign up through the app, open **AI agent**, create an agent, **Activate**, **Make default**; open **Knowledge**, create a
+base, **Upload** a small `.txt` and watch it go Waiting → Indexing → Ready. Send a customer message containing "price"
+through the fake inbound webhook (`tests/e2e_stack/README.md`) and the inbox shows the scripted answer from the
+document. Take the profile down with `docker compose -f ../docker-compose.e2e.yml --profile e2e down -v`.
+
 ## Changing the look
 
 The design language is [packages/ui/DESIGN.md](packages/ui/DESIGN.md): one blue family and white in three

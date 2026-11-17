@@ -149,6 +149,31 @@ otherwise Uvicorn may rewrite the ASGI peer from attacker-supplied
 
 **What the proxy logs** (FEB-35, ADR-199). Every access log in `nginx/nginx.conf` uses one format, `wasla_safe`, which writes the normalised path (`$uri`) and never the query string: no `$request`, `$request_uri`, `$args`, `$arg_*`, `$query_string` or `$http_referer`. A search term (`?q=`), a filter and the event stream's ticket travel in the query string, and the application's own logs record none of them. Each `server` names the format itself, because the file is included in the image's `http` block, whose own access log (`main`) writes the request line and the referrer - a `server` without one would inherit it. `tests/integration/test_deployment_configuration.py` fails if a forbidden variable, nginx's own `combined` / `main` format or a `server` without an access log comes back. **The error log is not covered and cannot be:** nginx writes the request line, query string included, into its own error entries (an upstream timeout, a refused connection, a body too large), and no directive removes it. So nginx's error log can hold a customer's name or number someone searched for: keep it for no longer than the application's logs (14 days unless your retention policy says less), restrict who reads it, and do not ship it to a third party unredacted. A different proxy in front of the API must follow the same rule.
 
+**Where nginx's logs go, and how long they are kept.** The pinned `nginx:1.27-alpine` image links `/var/log/nginx/error.log` and `access.log` to the container's stderr and stdout, so both are kept by Docker's logging driver, not in a file nginx rotates. Docker's default `json-file` driver keeps them **without a bound** until the container is removed, so `docker-compose.prod.yml` gives the `nginx` service its own bound:
+
+```yaml
+logging:
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+```
+
+That is at most about 50 MB of nginx output on the host, the oldest file dropped first. It is a bound by **size, not by days**: how many days it covers depends on traffic, and on a quiet host it can cover more than 14. `tests/integration/test_deployment_configuration.py` fails if the block is removed or made unbounded. If your policy needs a bound by time, keep nginx's output with another driver instead:
+
+- **journald** — set `logging: { driver: journald }` on the service (or `"log-driver": "journald"` in `/etc/docker/daemon.json`) and bound the journal in `/etc/systemd/journald.conf` with `MaxRetentionSec=14day` (and `SystemMaxUse=` for a size cap), then `systemctl restart systemd-journald`.
+- **a host file with logrotate** — have the driver or a collector write to `/var/log/wasla/nginx.log` and rotate it with `daily`, `rotate 14`, `compress`, `missingok`, `create 0640 root adm`.
+
+Only the host's administrators may read these logs (`docker logs` needs the Docker group, which is root-equivalent; journald's `adm` / `systemd-journal` groups; the logrotate file's `0640 root adm`). This example ships nginx's logs nowhere. The other services of the compose file keep Docker's default driver; bound them the same way if your policy covers them.
+
+### Before the first deploy
+
+Tick each line on the host before the first deploy that uses this example:
+
+- [ ] **nginx's log retention** — the shipped `logging:` block on the `nginx` service kept, or an equivalent bound by size or time set (the section above).
+- [ ] **nginx's log readers restricted** — only the host's administrators can run `docker logs` or read the journal or log file that holds them.
+- [ ] **security.yml's RGM-27 fixed** — the open security-workflow finding the owner tracks before the first deploy.
+
 **TLS is not included and cannot be.** Certificates are issued to a domain by a certificate authority; nothing in this repository knows the domain. A self-signed certificate shipped here would be worse than none — it would look like TLS while failing every client that checks.
 
 What ships is the structure around it. The HTTP listener on port 80 serves the ACME challenge and redirects everything else to HTTPS. The proxy's own listener is on **8443 and speaks plain HTTP** until the commented TLS block is enabled, which is why the production compose publishes it on loopback only rather than as 443.

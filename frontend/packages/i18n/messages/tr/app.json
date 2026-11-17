@@ -10,7 +10,9 @@
     "channels": "Kanallar",
     "inbox": "Gelen kutusu",
     "contacts": "Müşteriler",
-    "leads": "Potansiyel müşteriler"
+    "leads": "Potansiyel müşteriler",
+    "ai": "Yapay zekâ asistanı",
+    "knowledge": "Bilgi"
   },
   "account": {
     "label": "Hesap",
@@ -120,7 +122,9 @@
     "agent": "Yapay zekâ asistanını kurun",
     "knowledge": "Bilgi ekleyin",
     "team": "Bir ekip arkadaşı davet edin",
-    "plan": "Bir plan seçin"
+    "plan": "Bir plan seçin",
+    "agentAction": "Yapay zekâ asistanını kurun",
+    "knowledgeAction": "Bilgi ekleyin"
   },
   "roles": {
     "onlyAdmins": "Kanalları yalnızca sahipler ve yöneticiler bağlayabilir ve değiştirebilir.",
@@ -735,5 +739,356 @@
         "custom_fields": "diğer ayrıntılar"
       }
     }
+  },
+  "homeWarnings": {
+    "noAgentTitle": "Müşterileri yanıtlayan bir yapay zekâ asistanı yok.",
+    "noAgentAdmin": "Etkin bir asistan varsayılan olana kadar müşteriler otomatik yanıt almaz.",
+    "noAgentAction": "Yapay zekâ asistanını kurun",
+    "defaultInactiveAdmin": "Varsayılan asistanınız kapalı, bu yüzden müşteriler otomatik yanıt almıyor.",
+    "defaultInactiveAction": "Açın",
+    "noAgentMember": "Bir sahip ya da yönetici bir asistanı açabilir.",
+    "unreachableTitle": "Bilginizde hazır belgeler var ama yanıtlayan hiçbir asistan bunlarda arama yapamıyor.",
+    "unreachableAction": "Asistanın araçlarını kontrol edin"
+  },
+  "ai": {
+    "title": "Yapay zekâ asistanı",
+    "line": "Müşterilerinizi yanıtlayan yapay zekâ çalışanı ve kullanabildikleri.",
+    "listLabel": "Yapay zekâ asistanları",
+    "newAgent": "Yeni asistan",
+    "loading": "Yükleniyor…",
+    "loadError": "Yüklenemedi. Yeniden deneyin.",
+    "retry": "Yeniden dene",
+    "reference": "Referans",
+    "empty": "Henüz yapay zekâ asistanı yok. Etkin bir asistan varsayılan olana kadar müşteriler otomatik yanıt almaz.",
+    "emptyAction": "İlk asistanı oluşturun",
+    "draftNote": "Yeni asistanlar taslak olarak başlar. Müşterileri yanıtlaması için birini etkinleştirip varsayılan yapın.",
+    "limit100": "İlk 100 asistan gösteriliyor.",
+    "model": "Model",
+    "updated": "Güncellendi",
+    "answers": "Müşterileri yanıtlıyor",
+    "notFound": "Bu asistan bu çalışma alanında yok.",
+    "backToList": "Yapay zekâ asistanlarına dön",
+    "status": {
+      "draft": "Taslak",
+      "active": "Etkin",
+      "disabled": "Devre dışı",
+      "sentence": {
+        "draft": "Taslak — müşterileri yanıtlamıyor.",
+        "activeIdle": "Etkin — müşterileri yanıtlamıyor. Yalnızca varsayılan asistan yanıtlar.",
+        "answering": "Etkin ve müşterileri yanıtlıyor.",
+        "disabled": "Devre dışı — müşterileri yanıtlamıyor.",
+        "disabledDefault": "Bu asistan varsayılan ama devre dışı: müşteriler otomatik yanıt almıyor."
+      },
+      "defaultIdle": "Varsayılan, yanıtlamıyor"
+    },
+    "actions": {
+      "activate": "Etkinleştir",
+      "makeDefault": "Varsayılan yap",
+      "disable": "Devre dışı bırak"
+    },
+    "disableTitle": "Müşterileri yanıtlayan asistan kapatılsın mı?",
+    "disableBody": "Başka bir etkin asistan varsayılan olana kadar müşteriler otomatik yanıt almayacak.",
+    "disableConfirm": "Devre dışı bırak",
+    "cancel": "İptal",
+    "close": "Kapat",
+    "create": {
+      "title": "Yeni asistan",
+      "description": "Taslak olarak başlar; etkinleştirip varsayılan yapana kadar kimseyi yanıtlamaz.",
+      "name": "Ad",
+      "instructions": "Talimatlar",
+      "instructionsHint": "Asistanın ne yapması ve nasıl konuşması gerektiği. Düz metin.",
+      "submit": "Asistanı oluştur",
+      "knowledgeGrant": "Yeni asistanlar bilginizde arama yapabilir."
+    },
+    "sections": {
+      "identity": "Kim olduğu",
+      "instructions": "Ona ne söylendiği",
+      "behaviour": "Nasıl davrandığı",
+      "tools": "Neleri kullanabileceği",
+      "status": "Yanıtlayıp yanıtlamadığı"
+    },
+    "fields": {
+      "name": "Ad",
+      "description": "Açıklama",
+      "descriptionHint": "Ekibiniz için bir satır. Değiştirilebilir, kaldırılamaz.",
+      "instructions": "Talimatlar",
+      "instructionsHint": "Biçimlendirme olmadan düz metin. Asistan her yanıttan önce okur.",
+      "model": "Model",
+      "modelHint": "Yalnızca bu kurulumun çalıştırdığı modeller.",
+      "modelDefault": "{model} (varsayılan)",
+      "modelFixed": "Bu kurulum tarafından belirlenir.",
+      "temperature": "Yaratıcılık",
+      "temperatureHint": "0 yanıtları öngörülebilir tutar; daha yüksek değerler çeşitlendirir. {min} ile {max} arası.",
+      "maxOutputTokens": "En uzun yanıt",
+      "maxOutputTokensHint": "Token olarak, bu kurulumda en çok {max}.",
+      "memoryMessages": "Hatırlanan mesajlar",
+      "memoryMessagesHint": "Asistanın okuduğu son mesaj sayısı, {min} ile {max} arası.",
+      "memoryBudget": "Bellek boyutu",
+      "memoryBudgetHint": "Okuyabileceği konuşma tokenları, {min} ile {max} arası.",
+      "escalation": "Müşteri şöyle göründüğünde bir kişiye devret",
+      "escalationHint": "Konuşma ekibinize geçer ve asistan yanıt vermeyi bırakır.",
+      "escalationOff": "Kapalı — asla otomatik devretme",
+      "escalationNeutral": "Nötr veya daha kötü",
+      "escalationNegative": "Olumsuz veya daha kötü",
+      "escalationAngry": "Kızgın"
+    },
+    "problems": {
+      "required": "Bu alan zorunlu.",
+      "tooLong": "Bu çok uzun.",
+      "notANumber": "Bir sayı girin.",
+      "notAWholeNumber": "Bir tam sayı girin.",
+      "outOfRange": "Bu kurulumun izin verdiğinin dışında.",
+      "descriptionCannotBeRemoved": "Açıklama kaldırılamaz, yalnızca değiştirilebilir.",
+      "modelNotOffered": "Bu kurulum o modeli çalıştırmıyor."
+    },
+    "save": "Değişiklikleri kaydet",
+    "discard": "Vazgeç",
+    "saved": "Kaydedildi.",
+    "unsavedTitle": "Değişiklikleriniz atılsın mı?",
+    "unsavedBody": "Bu sayfada değiştirdikleriniz kaydedilmedi.",
+    "unsavedConfirm": "Değişiklikleri at",
+    "readOnly": "Bu asistanın nasıl kurulduğunu okuyabilirsiniz. Bir sahip ya da yönetici değiştirebilir.",
+    "on": "Açık",
+    "off": "Kapalı",
+    "tools": {
+      "label": "Araçlar",
+      "line": "Her araç, asistanın yanıt verirken yapabileceği bir şeydir.",
+      "unknown": "Wasla'nın daha yeni bir sürümünden bir araç.",
+      "gone": "Artık kullanılamıyor",
+      "goneLine": "Bu sürümün artık çalıştırmadığı araç izinleri.",
+      "remove": "Kaldır",
+      "request_human_handoff": {
+        "label": "Bir kişiye devret",
+        "description": "Müşteri bir kişi istediğinde ya da asistan yardım edemediğinde konuşmayı ekibinize aktarır."
+      },
+      "search_knowledge": {
+        "label": "Bilginizde arama",
+        "description": "Bilgi tabanlarınızdaki belgelerden yanıt verir."
+      },
+      "record_lead_details": {
+        "label": "Fırsat bilgilerini kaydet",
+        "description": "Müşterinin adını, ilgisini ve bütçesini fırsatına kaydeder."
+      },
+      "schedule_follow_up": {
+        "label": "Takip planla",
+        "description": "WhatsApp kurallarına uyarak müşteriye sonraki bir mesaj planlar."
+      },
+      "scope": {
+        "legend": "Hangi bilgide arama yaptığı",
+        "all": "Tüm bilgi tabanları",
+        "chosen": "Yalnızca bunlar",
+        "none": "En az bir bilgi tabanı seçin.",
+        "save": "Seçimi kaydet",
+        "readAll": "Tüm bilgi tabanlarında arama yapar.",
+        "readChosen": "Arama yaptığı: {names}",
+        "noBases": "Henüz bilgi tabanı yok.",
+        "more": "Daha fazla bilgi tabanı göster"
+      }
+    },
+    "unreachable": "Bilginizde hazır belgeler var ama yanıtlayan hiçbir asistan bunlarda arama yapamıyor. Yanıtlayan asistan için “Bilginizde arama”yı açın."
+  },
+  "knowledge": {
+    "title": "Bilgi",
+    "line": "Asistanlarınızın yanıt verdiği kaynak. Asistanlar bunu müşterilere gerçek olarak söyler.",
+    "listLabel": "Bilgi tabanları",
+    "newBase": "Yeni bilgi tabanı",
+    "empty": "Henüz bilgi tabanı yok. Bir tane oluşturun, sonra asistanlarınızın yanıt verebileceği belgeleri ekleyin.",
+    "created": "Oluşturuldu",
+    "loadMore": "Daha fazla yükle",
+    "notForRole": "Bilgiyi sahipler ve yöneticiler yönetir.",
+    "notFound": "Bu bilgi tabanı bu çalışma alanında yok.",
+    "backToList": "Bilgiye dön",
+    "create": {
+      "title": "Yeni bilgi tabanı",
+      "name": "Ad",
+      "description": "Açıklama (isteğe bağlı)",
+      "submit": "Oluştur"
+    },
+    "edit": {
+      "name": "Ad",
+      "description": "Açıklama",
+      "editName": "Yeniden adlandır",
+      "editDescription": "Açıklamayı düzenle",
+      "save": "Kaydet",
+      "cancel": "İptal"
+    },
+    "delete": {
+      "action": "Bilgi tabanını sil",
+      "emptyTitle": "Bu bilgi tabanı silinsin mi?",
+      "emptyBody": "İçinde belge yok.",
+      "fullTitle": "Bu bilgi tabanı ve belgeleri silinsin mi?",
+      "fullBody": "Bu bilgi tabanında belgeler var. Silmek içindeki her belgeyi siler; asistanlar bunlardan yanıt vermeyi bırakır.",
+      "count": "{count, plural, one {# belge de silinir.} other {# belge de silinir.}}",
+      "countAtLeast": "{count, plural, one {En az # belge de silinir.} other {En az # belge de silinir.}}",
+      "typeName": "Silmek için bilgi tabanının adını yazın.",
+      "confirm": "Sil",
+      "deleted": "Bilgi tabanı silindi.",
+      "incomplete": "Her belge silinemedi. Yeniden deneyin.",
+      "tryAgain": "Yeniden dene"
+    },
+    "settings": {
+      "title": "Yanıt ayarları",
+      "line": "Asistanların bilginizde nasıl arama yaptığı. Varsayılanlar çoğu çalışma alanına uyar.",
+      "default": "Varsayılanı kullanıyor",
+      "workspace": "Bu çalışma alanı için ayarlandı",
+      "useDefault": "Varsayılanı kullan",
+      "hybrid": {
+        "label": "Tam sözcükleri de eşleştir",
+        "description": "Hem anlama hem sözcüklerin kendisine göre arar; adlar ve kodlar bulunur."
+      },
+      "rerank": {
+        "label": "Sonuçları yeniden sırala",
+        "description": "Asistan okumadan önce en iyi pasajları yeniden kontrol eder."
+      },
+      "confidence_tiers": {
+        "label": "Ne kadar emin olduğunu söyle",
+        "description": "Zayıf eşleşmeler asistana belirsiz olarak verilir."
+      },
+      "pre_retrieval": {
+        "label": "İlk yanıttan önce ara",
+        "description": "Asistan yanıtlamaya başlamadan önce bilginize bakar."
+      },
+      "parallel_sentiment": {
+        "label": "Ruh halini aynı anda oku",
+        "description": "Yanıt hazırlanırken müşterinin nasıl göründüğünü değerlendirir."
+      },
+      "number_grounding": {
+        "label": "Belirttiği sayıları kontrol et",
+        "description": "Yanıttaki fiyatları ve rakamları belgelerinizle karşılaştırır.",
+        "off": "Kapalı",
+        "observe": "Yalnızca uyuşmazlıkları not et",
+        "correct": "Uyuşmazlıkları düzelt",
+        "strict": "Uyuşmayan yanıtı gönderme"
+      },
+      "on": "Açık",
+      "off": "Kapalı"
+    },
+    "search": {
+      "title": "Bir soruyu deneyin",
+      "line": "Hangi pasajların yanıt vereceğini görün. Her deneme bir arama sayılır.",
+      "question": "Soru",
+      "base": "Arama yeri",
+      "everyBase": "Tüm bilgi tabanları",
+      "submit": "Dene (bir arama sayılır)",
+      "found": "{count, plural, one {# pasaj bulundu} other {# pasaj bulundu}}",
+      "none": "Bilginizde yanıt bulunamadı.",
+      "passages": "Pasajlar",
+      "strong": "Güçlü eşleşme",
+      "possible": "Olası eşleşme",
+      "weak": "Zayıf eşleşme",
+      "versions": "Bu belgenin iki sürümü birlikte yanıt veriyor olabilir: {title}",
+      "unavailable": "Arama şu anda kullanılamıyor."
+    },
+    "gaps": {
+      "title": "Yanıtsız sorular",
+      "line": "Müşterilerin sorduğu ve bilginizdeki hiçbir şeyin yanıtlamadığı sorular.",
+      "days": "Dönem",
+      "daysOption": "{days, plural, one {# gün} other {# gün}}",
+      "label": "Yanıtsız sorular",
+      "searches": "Sorulma",
+      "lastAsked": "Son sorulma",
+      "none": "Bu dönemde yanıtsız kalan bir şey olmadı.",
+      "off": "Yanıtsız sorular bu kurulumda kapalı."
+    },
+    "documents": {
+      "label": "Belgeler",
+      "upload": "Yükle",
+      "addText": "Metin ekle",
+      "empty": "Henüz belge yok. Bir dosya yükleyin ya da metin ekleyin — asistanlar burada olandan yanıt verir.",
+      "filter": "Göster",
+      "allStatuses": "Tüm durumlar",
+      "search": "Başlığa göre bul",
+      "searchHint": "Bu bilgi tabanının başlıklarında arar.",
+      "noMatch": "Eşleşen belge yok.",
+      "status": {
+        "pending": "Bekliyor",
+        "processing": "Dizinleniyor",
+        "ready": "Hazır",
+        "failed": "Başarısız"
+      },
+      "type": {
+        "text": "Metin",
+        "markdown": "Markdown",
+        "pdf": "PDF",
+        "csv": "CSV",
+        "xlsx": "Elektronik tablo",
+        "docx": "Word",
+        "html": "Web sayfası"
+      },
+      "needsReindex": "Yeniden dizinlenmeli",
+      "reindexing": "Yeniden dizinleniyor…",
+      "rowName": "{title}, {status}, {time}",
+      "settledReady": "{count, plural, one {# belge hazır.} other {# belge hazır.}}",
+      "settledFailed": "{count, plural, one {# belge başarısız.} other {# belge başarısız.}}",
+      "refreshFailed": "Durumlar yenilenemedi. Denemeye devam ediliyor."
+    },
+    "upload": {
+      "title": "Belge yükle",
+      "file": "Dosya",
+      "choose": "Dosya seçin",
+      "hint": "PDF, Word ve elektronik tablolar en çok {binary}; metin, Markdown, CSV ve web sayfaları en çok {text}.",
+      "chosen": "{name}, {size}",
+      "titleField": "Başlık",
+      "validFrom": "Geçerlilik başlangıcı (isteğe bağlı)",
+      "validUntil": "Geçerlilik bitişi (isteğe bağlı)",
+      "submit": "Yükle",
+      "sending": "Yükleniyor…",
+      "typeRefused": "Bu dosya türü desteklenmiyor. Şunları kullanın: {extensions}",
+      "sizeRefused": "Bu dosya {size}; {kind} dosyaları en çok {max} olabilir.",
+      "emptyRefused": "Bu dosya boş.",
+      "dates": "“Geçerlilik bitişi”, “Geçerlilik başlangıcı”ndan sonra olmalı.",
+      "exists": "Bu dosyadan bir belge zaten var.",
+      "replaceIt": "Değiştir",
+      "otherBase": "Bu dosya zaten başka bir bilgi tabanında.",
+      "sameContent": "Aynı içerikte bir belge zaten var.",
+      "openIt": "Aç"
+    },
+    "text": {
+      "title": "Metin ekle",
+      "titleField": "Başlık",
+      "content": "Metin",
+      "contentHint": "Asistanlarınızın yanıt verebileceği düz metin.",
+      "submit": "Ekle"
+    },
+    "panel": {
+      "label": "Belge",
+      "close": "Kapat",
+      "status": "Durum",
+      "error": "Neden başarısız oldu",
+      "warnings": "Çıkarma notları",
+      "warning": {
+        "digits_glued_to_arabic": "{count, plural, one {# satırda rakamlar Arapça metne bitişikti.} other {# satırda rakamlar Arapça metne bitişikti.}}",
+        "arabic_indic_leading_zero": "{count, plural, one {# sayıda Hint-Arap başta sıfır vardı.} other {# sayıda Hint-Arap başta sıfır vardı.}}",
+        "other": "{key}: {count}"
+      },
+      "type": "Tür",
+      "file": "Dosya",
+      "size": "Boyut",
+      "chunks": "Pasajlar",
+      "ingested": "Dizinlendi",
+      "added": "Eklendi",
+      "validFrom": "Geçerlilik başlangıcı",
+      "validUntil": "Geçerlilik bitişi",
+      "replaces": "Başka bir belgenin yerini alıyor",
+      "original": "Özgün dosya saklanıyor",
+      "originalYes": "Evet",
+      "originalNo": "Hayır",
+      "attempt": "Dizinleme denemesi",
+      "attemptValue": "{attempts, plural, one {# deneme} other {# deneme}}",
+      "replace": "İçeriği değiştir",
+      "replaceFile": "Bir dosyayla",
+      "replaceText": "Metinle",
+      "retry": "Dizinlemeyi yeniden dene",
+      "delete": "Sil",
+      "deleteTitle": "Bu belge silinsin mi?",
+      "deleteBody": "Asistanlar bundan yanıt vermeyi bırakır. Geri alınamaz.",
+      "deleteConfirm": "Sil",
+      "similar": "Benzer belgeler",
+      "similarNone": "Benzer belge yok.",
+      "notFound": "Bu belge artık yok."
+    },
+    "reference": "Referans",
+    "retry": "Yeniden dene",
+    "loading": "Yükleniyor…"
   }
 }
