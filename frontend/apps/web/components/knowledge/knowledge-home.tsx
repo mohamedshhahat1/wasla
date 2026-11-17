@@ -595,15 +595,18 @@ function KnowledgeScreen() {
 
   return (
     <div className="flex flex-col gap-6" data-screen="knowledge">
-      <PageHeader
-        title={t("title")}
-        description={t("line")}
-        actions={
-          <Button onClick={() => setCreating(true)} data-action="new-base">
-            {t("newBase")}
-          </Button>
-        }
-      />
+      {/* The page's head on the secondary band, as home's (the 30 %, VQ6-02). */}
+      <div className="rounded-xl bg-secondary-subtle px-6 py-7 sm:px-8">
+        <PageHeader
+          title={t("title")}
+          description={t("line")}
+          actions={
+            <Button onClick={() => setCreating(true)} data-action="new-base">
+              {t("newBase")}
+            </Button>
+          }
+        />
+      </div>
       {body}
       <Disclosure id="answer-settings" title={t("settings.title")} line={t("settings.line")}>
         {() => <AnswerSettings />}

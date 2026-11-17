@@ -300,10 +300,13 @@ export function AgentsList() {
 
   return (
     <div className="flex flex-col gap-6" data-screen="agents">
-      <PageHeader title={t("title")} description={t("line")} actions={newAgent} />
-      {admin && agents.data?.length ? (
-        <p className="m-0 text-sm text-text-muted">{t("draftNote")}</p>
-      ) : null}
+      {/* The page's head on the secondary band, as home's (the 30 %, VQ6-02). */}
+      <div className="flex flex-col gap-3 rounded-xl bg-secondary-subtle px-6 py-7 sm:px-8">
+        <PageHeader title={t("title")} description={t("line")} actions={newAgent} />
+        {admin && agents.data?.length ? (
+          <p className="m-0 text-sm text-text-muted">{t("draftNote")}</p>
+        ) : null}
+      </div>
       {body}
       {admin ? <CreateAgentDialog open={creating} onOpenChange={setCreating} /> : null}
     </div>
