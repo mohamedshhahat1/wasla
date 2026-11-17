@@ -29,7 +29,7 @@ import {
 import { connectNumber, freshNumber, gateState, memberOf, restore, suspend } from "../support/fe3";
 import { connectedOwner, conversationOf, freshCustomer, inbound, text } from "../support/fe4";
 import { createLead } from "../support/fe5";
-import { answeringAgent, baseWithDocument, call, settled } from "../support/fe6";
+import { answeringAgent, baseWithDocument, settled } from "../support/fe6";
 
 interface Shares {
   dominant: number;
@@ -449,19 +449,20 @@ for (const locale of LOCALES) {
       await expect(page.locator('[data-banner="no-answering-agent"]')).toBeVisible({
         timeout: 30_000,
       });
+      // Every card answered: a capture of "Loading..." would measure the wrong screen.
+      await expect(page.getByText(label(locale, "app.home.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
       await capture(page, testInfo, "web-home-no-agent", locale, "gate");
 
+      // The trial plan allows one agent: the list is measured with that one.
       const agentId = await answeringAgent(owner, "Sales agent");
-      await call(owner, "POST", "/api/v1/agents", {
-        name: "Support agent",
-        system_prompt: "You answer support questions about the test company.",
-      });
       const { baseId, documentId } = await baseWithDocument(owner, "Prices");
       await baseWithDocument(owner, "Policies", "Refund policy");
       await settled(owner, documentId);
 
       await page.goto(`${WEB}/ai/agents`);
-      await expect(page.locator("[data-agent-row]")).toHaveCount(2, { timeout: 30_000 });
+      await expect(page.locator("[data-agent-row]")).toHaveCount(1, { timeout: 30_000 });
       await capture(page, testInfo, "web-agents", locale);
 
       await page.goto(`${WEB}/ai/agents/${agentId}`);

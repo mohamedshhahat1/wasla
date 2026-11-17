@@ -107,10 +107,12 @@ function AnswerWarnings({ manager }: { manager: boolean }) {
             ) : undefined
           }
         >
+          {/* The title says it; the owner's way to fix it is the action, so only a turned-off
+              default and a member's case need a sentence. */}
           {manager
             ? missing.kind === "defaultInactive"
               ? t("defaultInactiveAdmin")
-              : t("noAgentAdmin")
+              : null
             : t("noAgentMember")}
         </Banner>
       ) : null}

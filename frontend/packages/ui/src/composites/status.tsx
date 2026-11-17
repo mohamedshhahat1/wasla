@@ -84,7 +84,8 @@ export function Banner({
       )}
     >
       <Icon icon={icon.icon} name={icon.name} className={cn("mt-1", iconTone[tone])} />
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
+      {/* A basis, so on a phone the action wraps under the words instead of squeezing them (FE-6). */}
+      <div className="flex min-w-0 flex-1 basis-60 flex-col gap-1">
         <p className="m-0 text-md font-semibold text-text">{title}</p>
         {children ? <div className="m-0 text-sm text-text">{children}</div> : null}
       </div>
