@@ -110,6 +110,28 @@ export {
   type TimelineEntry,
 } from "./composites/customers";
 export {
+  AgentRow,
+  AnswersMark,
+  DocumentRow,
+  DocumentStatusBadge,
+  FileField,
+  GapList,
+  KnowledgeScopePicker,
+  PassageList,
+  SettingSwitchRow,
+  TextCounter,
+  ToolSwitchRow,
+  type AgentRowProps,
+  type DocumentRowProps,
+  type FileFieldProps,
+  type GapItem,
+  type KnowledgeScopePickerProps,
+  type PassageItem,
+  type ScopeBase,
+  type SettingSwitchRowProps,
+  type ToolSwitchRowProps,
+} from "./composites/knowledge";
+export {
   SwitcherMenu,
   type SwitcherMenuProps,
   type SwitcherWorkspace,

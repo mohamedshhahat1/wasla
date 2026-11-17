@@ -156,7 +156,9 @@ const badgeTone: Record<StatusTone, string> = {
   warning: "bg-warning-subtle text-warning",
   info: "bg-info-subtle text-info",
   success: "bg-success-subtle text-success",
-  neutral: "bg-secondary-subtle text-text",
+  // An inset ring in the border-strong role keeps the pill on the secondary band, whose fill is
+  // the same as the badge's (FEF-39); inset, so no badge grows or moves.
+  neutral: "bg-secondary-subtle text-text ring-1 ring-inset ring-border-strong",
 };
 
 /** A small status pill: text and an icon, never colour alone. */

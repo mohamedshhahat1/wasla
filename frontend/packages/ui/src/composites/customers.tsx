@@ -27,9 +27,13 @@ import { DropdownMenu } from "../primitives/menu";
 import { focusRing } from "../primitives/styles";
 import { InertLink } from "./inbox";
 
-type RenderLink = (props: { href: string; className: string; children: ReactNode }) => ReactNode;
+export type RenderLink = (props: {
+  href: string;
+  className: string;
+  children: ReactNode;
+}) => ReactNode;
 
-function RowLink({
+export function RowLink({
   href,
   className,
   children,
@@ -50,7 +54,7 @@ function RowLink({
   );
 }
 
-const rowClass = cn(
+export const rowClass = cn(
   "flex min-h-target w-full flex-col gap-1 rounded-lg px-4 py-3 text-start text-text no-underline",
   "hover:bg-secondary-subtle",
   focusRing,

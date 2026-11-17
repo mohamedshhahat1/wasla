@@ -21,6 +21,9 @@
     caret-color: var(--color-primary);
     /* A focused control is never hidden under the sticky header (WCAG 2.4.11). */
     scroll-padding-block-start: calc(var(--spacing-target) + var(--spacing-8));
+    /* A sticky action bar at the foot of a form (the agent page's Save, FE-6) never hides the
+       field the browser scrolls focus to (WCAG 2.2 2.4.11). */
+    scroll-padding-block-end: calc(var(--spacing-target) + var(--spacing-8) * 2);
   }
 
   :lang(ar) {

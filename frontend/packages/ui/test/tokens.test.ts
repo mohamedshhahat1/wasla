@@ -95,6 +95,8 @@ const rolePairs: Array<[string, string, number]> = [
   ["color-on-brand", "color-primary", TEXT],
   ["color-border-strong", "color-surface", NON_TEXT],
   ["color-border-strong", "color-canvas", NON_TEXT],
+  // FEF-39: the neutral badge's edge on the secondary band it shares its fill with.
+  ["color-border-strong", "color-secondary-subtle", NON_TEXT],
   ["color-primary", "color-surface", NON_TEXT],
   ["color-danger", "color-surface-sunken", NON_TEXT],
   ["color-text-muted", "color-surface-sunken", NON_TEXT],
