@@ -287,7 +287,7 @@ const DOCUMENT_TONE: Record<string, StatusTone> = {
 export function DocumentStatusBadge({ status, label }: { status: string; label: string }) {
   const tone = DOCUMENT_TONE[status] ?? "neutral";
   return (
-    <span data-document-status={status} className="inline-flex motion-safe:transition-opacity">
+    <span data-document-status={status} className="inline-flex">
       <Badge tone={tone} icon={tone !== "neutral"}>
         {label}
       </Badge>

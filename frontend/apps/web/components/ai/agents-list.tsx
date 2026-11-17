@@ -218,7 +218,8 @@ export function AgentsList() {
   const agents = useAgents();
   const [creating, setCreating] = useState(false);
 
-  const newAgent = admin ? (
+  // One primary per view: an empty list offers its own "Create the first agent" instead.
+  const newAgent = admin && agents.data?.length ? (
     <Button onClick={() => setCreating(true)} data-action="new-agent">
       {t("newAgent")}
     </Button>

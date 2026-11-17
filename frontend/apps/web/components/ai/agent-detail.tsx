@@ -586,7 +586,7 @@ function StatusSection({ agent }: { agent: AgentRead }) {
         {actionsFor(agent).map((action) => (
           <Button
             key={action}
-            variant={action === "disable" ? "secondary" : "primary"}
+            variant="secondary"
             busy={act.isPending && act.variables === action}
             disabled={act.isPending}
             onClick={() => run(action)}
