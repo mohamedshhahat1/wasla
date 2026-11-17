@@ -288,6 +288,16 @@ _EXTENSIONS: Final[dict[str, DocumentSource]] = {
 MAX_TEXT_UPLOAD_BYTES: Final = MAX_EXTRACTED_CHARACTERS * 4
 
 
+def max_upload_bytes(source: DocumentSource) -> int:
+    """The largest file of this format an upload may carry - the check and the read (FEB-38)."""
+    return MAX_BINARY_DOCUMENT_BYTES if source in BINARY_SOURCES else MAX_TEXT_UPLOAD_BYTES
+
+
+def upload_extensions(source: DocumentSource) -> tuple[str, ...]:
+    """The file extensions an upload is read as this format by, from `_EXTENSIONS` itself."""
+    return tuple(suffix for suffix, mapped in _EXTENSIONS.items() if mapped is source)
+
+
 def upload_source(declared: DocumentSource | None, filename: str | None) -> DocumentSource:
     """A multipart upload's format: as declared, else from its extension, else text."""
     if declared is not None:
@@ -304,7 +314,7 @@ def upload_as_submission(content: bytes, *, source: DocumentSource) -> str:
     """
     if not content:
         raise UnreadableDocumentError("The uploaded file is empty.")
-    limit = MAX_BINARY_DOCUMENT_BYTES if source in BINARY_SOURCES else MAX_TEXT_UPLOAD_BYTES
+    limit = max_upload_bytes(source)
     if len(content) > limit:
         raise UploadTooLargeError(f"That file is too large. The limit is {limit // 1024} KB.")
     check_declared_format(content, source)

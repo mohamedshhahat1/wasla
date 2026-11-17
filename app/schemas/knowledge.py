@@ -26,6 +26,9 @@ from app.db.models.knowledge import (
 )
 from app.services.knowledge_service import MAX_DOCUMENT_CHARACTERS, DocumentView
 
+#: The longest a document title may be, in every route that takes one.
+MAX_DOCUMENT_TITLE_LENGTH = 300
+
 
 def _storable(value: str | None) -> str | None:
     """Refuse text PostgreSQL cannot hold or Unicode cannot encode (RAG-11).
@@ -67,7 +70,7 @@ class KnowledgeBaseCreateRequest(BaseModel):
 class DocumentCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    title: str = Field(min_length=1, max_length=300)
+    title: str = Field(min_length=1, max_length=MAX_DOCUMENT_TITLE_LENGTH)
     # The document text itself. Bounded here as well as in the service, so an
     # oversized body is rejected by validation before it is read into a string.
     content: str = Field(min_length=1, max_length=MAX_DOCUMENT_CHARACTERS)
@@ -115,7 +118,7 @@ class DocumentReplaceRequest(BaseModel):
 
     content: str = Field(min_length=1, max_length=MAX_DOCUMENT_CHARACTERS)
     source: DocumentSource = DocumentSource.TEXT
-    title: str | None = Field(default=None, min_length=1, max_length=300)
+    title: str | None = Field(default=None, min_length=1, max_length=MAX_DOCUMENT_TITLE_LENGTH)
     filename: str | None = Field(default=None, max_length=300)
     media_type: str | None = Field(default=None, max_length=150)
 
@@ -396,3 +399,26 @@ class KnowledgeSettingsUpdate(BaseModel):
     number_grounding: Literal["off", "observe", "correct", "strict"] | None = None
     pre_retrieval: bool | None = None
     parallel_sentiment: bool | None = None
+
+
+class SourceLimitRead(BaseModel):
+    """What an upload of one format may be."""
+
+    source: DocumentSource
+    extensions: list[str]
+    media_types: list[str]
+    max_bytes: int
+
+
+class KnowledgeLimitsRead(BaseModel):
+    """What a document may be on this deployment (FEB-38).
+
+    Read from the objects the upload's own checks use, so a screen's pre-check
+    is the server's rule. Holds nothing of any workspace.
+    """
+
+    sources: list[SourceLimitRead]
+    max_request_bytes: int
+    max_pdf_pages: int
+    max_characters: int
+    max_title_length: int

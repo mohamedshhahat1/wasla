@@ -111,18 +111,40 @@ class AgentService:
     async def get(self, agent_id: uuid.UUID) -> Agent:
         return await self._agents.require_by_id(agent_id)
 
-    def _permitted_models(self) -> tuple[str, ...]:
-        """Every model this deployment will run, including the fallback.
+    @property
+    def default_model(self) -> str:
+        """The model an agent naming none is given."""
+        return self._settings.openai_model
+
+    @property
+    def output_token_ceiling(self) -> int:
+        """The most output tokens an agent may ask for, and what it gets by default."""
+        return self._settings.openai_max_output_tokens
+
+    @property
+    def default_knowledge_grant(self) -> bool:
+        """Whether a new agent is given `search_knowledge` on creation."""
+        return self._settings.agent_default_knowledge_grant
+
+    def permitted_models(self) -> tuple[str, ...] | None:
+        """Every model this deployment will run, default first; `None` when unrestricted.
 
         The configured default is always in the set. It is what an agent naming
         no model is given, so a list that omitted it would make the ordinary
         agent unbuildable - a misconfiguration that would surface as "cannot
         create any agent" long after the list was written.
+
+        One resolver for the refusal in `_checked_model` and for the options a
+        screen offers (FEB-37), so the two can never disagree.
         """
         configured = tuple(self._settings.openai_allowed_models)
         if not configured:
-            return ()
-        return tuple({*configured, self._settings.openai_model})
+            return None
+        default = self.default_model
+        return (default, *dict.fromkeys(model for model in configured if model != default))
+
+    def _permitted_models(self) -> tuple[str, ...]:
+        return self.permitted_models() or ()
 
     def _checked_model(self, model: str | None) -> str:
         """Resolve the model to use, refusing one this deployment will not run (ADR-053).
@@ -143,7 +165,9 @@ class AgentService:
                 "agent.model_refused",
                 extra={"event": "agent.model_refused", "model": resolved},
             )
-            raise ValidationError(_model_refusal(resolved, permitted))
+            raise ValidationError(
+                _model_refusal(resolved, permitted), error_code="agent_model_not_permitted"
+            )
         return resolved
 
     def _checked_output_tokens(self, requested: int | None) -> int:
@@ -155,11 +179,14 @@ class AgentService:
         than silently clamped: an administrator who asked for 8,000 tokens and
         got 2,048 would believe something false about what they configured.
         """
-        ceiling = self._settings.openai_max_output_tokens
+        ceiling = self.output_token_ceiling
         if requested is None:
             return ceiling
         if requested > ceiling:
-            raise ValidationError(f"max_output_tokens may not exceed {ceiling} on this deployment.")
+            raise ValidationError(
+                f"max_output_tokens may not exceed {ceiling} on this deployment.",
+                error_code="agent_output_tokens_exceed_ceiling",
+            )
         return requested
 
     async def create(
@@ -200,9 +227,7 @@ class AgentService:
         # Flushed so the caller can read the generated id.
         await self._session.flush()
         logger.info("agent.created", extra={"agent_id": str(agent.id)})
-        if self._settings.agent_default_knowledge_grant and self._registry.knows(
-            SEARCH_KNOWLEDGE_TOOL
-        ):
+        if self.default_knowledge_grant and self._registry.knows(SEARCH_KNOWLEDGE_TOOL):
             await self.grant_tool(agent.id, name=SEARCH_KNOWLEDGE_TOOL, actor=actor)
         return agent
 
@@ -265,7 +290,9 @@ class AgentService:
         if name == agent.name:
             return
         if await self._agents.get_by_name(name) is not None:
-            raise ConflictError("An agent with that name already exists.")
+            raise ConflictError(
+                "An agent with that name already exists.", error_code="agent_name_exists"
+            )
         agent.name = name
 
     async def make_default(self, agent_id: uuid.UUID) -> Agent:
@@ -278,7 +305,10 @@ class AgentService:
         """
         agent = await self._agents.require_by_id(agent_id)
         if agent.status is not AgentStatus.ACTIVE:
-            raise ValidationError("Activate this agent before making it the default.")
+            raise ValidationError(
+                "Activate this agent before making it the default.",
+                error_code="agent_not_active",
+            )
 
         await self._agents.clear_defaults()
         agent.is_default = True
@@ -372,6 +402,7 @@ class AgentService:
                 raise ValidationError(
                     "knowledge_base_ids names a knowledge base this workspace does not have.",
                     details={"knowledge_base_id": str(knowledge_base_id)},
+                    error_code="knowledge_scope_invalid",
                 )
         return {KNOWLEDGE_SCOPE_KEY: [str(value) for value in ids]}
 

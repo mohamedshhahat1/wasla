@@ -196,6 +196,9 @@ async def test_the_report_is_not_found_while_disabled(
 ) -> None:
     response = await http.get("/api/v1/knowledge/gaps", headers=victim.headers)
     assert response.status_code == 404
+    # FEB-06 (EC6-02): the screen tells "switched off" from "not found" by code.
+    assert response.json()["error"]["code"] == "knowledge_gap_report_disabled"
+    assert response.json()["error"]["message"] == "The knowledge-gap report is not enabled."
 
 
 # ------------------------------------------------- retention and the purge

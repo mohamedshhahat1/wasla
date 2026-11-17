@@ -32,6 +32,7 @@ MAX_TOOL_NAME_LENGTH = 100
 # Long enough for a detailed persona with examples, short enough that a runaway
 # paste cannot become the system prompt.
 MAX_PROMPT_LENGTH = 20_000
+MIN_MESSAGE_LIMIT = 1
 MAX_MESSAGE_LIMIT = 200
 MIN_TOKEN_BUDGET = 200
 MAX_TOKEN_BUDGET = 100_000
@@ -47,7 +48,7 @@ Prompt = Annotated[StorableText, Field(min_length=1, max_length=MAX_PROMPT_LENGT
 ModelName = Annotated[StorableText, Field(min_length=1, max_length=MAX_MODEL_LENGTH)]
 ToolName = Annotated[StorableText, Field(min_length=1, max_length=MAX_TOOL_NAME_LENGTH)]
 Temperature = Annotated[float, Field(ge=MIN_TEMPERATURE, le=MAX_TEMPERATURE)]
-MessageLimit = Annotated[int, Field(ge=1, le=MAX_MESSAGE_LIMIT)]
+MessageLimit = Annotated[int, Field(ge=MIN_MESSAGE_LIMIT, le=MAX_MESSAGE_LIMIT)]
 TokenBudget = Annotated[int, Field(ge=MIN_TOKEN_BUDGET, le=MAX_TOKEN_BUDGET)]
 OutputTokens = Annotated[int, Field(ge=1, le=MAX_OUTPUT_TOKENS)]
 
@@ -170,3 +171,61 @@ class ToolSpecRead(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any]
+
+
+class LengthBound(BaseModel):
+    """The longest a text field may be."""
+
+    max_length: int
+
+
+class RangeBound(BaseModel):
+    """The smallest and largest a number may be."""
+
+    min: float
+    max: float
+
+
+class OutputTokenOptions(BaseModel):
+    """What `max_output_tokens` may be on this deployment."""
+
+    default: int
+    ceiling: int
+
+
+class AgentBounds(BaseModel):
+    """The fixed bounds of an agent's fields, read from this module's constants."""
+
+    name: LengthBound
+    description: LengthBound
+    system_prompt: LengthBound
+    temperature: RangeBound
+    memory_message_limit: RangeBound
+    memory_token_budget: RangeBound
+
+
+class AgentOptionsRead(BaseModel):
+    """What this deployment lets an agent be (FEB-37).
+
+    `models` is the permitted list, the default first - or null when the
+    deployment restricts nothing. Numbers and model names only: no key, no
+    provider address, nothing of any workspace.
+    """
+
+    models: list[str] | None
+    default_model: str
+    max_output_tokens: OutputTokenOptions
+    bounds: AgentBounds
+    default_knowledge_grant: bool
+
+
+def agent_bounds() -> AgentBounds:
+    """The bounds the request schemas above enforce, from the same constants."""
+    return AgentBounds(
+        name=LengthBound(max_length=MAX_NAME_LENGTH),
+        description=LengthBound(max_length=MAX_DESCRIPTION_LENGTH),
+        system_prompt=LengthBound(max_length=MAX_PROMPT_LENGTH),
+        temperature=RangeBound(min=MIN_TEMPERATURE, max=MAX_TEMPERATURE),
+        memory_message_limit=RangeBound(min=MIN_MESSAGE_LIMIT, max=MAX_MESSAGE_LIMIT),
+        memory_token_budget=RangeBound(min=MIN_TOKEN_BUDGET, max=MAX_TOKEN_BUDGET),
+    )

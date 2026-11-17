@@ -355,6 +355,7 @@ class KnowledgeService:
         description: str | None = None,
         actor: User | None = None,
     ) -> KnowledgeBase:
+        await self._refuse_used_name(name.strip())
         base = await self._bases.create(name=name.strip(), description=description)
         await self._session.flush()
         self._audit.record(
@@ -369,6 +370,18 @@ class KnowledgeService:
             extra={"tenant_id": str(self._tenant_id), "knowledge_base_id": str(base.id)},
         )
         return base
+
+    async def _refuse_used_name(self, name: str) -> None:
+        """Refuse a name another knowledge base of this workspace has (FEB-40).
+
+        Checked rather than left to `uq_knowledge_bases_tenant_id_name`, whose
+        violation escaped as a driver error and answered 500.
+        """
+        if await self._bases.get_by_name(name) is not None:
+            raise ConflictError(
+                "A knowledge base with that name already exists.",
+                error_code="knowledge_base_name_exists",
+            )
 
     async def list_knowledge_bases(self, *, limit: int = 50) -> list[KnowledgeBase]:
         return await self._bases.list_all(limit=limit)
@@ -1018,6 +1031,7 @@ class KnowledgeService:
         base = await self._bases.require_by_id(knowledge_base_id)
         fields = []
         if name is not None and name.strip() != base.name:
+            await self._refuse_used_name(name.strip())
             base.name = name.strip()
             fields.append("name")
         if description is not None and description != base.description:

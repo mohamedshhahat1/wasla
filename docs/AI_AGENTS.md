@@ -31,6 +31,7 @@ Tool access is a grant per agent in `agent_tools`: a tool name, an `enabled` fla
 | `GET` | `/api/v1/agents` | Any workspace member |
 | `POST` | `/api/v1/agents` | Admin or owner |
 | `GET` | `/api/v1/agents/available-tools` | Any workspace member |
+| `GET` | `/api/v1/agents/options` | Any workspace member |
 | `GET` | `/api/v1/agents/{agent_id}` | Any workspace member |
 | `PATCH` | `/api/v1/agents/{agent_id}` | Admin or owner |
 | `POST` | `/api/v1/agents/{agent_id}/default` | Admin or owner |
@@ -39,6 +40,22 @@ Tool access is a grant per agent in `agent_tools`: a tool name, an `enabled` fla
 | `DELETE` | `/api/v1/agents/{agent_id}/tools/{name}` | Admin or owner |
 
 Reading is open to members because staffing an inbox means seeing what the agent is configured to do. Changing what customers are told is an administrative act.
+
+### What the agent page can learn (FEB-37, ADR-200)
+
+`GET /api/v1/agents/options` answers what this deployment lets an agent be, the same for every workspace and open to every member:
+
+| Field | Source |
+| --- | --- |
+| `models` | the permitted list, the default first and then `OPENAI_ALLOWED_MODELS` in its order, without a duplicate - or `null` when the deployment restricts nothing |
+| `default_model` | `OPENAI_MODEL` |
+| `max_output_tokens` | `{default, ceiling}`, both `OPENAI_MAX_OUTPUT_TOKENS` (what an agent naming none is given, and the most it may ask for) |
+| `bounds` | `name`, `description`, `system_prompt` (`max_length`), `temperature`, `memory_message_limit`, `memory_token_budget` (`min`, `max`) - the constants `app/schemas/agent.py` validates with |
+| `default_knowledge_grant` | `AGENT_DEFAULT_KNOWLEDGE_GRANT` |
+
+`AgentService.permitted_models()` is the one resolver behind both this read and the `422 agent_model_not_permitted` refusal, so a screen cannot offer a model the API would refuse. The read carries model names and numbers only: no key, no provider address, nothing of a workspace.
+
+Refusals a screen tells apart (FEB-06, ADR-200): `409 agent_name_exists` (a name already used in the workspace), `422 agent_not_active` (making a draft or disabled agent the default), `422 agent_model_not_permitted` (a model outside the list - the sentence names the permitted ones), `422 agent_output_tokens_exceed_ceiling`, and `422 knowledge_scope_invalid` (a `search_knowledge` scope naming a knowledge base this workspace does not have - gone, or never its own; the same words either way).
 
 ## Orchestrator flow
 

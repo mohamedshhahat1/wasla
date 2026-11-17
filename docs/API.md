@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **265 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **267 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -30,9 +30,9 @@ conclusion drawn from it is vacuously true.
 | 401 | `AuthenticationError` | Missing, malformed or no-longer-valid credentials |
 | 403 | `PermissionDeniedError` | Authenticated, but not permitted in this workspace. Codes a client tells apart (ADR-194): `workspace_suspended` - the workspace is suspended ("This workspace is not available."; switching or logging into it answers "This workspace is suspended." with the same code - FEB-06, ADR-196); `membership_revoked` - the caller's membership in this workspace was withdrawn (also what a refresh **into** that workspace answers, with the refresh token left unspent - FEB-34, ADR-199; a workspace since deleted, one the caller never belonged to and an unknown slug keep the 404); `email_verification_required`; otherwise `permission_denied`. Somebody who never belonged to the workspace gets the 404 below, never one of these |
 | 402 | `PlanLimitExceededError` (`plan_limit_exceeded`), `PaymentRequiredError` (`payment_required`) | The plan does not stretch that far; the plan asked for is not paid for |
-| 404 | `NotFoundError`, `TenantIsolationError` | Absent, or outside the caller's workspace. One code of its own (FEB-06, ADR-199): `assignee_not_active_member` - a lead assigned to somebody who is not an active member here (the same sentence; it tells the picker to re-read its members, not that the lead is gone) |
-| 409 | `ConflictError` | Uniqueness or state conflict. Two entitlement codes (ADR-131): `channel_capacity_exceeded` - every channel slot is taken - and `channel_type_not_allowed` - the plan in force does not include that channel; and `whatsapp_number_already_connected` - the WhatsApp number is already held by a workspace (which one is never said; FEB-06, ADR-196). Inbox (FEB-06, ADR-198): `stale_assignment` - the assignee changed since you read it (who has it now is never said; read the conversation again); `idempotency_key_reused` - an `Idempotency-Key` sent again with a different message (make a new key). Leads (CRM.md): `stale_lead_status`, `open_lead_exists`, and `stale_assignment` for a lead's owner |
-| 422 | `ValidationError` | Rejected by a business rule. Inbox codes (FEB-05, ADR-197): `search_term_invalid` - `q` outside 2..100 characters; `cursor_view_mismatch` - a `next_cursor` presented with other inbox filters than the view it came from; `inbox_view_with_updated_since` - `status`, `assigned_to`, `mode`, `q` or `unread` or `contact_id` together with `updated_since`. Sending (FEB-06, ADR-198): `reply_window_closed` - free text or a file after the channel's reply window closed (send an approved template); `media_type_not_allowed` - a file whose bytes are no type Wasla accepts, contradict the type it was sent as, or a type the channel does not take. Customers (FEB-06, ADR-199): `lead_status_transition_not_allowed` - a move the pipeline's graph forbids from where the lead stands (read the lead again: `next_statuses` says what is allowed); `contact_name_invalid` - a contact's name that is empty once trimmed (send `null` to remove it) |
+| 404 | `NotFoundError`, `TenantIsolationError` | Absent, or outside the caller's workspace. `knowledge_gap_report_disabled` - `GET /knowledge/gaps` while `RAG_GAP_REPORT_ENABLED` is off (FEB-06, ADR-200; still a 404). One code of its own (FEB-06, ADR-199): `assignee_not_active_member` - a lead assigned to somebody who is not an active member here (the same sentence; it tells the picker to re-read its members, not that the lead is gone) |
+| 409 | `ConflictError` | Uniqueness or state conflict. Agents and knowledge (FEB-06, ADR-200): `agent_name_exists`, `knowledge_base_name_exists` (a name already used in the workspace - before FEB-40 this one escaped as a `500`). Two entitlement codes (ADR-131): `channel_capacity_exceeded` - every channel slot is taken - and `channel_type_not_allowed` - the plan in force does not include that channel; and `whatsapp_number_already_connected` - the WhatsApp number is already held by a workspace (which one is never said; FEB-06, ADR-196). Inbox (FEB-06, ADR-198): `stale_assignment` - the assignee changed since you read it (who has it now is never said; read the conversation again); `idempotency_key_reused` - an `Idempotency-Key` sent again with a different message (make a new key). Leads (CRM.md): `stale_lead_status`, `open_lead_exists`, and `stale_assignment` for a lead's owner |
+| 422 | `ValidationError` | Rejected by a business rule. Inbox codes (FEB-05, ADR-197): `search_term_invalid` - `q` outside 2..100 characters; `cursor_view_mismatch` - a `next_cursor` presented with other inbox filters than the view it came from; `inbox_view_with_updated_since` - `status`, `assigned_to`, `mode`, `q` or `unread` or `contact_id` together with `updated_since`. Sending (FEB-06, ADR-198): `reply_window_closed` - free text or a file after the channel's reply window closed (send an approved template); `media_type_not_allowed` - a file whose bytes are no type Wasla accepts, contradict the type it was sent as, or a type the channel does not take. Customers (FEB-06, ADR-199): `lead_status_transition_not_allowed` - a move the pipeline's graph forbids from where the lead stands (read the lead again: `next_statuses` says what is allowed); `contact_name_invalid` - a contact's name that is empty once trimmed (send `null` to remove it). Agents (FEB-06, ADR-200): `agent_not_active`, `agent_model_not_permitted`, `agent_output_tokens_exceed_ceiling`, `knowledge_scope_invalid` (see [AI_AGENTS.md](AI_AGENTS.md)) |
 | 429 | `RateLimitedError` | Upstream is rate limiting |
 | 502 | `ExternalServiceError` | A provider failed |
 | 503 | `DependencyUnavailableError` | A dependency or platform credential is unavailable |
@@ -46,7 +46,7 @@ ADR-191):
 
 | File | What |
 | --- | --- |
-| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (265 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (267 operations less `/metrics`, which keeps itself out of the schema) |
 | `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
 
 `python -m scripts.export_openapi` writes both from the application factory, in
@@ -639,6 +639,7 @@ Conversations carry identifiers rather than embedded contact objects. The models
 
 | Method | Path | Who |
 | --- | --- | --- |
+| GET | `/api/v1/knowledge/limits` | Any workspace member (what a document may be, FEB-38) |
 | GET | `/api/v1/knowledge/bases` | Any workspace member |
 | POST | `/api/v1/knowledge/bases` | Admin or owner |
 | GET | `/api/v1/knowledge/bases/{knowledge_base_id}` | Any workspace member |
@@ -678,6 +679,10 @@ Three behaviours worth knowing:
 - **Knowledge-gap report** (RQ-27, ADR-183): `GET /knowledge/gaps?days=30&limit=50` answers `{days, gaps: [{query, language, searches, best_distance, last_asked_at}]}`, the most-asked queries the agent searched with and found nothing for in this workspace (the model's query, never a customer's message), `days` 1 .. 90. `404` while the report is off, which is the default until the Privacy audit.
 - **A document read never returns the extracted text.** It reports what was ingested — status, chunk count, size, failure reason. The API is not a document store.
 
+
+**What a document may be (FEB-38, ADR-200).** `GET /knowledge/limits` answers, per source (`text`, `markdown`, `pdf`, `csv`, `xlsx`, `docx`, `html`), its `extensions`, `media_types` and `max_bytes`, plus `max_request_bytes` (the multipart body cap, `MAX_DOCUMENT_REQUEST_BYTES`, 5 MiB by default), `max_pdf_pages`, `max_characters` (a text document) and `max_title_length`. Read from the objects the upload checks (`document_formats.max_upload_bytes`, its extension table, `knowledge_limits`), so a screen's pre-check is the server's own rule: today a PDF, workbook or Word file is refused above 300,000 bytes and a text, Markdown, CSV or HTML file above 1,600,000.
+
+**The next page from a browser (FEB-39).** `GET /knowledge/bases` and `GET /knowledge/bases/{id}/documents` answer their next page in `X-Next-Cursor`; it is in the CORS `Access-Control-Expose-Headers` beside the request-id header, so a page on an allowed origin can read it.
 ## Leads
 
 **Status: Implemented.** Full behaviour in [CRM.md](CRM.md).
