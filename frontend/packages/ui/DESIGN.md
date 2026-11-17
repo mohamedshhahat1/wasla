@@ -242,6 +242,52 @@ are FE-1's. 0 s under reduced motion.
 | emil-design-eng | no motion on rows, badges, the edit swap and the timeline                                             |
 | impeccable      | the context and audit of the new screens (FE5_CUSTOMERS.md)                                           |
 
+## The AI agent and knowledge (FE-6, ADR-200)
+
+**The agent page** reads in one order: who it is, what it is told, how it behaves, what it may use, whether it answers.
+Identity, Instructions and Behaviour are white cards; the head (RecordHeader) and "Whether it answers" (RecordPanel) are
+the `secondary-subtle` surfaces - the page's 30 %. The instructions are a plain Textarea with a counter ("1,234 / 20,000"
+from the deployment's bound) that speaks only near the bound; nothing is rendered as Markdown. Save and Discard sit in one
+sticky bar at the foot of the form; Save is the page's one primary, enabled only while something changed.
+
+**Who answers** is said in words, never by colour alone: "Answers customers" is an icon and words in the accent role (it is
+not a status); Active is a `success` badge, Draft and Disabled neutral. Each state has its sentence ("Draft - not
+answering customers."). "Make default" exists only for an active agent. Turning off the agent that answers opens a dialog
+whose Cancel is focused first and whose action is `danger`.
+
+**Tools** are rows on white inside the tools card: the name, one line on what it does, a Switch on the inline end. The
+switch reports and waits - nothing moves before the answer. search_knowledge's scope sits under its row on
+`secondary-subtle`: "Every knowledge base" or "Only these", with a checkbox per base. A member sees "On" / "Off" as words.
+
+**Documents** are rows (DocumentRow): the title, the status badge (Ready `success`, Failed `danger`, Waiting and Indexing
+neutral), then type, size and time; "Needs re-indexing" and "Re-indexing..." as quiet words. A row is one button that opens
+the document panel - a pane beside the list from 1024 px, a drawer below. Statuses change on their own: one polite live
+region per list says what settled ("2 documents ready."), never one announcement per row.
+
+**Upload** is a dialog with a labelled file chooser whose one keyboard stop is a button; the pre-check's refusal is said
+under it before anything is sent, with the server's own limits in the page's units ("This file is 412 kB; PDF files can be
+up to 300 kB"). No drag-and-drop library; one file at a time.
+
+**Destructive cascades** (a knowledge base with documents) ask for the name to be typed (FE-3's confirmation, `@wasla/ui`'s
+ConfirmDialog) and say how many documents go with it, from the rows already loaded ("At least 25" while more pages exist).
+
+**Home's warnings** are warning Banners above the checklist: "No AI agent is answering customers." for every role, with
+the way to fix it for owners and administrators; the unreachable-knowledge one for owners and administrators only.
+
+**The neutral badge on the secondary band** (FEF-39) carries an inset ring in the `border-strong` role: its fill is the
+band's own colour, so without the ring the pill disappeared. Measured 3.08:1 against `secondary-subtle` (1.4.11); inset, so
+no badge grows.
+
+**Motion.** A badge changing status, a switch and the panel use FE-1's tokens; "Indexing" is a word, never a spinner that
+loops. 0 s under reduced motion.
+
+| Skill (FE-6)    | Decided                                                                                                   |
+| --------------- | --------------------------------------------------------------------------------------------------------- |
+| ui-ux-pro-max   | the agent page's order, the status sentences, pre-checks said before sending, one live region per list    |
+| taste-skill     | the 30 % on the head and the status panel, one primary per view, no "AI" gradients, glow or sparkle icons |
+| emil-design-eng | no looping "processing" cue, the switch and badge changes on FE-1's tokens, nothing animates under reduce |
+| impeccable      | the audit of the new screens and of FE-5's three leftovers (FE6_AI_KNOWLEDGE.md)                          |
+
 ## Right to left
 
 Logical properties only (the lint forbids physical sides). The brand panel sits at the inline end
