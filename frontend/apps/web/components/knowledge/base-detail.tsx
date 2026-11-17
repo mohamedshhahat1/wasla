@@ -990,6 +990,23 @@ function DocumentDetails({
   const { scope } = useWorkspace();
   const changed = useDocumentsChanged();
   const wide = useWidth() >= LG;
+  // Escape closes the pane as it closes the drawer, and focus goes back to the row (KD-05).
+  const pane = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!wide) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // A dialog open above the page owns Escape.
+      if (document.querySelector('[role="dialog"]')) return;
+      const row = document.querySelector<HTMLElement>(
+        '[data-document-row] button[aria-current="true"]',
+      );
+      onClose();
+      if (row) setTimeout(() => row.focus(), 0);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [wide, onClose]);
   const [replacing, setReplacing] = useState<"file" | "text" | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [similarOpen, setSimilarOpen] = useState(false);
@@ -1245,7 +1262,7 @@ function DocumentDetails({
       {/* LY6-01: a pane beside the list from 1024 px, a drawer below it (Back closes it: the id is
           in the URL). */}
       {wide ? (
-        <div className="w-full shrink-0 lg:w-96" data-document-panel="">
+        <div ref={pane} className="w-full shrink-0 lg:w-96" data-document-panel="">
           <SidePanel
             title={doc?.title ?? t("panel.label")}
             variant="pane"

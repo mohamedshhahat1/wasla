@@ -90,7 +90,9 @@ for (const locale of ["en", "ar"] as const) {
     const created = page.waitForResponse(
       (r) => r.request().method() === "POST" && /\/api\/v1\/agents$/.test(r.url()),
     );
-    await page.evaluate(() => document.querySelector<HTMLFormElement>("form[id]")?.requestSubmit());
+    // Enter in a text field submits its form (implicit submission): keys only.
+    await tabTo(page, { field: "agent-name" }, true);
+    await page.keyboard.press("Enter");
     expect((await created).status()).toBe(201);
     await page.waitForURL(/\/ai\/agents\/[0-9a-f-]{36}$/);
 
@@ -133,9 +135,8 @@ for (const locale of ["en", "ar"] as const) {
     const added = page.waitForResponse(
       (r) => r.request().method() === "POST" && /\/documents$/.test(new URL(r.url()).pathname),
     );
-    await page.evaluate(() =>
-      document.querySelector<HTMLFormElement>("[role=dialog] form")?.requestSubmit(),
-    );
+    await tabTo(page, { field: "text-title" }, true);
+    await page.keyboard.press("Enter");
     expect((await added).status()).toBe(202);
     await tabTo(page, { inside: "[data-document-row]" });
     await page.keyboard.press("Enter");
@@ -152,7 +153,9 @@ for (const locale of ["en", "ar"] as const) {
     await tabTo(page, { rowLinkPrefix: "/contacts/" });
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/contacts\/[0-9a-f-]{36}$/);
-    await page.keyboard.press("Alt+ArrowLeft");
+    // Back by the page's own link: a browser shortcut never reaches a headless page.
+    await tabTo(page, { name: label(locale, "app.customers.contact.back") });
+    await page.keyboard.press("Enter");
     await expect(page).toHaveURL(`${WEB}/contacts`);
   });
 }
