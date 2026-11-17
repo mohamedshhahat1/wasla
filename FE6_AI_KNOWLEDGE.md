@@ -241,4 +241,67 @@ confirmation (ConfirmDialog) for cascades; home's Banner pattern for plan warnin
 
 ## 36. Final Verdict
 
-Pending the push's runs — the addendum records the verdict.
+FE-6 MERGED AND PUSHED, CI GREEN — see Addendum 1.
+
+## Addendum 1 — the four pushes, CI green, the previews
+
+**Verdict: FE-6 MERGED AND PUSHED, CI GREEN.** Beside it: **PREVIEWS UPDATED** (all three Workers).
+NEXT: THE OWNER PICKS — FE-8 (after FEB-12 / FEB-13), FE-7 (after FEB-09, with FEB-36's "last-used workspace"), or the
+WhatsApp Embedded Signup backend stage.
+
+### Pushes and runs
+
+| Push | Head | frontend.yml | ci.yml | What was red, and why |
+| --- | --- | --- | --- | --- |
+| 1 | ebb14c3 (report; merge 558e21b) | 44088496468 failure | 44088496532 failure (tests 8291 passed, 17 skipped, 2 deselected) | ruff E501 in a test A-BE added (one line, 101 > 100; the local GB6-3 run missed it); KY-02 in Firefox / WebKit: focus lost where a pressed control was removed (a dialog closing into a new page, Activate replaced) — Chromium wraps a lost focus, the others leave the page; AJ-04 chose a file before the field was enabled (limits not yet read); visual roles: FE-3's home captures now carried FE-6's warning (status 3.1–7.4 % > 3); CJ-10 WebKit-only (see FEF-43) |
+| 2 | 79ff4a8 (fix 22945f0) | 44102582623 failure (Firefox only) | 44102582785 success | KY-02 in Firefox: Shift+Tab after the status actions still lost the keyboard — a busy Button is `disabled`, which drops focus in Firefox, and the restore waited for both reads |
+| 3 | 4281e95 (fix 4a8f968) | 44112760858 failure (Firefox only) | 44112760783 cancelled by push 4 (owner: push without waiting) | KY-02 in Firefox: Shift+Tab trapped in the scope picker's RadioGroup (Radix's container leaves the Tab order through a state update that lands after Firefox chose the container; it hands focus back to the checked radio) — FEF-44 |
+| 4 | 5267367 (fix e7f26a1) | **44122041585 success, every job** | **44122041770 success, every job** | — |
+
+Push 4's counts: Chromium 224 passed / 22 skipped; Firefox 216 / 30; WebKit (with the API restart, JR-11, IJ-08) 219 / 30;
+visual roles 70 passed; Storybook (axe, keyboard, motion, layout), drift, typecheck / lint / unit / i18n / build / audit
+green. ci.yml: 8291 passed, 17 skipped, 2 deselected = CI_TEST_COUNT 8238 + 53 tests A-BE added; Lint, format, types;
+Migration-built schema; Docker build; Alert rules — all green. Each push was made without force and merged as one normal
+merge commit whose tree equals its fix commit's (`git diff --exit-code`). Push 2 and 3 waited for the running ci.yml; push
+4 was made at once on the owner's instruction ("don't wait to ci push and watch the fix"), cancelling push 3's ci.yml.
+This addendum is docs-only: it starts no frontend.yml — run 44122041585 is the one that decides the verdict.
+
+### The fixes (no test skipped, no band widened, no bound raised, no keyboard step replaced by a click)
+
+| Commit | Change | Proof |
+| --- | --- | --- |
+| 22945f0 | `lib/focus.ts` (focusIfLost; unit test fe6-focus.test.ts): the agent page and the base page give a lost focus to their heading on arrival; the upload specs wait for the enabled file field; visual-roles gives FE-3's measured homes an answering agent (the warning stays measured apart as `web-home-no-agent`, a status state ≤ 8 %); the E501 line | Chromium locally: KY-02, AJ-04, AJ-05 (AJ-05 phone re-run alone after a 0xC0000409 worker crash before its test; both runs recorded), visual-roles homes 16 passed |
+| 4a8f968 | the status actions stay focusable while busy (`aria-disabled`, `aria-busy`, a second press ignored); focus moves to the next state's first action in the commit that draws it; KY-02 waits on each focus (heading on arrival, next action after each status change) | Chromium locally: KY-02 6 passed, AJ-02 / AJ-03 6 passed |
+| e7f26a1 | `@wasla/ui` RadioGroup: on Shift+Tab the container leaves the Tab order on the element itself, before the browser moves; Radix keeps forward Tab, arrows, Home / End; unit test radio-group.test.tsx pins the timing (fails with the change removed — checked) | **Firefox locally, one exception to section 8 made to diagnose a CI-only red after the owner said "don't stop until you fix it"**: KY-02 (en) failed on the unfixed build exactly as on GitHub, then passed; KY-02 Firefox + Chromium desktop / phone en / ar 12 passed; AJ-02 / AJ-06 Chromium 8 passed; packages/ui 137 unit tests |
+
+### Findings added
+
+| ID | Finding | Status |
+| --- | --- | --- |
+| FEF-43 | CJ-10 (FE-5) failed once in WebKit on push 1: a withdrawn member's reload of /contacts was redirected to /verify and stayed there (session and routing code, unchanged by FE-6 — VQ6-04 empty); green on pushes 2, 3, 4 | NOT CLOSED — intermittent, for the session's owner stage |
+| FEF-44 | Shift+Tab trapped inside every `@wasla/ui` RadioGroup in Firefox (agent's hand-over level, knowledge scope, number grounding) | CLOSED (e7f26a1) |
+| — | the agent's status buttons dropped focus in Firefox while busy (`disabled`) | CLOSED (4a8f968) |
+| — | lost focus after a dialog closed into a new page (agent, knowledge base) | CLOSED (22945f0) |
+
+### Part C — the previews
+
+C: had 4.8 GB free before the build (below 6 GB); the owner answered "continue anyway" (2026-11-17 17:08 UTC); 2.8 GB
+after. `wrangler whoami`: "Mohamedshhahat1@gmail.com's Account", 1cc89863… (= FE-5's). The live versions before were
+FE-5's. Source diff a2febaf → 5267367: web 52 paths, console 22, marketing 20 (through `@wasla/ui` / `@wasla/i18n`) → all
+three rebuilt with `build-workers-linux.mjs --env preview`, the three workers.dev origins, `PUBLIC_PREVIEW_NO_API=true`
+(web 3,946 files, console 3,687, marketing 29 / 573,483 B). `workers:smoke`: every page 200 on workerd; session routes GET
+405, POST 503. Every wrangler.jsonc unchanged since a2febaf (workers.dev only, no route, no custom domain, ASSETS only). No
+secret set; nothing on iwasla.tech.
+
+| Worker | Previous version (FE-5) | New version | Upload (gzip) |
+| --- | --- | --- | --- |
+| wasla-preview-web | df3720f3-f913-402e-af0f-81fbe161313e | e9d20bca-e35b-45ba-b1f2-5f8d50c64ea3 | 8899.41 KiB (1782.31 KiB; +4.6 %) |
+| wasla-preview-console | 84855297-dce0-46b8-93b7-01a47b9eba70 | d0520a0d-23b6-40fb-a136-53a5ed80a1c2 | 6536.97 KiB (1382.06 KiB) |
+| wasla-preview-marketing | 369e2448-637c-4b9f-928c-c0c1e0b9a98d | 2d4d5535-7399-442a-a826-bf31250f4075 | 0.35 KiB (0.24 KiB) |
+
+Live checks: web `/`, `/login`, `/ai/agents`, `/knowledge`, `/contacts`, console `/`, marketing `/ar/` → 200 (marketing
+`/` 302 to `/en/`); HSTS, CSP with nonce and `strict-dynamic`, nosniff, referrer and permissions policies on `/login`;
+`/session/refresh` GET 405, cross-origin POST 403, header-less POST 403, same-origin POST 503 `session_unavailable` (login
+the same). In Chrome, `/`, `/ai/agents` and `/knowledge` without a session show the PreviewNotice ("This is a preview of
+Wasla"); no console error. The AI and knowledge screens themselves are seen through the contact sheet and the local
+walk-through (the previews have no API).
