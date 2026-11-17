@@ -95,14 +95,18 @@ for (const locale of ["en", "ar"] as const) {
     await page.keyboard.press("Enter");
     expect((await created).status()).toBe(201);
     await page.waitForURL(/\/ai\/agents\/[0-9a-f-]{36}$/);
+    // The dialog's field is gone: the page's heading holds the focus (a fact, before any Tab).
+    await expect(page.locator("#agent-title")).toBeFocused();
 
-    // Activate, then make default - Enter on each; the status says so.
+    // Activate, then make default - Enter on each; the status says so, and focus lands on the
+    // next state's first action, never nowhere.
     await tabTo(page, { action: "activate" });
     await page.keyboard.press("Enter");
-    await expect(page.locator('[data-action="makeDefault"]')).toBeVisible();
+    await expect(page.locator('[data-action="makeDefault"]')).toBeFocused();
     await tabTo(page, { action: "makeDefault" }, true);
     await page.keyboard.press("Enter");
     await expect(page.locator('[data-status-sentence="answering"]')).toBeVisible();
+    await expect(page.locator("[data-agent-status] [data-action]").first()).toBeFocused();
 
     // A tool's switch: Space.
     await tabTo(page, { role: "switch" }, true);
@@ -125,6 +129,7 @@ for (const locale of ["en", "ar"] as const) {
     await page.keyboard.type("Keys");
     await page.keyboard.press("Enter");
     await page.waitForURL(/\/knowledge\/[0-9a-f-]{36}$/);
+    await expect(page.locator("#base-title")).toBeFocused();
     await tabTo(page, { action: "add-text" });
     await page.keyboard.press("Enter");
     // A dialog focuses its first control (the close button); Tab moves on to the field.

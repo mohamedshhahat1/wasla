@@ -13,7 +13,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import NextLink from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 
 import { ApiError, unwrap } from "@wasla/api-client";
 import {
@@ -546,16 +554,7 @@ function StatusSection({ agent }: { agent: AgentRead }) {
   const { scope } = useWorkspace();
   const [confirming, setConfirming] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
-  // The pressed button is replaced by the next state's actions: focus goes to the first of them
-  // (or the sentence when none is left) instead of being lost (KY-02).
-  const [settledAt, setSettledAt] = useState(0);
-  useEffect(() => {
-    if (!settledAt || !panel.current) return;
-    focusIfLost(
-      panel.current.querySelector<HTMLElement>("[data-action]") ??
-        panel.current.querySelector<HTMLElement>("[data-status-sentence]"),
-    );
-  }, [settledAt, agent.status, agent.is_default]);
+  const pressed = useRef(false);
   const act = useMutation({
     mutationFn: (action: AgentAction) => {
       const body = actionBody(action);
@@ -576,13 +575,27 @@ function StatusSection({ agent }: { agent: AgentRead }) {
       Promise.all([
         client.invalidateQueries({ queryKey: agentKey(scope, agent.id) }),
         client.invalidateQueries({ queryKey: agentsKey(scope) }),
-      ]).then(() => setSettledAt(Date.now())),
+      ]),
   });
+  // The pressed button is replaced by the next state's actions: focus goes to the first action,
+  // or the sentence when none is left, instead of being lost (KY-02). It runs in the commit that
+  // draws the new state, so no moment exists in which the new state is on screen and focus is
+  // nowhere. On a refusal the pressed button stays, and so does its focus.
+  useLayoutEffect(() => {
+    if (!pressed.current || !panel.current) return;
+    pressed.current = false;
+    focusIfLost(
+      panel.current.querySelector<HTMLElement>("[data-action]") ??
+        panel.current.querySelector<HTMLElement>("[data-status-sentence]"),
+    );
+  }, [agent.status, agent.is_default, act.isError]);
   const run = (action: AgentAction) => {
     if (needsDisableConfirmation(agent, action)) {
       setConfirming(true);
       return;
     }
+    if (act.isPending) return;
+    pressed.current = true;
     act.mutate(action);
   };
   const sentence = statusSentence(agent);
@@ -601,11 +614,13 @@ function StatusSection({ agent }: { agent: AgentRead }) {
       )}
       <div className="flex flex-wrap gap-3">
         {actionsFor(agent).map((action) => (
+          // Never `disabled` while the request runs: a focused button that becomes disabled loses
+          // the focus in Firefox, and the keyboard with it (KY-02). It says it is busy instead.
           <Button
             key={action}
             variant="secondary"
-            busy={act.isPending && act.variables === action}
-            disabled={act.isPending}
+            aria-disabled={act.isPending || undefined}
+            aria-busy={(act.isPending && act.variables === action) || undefined}
             onClick={() => run(action)}
             data-action={action}
           >
@@ -633,6 +648,7 @@ function StatusSection({ agent }: { agent: AgentRead }) {
               variant="danger"
               onClick={() => {
                 setConfirming(false);
+                pressed.current = true;
                 act.mutate("disable");
               }}
               data-action="confirm-disable"
