@@ -1262,7 +1262,7 @@ function DocumentDetails({
       {/* LY6-01: a pane beside the list from 1024 px, a drawer below it (Back closes it: the id is
           in the URL). */}
       {wide ? (
-        <div ref={pane} className="w-full shrink-0 lg:w-96" data-document-panel="">
+        <div ref={pane} className="shrink-0" data-document-panel="">
           <SidePanel
             title={doc?.title ?? t("panel.label")}
             variant="pane"

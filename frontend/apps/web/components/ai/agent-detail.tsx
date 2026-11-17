@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 import { ApiError, unwrap } from "@wasla/api-client";
 import {
   AnswersMark,
+  cn,
   Banner,
   Button,
   Card,
@@ -482,7 +483,11 @@ function AgentForm({ agent, options }: { agent: AgentRead; options: AgentOptions
       </Section>
 
       <div
-        className="sticky bottom-0 z-10 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm"
+        // Sticky only while there is something to save: at rest it never covers the form (audit P2).
+        className={cn(
+          "z-10 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm",
+          dirty && "sticky bottom-0",
+        )}
         data-agent-actions=""
       >
         <Button type="submit" busy={save.isPending} disabled={!dirty} data-action="save-agent">
