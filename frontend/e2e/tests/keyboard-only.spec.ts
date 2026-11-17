@@ -4,6 +4,7 @@
  * test reads this file and fails if a mouse call appears in it. Each step waits on a fact.
  */
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import type { Page } from "@playwright/test";
 
@@ -18,7 +19,7 @@ const KEYS_ONLY =
   /\.(click|dblclick|hover|tap|dragTo|check|uncheck|selectOption|setChecked)\(|page\.mouse|\.mouse\./;
 
 test("KY-02: this journey uses no pointer API", () => {
-  const source = readFileSync(__filename, "utf-8")
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf-8")
     .split("\n")
     .filter((line) => !line.includes("KEYS_ONLY"))
     .join("\n");
