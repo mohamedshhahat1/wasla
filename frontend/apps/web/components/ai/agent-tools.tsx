@@ -74,8 +74,9 @@ function ScopeEditor({
   const client = useQueryClient();
   const { session } = useSession();
   const { scope } = useWorkspace();
-  const bases = useBases(true);
   const saved = scopeOf(grant);
+  // A member reads names only when the scope names bases (AJ-08: no request it does not need).
+  const bases = useBases(admin || saved.choice === "chosen");
   const [choice, setChoice] = useState(saved.choice);
   const [chosen, setChosen] = useState(saved.chosen);
   useEffect(() => {

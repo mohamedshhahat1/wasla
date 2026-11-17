@@ -94,6 +94,21 @@ async function signIn(page: Page, context: BrowserContext, locale: Locale, email
   await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
 }
 
+/** The navigation (on a phone, in its sheet) and one of its links, clicked; waits on the URL. */
+async function viaNav(page: Page, locale: Locale, key: string, url: string): Promise<void> {
+  if (/phone/.test(test.info().project.name)) {
+    await page.getByRole("button", { name: label(locale, "app.menu") }).click();
+  }
+  const nav = page
+    .getByRole("navigation", { name: label(locale, "app.navLabel") })
+    .filter({ visible: true });
+  // A client-side move: the click does not wait for a document to load, the URL is the fact.
+  await nav
+    .getByRole("link", { name: label(locale, key), exact: true })
+    .click({ noWaitAfter: true });
+  await page.waitForURL(url);
+}
+
 function answerOf(
   page: Page,
   method: string,
@@ -200,11 +215,7 @@ for (const locale of ["en", "ar"] as const) {
     await axe(page, `agent answering ${locale}`);
 
     // Home: no warning, without a reload of home - its agents read was invalidated.
-    await page
-      .getByRole("link", { name: label(locale, "app.nav.home") })
-      .first()
-      .click();
-    await page.waitForURL(`${WEB}/`);
+    await viaNav(page, locale, "app.nav.home", `${WEB}/`);
     await expect(page.locator('[data-banner="no-answering-agent"]')).toHaveCount(0);
     const agents = await agentsOf(owner);
     expect(agents.filter((agent) => agent.is_default && agent.status === "active")).toHaveLength(1);
@@ -239,14 +250,25 @@ test("AJ-02 / AJ-09 (member): reads the agent, sees no control; no Knowledge ent
   const member = await memberOf(owner);
   const seen = recordRequests(context);
   await signIn(page, context, "en", member.email);
-  await expect(page.getByRole("link", { name: label("en", "app.nav.ai") }).first()).toBeVisible();
-  await expect(page.getByRole("link", { name: label("en", "app.nav.knowledge") })).toHaveCount(0);
+  // AJ-09: the AI agent entry, and no Knowledge entry (the sheet on a phone).
+  await viaNav(page, "en", "app.nav.ai", `${WEB}/ai/agents`);
+  if (/phone/.test(test.info().project.name)) {
+    await page.getByRole("button", { name: label("en", "app.menu") }).click();
+  }
+  await expect(
+    page
+      .getByRole("navigation", { name: label("en", "app.navLabel") })
+      .filter({ visible: true })
+      .getByRole("link", { name: label("en", "app.nav.knowledge"), exact: true }),
+  ).toHaveCount(0);
   await page.goto(`${WEB}/ai/agents/${agentId}`);
   await expect(page.locator("[data-read-only]")).toBeVisible();
   await expect(page.getByRole("switch")).toHaveCount(0);
   await expect(page.locator('[data-action="save-agent"]')).toHaveCount(0);
   await expect(page.locator('[data-action="disable"]')).toHaveCount(0);
   await axe(page, "agent read-only");
+  // The agent searches every base, so its page asked for no base names either (TL-03, AJ-08).
+  expect(seen.filter((entry) => /\/api\/v1\/knowledge/.test(entry))).toEqual([]);
   await page.goto(`${WEB}/knowledge`);
   await expect(page.getByText(label("en", `${KB}.notForRole`))).toBeVisible();
   expect(seen.filter((entry) => /\/api\/v1\/knowledge/.test(entry))).toEqual([]);
@@ -263,11 +285,7 @@ test("AJ-04: upload → waiting → indexing → ready on screen; polling stops;
   await answeringAgent(line.owner);
   await signIn(page, context, "en", line.owner.email);
   const log = apiLog(page);
-  await page
-    .getByRole("link", { name: label("en", "app.nav.knowledge") })
-    .first()
-    .click();
-  await page.waitForURL(`${WEB}/knowledge`);
+  await viaNav(page, "en", "app.nav.knowledge", `${WEB}/knowledge`);
   await axe(page, "knowledge empty");
   await page.locator('[data-action="new-base"]').click();
   await page.getByRole("dialog").locator('[data-field="base-name"]').fill("Facts");

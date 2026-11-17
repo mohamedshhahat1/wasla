@@ -771,11 +771,6 @@ function BaseScreen({ id }: { id: string }) {
             time={when?.time ?? null}
             timeFull={when?.full ?? null}
             selected={row.id === view.doc}
-            accessibleName={t("documents.rowName", {
-              title: row.title,
-              status,
-              time: when?.time ?? "",
-            })}
             onOpen={() => go({ ...view, doc: row.id })}
           />
         );

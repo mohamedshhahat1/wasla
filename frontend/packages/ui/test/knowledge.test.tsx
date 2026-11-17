@@ -37,7 +37,6 @@ describe("text a person, a document or the AI wrote is never markup (M-U35)", ()
             status={<DocumentStatusBadge status="ready" label="Ready" />}
             type="PDF"
             size="12 kB"
-            accessibleName={`${MARKUP}, Ready`}
             onOpen={() => undefined}
           />
         </RecordList>
@@ -77,7 +76,7 @@ describe("text a person, a document or the AI wrote is never markup (M-U35)", ()
     // "Answers customers" is not a status: no status badge carries it.
     expect(screen.getByText("Answers customers").closest("[data-badge]")).toBeNull();
   });
-  it("a document row is one button whose name is title, status and time", async () => {
+  it("a document row is one button named by its own visible title, status and time", async () => {
     const onOpen = vi.fn();
     render(
       <RecordList label="Documents">
@@ -86,12 +85,13 @@ describe("text a person, a document or the AI wrote is never markup (M-U35)", ()
           status={<DocumentStatusBadge status="processing" label="Indexing" />}
           type="Text"
           size="1 kB"
-          accessibleName="Prices, Indexing, 2 min ago"
+          time="2 min ago"
+          timeFull="17 November 2026"
           onOpen={onOpen}
         />
       </RecordList>,
     );
-    const row = screen.getByRole("button", { name: "Prices, Indexing, 2 min ago" });
+    const row = screen.getByRole("button", { name: /^Prices\s*Indexing\s*2 min ago$/ });
     row.focus();
     await userEvent.keyboard("{Enter}");
     expect(onOpen).toHaveBeenCalledTimes(1);

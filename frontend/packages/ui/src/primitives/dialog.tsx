@@ -2,7 +2,7 @@
 
 import { X } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "../cn";
 import { Button } from "./button";
@@ -35,6 +35,10 @@ export function Dialog({
   children,
   footer,
 }: DialogProps) {
+  // A dialog opened from state, without a trigger, still returns focus to what opened it (FE-6,
+  // KY-02): Radix restores focus to its own trigger only, so the opener is remembered here - read
+  // before Radix moves focus into the dialog.
+  const opener = useRef<HTMLElement | null>(null);
   const rootProps = {
     ...(open === undefined ? {} : { open }),
     ...(defaultOpen === undefined ? {} : { defaultOpen }),
@@ -51,6 +55,19 @@ export function Dialog({
             "wasla-dialog max-h-full overflow-y-auto rounded-xl border border-border bg-surface-raised p-7 shadow-lg",
           )}
           {...(description ? {} : { "aria-describedby": undefined })}
+          onOpenAutoFocus={() => {
+            const active = document.activeElement;
+            opener.current =
+              active instanceof HTMLElement && active !== document.body ? active : null;
+          }}
+          onCloseAutoFocus={(event) => {
+            const target = opener.current;
+            opener.current = null;
+            if (!trigger && target?.isConnected) {
+              event.preventDefault();
+              target.focus();
+            }
+          }}
         >
           <div className="flex items-start justify-between gap-4">
             <DialogPrimitive.Title className="m-0 text-xl font-semibold text-text">

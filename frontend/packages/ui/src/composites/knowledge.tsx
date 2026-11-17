@@ -307,8 +307,6 @@ export interface DocumentRowProps {
   time?: string | null;
   timeFull?: string | null;
   selected?: boolean;
-  /** The accessible name: "<title>, <status>, <time>". */
-  accessibleName: string;
 }
 
 /** One document in a list: its title, status, type, size and time; a button that opens it. */
@@ -322,15 +320,18 @@ export function DocumentRow({
   time,
   timeFull,
   selected = false,
-  accessibleName,
 }: DocumentRowProps) {
   const descriptionId = useId();
+  const titleId = useId();
+  const statusId = useId();
+  const timeId = useId();
   return (
     <li data-document-row="">
       <button
         type="button"
         onClick={onOpen}
-        aria-label={accessibleName}
+        // Its name is its own visible title, status and time, so what is read is what is seen.
+        aria-labelledby={[titleId, statusId, time ? timeId : null].filter(Boolean).join(" ")}
         aria-current={selected || undefined}
         className={cn(
           rowClass,
@@ -339,10 +340,10 @@ export function DocumentRow({
         )}
       >
         <span className="flex flex-wrap items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-md font-semibold">
+          <span id={titleId} className="min-w-0 flex-1 truncate text-md font-semibold">
             <bdi dir="auto">{title}</bdi>
           </span>
-          {status}
+          <span id={statusId}>{status}</span>
         </span>
         <span className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-text-muted">
           <span>{type}</span>
@@ -351,7 +352,9 @@ export function DocumentRow({
           </span>
           {time ? (
             <>
-              <time aria-describedby={descriptionId}>{time}</time>
+              <time id={timeId} aria-describedby={descriptionId}>
+                {time}
+              </time>
               <span id={descriptionId} className="sr-only">
                 {timeFull}
               </span>

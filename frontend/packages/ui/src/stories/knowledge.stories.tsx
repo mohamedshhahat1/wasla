@@ -266,7 +266,6 @@ export const Documents: Story = {
         time={t.time}
         timeFull={t.full}
         selected={status === "failed"}
-        accessibleName={`${t.prices}, ${t.statuses[status]}, ${t.time}`}
         onOpen={() => undefined}
       />
     ));

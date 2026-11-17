@@ -27,7 +27,8 @@ export async function call(
   body?: unknown,
 ): Promise<{ status: number; json: unknown }> {
   const headers: Record<string, string> = {
-    ...signedForward(testAddress(), method, path),
+    // The forward signature covers the decoded path without its query (FE-0).
+    ...signedForward(testAddress(), method, decodeURIComponent(path.split("?")[0]!)),
     Authorization: `Bearer ${owner.token}`,
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -82,9 +83,10 @@ export async function baseWithDocument(
   const base = await call(owner, "POST", "/api/v1/knowledge/bases", { name });
   if (base.status !== 201) throw new Error(`base answered ${base.status}`);
   const baseId = (base.json as { id: string }).id;
+  // One copy per workspace (RV-07): each base's text is its own.
   const doc = await call(owner, "POST", `/api/v1/knowledge/bases/${baseId}/documents`, {
     title,
-    content: PRICE_TEXT,
+    content: `${PRICE_TEXT} (${name})`,
   });
   if (doc.status !== 202) throw new Error(`document answered ${doc.status}`);
   return { baseId, documentId: (doc.json as { document: { id: string } }).document.id };
