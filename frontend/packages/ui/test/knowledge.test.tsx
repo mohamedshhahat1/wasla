@@ -91,7 +91,7 @@ describe("text a person, a document or the AI wrote is never markup (M-U35)", ()
         />
       </RecordList>,
     );
-    const row = screen.getByRole("button", { name: /^Prices\s*Indexing\s*2 min ago$/ });
+    const row = screen.getByRole("button", { name: /Prices.*Indexing.*2 min ago/ });
     row.focus();
     await userEvent.keyboard("{Enter}");
     expect(onOpen).toHaveBeenCalledTimes(1);

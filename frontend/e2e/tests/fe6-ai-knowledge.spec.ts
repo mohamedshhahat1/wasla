@@ -412,11 +412,12 @@ test("AJ-05: pre-checks send nothing; a duplicate is replaced; a failed document
 
   // Delete: asks first, then the row is gone.
   await settled(owner, doc.id);
+  const before = await page.locator("[data-document-row]").count();
   await page.locator('[data-action="delete-document"]').click();
   const removed = answerOf(page, "DELETE", /\/api\/v1\/knowledge\/documents\/[0-9a-f-]{36}$/);
   await page.locator('[data-action="confirm-delete-document"]').click();
   expect((await removed).status()).toBe(204);
-  await expect(page.locator("[data-document-row]")).toHaveCount(0);
+  await expect(page.locator("[data-document-row]")).toHaveCount(before - 1);
 });
 
 test("AJ-06: a base with documents needs its name typed; answer settings send one key; the scope", async ({

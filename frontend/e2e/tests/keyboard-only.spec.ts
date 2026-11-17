@@ -31,7 +31,8 @@ type Target =
   | { action: string }
   | { role: string }
   | { inside: string }
-  | { rowLinkPrefix: string };
+  | { rowLinkPrefix: string }
+  | { field: string };
 
 /** Tab (or Shift+Tab) until the focused element is the target, bounded; the fact is focus. */
 async function tabTo(page: Page, target: Target, reverse = false): Promise<void> {
@@ -43,6 +44,7 @@ async function tabTo(page: Page, target: Target, reverse = false): Promise<void>
       if ("action" in wanted) return el.getAttribute("data-action") === wanted.action;
       if ("role" in wanted) return el.getAttribute("role") === wanted.role;
       if ("inside" in wanted) return el.closest(wanted.inside) !== null;
+      if ("field" in wanted) return el.getAttribute("data-field") === wanted.field;
       return (el.getAttribute("data-row-link") ?? "").startsWith(wanted.rowLinkPrefix);
     }, target);
     if (hit) return;
@@ -80,7 +82,8 @@ for (const locale of ["en", "ar"] as const) {
       .poll(() => page.evaluate(() => (document.activeElement?.textContent ?? "").trim()))
       .toBe(create);
     await page.keyboard.press("Enter");
-    await expect(page.locator('[data-field="agent-name"]')).toBeFocused();
+    // A dialog focuses its first control (the close button); Tab moves on to the field.
+    await tabTo(page, { field: "agent-name" });
     await page.keyboard.type("Keyboard agent");
     await page.keyboard.press("Tab");
     await page.keyboard.type("You answer questions about the test company.");
@@ -115,13 +118,15 @@ for (const locale of ["en", "ar"] as const) {
     await page.goto(`${WEB}/knowledge`);
     await tabTo(page, { action: "new-base" });
     await page.keyboard.press("Enter");
-    await expect(page.locator('[data-field="base-name"]')).toBeFocused();
+    // A dialog focuses its first control (the close button); Tab moves on to the field.
+    await tabTo(page, { field: "base-name" });
     await page.keyboard.type("Keys");
     await page.keyboard.press("Enter");
     await page.waitForURL(/\/knowledge\/[0-9a-f-]{36}$/);
     await tabTo(page, { action: "add-text" });
     await page.keyboard.press("Enter");
-    await expect(page.locator('[data-field="text-title"]')).toBeFocused();
+    // A dialog focuses its first control (the close button); Tab moves on to the field.
+    await tabTo(page, { field: "text-title" });
     await page.keyboard.type("Opening hours");
     await page.keyboard.press("Tab");
     await page.keyboard.type("Open from 9 to 5. (e2e)");
