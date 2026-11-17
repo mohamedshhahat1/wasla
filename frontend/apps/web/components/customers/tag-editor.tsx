@@ -13,9 +13,12 @@ import { useNumber } from "./shared";
 export function TagEditor({
   tags,
   onChange,
+  labelHidden = false,
 }: {
   tags: string[];
   onChange: (tags: string[]) => void;
+  /** Inside a section already titled "Tags": the label is for assistive tech only (FEF-40). */
+  labelHidden?: boolean;
 }) {
   const t = useTranslations("app.customers");
   const number = useNumber();
@@ -30,7 +33,7 @@ export function TagEditor({
   };
   return (
     <div className="flex flex-col gap-2" data-tag-editor="">
-      <label htmlFor={id} className="text-sm font-medium text-text">
+      <label htmlFor={id} className={labelHidden ? "sr-only" : "text-sm font-medium text-text"}>
         {t("fields.tags")}
       </label>
       {tags.length ? (
