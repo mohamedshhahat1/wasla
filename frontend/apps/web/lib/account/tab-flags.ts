@@ -1,9 +1,8 @@
 /**
- * The tab's storage for FE-7's two one-word flags (ADR-201): which signed-in Google flow a return
- * to /auth/google/callback finishes ("link" / "reauth"), and that this tab already matched its
- * language to the account. Both are words the page could print - never a code, a state, a token,
- * a handle, an address or a language - and this is the only file outside packages/session and the
- * composer's draft store that reaches sessionStorage (the no-web-storage allow-list).
+ * The tab's storage for FE-7's one one-word flag (ADR-201): which signed-in Google flow a return to
+ * /auth/google/callback finishes ("link" / "reauth"), removed as it is read. A word the page could
+ * print - never a code, a state, a token, a handle or an address - and this is the only file
+ * outside packages/session and the composer's draft store that reaches sessionStorage.
  */
 export function tabFlags(): Storage | null {
   try {

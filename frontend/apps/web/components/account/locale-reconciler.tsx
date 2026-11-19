@@ -6,17 +6,13 @@ import { useEffect, useRef } from "react";
 
 import { isLocale } from "@wasla/i18n";
 
-import {
-  alreadyReconciled,
-  markReconciled,
-  postDeviceLocale,
-  reconcileLocale,
-} from "../../lib/account/locale";
-import { tabFlags } from "../../lib/account/tab-flags";
+import { postDeviceLocale, reconcileLocale, reconcileMemo } from "../../lib/account/locale";
 import { useSession } from "../session-provider";
 
+const memo = reconcileMemo();
+
 /**
- * LC-06 (FEB-09, ADR-201), once per signed-in session in this tab: the device follows the
+ * LC-06 (FEB-09, ADR-201), once per page and person: the device follows the
  * account's language when they differ; an account with none takes the language in use (OQ-2).
  * Renders nothing.
  */
@@ -28,9 +24,7 @@ export function LocaleReconciler() {
   useEffect(() => {
     if (!profile || ran.current || !isLocale(requested)) return;
     ran.current = true;
-    const store = tabFlags();
-    if (alreadyReconciled(store)) return;
-    markReconciled(store);
+    if (!memo.take(profile.id)) return;
     const step = reconcileLocale(profile.locale, requested);
     if (step.kind === "follow-account") {
       postDeviceLocale(step.locale, pathname);

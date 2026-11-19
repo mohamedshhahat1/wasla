@@ -8,7 +8,7 @@
  *   the language the person is using, once (OQ-2's default);
  * - they agree → nothing.
  *
- * "Once" is once per signed-in session in this tab: the decision never runs in a loop.
+ * "Once" is once per page and person (reconcileMemo): the decision never runs in a loop.
  */
 import { isLocale, type Locale } from "@wasla/i18n";
 
@@ -27,23 +27,21 @@ export function reconcileLocale(
   return { kind: "follow-account", locale: accountLocale };
 }
 
-/** sessionStorage holds only that this tab already reconciled - never a language or a person. */
-export const RECONCILED_KEY = "wasla_locale_reconciled";
-
-export function alreadyReconciled(storage: Pick<Storage, "getItem"> | null): boolean {
-  try {
-    return storage?.getItem(RECONCILED_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-export function markReconciled(storage: Pick<Storage, "setItem"> | null): void {
-  try {
-    storage?.setItem(RECONCILED_KEY, "1");
-  } catch {
-    // Private mode: the check runs again next time, and agrees then - harmless.
-  }
+/**
+ * Once per page per person, kept in memory - never in web storage (FE-2's proof that the tab's
+ * storage stays empty). A reload checks again, which is harmless: after the device followed the
+ * account, or the account took the device's language, the two agree and the step is "none". It
+ * cannot loop on a browser that refuses cookies, because such a browser cannot be signed in (S-2).
+ */
+export function reconcileMemo(): { take(personId: string): boolean } {
+  const done = new Set<string>();
+  return {
+    take(personId) {
+      if (done.has(personId)) return false;
+      done.add(personId);
+      return true;
+    },
+  };
 }
 
 /** Sets this device's language the way the switcher does: a form POST to /locale (AP-04). */

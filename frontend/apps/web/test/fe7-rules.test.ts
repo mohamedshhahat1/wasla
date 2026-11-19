@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import { noteGoogleFlow, takeGoogleFlow } from "../lib/account/google-flow";
-import { alreadyReconciled, markReconciled, reconcileLocale } from "../lib/account/locale";
+import { reconcileLocale, reconcileMemo } from "../lib/account/locale";
 import { changesOf, hasWords, mergePages, nextUntil, WORDED_ACTIONS } from "../lib/team/activity";
 import {
   activeOwners,
@@ -246,17 +246,11 @@ describe("the language follows the account (LC-06, OQ-2)", () => {
     expect(reconcileLocale("ar", "xx")).toEqual({ kind: "none" });
   });
 
-  it("runs once per tab (M-Q35)", () => {
-    const store = new Map<string, string>();
-    const storage = {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
-    };
-    expect(alreadyReconciled(storage)).toBe(false);
-    markReconciled(storage);
-    expect(alreadyReconciled(storage)).toBe(true);
-    expect([...store.values()]).toEqual(["1"]);
-    expect(alreadyReconciled(null)).toBe(false);
+  it("runs once per page and person, and keeps nothing in web storage (M-Q35)", () => {
+    const memo = reconcileMemo();
+    expect(memo.take("person-1")).toBe(true);
+    expect(memo.take("person-1")).toBe(false);
+    expect(memo.take("person-2")).toBe(true);
   });
 });
 
