@@ -59,6 +59,8 @@ export function SignupForm() {
       const outcome = await session.registerLogin({
         ...values,
         full_name: values.full_name.trim() || null,
+        // FEB-09 (LC-06): the language the form is in becomes the account's.
+        locale: document.documentElement.lang || null,
       });
       // Signed in: PageGate sends the person to /verify (FEF-38: one place decides).
       if (outcome.kind === "check_inbox") setCheckInbox(true);

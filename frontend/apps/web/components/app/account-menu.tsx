@@ -1,12 +1,13 @@
 "use client";
 
 import { CircleUserRound } from "lucide-react";
+import NextLink from "next/link";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { useState } from "react";
 
 import { dirOf, isLocale } from "@wasla/i18n";
-import { Button, ConfirmDialog, Icon, Popover } from "@wasla/ui";
+import { Button, ConfirmDialog, Icon, Popover, linkClasses } from "@wasla/ui";
 
 import { FormAlert } from "../auth/form-alert";
 import { LanguageSwitcher } from "../language-switcher";
@@ -14,8 +15,8 @@ import { useSession } from "../session-provider";
 
 /**
  * The account menu (SH-04): who is signed in, in which workspace and as which role, the language,
- * Sign out and Sign out everywhere (FE-2's flows, unchanged). Nothing else - account settings are
- * FE-7's.
+ * Sign out and Sign out everywhere (FE-2's flows, unchanged), and the way to the account page
+ * (FE-7, HM7-01), for every role.
  */
 export function AccountMenu({
   workspaceName,
@@ -86,9 +87,23 @@ export function AccountMenu({
               })}
             </p>
           </div>
+          <NextLink
+            href="/settings/account"
+            className={linkClasses("text-md")}
+            onClick={() => setMenuOpen(false)}
+            data-account-settings=""
+          >
+            {t("account.settings")}
+          </NextLink>
           <div className="flex flex-col gap-2">
             <p className="m-0 text-sm font-medium text-text">{t("account.language")}</p>
-            <LanguageSwitcher current={locale} label={common("languageLabel")} />
+            <LanguageSwitcher
+              current={locale}
+              label={common("languageLabel")}
+              beforeSubmit={(chosen) =>
+                session.api.PATCH("/api/v1/auth/me", { body: { locale: chosen } })
+              }
+            />
           </div>
           <FormAlert error={error} />
           <div className="flex flex-wrap gap-3 border-t border-border pt-4">

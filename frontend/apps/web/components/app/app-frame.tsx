@@ -14,6 +14,7 @@ import { unreadSummaryKey } from "../../lib/inbox/keys";
 import { capCount } from "../../lib/inbox/live";
 import { currentEntry, entriesFor } from "../../lib/navigation";
 import type { SharedState } from "../../lib/stream-coordinator";
+import { LocaleReconciler } from "../account/locale-reconciler";
 import { ApiHealth } from "../api-health";
 import { PageGate } from "../page-gate";
 import { useSession } from "../session-provider";
@@ -114,6 +115,7 @@ function Frame({ children }: { children: ReactNode }) {
         </footer>
       }
     >
+      <LocaleReconciler />
       {decision.fullState ? <GateFullState state={decision.fullState} /> : children}
     </AppShell>
   );
