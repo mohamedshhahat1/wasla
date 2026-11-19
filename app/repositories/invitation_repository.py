@@ -65,6 +65,7 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
         token_hash: str,
         expires_at: datetime,
         invited_by_id: uuid.UUID | None = None,
+        locale: str | None = None,
     ) -> TenantInvitation:
         """Stage one pending invitation for an address.
 
@@ -83,6 +84,7 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
             status=InvitationStatus.PENDING,
             token_hash=token_hash,
             expires_at=expires_at,
+            locale=locale,
             invited_by_id=invited_by_id,
         )
         return self.add(invitation)

@@ -8,6 +8,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.core.locales import Locale
 from app.core.security import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from app.core.timezones import MAX_TIMEZONE_LENGTH
 from app.db.models import PlatformRole, TenantRole, TenantStatus
@@ -59,6 +60,9 @@ class RegistrationRequest(_Payload):
     # The new workspace's IANA zone, from `GET /api/v1/timezones` (TZ-01).
     # Required; a name outside the list is 422 `timezone_unknown`.
     timezone: StorableText = Field(min_length=1, max_length=MAX_TIMEZONE_LENGTH)
+    # The language the sign-up form was in (FEB-09); absent leaves the account
+    # without one, and its e-mail in English.
+    locale: Locale | None = None
 
 
 class LoginRequest(_Payload):
@@ -237,4 +241,17 @@ class ProfileResponse(BaseModel):
     # making a product decision, not an authorization one.
     email_verified_at: datetime | None = None
     platform_role: PlatformRole | None = None
+    # The account's language (FEB-09), or None when the person never chose one
+    # - their e-mail is then in English. Every device they sign in on follows it.
+    locale: Locale | None = None
     workspaces: list[WorkspaceSummary] = Field(default_factory=list)
+
+
+class ProfileUpdateRequest(_Payload):
+    """`PATCH /auth/me`: the account's language, and nothing else (FEB-09).
+
+    Required, and nullable: an empty body is refused rather than read as "no
+    change", and `null` clears the choice back to English.
+    """
+
+    locale: Locale | None

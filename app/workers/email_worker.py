@@ -44,7 +44,7 @@ from app.repositories.email_repository import (
     DEFAULT_CLAIM_LIMIT,
     EmailOutboxRepository,
 )
-from app.services.email_service import open_email_context
+from app.services.email_service import open_email_context, take_locale
 from app.services.email_templates import EmailTemplate, render
 
 logger = get_logger(__name__)
@@ -214,10 +214,12 @@ class EmailWorker:
         try:
             template = EmailTemplate(email.template)
             context = open_email_context(email, self._settings)
+            locale = take_locale(context)
             rendered = render(
                 template,
                 context,
                 public_url=self._settings.app_public_url or "",
+                locale=locale,
             )
             message = EmailMessage(
                 sender=self._settings.email_from or "",

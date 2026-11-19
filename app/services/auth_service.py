@@ -141,6 +141,7 @@ class AuthService:
         workspace_slug: str,
         timezone: str,
         full_name: str | None = None,
+        locale: str | None = None,
     ) -> AuthenticatedSession:
         """Create an account atomically, translating only known uniqueness races.
 
@@ -158,6 +159,7 @@ class AuthService:
                     workspace_slug=workspace_slug,
                     timezone=timezone,
                     full_name=full_name,
+                    locale=locale,
                 )
         except ConflictError as error:
             if str(error) == EmailAlreadyRegisteredError.message:
@@ -197,12 +199,16 @@ class AuthService:
         workspace_slug: str,
         timezone: str,
         full_name: str | None,
+        locale: str | None,
     ) -> AuthenticatedSession:
         user = await self._users.create(
             email=email,
             full_name=full_name,
             hashed_password=hash_password(password),
         )
+        # The sign-up form's language (FEB-09), set before the verification
+        # code is queued below so the first message is already in it.
+        user.locale = locale
         tenant = await self._tenants.create(
             name=workspace_name, slug=workspace_slug, timezone=timezone
         )

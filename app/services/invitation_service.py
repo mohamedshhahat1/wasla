@@ -103,6 +103,7 @@ class InvitationService:
         inviter_role: TenantRole,
         email: str,
         role: TenantRole,
+        locale: str | None = None,
     ) -> tuple[TenantInvitation, str]:
         """Create an invitation, queue its email, and return the one-time token.
 
@@ -129,6 +130,7 @@ class InvitationService:
             token_hash=token_hash,
             expires_at=datetime.now(UTC) + timedelta(days=INVITATION_TTL_DAYS),
             invited_by_id=inviter.id,
+            locale=locale,
         )
         await self._session.flush()
 
@@ -147,6 +149,8 @@ class InvitationService:
             },
             tenant_id=tenant_id,
             user_id=existing.id if existing is not None else None,
+            # The inviter's choice, not the invitee's account (LC-03).
+            locale=invitation.locale,
         )
 
         AuditTrail(self._session, tenant_id=tenant_id).record(

@@ -35,6 +35,7 @@ def _response(invitation: TenantInvitation) -> InvitationResponse:
         status=invitation.status,
         expires_at=invitation.expires_at,
         accepted_at=invitation.accepted_at,
+        locale=invitation.locale,
     )
 
 
@@ -67,6 +68,7 @@ async def issue_invitation(
         inviter_role=workspace.role,
         email=payload.email,
         role=payload.role,
+        locale=payload.locale,
     )
     return _response(invitation)
 

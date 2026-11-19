@@ -27,6 +27,8 @@ from enum import StrEnum
 from typing import Final
 from urllib.parse import urlencode
 
+from app.core.locales import DEFAULT_LOCALE, SUPPORTED_LOCALES
+
 
 class EmailTemplate(StrEnum):
     """Everything the product knows how to say by email."""
@@ -129,8 +131,29 @@ _REQUIRED_KEYS: Final[dict[EmailTemplate, frozenset[str]]] = {
 }
 
 
-def subject_for(template: EmailTemplate) -> str:
-    return _SUBJECTS[template]
+_FOOTER_EN: Final = "This is a transactional message from Wasla about your account or workspace."
+
+# Where each linked template points, for every language. English builds its
+# own links inline below; the translated texts share these.
+_LINKS: Final[dict[EmailTemplate, tuple[str, str]]] = {
+    EmailTemplate.WORKSPACE_INVITATION: ("/invitations/accept", "token"),
+    EmailTemplate.PASSWORD_RESET: ("/reset-password", "token"),
+}
+
+
+def _checked_locale(locale: str) -> str:
+    """A language the product speaks, or ValueError - never a silent fallback."""
+    if locale not in SUPPORTED_LOCALES:
+        raise ValueError(f"unsupported email locale: {locale!r}")
+    return locale
+
+
+def subject_for(template: EmailTemplate, locale: str = DEFAULT_LOCALE) -> str:
+    if _checked_locale(locale) == DEFAULT_LOCALE:
+        return _SUBJECTS[template]
+    from app.services.email_translations import TRANSLATIONS
+
+    return TRANSLATIONS[locale][template].subject
 
 
 def _link(public_url: str, path: str, **params: str) -> str:
@@ -147,7 +170,14 @@ def _link(public_url: str, path: str, **params: str) -> str:
     return f"{base}{path}?{query}" if query else f"{base}{path}"
 
 
-def _layout(title: str, paragraphs: list[str], link: tuple[str, str] | None) -> str:
+def _layout(
+    title: str,
+    paragraphs: list[str],
+    link: tuple[str, str] | None,
+    *,
+    lang: str = DEFAULT_LOCALE,
+    footer: str = _FOOTER_EN,
+) -> str:
     """One HTML shape for every message: readable, accessible, unbranded-plain.
 
     Table-free and inline-styled because email clients are what they are. The
@@ -167,8 +197,9 @@ def _layout(title: str, paragraphs: list[str], link: tuple[str, str] | None) -> 
             'padding:12px 20px;border-radius:6px;font-size:15px;display:inline-block;">'
             f"{html.escape(label)}</a></p>"
         )
+    direction = ' dir="rtl"' if lang == "ar" else ""
     return (
-        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        f'<!DOCTYPE html><html lang="{lang}"{direction}><head><meta charset="utf-8">'
         f"<title>{html.escape(title)}</title></head>"
         '<body style="margin:0;padding:0;background:#f5f7fa;">'
         '<div role="article" aria-roledescription="email" '
@@ -177,7 +208,7 @@ def _layout(title: str, paragraphs: list[str], link: tuple[str, str] | None) -> 
         f'<h1 style="font-size:18px;margin:0 0 20px 0;color:#111827;">{html.escape(title)}</h1>'
         f"{body}{button}"
         '<p style="margin:24px 0 0 0;font-size:12px;color:#6b7280;">'
-        "This is a transactional message from Wasla about your account or workspace.</p>"
+        f"{html.escape(footer)}</p>"
         "</div></body></html>"
     )
 
@@ -187,6 +218,7 @@ def render(
     context: Mapping[str, str],
     *,
     public_url: str,
+    locale: str = DEFAULT_LOCALE,
 ) -> RenderedEmail:
     """Render one message, refusing an incomplete context.
 
@@ -197,6 +229,8 @@ def render(
     missing = sorted(_REQUIRED_KEYS[template] - set(context))
     if missing:
         raise ValueError(f"template {template.value} is missing context keys: {', '.join(missing)}")
+    if _checked_locale(locale) != DEFAULT_LOCALE:
+        return _render_translated(template, context, public_url=public_url, locale=locale)
     subject = _SUBJECTS[template]
 
     if template is EmailTemplate.WORKSPACE_INVITATION:
@@ -519,3 +553,63 @@ def render(
         )
 
     return RenderedEmail(subject=subject, text=text, html=html_body)
+
+
+def _render_translated(
+    template: EmailTemplate,
+    context: Mapping[str, str],
+    *,
+    public_url: str,
+    locale: str,
+) -> RenderedEmail:
+    """One message in ar / fr / tr, from `email_translations` (FEB-09).
+
+    The same three rules as English: the subject is a constant, every value is
+    escaped into the HTML (and isolated in `<bdi>`, so an address or a name
+    keeps its own direction inside Arabic), and every link is built by `_link`.
+    """
+    from app.services.email_translations import CHROME, TRANSLATIONS
+
+    translation = TRANSLATIONS[locale][template]
+    keys = _REQUIRED_KEYS[template]
+    plain = {key: context[key] for key in keys}
+    marked = {
+        key: (
+            f"<bdi><strong>{html.escape(context[key])}</strong></bdi>"
+            if key == "workspace_name"
+            else f"<bdi>{html.escape(context[key])}</bdi>"
+        )
+        for key in keys
+    }
+    link: tuple[str, str] | None = None
+    if template in _LINKS:
+        path, param = _LINKS[template]
+        if translation.link_label is None:
+            raise ValueError(f"template {template.value} has no {locale} link label")
+        link = (_link(public_url, path, **{param: context[param]}), translation.link_label)
+
+    text_parts: list[str] = []
+    html_parts: list[str] = []
+    for paragraph in translation.paragraphs:
+        if paragraph == "{code}":
+            text_parts.append(f"    {plain['code']}")
+            html_parts.append(
+                '<strong dir="ltr" style="font-size:28px;letter-spacing:6px;'
+                f'font-family:monospace;color:#111827;">{html.escape(plain["code"])}</strong>'
+            )
+            continue
+        text_parts.append(paragraph.format(**plain))
+        html_parts.append(paragraph.format(**marked))
+    if link is not None:
+        text_parts.insert(1, f"{link[1]}:\n{link[0]}")
+    return RenderedEmail(
+        subject=translation.subject,
+        text="\n\n".join(text_parts),
+        html=_layout(
+            translation.subject,
+            html_parts,
+            link,
+            lang=locale,
+            footer=CHROME[locale].footer,
+        ),
+    )

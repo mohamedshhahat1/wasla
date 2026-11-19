@@ -697,6 +697,17 @@ class AccountService:
         )
         return user
 
+    async def set_locale(self, *, user: User, locale: str | None) -> User:
+        """Set or clear the account's language (FEB-09).
+
+        Not audited, deliberately: every audited account change is a security
+        event (a credential, a session estate, the account's existence), and a
+        display language is none of those. Nothing else about the account moves.
+        """
+        user.locale = locale
+        await self._session.flush()
+        return user
+
     async def revoke_sessions(self, *, user: User) -> User:
         """Sign this person out everywhere, leaving the account usable.
 

@@ -8,6 +8,7 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.core.locales import Locale
 from app.core.security import MAXIMUM_PASSWORD_LENGTH, MINIMUM_PASSWORD_LENGTH
 from app.db.models import InvitationStatus, TenantRole
 from app.schemas.auth import MAXIMUM_TOKEN_LENGTH, WorkspaceSummary
@@ -25,6 +26,9 @@ class _Payload(BaseModel):
 class InvitationCreateRequest(_Payload):
     email: EmailStr
     role: TenantRole = TenantRole.MEMBER
+    # The language of the e-mail (FEB-09), chosen by the inviter because the
+    # invitee may have no account to read one from. Absent sends it in English.
+    locale: Locale | None = None
 
 
 class InvitationAcceptRequest(_Payload):
@@ -67,6 +71,7 @@ class InvitationResponse(BaseModel):
     status: InvitationStatus
     expires_at: datetime
     accepted_at: datetime | None = None
+    locale: Locale | None = None
 
 
 class InvitationAcceptedResponse(BaseModel):

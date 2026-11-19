@@ -148,6 +148,22 @@ template-by-name lookup from outside the enum and no user-supplied template.
 - An incomplete context raises rather than rendering around the hole. The
   worker records that as a permanent failure of the row.
 
+**Four languages (FEB-09, ADR-201).** Every template has an English text
+(the code above, unchanged byte for byte) and **draft** Arabic, French and
+Turkish texts in `email_translations.py`, marked `REVIEWED = False` until the
+owner's review (FEQ-08). `email_service.locale_for_recipient` is the one place a
+message's language is chosen: an invitation in the language its inviter picked
+(`tenant_invitations.locale`), every other message in the recipient account's
+`users.locale`, English otherwise. The choice rides inside the outbox row's
+context as `_locale` - sealed with it for credential-bearing templates - and only
+when it is not English, so an English row is exactly what it was before; the
+`subject` column is written in the chosen language. Translated messages follow
+the same rules: constant subjects, escaped values, links built here. Values are
+isolated in `<bdi>` so an address, a code or a name keeps its own direction in
+Arabic, whose HTML carries `lang="ar" dir="rtl"`; the verification code stays in
+Latin digits, left to right. An unknown language is a render error, never a
+silent fallback.
+
 No unsubscribe link, deliberately. These are transactional - a password
 change notice is not something to opt out of. The day a marketing email
 exists it must be a separate system with its own consent record; adding one
