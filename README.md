@@ -187,6 +187,8 @@ A result is only meaningful alongside the build that produced it. "The suite is 
 WASLA_TEST_SCHEMA=migrations pytest tests/integration
 ```
 
+**CI runs both builds in shards.** The model-built suite and the migration-built `tests/integration tests/e2e` run are each split by file across parallel jobs by `scripts/ci_shards.py`, balanced by `scripts/ci_test_durations.json`; a final job combines coverage and fails unless every test the unsharded command collects ran in exactly one shard. To reproduce a red shard, run exactly its files: `pytest $(python -m scripts.ci_shards files --suite model --shards 7 --index 3)` (or `--suite migrations --shards 5` with `WASLA_TEST_SCHEMA=migrations`).
+
 **The kept-data sweep is CI's last migration-parity step**: every AI-harness suite with `WASLA_TEST_KEEP_AI_DATA=1`, then the AI and tool invariants over everything they kept. Run it with `python -m scripts.kept_data_sweep` against a disposable `TEST_DATABASE_URL` before pushing - `docs/RUNBOOK.md` says how, and what each failing rule means.
 
 The media suites want an object store the same way: they skip unless `TEST_S3_ENDPOINT_URL`, `TEST_S3_BUCKET`, `TEST_S3_ACCESS_KEY_ID` and `TEST_S3_SECRET_ACCESS_KEY` point at one, and `docker compose --profile objectstore up -d minio` is enough. Run them: what they prove is that the SigV4 signing in `app/core/object_store.py` satisfies a real store, and mocking an SDK call cannot establish that — a signature is either accepted or it is a 403. CI runs them against MinIO and fails if it finds them skipped.
