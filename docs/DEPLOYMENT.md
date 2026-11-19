@@ -164,13 +164,16 @@ That is at most about 50 MB of nginx output on the host, the oldest file dropped
 - **journald** — set `logging: { driver: journald }` on the service (or `"log-driver": "journald"` in `/etc/docker/daemon.json`) and bound the journal in `/etc/systemd/journald.conf` with `MaxRetentionSec=14day` (and `SystemMaxUse=` for a size cap), then `systemctl restart systemd-journald`.
 - **a host file with logrotate** — have the driver or a collector write to `/var/log/wasla/nginx.log` and rotate it with `daily`, `rotate 14`, `compress`, `missingok`, `create 0640 root adm`.
 
-Only the host's administrators may read these logs (`docker logs` needs the Docker group, which is root-equivalent; journald's `adm` / `systemd-journal` groups; the logrotate file's `0640 root adm`). This example ships nginx's logs nowhere. The other services of the compose file keep Docker's default driver; bound them the same way if your policy covers them.
+Only the host's administrators may read these logs (`docker logs` needs the Docker group, which is root-equivalent; journald's `adm` / `systemd-journal` groups; the logrotate file's `0640 root adm`). This example ships nginx's logs nowhere.
+
+**Every other service is bounded the same way** (FEB-41, ADR-201). The compose file declares the bound once, as `x-logging: &default-logging` (json-file, `max-size: "10m"`, `max-file: "5"`), and every service carries `logging: *default-logging` - nginx keeps its own block with the same values. That is at most about 50 MB of output per service, by size and not by days; the journald alternative above applies to any of them. `tests/integration/test_deployment_configuration.py` fails if any service, including one added later, has no bound.
 
 ### Before the first deploy
 
 Tick each line on the host before the first deploy that uses this example:
 
 - [ ] **nginx's log retention** — the shipped `logging:` block on the `nginx` service kept, or an equivalent bound by size or time set (the section above).
+- [ ] **Every service's log retention** - the shared `x-logging` bound kept on every service, or an equivalent bound by size or time set (the section above; FEB-41).
 - [ ] **nginx's log readers restricted** — only the host's administrators can run `docker logs` or read the journal or log file that holds them.
 - [ ] **security.yml's RGM-27 fixed** — the open security-workflow finding the owner tracks before the first deploy.
 
@@ -807,6 +810,8 @@ Do not change `OPENAI_EMBEDDING_MODEL` in a running deployment: every document b
 **Migrations `0135`-`0138` (RAG remediation Part 3)** are additive and online: `document_source` gains `csv`, `xlsx`, `docx`, `html` (enum labels cannot be dropped; the downgrade refuses while any document uses them); `document_generation_state` gains `shadow` and `workspace_embedding_spaces` is created (the downgrade refuses while a switch, a shadow or its audit rows exist); `document_chunks` gets autovacuum and statistics storage parameters (catalogue-only, `SHARE UPDATE EXCLUSIVE`); `knowledge_search_gaps` is created (the downgrade refuses while it holds rows). No back-fill. The Part 1 and Part 2 first-deploy steps above cover all three Parts: one `reindex-all` pass builds normalised text, the new chunks, contextual embeddings and lexical text; then `rag_invariants verify` must report RR-01 .. RR-14 at 0. Row-level security is not applied (ADR-185), so no new database role is needed.
 
 **Migration `0140` (FE-5, ADR-199)** is additive and online: `contacts.name` (nullable, the name a member gives a customer), the new empty table `contact_consent_events` with its enum `consent_action`, and the audit label `contact_renamed`. No back-fill: an opt-out older than the table is shown from the consent row's own timestamp. The downgrade drops the table, the enum and the column (the names members gave and the history go with them; the consent state is untouched) and refuses while an audit row records a rename.
+
+**Migration `0141` (FE-7, ADR-201)** is additive and online: `users.locale` and `tenant_invitations.locale` (nullable, checked against en / ar / fr / tr) and `users.last_workspace_id` (nullable, `ON DELETE SET NULL` to `tenants`). No back-fill: every account keeps English e-mail and today's sign-in workspace until a choice is made. The downgrade drops the three columns: e-mail returns to English and a sign-in naming no workspace to the oldest active one.
 
 **Migration `0139` (FE-4, ADR-198)** is additive and online: three nullable columns on `conversations` (`last_read_message_id`, `last_read_by_user_id` with a `SET NULL` key to `users`, `last_read_at`) - the team's shared read position. No back-fill: every existing conversation starts unread. The downgrade drops the three columns.
 

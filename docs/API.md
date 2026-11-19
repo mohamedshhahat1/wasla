@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **267 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **268 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -46,7 +46,7 @@ ADR-191):
 
 | File | What |
 | --- | --- |
-| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (267 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (268 operations less `/metrics`, which keeps itself out of the schema) |
 | `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
 
 `python -m scripts.export_openapi` writes both from the application factory, in
@@ -99,6 +99,7 @@ Liveness deliberately does not touch PostgreSQL: a database outage must not make
 | POST | `/api/v1/auth/logout` | Revoke a refresh token (`204`) | Public |
 | POST | `/api/v1/auth/workspace` | Switch the active workspace | Authenticated |
 | GET | `/api/v1/auth/me` | The caller and their memberships | Authenticated |
+| PATCH | `/api/v1/auth/me` | Set or clear the account's language (`locale` only) | Authenticated |
 | POST | `/api/v1/auth/logout-all` | End **every** session this account holds | Authenticated |
 | POST | `/api/v1/auth/password` | Change the password, proving the current one, ending every session | Authenticated |
 | POST | `/api/v1/auth/password/set` | Choose a **first** password for an account that has none, ending every session | Authenticated |
@@ -141,6 +142,40 @@ in a response, never in a URL and never in the subject line.
 Neither route grants anything. `verify` returns a timestamp, not a credential, and
 `GET /auth/me` reports `email_verified_at` so a client can decide whether to prompt.
 No route in this document requires a verified address.
+
+### The account's language (FEB-09, ADR-201)
+
+`GET /auth/me` reports `locale` - `"en"`, `"ar"`, `"fr"`, `"tr"`, or `null` when the
+person never chose one. `PATCH /auth/me` with `{"locale": "ar"}` sets it and
+`{"locale": null}` clears it; the field is required (an empty body is `422`) and any
+other field is `422`, as on `DELETE /auth/me`. It answers the same body as `GET`, works
+before the address is verified, and is not audited (a display language is not a
+security event). `POST /auth/register` takes an optional `locale` - the sign-up form's
+language. Every e-mail to a Wasla user is rendered in that user's `locale` (English when
+`null`); an invitation is rendered in the `locale` its inviter chose
+(`POST /invitations`), because the invitee may have no account. See [EMAIL.md](EMAIL.md).
+
+### Which workspace a sign-in opens (FEB-36, ADR-201)
+
+A sign-in or refresh that names no `workspace_slug` opens the workspace the person last
+**chose** - by `POST /auth/workspace`, or by naming it at sign-in - while that workspace
+is active and their membership stands; otherwise the oldest active membership's
+workspace, as before; never a suspended or closed one (none when every one is). The
+choice is stored on the account and is in no response.
+
+### Codes the account and team screens tell apart (FEB-06, ADR-201)
+
+| Status | Code | Where |
+| --- | --- | --- |
+| 401 | `current_password_invalid` | `POST /auth/password`, `DELETE /auth/me`: the current password is wrong (the session stands) |
+| 422 | `password_unchanged` | `POST /auth/password`: the new password equals the current one |
+| 409 | `invitation_pending` | `POST /invitations`: the address already has a pending invitation |
+| 409 | `already_member` | `POST /invitations`, `POST /workspace/members/{id}/reinstate`: already an active member |
+| 409 | `invitation_not_pending` | `DELETE /invitations/{id}`: no longer pending |
+| 409 | `workspace_slug_taken` | `PATCH /workspace`: the address is in use |
+| 409 | `google_already_connected` | `POST /auth/identities/google/link`: this account already has Google, or this Google account already is this account's |
+| 409 | `google_identity_in_use` | `POST /auth/identities/google/link`: that Google account belongs to another Wasla account (which is not named) |
+| 403 | `google_unlink_requires_password` | `DELETE /auth/identities/google`: Google is the only way in; set a password first |
 
 ### Signing in with Google
 
@@ -193,7 +228,7 @@ The account's `email` is **not** refreshed - it is written once, at enrolment. S
 
 | Method | Path | Purpose | Access |
 | --- | --- | --- | --- |
-| POST | `/api/v1/invitations` | Invite someone to the workspace (`201`) | Tenant admin |
+| POST | `/api/v1/invitations` | Invite someone to the workspace (`201`); optional `locale` for the e-mail's language | Tenant admin |
 | GET | `/api/v1/invitations` | List open invitations | Tenant admin |
 | DELETE | `/api/v1/invitations/{invitation_id}` | Revoke an invitation | Tenant admin |
 | POST | `/api/v1/invitations/accept` | Redeem an invitation token | Public |

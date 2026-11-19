@@ -8324,6 +8324,23 @@
             "title": "Email",
             "type": "string"
           },
+          "locale": {
+            "anyOf": [
+              {
+                "enum": [
+                  "en",
+                  "ar",
+                  "fr",
+                  "tr"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
+          },
           "role": {
             "$ref": "#/components/schemas/TenantRole",
             "default": "member"
@@ -8363,6 +8380,23 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "enum": [
+                  "en",
+                  "ar",
+                  "fr",
+                  "tr"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
           },
           "role": {
             "$ref": "#/components/schemas/TenantRole"
@@ -15778,6 +15812,23 @@
             "title": "Id",
             "type": "string"
           },
+          "locale": {
+            "anyOf": [
+              {
+                "enum": [
+                  "en",
+                  "ar",
+                  "fr",
+                  "tr"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
+          },
           "platform_role": {
             "anyOf": [
               {
@@ -15801,6 +15852,34 @@
           "email"
         ],
         "title": "ProfileResponse",
+        "type": "object"
+      },
+      "ProfileUpdateRequest": {
+        "additionalProperties": false,
+        "description": "`PATCH /auth/me`: the account's language, and nothing else (FEB-09).\n\nRequired, and nullable: an empty body is refused rather than read as \"no\nchange\", and `null` clears the choice back to English.",
+        "properties": {
+          "locale": {
+            "anyOf": [
+              {
+                "enum": [
+                  "en",
+                  "ar",
+                  "fr",
+                  "tr"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
+          }
+        },
+        "required": [
+          "locale"
+        ],
+        "title": "ProfileUpdateRequest",
         "type": "object"
       },
       "ProposedPriceRead": {
@@ -16612,6 +16691,23 @@
               }
             ],
             "title": "Full Name"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "enum": [
+                  "en",
+                  "ar",
+                  "fr",
+                  "tr"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
           },
           "password": {
             "maxLength": 128,
@@ -22206,6 +22302,61 @@
           }
         ],
         "summary": "Describe the authenticated caller",
+        "tags": [
+          "Authentication"
+        ]
+      },
+      "patch": {
+        "description": "Set or clear the caller's own language (FEB-09). The caller is the target.\n\nOnly `locale`: every other field is refused (422), as `DELETE /auth/me`\nrefuses them. Reachable before the address is verified, so the\nverification e-mail itself can be asked for in the person's language.",
+        "operationId": "update_me_api_v1_auth_me_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Change the account's language",
         "tags": [
           "Authentication"
         ]

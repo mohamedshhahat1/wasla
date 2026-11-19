@@ -73,5 +73,21 @@
   "stale_lead_status": "غيّر شخص آخر حالة هذا العميل المحتمل. تمت إعادة تحميله.",
   "open_lead_exists": "لدى هذا العميل عميل محتمل مفتوح بالفعل.",
   "connection_lost": "انقطع الاتصال. تحقّق منه وحاول مرة أخرى.",
-  "fallback": "حدث خطأ ما. حاول مرة أخرى."
+  "fallback": "حدث خطأ ما. حاول مرة أخرى.",
+  "invitation_pending": "لهذا العنوان دعوة معلّقة بالفعل.",
+  "already_member": "هذا الشخص عضو في مساحة العمل هذه بالفعل.",
+  "invitation_not_pending": "لم تعد هذه الدعوة مفتوحة.",
+  "workspace_slug_taken": "هذا العنوان مستخدم. اختر غيره.",
+  "current_password_invalid": "كلمة المرور الحالية غير صحيحة.",
+  "password_unchanged": "يجب أن تختلف كلمة المرور الجديدة عن الحالية.",
+  "google_already_connected": "حساب Google مرتبط بالفعل.",
+  "google_identity_in_use": "حساب Google هذا مرتبط بحساب آخر في وصلة.",
+  "google_unlink_requires_password": "عيّن كلمة مرور قبل فصل Google.",
+  "ownership_transfer_invalid": "تنتقل الملكية فقط إلى عضو نشط آخر يستطيع تسجيل الدخول.",
+  "workspace_confirmation_invalid": "اكتب عنوان مساحة العمل كما هو معروض تمامًا.",
+  "reauthentication_required": "أكّد أنه أنت بكلمة المرور أو عبر Google.",
+  "reauthentication_unavailable": "لا يستطيع Google تأكيد هويتك لهذا الحساب.",
+  "workspace_owner_required": "يستطيع المالك فقط فعل ذلك.",
+  "account_owns_workspaces": "سلّم مساحات العمل التي تملكها أو أغلقها أولًا.",
+  "last_workspace_owner": "أنت المالك الوحيد. اجعل شخصًا آخر مالكًا أولًا."
 }
