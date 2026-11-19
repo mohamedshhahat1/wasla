@@ -249,6 +249,52 @@ export class WebSession {
     this.#adopt(await this.#post<SessionGrant>("google/callback", { code, state }));
   }
 
+  /** FE-7 (SG-02): start connecting Google to the signed-in account; Google's address to go to. */
+  async googleLinkUrl(): Promise<string> {
+    const bearer = await this.accessToken();
+    const answer = await this.#post<{ authorization_url: string }>(
+      "google/link/authorize",
+      {},
+      bearer,
+    );
+    return answer.authorization_url;
+  }
+
+  /** Finish connecting Google: the session itself does not change. */
+  async googleLinkCallback(code: string, state: string): Promise<void> {
+    const bearer = await this.accessToken();
+    await this.#post("google/link/callback", { code, state }, bearer);
+  }
+
+  /** Start re-authenticating with Google to close the account (SG-02). */
+  async googleReauthUrl(): Promise<string> {
+    const bearer = await this.accessToken();
+    const answer = await this.#post<{ authorization_url: string }>(
+      "google/reauth/authorize",
+      {},
+      bearer,
+    );
+    return answer.authorization_url;
+  }
+
+  /** Finish it: the proof stays in the session route's sealed cookie; only its lifetime is told. */
+  async googleReauthCallback(code: string, state: string): Promise<number> {
+    const bearer = await this.accessToken();
+    const answer = await this.#post<{ expires_in: number }>(
+      "google/reauth/callback",
+      { code, state },
+      bearer,
+    );
+    return answer.expires_in;
+  }
+
+  /** Close the account with the Google proof the session route holds; signed out on success. */
+  async closeAccountWithGoogle(): Promise<void> {
+    const bearer = await this.accessToken();
+    await this.#post("account/close", {}, bearer);
+    this.channel.announceSignedOut();
+  }
+
   async signOut(): Promise<void> {
     try {
       await this.#post("logout", {});

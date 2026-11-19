@@ -26,11 +26,12 @@ export const PUBLIC_ORIGIN_NAMES = [
 /**
  * The files allowed to touch web storage (they hold no token: S-2): the session's preferences, and
  * the inbox's composer draft - its text only, per workspace and conversation, in sessionStorage
- * (plan section 21, CP-01).
+ * (plan section 21, CP-01); and FE-7's two one-word tab flags (lib/account/tab-flags.ts, ADR-201).
  */
 export const STORAGE_ALLOW_FILES = [
   "packages/session/src/preferences-storage.ts",
   "apps/web/lib/inbox/draft-storage.ts",
+  "apps/web/lib/account/tab-flags.ts",
 ];
 
 /** Files that always end up in a browser bundle, whatever their directive. */

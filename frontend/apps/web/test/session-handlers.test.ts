@@ -1,5 +1,5 @@
 /**
- * The eight /session/* handlers against a fake API (FE-2 section 13.3): per route the API path
+ * The /session/* handlers against a fake API (FE-2 section 13.3): per route the API path
  * called, the forward signature, the cookie set or cleared, a body that never carries the
  * refresh token, errors passed through by code, the timeout and the missing secret.
  */
@@ -12,6 +12,7 @@ import { signForward } from "@wasla/session/server";
 
 import {
   handleSession,
+  sealReauth,
   SESSION_VERBS,
   sessionRoute,
   type SessionServerConfig,
@@ -568,6 +569,23 @@ describe("the handlers call the API origin only (SR-09)", () => {
         setCookie: ["wasla_oauth=b; Path=/"],
       },
       "/api/v1/auth/google/callback": { status: 200, json: session },
+      // FE-7's relays (SG-02).
+      "/api/v1/auth/identities/google/authorize": {
+        status: 200,
+        json: { authorization_url: "http://127.0.0.1:8026/x" },
+        setCookie: ["wasla_oauth=b; Path=/"],
+      },
+      "/api/v1/auth/identities/google/link": { status: 200, json: {} },
+      "/api/v1/auth/google/reauth/authorize": {
+        status: 200,
+        json: { authorization_url: "http://127.0.0.1:8026/x" },
+        setCookie: ["wasla_oauth=b; Path=/"],
+      },
+      "/api/v1/auth/google/reauth/callback": {
+        status: 200,
+        json: { reauthentication_token: "proof", expires_in: 300 },
+      },
+      "/api/v1/auth/me": { status: 200, json: {} },
     });
     for (const verb of SESSION_VERBS) {
       await handleSession(
@@ -576,7 +594,7 @@ describe("the handlers call the API origin only (SR-09)", () => {
           verb,
           { workspace_slug: "acme", code: "c", state: "s" },
           {
-            Cookie: `wasla_rt=${REFRESH}; wasla_oauth=b`,
+            Cookie: `wasla_rt=${REFRESH}; wasla_oauth=b; wasla_reauth=${sealReauth("proof", SECRET)}`,
             Authorization: "Bearer a",
           },
         ),
