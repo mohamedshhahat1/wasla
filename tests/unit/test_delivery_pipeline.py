@@ -331,3 +331,189 @@ def test_the_security_scan_installs_and_audits_what_the_image_ships() -> None:
     lock_audit = [run for run in audits if "pip-audit" in run and "-r requirements.lock" in run]
     assert lock_audit and "-r requirements-build.lock" in lock_audit[0]
     assert "--no-deps" in lock_audit[0]
+
+
+# --- CI's sharded test runs ---------------------------------------------------
+#
+# The model-built suite and the migration-built integration/e2e suite were one
+# pytest process each; they are matrix jobs now, split by
+# `scripts/ci_shards.py`. Sharding is only a speed-up if it changes nothing
+# else, so these pin what the single runs guaranteed: the same roots, the same
+# two deselections and nothing more, a skip gate on every shard's own output,
+# the media gate where the store is, coverage over the whole suite, and a
+# completeness check that every collected test ran exactly once.
+
+#: The only tests either run leaves out, both for the kept-data session.
+KEPT_ONLY = {
+    "tests/integration/test_ai_invariants.py::test_a_kept_run_really_had_something_to_sweep",
+    "tests/integration/test_tool_invariants.py::test_a_kept_run_really_had_something_to_sweep",
+}
+
+#: Sharded job -> the `scripts.ci_shards` suite it runs.
+SHARDED = {"tests": "model", "migration-suites": "migrations"}
+
+
+def _ci_jobs() -> dict[str, Any]:
+    jobs: dict[str, Any] = _load("ci.yml")["jobs"]
+    return jobs
+
+
+def _run_of(job: str, needle: str) -> tuple[int, str]:
+    runs = [str(step.get("run", "")) for step in _steps(_load("ci.yml"), job)]
+    index = next(i for i, run in enumerate(runs) if needle in run)
+    return index, runs[index]
+
+
+def _deselected(text: str) -> set[str]:
+    return set(re.findall(r"--deselect\s+(\S+)", text))
+
+
+@pytest.mark.parametrize(("job", "suite"), sorted(SHARDED.items()))
+def test_each_shard_runs_its_files_and_nothing_else(job: str, suite: str) -> None:
+    spec = _ci_jobs()[job]
+    shards = spec["strategy"]["matrix"]["shard"]
+    assert shards == list(range(1, len(shards) + 1)), "shards are numbered 1..N"
+    assert len(shards) > 1
+    assert spec["strategy"]["fail-fast"] is False
+
+    _index, run = _run_of(job, "pytest ")
+    assert f"scripts.ci_shards files --suite {suite}" in run
+    assert "--shards ${{ strategy.job-total }} --index ${{ matrix.shard }}" in run
+    pytest_call = run[run.index("pytest ") :].split("|")[0]
+    assert pytest_call.split()[-1] == "$FILES", "the shard's files are its only roots"
+    assert "-k " not in pytest_call and " -m " not in pytest_call
+    assert _deselected(pytest_call) == KEPT_ONLY
+    assert "--junitxml=reports/" in pytest_call
+    assert "| tee /tmp/pytest.txt" in run and "pipefail" in run
+
+
+@pytest.mark.parametrize("job", sorted(SHARDED))
+def test_every_shard_gates_its_own_skips(job: str) -> None:
+    tests_at, _ = _run_of(job, "pytest ")
+    gate_at, gate = _run_of(job, 'grep -E "^SKIPPED" /tmp/pytest.txt')
+    assert gate_at > tests_at
+    assert "exit 1" in gate
+
+
+def _allowed_skips(job: str) -> list[str]:
+    _, gate = _run_of(job, 'grep -E "^SKIPPED" /tmp/pytest.txt')
+    allowed = re.search(r'grep -vE "([^"]+)"', gate)
+    assert allowed is not None
+    return allowed.group(1).split("|")
+
+
+def test_the_model_shards_allow_only_the_skips_written_down() -> None:
+    assert _allowed_skips("tests") == [
+        "real-provider tests are opt-in",
+        "the model declined to call a tool",
+        "schema parity is only meaningful against a migration-built database",
+        "the old-pgvector lane is opt-in",
+    ]
+
+
+def test_the_migration_shards_allow_only_what_the_single_run_skipped() -> None:
+    """That run had no gate. When it was split, it skipped for exactly two
+    reasons (CI run 44146445974): 73 media tests, because this job starts no
+    object store - they run, gated, in the model-built shards - and the opt-in
+    old-pgvector lane. Those two and nothing else; in particular not the
+    schema-parity skip, which here would mean the migration-built schema was
+    never built."""
+    assert _allowed_skips("migration-suites") == [
+        "No object store configured",
+        "the old-pgvector lane is opt-in",
+    ]
+
+
+def test_the_model_shards_keep_coverage_the_store_and_the_media_gate() -> None:
+    job = _ci_jobs()["tests"]
+    tests_at, run = _run_of("tests", "pytest ")
+    assert "--cov=app" in run
+    env = job["env"]
+    assert {"TEST_S3_ENDPOINT_URL", "WASLA_TEST_TMPFS", "TEST_DATABASE_URL"} <= set(env)
+    media_at, media = _run_of("tests", "tests/integration/test_object_store.py")
+    assert media_at > tests_at and "No object store configured" in media
+    assert "WASLA_TEST_SCHEMA" not in env, "the model-built run must build from the models"
+
+
+def test_the_migration_shards_build_their_schema_from_migrations() -> None:
+    assert _ci_jobs()["migration-suites"]["env"]["WASLA_TEST_SCHEMA"] == "migrations"
+
+
+def test_the_kept_data_sweep_and_the_parity_check_stay_one_unsharded_session() -> None:
+    """The sweep checks what earlier suites in *its own* session kept; split, it
+    would sweep a fraction and still pass."""
+    job = _ci_jobs()["migration-parity"]
+    assert "strategy" not in job
+    assert job["env"]["WASLA_TEST_SCHEMA"] == "migrations"
+    runs = _text(job["steps"])
+    assert "WASLA_TEST_KEEP_AI_DATA" in runs
+    assert "tests/integration/test_schema_parity.py" in runs
+    assert "ci_shards" not in runs
+
+
+def test_migrations_still_apply_revert_reapply_and_match_the_models() -> None:
+    runs = _text(_steps(_load("ci.yml"), "migrations"))
+    for command in (
+        "create_app()",
+        "alembic upgrade head",
+        "alembic downgrade base",
+        "python -m scripts.db_preflight verify",
+        "alembic check",
+    ):
+        assert command in runs, command
+
+
+def test_coverage_and_completeness_are_judged_over_every_shard() -> None:
+    job = _ci_jobs()["coverage"]
+    assert set(job["needs"]) == set(SHARDED), "it must wait for every shard"
+    runs = [str(step.get("run", "")) for step in job["steps"]]
+    verify = next(run for run in runs if "scripts.ci_shards verify" in run)
+    calls = verify.split("python -m scripts.ci_shards verify")[1:]
+    assert sorted(call.split()[1] for call in calls) == sorted(SHARDED.values())
+    for call in calls:
+        assert _deselected(call) == KEPT_ONLY, call
+    combine = next(run for run in runs if "coverage combine" in run)
+    assert "shards/model/" in combine and "coverage report -m" in combine
+    downloads = [s for s in job["steps"] if "download-artifact" in str(s.get("uses", ""))]
+    assert {s["with"]["pattern"] for s in downloads} == {"shard-model-*", "shard-migrations-*"}
+
+
+def test_every_shard_uploads_what_the_coverage_job_reads() -> None:
+    for job, suite in SHARDED.items():
+        steps = _steps(_load("ci.yml"), job)
+        uploads = [s for s in steps if "upload-artifact" in str(s.get("uses", ""))]
+        assert len(uploads) == 1, job
+        assert uploads[0]["with"]["name"] == f"shard-{suite}-${{{{ matrix.shard }}}}"
+        assert uploads[0]["with"]["path"] == "reports/"
+    tests = next(s for s in _steps(_load("ci.yml"), "tests") if "--cov" in str(s.get("run", "")))
+    assert tests["env"]["COVERAGE_FILE"] == "reports/model-${{ matrix.shard }}.coverage"
+
+
+def test_the_splitter_sees_every_file_pytest_would_collect() -> None:
+    """`scripts/ci_shards.py` finds test files by pytest's default rule. If the
+    rule or the roots changed, the splitter would stop matching what an
+    unsharded run collects - CI's completeness check would catch it, but only
+    after a push."""
+    root = WORKFLOWS.parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    options = project["tool"]["pytest"]["ini_options"]
+    assert options["testpaths"] == ["tests"]
+    assert "python_files" not in options
+    assert not list((root / "tests").rglob("*_test.py"))
+
+
+def test_every_ci_job_that_installs_python_installs_the_lock_first() -> None:
+    """RGM-21's rule, for ci.yml: a new shard job must not be where it is lost."""
+    for name, job in _ci_jobs().items():
+        runs = [str(step.get("run", "")) for step in job.get("steps", [])]
+        if not any("pip install" in run for run in runs):
+            continue
+        locked = next(i for i, run in enumerate(runs) if "--require-hashes" in run)
+        assert "-r requirements.lock -r requirements-build.lock" in runs[locked], name
+        guard = next(i for i, run in enumerate(runs) if "scripts.check_installed_lock" in run)
+        first_use = next(
+            i
+            for i, run in enumerate(runs)
+            if any(tool in run for tool in ("pytest", "coverage", "alembic", "ruff"))
+        )
+        assert locked < guard < first_use, name

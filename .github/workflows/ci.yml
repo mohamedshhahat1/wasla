@@ -68,8 +68,24 @@ jobs:
         run: mypy app tests
 
   tests:
-    name: Tests and migrations
+    name: Tests, model-built schema (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
+
+    # One pytest process ran this whole suite for 62 minutes, and that one step
+    # was the workflow's wall time. It is now split by file across the shards
+    # below (`scripts/ci_shards.py`, balanced by the durations in
+    # `scripts/ci_test_durations.json`). Each shard is a complete, separate
+    # session with its own PostgreSQL, Redis and object store, and runs the
+    # same gates on its own output the single run did. Nothing is deselected
+    # or skipped that was not before, and the `coverage` job proves every test
+    # the unsharded run would have collected ran in exactly one shard.
+    #
+    # `fail-fast: false`: a red shard should not cancel the others, or the
+    # next run is the first to say what else was broken.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7]
 
     services:
       postgres:
@@ -178,17 +194,26 @@ jobs:
           # normal case, and fine. What is not fine is nobody noticing which
           # tests that costs, which the step below settles.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Each shard's coverage data and JUnit report, combined and checked
+          # by the `coverage` job. The term-missing report is printed there,
+          # over every shard, rather than six partial ones here.
+          COVERAGE_FILE: reports/model-${{ matrix.shard }}.coverage
         run: |
           set -o pipefail
+          mkdir -p reports
+          FILES=$(python -m scripts.ci_shards files --suite model \
+            --shards ${{ strategy.job-total }} --index ${{ matrix.shard }})
+          echo "Shard ${{ matrix.shard }} runs: $FILES"
           # The two non-vacuity checks below only mean something in a session
           # that kept the AI and tool suites' data. They run there - in the
           # migration-parity job, which asserts they did not skip - and are
           # deselected here rather than left to skip, so the gate below is
           # not asked to excuse anything.
-          pytest --cov=app --cov-report=term-missing -rs \
+          pytest --cov=app --cov-report= -rs \
+            --junitxml=reports/model-${{ matrix.shard }}.xml \
             --deselect tests/integration/test_ai_invariants.py::test_a_kept_run_really_had_something_to_sweep \
             --deselect tests/integration/test_tool_invariants.py::test_a_kept_run_really_had_something_to_sweep \
-            | tee /tmp/pytest.txt
+            $FILES | tee /tmp/pytest.txt
 
       - name: Every skip is one somebody chose
         shell: bash
@@ -240,6 +265,77 @@ jobs:
             exit 1
           fi
 
+      - name: Keep this shard's coverage and report
+        # `always()` for the JUnit report: a red shard's timings are still
+        # timings. The `coverage` job only runs when every shard passed.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shard-model-${{ matrix.shard }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  migrations:
+    name: Migrations and startup
+    runs-on: ubuntu-latest
+
+    # Ran at the end of the single test job, on the database its session had
+    # just dropped. A fresh database is the same starting point, and as a job
+    # of its own it no longer waits an hour for the suite to finish.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: wasla
+          POSTGRES_PASSWORD: wasla
+          POSTGRES_DB: wasla_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wasla -d wasla_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ENVIRONMENT: test
+      LOG_FORMAT: json
+      DATABASE_URL: postgresql+asyncpg://wasla:wasla@localhost:5432/wasla_test
+      REDIS_URL: redis://localhost:6379/0
+      # CI-only value. Never used by any deployed environment.
+      JWT_SECRET: continuous-integration-secret-value-not-for-deployment
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        # The lock by hash, then the project and its dev tools (CPM-05, RGM-07).
+        run: |
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
+
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
+
       - name: Application starts
         run: python -c "from app.main import create_app; create_app(); print('application factory ok')"
 
@@ -258,6 +354,136 @@ jobs:
       - name: No model drift against migrations
         run: alembic check
 
+  migration-suites:
+    name: Integration and e2e, migration-built schema (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+
+    # Every integration and end-to-end suite against the migrated schema.
+    #
+    # Was a hand-listed selection of twelve files, and the list is what went
+    # wrong. It was chosen when AUTH-01 was the failure being prevented, so it
+    # named the lifecycle endpoints and nothing else - and the entire billing
+    # family, 210 tests, was never once executed against the plan catalogue a
+    # deployment actually has. 166 of them failed the moment somebody tried it
+    # (WQ-04).
+    #
+    # A list cannot be maintained against that: nobody adding a test thinks to
+    # ask which CI job covers the schema production runs. So the scope is
+    # "everything that touches a database", and a file added tomorrow is
+    # covered by default rather than by remembering - `scripts/ci_shards.py`
+    # places a file it has no timing for at the mean, and the `coverage` job
+    # proves the shards together ran exactly what `pytest tests/integration
+    # tests/e2e` collects.
+    #
+    # It was thirty-five minutes in one process; it is now split by file like
+    # the model-built run. That is the price of the guarantee, and it is worth
+    # paying: the model-built schema agrees with the models *by construction*,
+    # so it is structurally incapable of catching a difference between the
+    # models and the migrations. The kept-data sweep is not split: it sweeps
+    # what earlier suites in its own session kept, so it stays one session, in
+    # `migration-parity` below.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: wasla
+          POSTGRES_PASSWORD: wasla
+          POSTGRES_DB: wasla_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wasla -d wasla_migrations"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ENVIRONMENT: test
+      LOG_FORMAT: json
+      DATABASE_URL: postgresql+asyncpg://wasla:wasla@localhost:5432/wasla_migrations
+      TEST_DATABASE_URL: postgresql+asyncpg://wasla:wasla@localhost:5432/wasla_migrations
+      REDIS_URL: redis://localhost:6379/0
+      # CI-only value. Never used by any deployed environment.
+      JWT_SECRET: continuous-integration-secret-value-not-for-deployment
+      # `alembic upgrade head` builds the schema, not the models (see
+      # `migration-parity` below for why that matters).
+      WASLA_TEST_SCHEMA: migrations
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        # The lock by hash, then the project and its dev tools (CPM-05, RGM-07).
+        run: |
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
+
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
+
+      - name: Every integration and end-to-end suite against the migrated schema
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p reports
+          FILES=$(python -m scripts.ci_shards files --suite migrations \
+            --shards ${{ strategy.job-total }} --index ${{ matrix.shard }})
+          echo "Shard ${{ matrix.shard }} runs: $FILES"
+          pytest -q -rs --junitxml=reports/migrations-${{ matrix.shard }}.xml \
+            --deselect tests/integration/test_ai_invariants.py::test_a_kept_run_really_had_something_to_sweep \
+            --deselect tests/integration/test_tool_invariants.py::test_a_kept_run_really_had_something_to_sweep \
+            $FILES | tee /tmp/pytest.txt
+
+      - name: Every skip is one somebody chose
+        shell: bash
+        run: |
+          # This run had no skip gate while it was one step; it has one per
+          # shard now, and it allows exactly what that run skipped. This job
+          # has no object store and no small filesystem, so the media and
+          # storage-cleanup suites skip here as they always have - they run,
+          # and are gated, in the model-built `tests` shards. Anything else
+          # that skips fails here instead of blending into a count.
+          UNEXPECTED=$(grep -E "^SKIPPED" /tmp/pytest.txt | grep -vE "No object store configured|the old-pgvector lane is opt-in" || true)
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::a test skipped for a reason nobody chose"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
+          echo "Skips in this shard, all accounted for:"
+          grep -E "^SKIPPED" /tmp/pytest.txt || echo "  (none)"
+
+      - name: Keep this shard's report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shard-migrations-${{ matrix.shard }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
+
   migration-parity:
     name: Migration-built schema
     runs-on: ubuntu-latest
@@ -270,9 +496,10 @@ jobs:
     # account-security endpoints returned 500 with a full rollback in
     # production, and CI was green throughout.
     #
-    # So this job builds the schema the way a deployment does, and runs two
-    # things against it: a parity check between `pg_enum` and the mapped
-    # `sa.Enum` definitions, and the lifecycle suites themselves - because a
+    # So this job builds the schema the way a deployment does, and runs a
+    # parity check between `pg_enum` and the mapped `sa.Enum` definitions
+    # against it, then the kept-data sweep. The suites themselves run against
+    # the same migration-built schema in `migration-suites` above - because a
     # parity test proves the labels exist and only the endpoints prove they are
     # written where they need to be.
     #
@@ -362,29 +589,6 @@ jobs:
             echo "::error::the schema-parity suite skipped; WASLA_TEST_SCHEMA is not taking effect"
             exit 1
           fi
-
-      - name: Every integration and end-to-end suite against the migrated schema
-        # Was a hand-listed selection of twelve files, and the list is what went
-        # wrong. It was chosen when AUTH-01 was the failure being prevented, so
-        # it named the lifecycle endpoints and nothing else - and the entire
-        # billing family, 210 tests, was never once executed against the plan
-        # catalogue a deployment actually has. 166 of them failed the moment
-        # somebody tried it (WQ-04).
-        #
-        # A list cannot be maintained against that: nobody adding a test thinks
-        # to ask which CI job covers the schema production runs. So the scope is
-        # now "everything that touches a database", and a file added tomorrow is
-        # covered by default rather than by remembering.
-        #
-        # It costs about twenty minutes, in its own job, in parallel with the
-        # model-built run. That is the price of the guarantee, and it is worth
-        # paying: the model-built schema agrees with the models *by
-        # construction*, so it is structurally incapable of catching a
-        # difference between the models and the migrations.
-        run: |
-          pytest -q -rs tests/integration tests/e2e \
-            --deselect tests/integration/test_ai_invariants.py::test_a_kept_run_really_had_something_to_sweep \
-            --deselect tests/integration/test_tool_invariants.py::test_a_kept_run_really_had_something_to_sweep
 
       - name: AI and tool invariants over the data their suites kept
         # The sweeps the AI and tool audits specify: every suite built on the
@@ -487,3 +691,70 @@ jobs:
           docker logs wasla-ci
           docker rm -f wasla-ci
           exit 1
+
+  coverage:
+    name: Coverage, and every test ran exactly once
+    runs-on: ubuntu-latest
+    # Only once every shard passed: a combined report over a red shard would be
+    # a number about a run that did not happen.
+    needs: [tests, migration-suites]
+
+    env:
+      # Collection imports the application and its settings, nothing more: no
+      # database, Redis or store is reached by `--collect-only`.
+      ENVIRONMENT: test
+      LOG_FORMAT: json
+      # CI-only value. Never used by any deployed environment.
+      JWT_SECRET: continuous-integration-secret-value-not-for-deployment
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        # The lock by hash, then the project and its dev tools (CPM-05, RGM-07).
+        run: |
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock
+          pip install -e ".[dev]"
+
+      - name: Installed packages are the lock's
+        run: |
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          pip check
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: shard-model-*
+          path: shards/model
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: shard-migrations-*
+          path: shards/migrations
+          merge-multiple: true
+
+      - name: Every collected test ran in exactly one shard
+        # Sharding must not be a way for a test to stop running. This collects
+        # each suite exactly as the unsharded command would - same roots, same
+        # deselections - and fails unless the shards' JUnit reports together
+        # hold every one of those tests, once, and nothing else.
+        run: |
+          python -m scripts.ci_shards verify --suite model --reports shards/model -- \
+            --deselect tests/integration/test_ai_invariants.py::test_a_kept_run_really_had_something_to_sweep \
+            --deselect tests/integration/test_tool_invariants.py::test_a_kept_run_really_had_something_to_sweep
+          python -m scripts.ci_shards verify --suite migrations --reports shards/migrations -- \
+            --deselect tests/integration/test_ai_invariants.py::test_a_kept_run_really_had_something_to_sweep \
+            --deselect tests/integration/test_tool_invariants.py::test_a_kept_run_really_had_something_to_sweep
+
+      - name: Coverage over every model-built shard
+        # What `--cov-report=term-missing` printed when this was one process:
+        # the shards' data combined, then reported over `app` as a whole.
+        run: |
+          coverage combine shards/model/*.coverage
+          coverage report -m

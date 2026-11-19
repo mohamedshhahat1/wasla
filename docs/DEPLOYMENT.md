@@ -543,7 +543,7 @@ treat alerting as unproven however green CI is.
 
 | Workflow | Responsibility | Status |
 | --- | --- | --- |
-| `ci.yml` | Ruff, Black, MyPy, the full suite with coverage, application start-up, migrations up/down/up, `alembic check`, image build and container liveness | Implemented |
+| `ci.yml` | Ruff, Black, MyPy, the full suite with coverage (split by file across parallel shards by `scripts/ci_shards.py`, then combined and checked that every collected test ran exactly once), application start-up, migrations up/down/up, `alembic check`, image build and container liveness | Implemented |
 | `security.yml` | Dependency audit (pip-audit), secret scan over full history (gitleaks), container scan (Trivy) | Implemented |
 | `deploy.yml` | Build, scan, publish to GHCR, deploy, verify readiness | Implemented |
 
