@@ -82,7 +82,9 @@ export function CloseWorkspace() {
           <Button
             type="submit"
             form={formId}
-            variant="danger"
+            // Red only once it can act: until the address matches it is a quiet secondary button
+            // that says it has nothing to do (UI7-01; the status role stays within its 3 %).
+            variant={matches ? "danger" : "secondary"}
             {...busyProps(close.isPending)}
             {...(!matches ? { "aria-disabled": true } : {})}
             data-action="close-workspace"
