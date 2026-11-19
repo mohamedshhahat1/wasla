@@ -6,12 +6,26 @@ memberships. There is deliberately no ``tenant_id`` on this table.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Final
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, UniqueConstraint, func, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.locales import MAX_LOCALE_LENGTH, locale_check_sql
 from app.db.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import PLATFORM_ROLE_TYPE, PlatformRole
 
@@ -45,6 +59,7 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         # however a row is written (DB-025). Tombstoned rows count too: a
         # deleted account's address stays reserved (docs/AUTH.md).
         Index("uq_users_email_lower", func.lower(text("email")), unique=True),
+        CheckConstraint(locale_check_sql("locale"), name="locale_supported"),
     )
 
     email: Mapped[str] = mapped_column(String(MAX_EMAIL_LENGTH), nullable=False)
@@ -104,6 +119,22 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     )
     platform_role: Mapped[PlatformRole | None] = mapped_column(
         PLATFORM_ROLE_TYPE,
+        nullable=True,
+        default=None,
+    )
+    # The language this person reads Wasla and its e-mail in (FEB-09). NULL is
+    # "not chosen", which renders every e-mail in English exactly as before.
+    locale: Mapped[str | None] = mapped_column(
+        String(MAX_LOCALE_LENGTH), nullable=True, default=None
+    )
+    # The workspace this person last chose - by switching, or by naming it at
+    # sign-in (FEB-36). A sign-in that names none opens it while it is still
+    # active and the membership still stands. Their own fact: no response, log
+    # line or e-mail carries it. SET NULL so a hard-deleted workspace (which
+    # the product never does - it tombstones) cannot leave it dangling.
+    last_workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
