@@ -177,6 +177,10 @@ The active workspace is read from the signed access token (`tid`) and from nowhe
 
 Switching workspace mints a new access token and leaves the refresh token untouched, so moving between workspaces never disturbs the long-lived credential. Identity never changes.
 
+**The last-used workspace (FEB-36, ADR-201).** A sign-in or refresh that names no workspace opens `users.last_workspace_id` when that workspace is active and the membership stands, else the oldest active membership's workspace, and never a suspended or closed one (none when every workspace is). Only a choice is recorded - a switch, or a sign-in that named a workspace - with one conditional `UPDATE` in the request's transaction, so a refused switch writes nothing. A revoked membership, a suspended or a tombstoned workspace each fall through by themselves at the next sign-in; nothing is written when access ends. The pointer is in no response, log line or e-mail. Migration 0141's downgrade drops it, and sign-in falls back to the oldest active workspace.
+
+**The account's language (FEB-09, ADR-201).** `users.locale` is `en`, `ar`, `fr`, `tr` or NULL, set by `PATCH /auth/me` and optionally at sign-up. It changes which language the account's e-mail is written in ([EMAIL.md](EMAIL.md)) and nothing about authentication or authorization. It is not sent to other members.
+
 ## Invitations
 
 Invitation tokens are generated from `secrets` and stored **only** as a SHA-256 hash on the invitation. The raw token is never returned by the API; its outbox copy is encrypted and delivered only to the invited address.

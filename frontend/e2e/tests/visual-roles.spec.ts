@@ -95,7 +95,10 @@ async function targets(page: Page): Promise<Target[]> {
           box.width > 0 &&
           box.height > 0 &&
           style.visibility !== "hidden" &&
-          !element.closest(".sr-only")
+          !element.closest(".sr-only") &&
+          // FE-7: Radix Select's native <select> for form submission - 1×1, aria-hidden, never in
+          // the tab order and with no pointer events - is nobody's target.
+          !(element.getAttribute("aria-hidden") === "true" && element.tabIndex < 0)
         );
       })
       .map((element) => {
@@ -491,6 +494,56 @@ for (const locale of LOCALES) {
         await capture(page, testInfo, "web-upload", locale, "screen", page.getByRole("dialog"));
         await page.keyboard.press("Escape");
       }
+    });
+
+    // FE-7 (VQ7-02): the team, settings and account screens join the averages - the members, the
+    // invitations with one open (the trial's two seats: the owner and that invitation), the workspace settings, the activity log, the
+    // close-workspace page and the account page.
+    test(`web-fe7 team and settings ${locale}`, async ({ page, context }, testInfo) => {
+      await useLocale(context, locale);
+      await useAddress(context);
+      const owner = await verifiedOwner("vis7");
+      await answeringAgent(owner);
+      await logInThroughTheApp(page, locale, owner.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+
+      await page.goto(`${WEB}/team`);
+      await expect(page.locator("[data-members-list] li")).toHaveCount(1, { timeout: 30_000 });
+      await capture(page, testInfo, "web-team", locale);
+
+      await page.goto(`${WEB}/team/invitations`);
+      await expect(page.locator('[data-field="invite-email"]')).toBeEnabled({ timeout: 30_000 });
+      await page.locator('[data-field="invite-email"]').fill(`vis7.${locale}@example.com`);
+      const sent = page.waitForResponse(
+        (r) => r.request().method() === "POST" && /\/api\/v1\/invitations$/.test(r.url()),
+      );
+      await page.locator('[data-action="invite"]').click();
+      expect((await sent).status()).toBe(201);
+      await expect(page.locator("[data-invitations-list] li")).toHaveCount(1, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-invitations", locale);
+
+      await page.goto(`${WEB}/settings/workspace`);
+      await expect(page.locator('[data-field="workspace-name"]')).toBeEnabled({ timeout: 30_000 });
+      await expect(page.locator("[data-local-time]")).toBeVisible();
+      await capture(page, testInfo, "web-settings-workspace", locale);
+
+      await page.goto(`${WEB}/settings/activity`);
+      await expect(page.locator("[data-activity-list] li").first()).toBeVisible({
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-settings-activity", locale);
+
+      await page.goto(`${WEB}/settings/workspace/close`);
+      await expect(page.locator('[data-field="close-confirmation"]')).toBeVisible({
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-settings-close", locale);
+
+      await page.goto(`${WEB}/settings/account`);
+      await expect(page.locator('[data-action="close-account"]')).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-account", locale);
     });
 
     test(`web-home-member ${locale}`, async ({ page, context }, testInfo) => {

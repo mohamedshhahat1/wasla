@@ -23,6 +23,7 @@ from app.schemas.auth import (
     PasswordChangeRequest,
     PasswordSetRequest,
     ProfileResponse,
+    ProfileUpdateRequest,
     RefreshRequest,
     RegistrationRequest,
     SessionResponse,
@@ -86,6 +87,7 @@ async def register(
             workspace_name=payload.workspace_name,
             workspace_slug=payload.workspace_slug,
             timezone=payload.timezone,
+            locale=payload.locale,
         )
     except EmailAlreadyRegisteredError:
         await service.notify_existing_registration(payload.email)
@@ -193,8 +195,32 @@ async def switch_workspace(
     summary="Describe the authenticated caller",
 )
 async def me(current_user: CurrentUserDep, service: AuthServiceDep) -> ProfileResponse:
-    workspaces = await service.list_workspaces(user=current_user.user, include_suspended=True)
-    user = current_user.user
+    return await _profile(current_user.user, service)
+
+
+@router.patch(
+    "/me",
+    response_model=ProfileResponse,
+    summary="Change the account's language",
+)
+async def update_me(
+    payload: ProfileUpdateRequest,
+    current_user: CurrentUserDep,
+    accounts: AccountServiceDep,
+    service: AuthServiceDep,
+) -> ProfileResponse:
+    """Set or clear the caller's own language (FEB-09). The caller is the target.
+
+    Only `locale`: every other field is refused (422), as `DELETE /auth/me`
+    refuses them. Reachable before the address is verified, so the
+    verification e-mail itself can be asked for in the person's language.
+    """
+    user = await accounts.set_locale(user=current_user.user, locale=payload.locale)
+    return await _profile(user, service)
+
+
+async def _profile(user: User, service: AuthServiceDep) -> ProfileResponse:
+    workspaces = await service.list_workspaces(user=user, include_suspended=True)
     return ProfileResponse(
         id=user.id,
         email=user.email,
@@ -202,6 +228,7 @@ async def me(current_user: CurrentUserDep, service: AuthServiceDep) -> ProfileRe
         avatar_url=user.avatar_url,
         email_verified_at=user.email_verified_at,
         platform_role=user.platform_role,
+        locale=user.locale,
         workspaces=[_summarise(workspace) for workspace in workspaces],
     )
 

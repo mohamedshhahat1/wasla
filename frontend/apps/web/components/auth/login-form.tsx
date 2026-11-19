@@ -59,6 +59,11 @@ export function LoginForm() {
     <AuthCard title={t("login.title")}>
       {note === "reset" ? <FormNote>{t("reset.done")}</FormNote> : null}
       {note === "google_cancelled" ? <FormNote>{t("google.cancelled")}</FormNote> : null}
+      {note === "password_changed" ? <FormNote>{t("login.notes.passwordChanged")}</FormNote> : null}
+      {note === "signed_out_everywhere" ? (
+        <FormNote>{t("login.notes.signedOutEverywhere")}</FormNote>
+      ) : null}
+      {note === "account_closed" ? <FormNote>{t("login.notes.accountClosed")}</FormNote> : null}
       <form
         noValidate
         onSubmit={(event) => void onSubmit(event)}

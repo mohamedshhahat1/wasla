@@ -67,6 +67,18 @@ type Listener = () => void;
 
 const realDelay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** 401 codes that refuse a form's proof, not the session (FEF-45): never refreshed or signed out. */
+export const FORM_REFUSAL_CODES: ReadonlySet<string> = new Set(["current_password_invalid"]);
+
+async function notASessionRefusal(response: Response): Promise<boolean> {
+  const body: unknown = await response
+    .clone()
+    .json()
+    .catch(() => null);
+  const code = (body as { error?: { code?: unknown } } | null)?.error?.code;
+  return typeof code === "string" && FORM_REFUSAL_CODES.has(code);
+}
+
 /** How long a tab that just opened waits for another tab's token before it refreshes (JT-03). */
 export const TOKEN_HANDOFF_WAIT_MS = 300;
 
@@ -237,6 +249,52 @@ export class WebSession {
     this.#adopt(await this.#post<SessionGrant>("google/callback", { code, state }));
   }
 
+  /** FE-7 (SG-02): start connecting Google to the signed-in account; Google's address to go to. */
+  async googleLinkUrl(): Promise<string> {
+    const bearer = await this.accessToken();
+    const answer = await this.#post<{ authorization_url: string }>(
+      "google/link/authorize",
+      {},
+      bearer,
+    );
+    return answer.authorization_url;
+  }
+
+  /** Finish connecting Google: the session itself does not change. */
+  async googleLinkCallback(code: string, state: string): Promise<void> {
+    const bearer = await this.accessToken();
+    await this.#post("google/link/callback", { code, state }, bearer);
+  }
+
+  /** Start re-authenticating with Google to close the account (SG-02). */
+  async googleReauthUrl(): Promise<string> {
+    const bearer = await this.accessToken();
+    const answer = await this.#post<{ authorization_url: string }>(
+      "google/reauth/authorize",
+      {},
+      bearer,
+    );
+    return answer.authorization_url;
+  }
+
+  /** Finish it: the proof stays in the session route's sealed cookie; only its lifetime is told. */
+  async googleReauthCallback(code: string, state: string): Promise<number> {
+    const bearer = await this.accessToken();
+    const answer = await this.#post<{ expires_in: number }>(
+      "google/reauth/callback",
+      { code, state },
+      bearer,
+    );
+    return answer.expires_in;
+  }
+
+  /** Close the account with the Google proof the session route holds; signed out on success. */
+  async closeAccountWithGoogle(): Promise<void> {
+    const bearer = await this.accessToken();
+    await this.#post("account/close", {}, bearer);
+    this.channel.announceSignedOut();
+  }
+
   async signOut(): Promise<void> {
     try {
       await this.#post("logout", {});
@@ -331,11 +389,16 @@ export class WebSession {
     return parsed as T;
   }
 
-  /** SB-01: a 401 refreshes once under the lock and retries the request once; a second 401 signs out. */
+  /**
+   * SB-01: a 401 refreshes once under the lock and retries the request once; a second 401 signs out.
+   * FEF-45: a 401 that says the *password* was wrong (`current_password_invalid`, FE-7's account
+   * page) is about the form, not the session - answered as it is, never refreshed or signed out.
+   */
   async #authFetch(request: Request): Promise<Response> {
     const retry = request.clone();
     const response = await this.#fetch(request);
     if (response.status !== 401 || !request.headers.has("Authorization")) return response;
+    if (await notASessionRefusal(response)) return response;
     let token: string;
     try {
       token = await this.refresh();

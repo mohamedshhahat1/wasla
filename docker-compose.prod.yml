@@ -5,8 +5,19 @@
 # run as a one-shot service so they are applied exactly once per release.
 name: wasla-prod
 
+# Every service's own output, bounded on the host (FEB-41, ADR-201): Docker's
+# default json-file driver keeps a container's stdout and stderr without limit.
+# The bound nginx has carried since FE-6 - about 50 MB per service, oldest file
+# dropped first; docs/DEPLOYMENT.md has the time bound and journald instead.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
+    logging: *default-logging
     image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     # Docker gives a container 64MB of /dev/shm, and PostgreSQL puts a
     # parallel query's shared tuple store there. An aggregate big enough to be
@@ -44,6 +55,7 @@ services:
     restart: always
 
   redis:
+    logging: *default-logging
     image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     # A password, and it is required rather than optional.
     #
@@ -83,6 +95,7 @@ services:
     restart: always
 
   migrate:
+    logging: *default-logging
     image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
     command: ["migrate"]
     # Container hardening. The image already runs as an unprivileged user
@@ -117,6 +130,7 @@ services:
     restart: "no"
 
   api:
+    logging: *default-logging
     image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
     # Container hardening. The image already runs as an unprivileged user
     # (Dockerfile: USER wasla, uid 1001); these bound what that user could do if
@@ -379,6 +393,7 @@ services:
     restart: always
 
   worker:
+    logging: *default-logging
     image: ${WASLA_IMAGE:?WASLA_IMAGE is required}
     command: ["worker"]
     # A real probe, replacing the API's liveness curl the image declares -
@@ -606,6 +621,7 @@ services:
   #
   #   docker compose -f docker-compose.prod.yml --profile backup run --rm backup
   backup:
+    logging: *default-logging
     # Its own image: `pg_dump` must match the server's major version, and the
     # off-host upload needs a client the database image does not carry. See
     # Dockerfile.backup for why neither belongs in the application image.
@@ -714,6 +730,7 @@ services:
   # operational shape, and a published Alertmanager is an unauthenticated way
   # to silence alerts.
   prometheus:
+    logging: *default-logging
     image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     volumes:
       - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -740,6 +757,7 @@ services:
       retries: 3
 
   alertmanager:
+    logging: *default-logging
     image: prom/alertmanager:v0.28.0@sha256:d5155cfac40a6d9250ffc97c19db2c5e190c7bc57c6b67125c94903358f8c7d8
     volumes:
       - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro

@@ -156,7 +156,9 @@ Privileged and administrative actions are recorded in an audit log, including pl
 Production Python dependencies and the build backend are resolved in
 `requirements.lock` and `requirements-build.lock`, with hashes checked by pip
 in the Docker builder. The application wheel is then installed without
-dependency resolution or build isolation. The Python, PostgreSQL/pgvector,
+dependency resolution or build isolation - after the code is copied, while the
+locked install reads only the lock files, so a code-only rebuild reuses the
+hashed dependency layer instead of reinstalling it (ADR-201). The Python, PostgreSQL/pgvector,
 Redis, nginx, Prometheus, and Alertmanager production inputs use registry
 digests. `security.yml` continues to run pip-audit, secret scanning, and Trivy.
 

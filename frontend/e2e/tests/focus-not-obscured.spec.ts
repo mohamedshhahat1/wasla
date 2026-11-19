@@ -144,14 +144,28 @@ for (const [width, height] of [
           `/knowledge/${baseId}?doc=${documentId}`,
           '[data-screen="knowledge-base"]',
         ],
+        // FE-7 (KY7-03): the team, settings and account screens.
+        ["team", "/team", "[data-members-list]"],
+        ["invitations", "/team/invitations", '[data-screen="invitations"]'],
+        ["workspace-settings", "/settings/workspace", "[data-workspace-form]"],
+        ["activity", "/settings/activity", "[data-settings]"],
+        ["close-workspace", "/settings/workspace/close", '[data-field="close-confirmation"]'],
+        ["account", "/settings/account", '[data-action="close-account"]'],
       ];
       const failures: string[] = [];
       for (const [name, path, ready] of screens) {
+        // Every full load refreshes the session, and /auth/refresh allows ten a minute per client
+        // address (AuthRateLimit): FE-7's six screens are swept from a second test address.
+        if (name === "team") await useAddress(context);
         await page.goto(`${WEB}${path}`);
         await expect(page.locator(ready).first()).toBeVisible({ timeout: 30_000 });
         if (name === "agent") {
           // Dirty, so the sticky Save bar is drawn: the case that can hide a field.
           await page.locator('[data-field="system_prompt"]').fill("x".repeat(3000));
+        }
+        if (name === "workspace-settings") {
+          // Dirty, so the save bar is drawn over the end of the form (KY7-03).
+          await page.locator('[data-field="workspace-name"]').fill("Renamed for the sweep");
         }
         const stops = await sweep(page, `${name} ${locale} ${width}`);
         for (const stop of stops.filter((s) => s.covered >= 0.999)) {

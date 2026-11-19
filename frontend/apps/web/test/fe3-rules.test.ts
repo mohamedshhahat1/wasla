@@ -396,7 +396,7 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
       expect(served.has(entry.route)).toBe(true);
     });
   }
-  it("FE-3 registers Home and Channels, FE-4 Inbox, FE-5 Customers and Leads, FE-6 the AI agent and Knowledge", () => {
+  it("FE-3 registers Home and Channels, FE-4 Inbox, FE-5 Customers and Leads, FE-6 the AI agent and Knowledge, FE-7 Team and Settings", () => {
     expect(NAVIGATION.map((entry) => entry.route)).toEqual([
       "/",
       "/inbox",
@@ -405,6 +405,8 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
       "/channels",
       "/ai/agents",
       "/knowledge",
+      "/team",
+      "/settings/workspace",
     ]);
     for (const role of ALL_ROLES)
       expect(entriesFor(role).map((entry) => entry.key)).toEqual([
@@ -416,10 +418,15 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
         "ai",
         // FE-6 (OQ-3, M-U33): Knowledge is an owner's and an administrator's; a member never sees it.
         ...(role === "member" ? [] : ["knowledge"]),
+        // FE-7 (HM7-01): Team for every role, Settings for owners and administrators.
+        "team",
+        ...(role === "member" ? [] : ["settings"]),
       ]);
     expect(entriesFor(null)).toEqual([]);
     expect(currentEntry("/ai/agents/abc")).toBe("ai");
     expect(currentEntry("/knowledge/abc")).toBe("knowledge");
+    expect(currentEntry("/team/invitations")).toBe("team");
+    expect(currentEntry("/settings/activity")).toBe("settings");
   });
   it("the current entry follows the path", () => {
     expect(currentEntry("/")).toBe("home");

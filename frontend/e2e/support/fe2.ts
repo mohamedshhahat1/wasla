@@ -18,10 +18,20 @@ export const REFRESH_COOKIES = ["wasla_rt", "__Host-wasla_rt"];
  * invitation's random token or slug can hold one (FEB-32, frontend.yml 43576090907).
  */
 export const VERIFICATION_SUBJECT = "Verify your email address for Wasla";
+/**
+ * FE-7 (FEB-09): the mail is in the account's language, so a sign-up in Arabic, French or Turkish
+ * gets its subject in that language (app/services/email_translations.py, drafts).
+ */
+export const VERIFICATION_SUBJECTS: ReadonlySet<string> = new Set([
+  VERIFICATION_SUBJECT,
+  "تأكيد عنوان بريدك الإلكتروني على Wasla",
+  "Vérifiez votre adresse e-mail pour Wasla",
+  "Wasla için e-posta adresinizi doğrulayın",
+]);
 
 async function verificationMails(email: string) {
-  return (await mailbox.messagesTo(email)).filter(
-    (message) => message.subject === VERIFICATION_SUBJECT,
+  return (await mailbox.messagesTo(email)).filter((message) =>
+    VERIFICATION_SUBJECTS.has(message.subject),
   );
 }
 

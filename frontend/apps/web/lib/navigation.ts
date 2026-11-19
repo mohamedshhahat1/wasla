@@ -10,7 +10,9 @@ import {
   House,
   Inbox,
   RadioTower,
+  Settings,
   Target,
+  UsersRound,
   type LucideIcon,
 } from "lucide-react";
 
@@ -99,6 +101,28 @@ export const NAVIGATION: readonly NavEntry[] = [
     iconName: "BookOpenText",
     roles: ADMIN_ROLES,
     page: "app/(app)/knowledge/page.tsx",
+  },
+  {
+    // FE-7 (HM7-01): every member reads the team; the controls follow the API's rules.
+    key: "team",
+    route: "/team",
+    labelKey: "team",
+    icon: UsersRound,
+    iconName: "UsersRound",
+    roles: ALL_ROLES,
+    page: "app/(app)/team/page.tsx",
+  },
+  {
+    // The workspace's settings are an owner's or administrator's; the account page is in the
+    // account menu for everybody.
+    key: "settings",
+    route: "/settings/workspace",
+    match: "/settings",
+    labelKey: "settings",
+    icon: Settings,
+    iconName: "Settings",
+    roles: ADMIN_ROLES,
+    page: "app/(app)/settings/workspace/page.tsx",
   },
 ];
 

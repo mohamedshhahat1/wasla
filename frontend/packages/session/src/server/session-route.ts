@@ -183,6 +183,8 @@ export interface ApiCall {
   apiOrigin: string;
   /** The API path, e.g. /api/v1/auth/login. */
   path: string;
+  /** POST unless named (FE-7, SG-02: closing the account is DELETE /auth/me). */
+  method?: "POST" | "DELETE" | undefined;
   body?: Record<string, unknown> | undefined;
   bearer?: string | null | undefined;
   /** A Cookie header for the API (only the Google binding cookie, SR-07). */
@@ -212,7 +214,7 @@ export class UpstreamTimeout extends Error {
 }
 
 /**
- * One POST to the API, server to server, signed with the forward headers (FEB-01) so the API
+ * One call to the API (a POST unless `method` says DELETE), server to server, signed with the forward headers (FEB-01) so the API
  * counts the browser's address, with a new X-Request-ID and a 10 s timeout. Only `apiOrigin`
  * is ever called (SR-09).
  */
@@ -227,7 +229,7 @@ export async function callApi(call: ApiCall): Promise<ApiAnswer> {
     ...signForward({
       secret: call.secret,
       clientIp: call.clientIp,
-      method: "POST",
+      method: call.method ?? "POST",
       path: forwardPath(url),
       now: call.now,
     }),
@@ -240,7 +242,7 @@ export async function callApi(call: ApiCall): Promise<ApiAnswer> {
   const doFetch = call.fetch ?? globalThis.fetch;
   try {
     const init: RequestInit = {
-      method: "POST",
+      method: call.method ?? "POST",
       headers,
       signal: controller.signal,
       redirect: "manual",

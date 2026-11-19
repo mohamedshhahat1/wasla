@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import Settings
 from app.core.exceptions import (
@@ -141,6 +143,7 @@ class AuthService:
         workspace_slug: str,
         timezone: str,
         full_name: str | None = None,
+        locale: str | None = None,
     ) -> AuthenticatedSession:
         """Create an account atomically, translating only known uniqueness races.
 
@@ -158,6 +161,7 @@ class AuthService:
                     workspace_slug=workspace_slug,
                     timezone=timezone,
                     full_name=full_name,
+                    locale=locale,
                 )
         except ConflictError as error:
             if str(error) == EmailAlreadyRegisteredError.message:
@@ -197,12 +201,16 @@ class AuthService:
         workspace_slug: str,
         timezone: str,
         full_name: str | None,
+        locale: str | None,
     ) -> AuthenticatedSession:
         user = await self._users.create(
             email=email,
             full_name=full_name,
             hashed_password=hash_password(password),
         )
+        # The sign-up form's language (FEB-09), set before the verification
+        # code is queued below so the first message is already in it.
+        user.locale = locale
         tenant = await self._tenants.create(
             name=workspace_name, slug=workspace_slug, timezone=timezone
         )
@@ -344,6 +352,8 @@ class AuthService:
             user.hashed_password = hash_password(password)
 
         workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+        if workspace_slug is not None:
+            await self._remember_choice(user=user, workspace=workspace)
         AuditTrail(self._session).record(
             AuditAction.LOGIN_SUCCEEDED,
             actor=user,
@@ -454,6 +464,8 @@ class AuthService:
             raise PermissionDeniedError("This account has been disabled.")
 
         workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
+        if workspace_slug is not None:
+            await self._remember_choice(user=user, workspace=workspace)
         logger.info(
             "auth.federated_session_opened",
             extra={
@@ -677,6 +689,7 @@ class AuthService:
         workspace = await self._resolve_workspace(user=user, workspace_slug=workspace_slug)
         if workspace is None:
             raise TenantIsolationError()
+        await self._remember_choice(user=user, workspace=workspace)
         return WorkspaceAccess(
             access_token=self._access_token(user=user, workspace=workspace),
             expires_in=self._settings.access_token_ttl_seconds,
@@ -729,6 +742,20 @@ class AuthService:
         memberships = await self._memberships.list_for_user(user.id)
 
         if workspace_slug is None:
+            # The workspace this person last chose, while it is still active
+            # and their membership still stands (FEB-36, the owner's rule of
+            # 2026-11-17). Only active memberships are listed, so a withdrawn
+            # one cannot match; `is_active` refuses a suspended or closed one.
+            # Anything else falls through to the rule below, unchanged.
+            if user.last_workspace_id is not None:
+                last = next(
+                    (entry for entry in memberships if entry.tenant_id == user.last_workspace_id),
+                    None,
+                )
+                if last is not None:
+                    tenant = await self._tenants.get_by_id(last.tenant_id)
+                    if tenant is not None and tenant.is_active:
+                        return WorkspaceContext(membership=last, tenant=tenant)
             # Oldest membership first: the workspace they started with. Only
             # active memberships are listed, so a withdrawn one is never the
             # workspace a refresh without a slug lands in (MR-03).
@@ -776,6 +803,30 @@ class AuthService:
                 "This workspace is suspended.", error_code="workspace_suspended"
             )
         return WorkspaceContext(membership=requested, tenant=tenant)
+
+    async def _remember_choice(self, *, user: User, workspace: WorkspaceContext | None) -> None:
+        """Record the workspace this person just chose, if it changed (FEB-36).
+
+        Called only where the person named the workspace - a switch, or a
+        sign-in with a slug - never for one chosen for them. One conditional
+        UPDATE on the request's session, so a refused request writes nothing
+        and an unchanged choice writes nothing at all. Two tabs switching at
+        once: the last write wins, which is the last choice made.
+        """
+        if workspace is None or user.last_workspace_id == workspace.tenant.id:
+            return
+        await self._session.execute(
+            update(User)
+            .where(
+                User.id == user.id,
+                User.last_workspace_id.is_distinct_from(workspace.tenant.id),
+            )
+            .values(last_workspace_id=workspace.tenant.id)
+            .execution_options(synchronize_session=False)
+        )
+        # The in-memory row follows the column without becoming dirty, so the
+        # request's flush does not write it a second time.
+        set_committed_value(user, "last_workspace_id", workspace.tenant.id)
 
     def _access_token(self, *, user: User, workspace: WorkspaceContext | None) -> str:
         """The one place an access token is minted, for every path that mints one.

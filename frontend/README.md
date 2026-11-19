@@ -173,6 +173,20 @@ base, **Upload** a small `.txt` and watch it go Waiting → Indexing → Ready. 
 through the fake inbound webhook (`tests/e2e_stack/README.md`) and the inbox shows the scripted answer from the
 document. Take the profile down with `docker compose -f ../docker-compose.e2e.yml --profile e2e down -v`.
 
+## Team and settings (FE-7, ADR-201)
+
+`/team` and `/team/invitations`, `/settings/workspace`, `/settings/activity`, `/settings/workspace/close` and
+`/settings/account`. Every member reads the team; owners and administrators invite, remove and reinstate; the owner hands
+over ownership, changes the address and closes the workspace. Everybody has the account page.
+
+Locally on FE-0's e2e profile (test values only): sign up through the app, open **Team → Invitations** and invite an
+`@example.com` address in Arabic - the mailbox at `http://127.0.0.1:8025/messages?to=<address>` shows the invitation in
+Arabic (`dir="rtl"`). **Account settings → Language** writes the account and this device. **Connect Google** goes
+through the fake Google; to choose who the fake signs in, append `&email=<address>` to its authorize address, as the
+journeys do. Create two more workspaces, switch to the last one, sign out and sign in: it opens again; suspend it with
+the staff account and the oldest active one opens instead. Unit tests: `apps/web/test/fe7-rules.test.ts`; journeys:
+`e2e/tests/fe7-team-settings.spec.ts`.
+
 ## Changing the look
 
 The design language is [packages/ui/DESIGN.md](packages/ui/DESIGN.md): one blue family and white in three

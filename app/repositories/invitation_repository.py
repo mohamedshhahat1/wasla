@@ -65,6 +65,7 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
         token_hash: str,
         expires_at: datetime,
         invited_by_id: uuid.UUID | None = None,
+        locale: str | None = None,
     ) -> TenantInvitation:
         """Stage one pending invitation for an address.
 
@@ -73,7 +74,10 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
         """
         normalised = normalise_email(email)
         if await self.get_pending_for_email(normalised) is not None:
-            raise ConflictError("That address already has a pending invitation.")
+            raise ConflictError(
+                "That address already has a pending invitation.",
+                error_code="invitation_pending",
+            )
 
         invitation = TenantInvitation(
             # From the repository's fixed scope, never from request input.
@@ -83,6 +87,7 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
             status=InvitationStatus.PENDING,
             token_hash=token_hash,
             expires_at=expires_at,
+            locale=locale,
             invited_by_id=invited_by_id,
         )
         return self.add(invitation)

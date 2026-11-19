@@ -132,6 +132,19 @@ export {
   type ToolSwitchRowProps,
 } from "./composites/knowledge";
 export {
+  ActivityRow,
+  DangerZone,
+  InvitationRow,
+  MemberRow,
+  RoleBadge,
+  SettingsNav,
+  type ActivityRowProps,
+  type InvitationRowProps,
+  type MemberRowProps,
+  type RoleTone,
+  type SettingsNavItem,
+} from "./composites/team";
+export {
   SwitcherMenu,
   type SwitcherMenuProps,
   type SwitcherWorkspace,

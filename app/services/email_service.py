@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.crypto import CredentialCipher
+from app.core.locales import DEFAULT_LOCALE, SUPPORTED_LOCALES
 from app.core.logging import get_logger
 from app.db.models import Membership, MembershipStatus, TenantRole, User
 from app.db.models.email import OutboundEmail
@@ -41,6 +42,48 @@ SENSITIVE_EMAIL_TEMPLATES: Final = frozenset(
         EmailTemplate.EMAIL_VERIFICATION,
     }
 )
+
+
+# The language a queued message renders in, carried inside its context (sealed
+# with it for a credential-bearing template) and only when it is not English -
+# an English row is exactly what it was before languages existed (FEB-09).
+LOCALE_CONTEXT_KEY: Final = "_locale"
+
+# Templates whose language is chosen by whoever caused them, because their
+# recipient may have no account to read one from: the inviter picks the
+# invitation's (LC-03).
+CHOSEN_LOCALE_TEMPLATES: Final = frozenset({EmailTemplate.WORKSPACE_INVITATION})
+
+
+async def locale_for_recipient(
+    session: AsyncSession,
+    *,
+    template: EmailTemplate,
+    user_id: uuid.UUID | None,
+    chosen: str | None,
+) -> str:
+    """The one place an e-mail's language is decided (LC-03).
+
+    An invitation goes in the language its inviter chose; every other message
+    to a Wasla user goes in that user's own language; anything without one is
+    English. An unknown value can only come from a defect, and is refused
+    rather than quietly rendered as something else.
+    """
+    if template in CHOSEN_LOCALE_TEMPLATES:
+        locale = chosen or DEFAULT_LOCALE
+    elif user_id is None:
+        locale = DEFAULT_LOCALE
+    else:
+        user = await session.get(User, user_id)
+        locale = (user.locale if user is not None else None) or DEFAULT_LOCALE
+    if locale not in SUPPORTED_LOCALES:
+        raise ValueError(f"unsupported email locale: {locale!r}")
+    return locale
+
+
+def take_locale(context: dict[str, str]) -> str:
+    """Remove and return the language an opened context carries (English if none)."""
+    return context.pop(LOCALE_CONTEXT_KEY, DEFAULT_LOCALE)
 
 
 class EmailContextError(ValueError):
@@ -124,8 +167,12 @@ class EmailOutbox:
         context: Mapping[str, object] | None = None,
         tenant_id: uuid.UUID | None = None,
         user_id: uuid.UUID | None = None,
+        locale: str | None = None,
     ) -> OutboundEmail | None:
         """Queue one email, or nothing if it is already queued or email is off.
+
+        `locale` is read only for a template whose language its sender chooses
+        (an invitation); every other message follows `locale_for_recipient`.
 
         A disabled deployment is a deliberate no-op rather than a row that
         waits forever: enabling email later should start delivering *new*
@@ -158,16 +205,22 @@ class EmailOutbox:
             )
             return None
 
+        language = await locale_for_recipient(
+            self._session, template=template, user_id=user_id, chosen=locale
+        )
+        values: dict[str, object] = dict(context or {})
+        if language != DEFAULT_LOCALE:
+            values[LOCALE_CONTEXT_KEY] = language
         stored_context = seal_email_context(
             template=template,
-            context=context or {},
+            context=values,
             idempotency_key=idempotency_key,
             settings=self._settings,
         )
         row = await self._repository.enqueue(
             recipient=address,
             template=template.value,
-            subject=subject_for(template),
+            subject=subject_for(template, language),
             context=stored_context,
             idempotency_key=idempotency_key,
             available_at=datetime.now(UTC),

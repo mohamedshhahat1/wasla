@@ -27,11 +27,12 @@ function readOf<T>(query: { data: T | undefined; isError: boolean }): Read<T> {
   return query.data ?? null;
 }
 
-/** The steps that have a screen in FE-3 get a link; the others say they come later (SH-03). */
+/** The steps that have a screen get a link (FE-7 adds the team's, HM7-02); the others say they come later (SH-03). */
 const STEP_LINKS: Partial<Record<ChecklistStep, { href: string; action: string }>> = {
   channel: { href: "/channels/connect/whatsapp", action: "channelAction" },
   agent: { href: "/ai/agents", action: "agentAction" },
   knowledge: { href: "/knowledge", action: "knowledgeAction" },
+  team: { href: "/team/invitations", action: "teamAction" },
 };
 
 /**

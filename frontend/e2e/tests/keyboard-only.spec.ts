@@ -162,5 +162,61 @@ for (const locale of ["en", "ar"] as const) {
     await tabTo(page, { name: label(locale, "app.customers.contact.back") });
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(`${WEB}/contacts`);
+
+    // FE-7 (KY7-02): Team → invitations → invite with Enter → revoke behind
+    // its dialog (Escape returns focus to the button, then confirm).
+    // (Team itself sits behind the phone's menu button: opened by address, as the inbox is above.)
+    await page.goto(`${WEB}/team`);
+    await expect(page.locator("[data-members-list]")).toBeVisible({ timeout: 30_000 });
+    await tabTo(page, { name: label(locale, "app.team.tabs.invitations") });
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`${WEB}/team/invitations`);
+    await tabTo(page, { field: "invite-email" });
+    await page.keyboard.type(`kb.${locale}.${Date.now().toString(36)}@example.com`);
+    const invited = page.waitForResponse(
+      (r) => r.request().method() === "POST" && /\/api\/v1\/invitations$/.test(r.url()),
+    );
+    await page.keyboard.press("Enter");
+    expect((await invited).status()).toBe(201);
+    await tabTo(page, { action: "revoke" });
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator('[data-action="revoke"]').first()).toBeFocused();
+    await page.keyboard.press("Enter");
+    await tabTo(page, { action: "confirm" });
+    const revoked = page.waitForResponse(
+      (r) => r.request().method() === "DELETE" && /\/api\/v1\/invitations\//.test(r.url()),
+    );
+    await page.keyboard.press("Enter");
+    expect((await revoked).status()).toBe(200);
+
+    // Settings: the name changes, the save bar appears, Save with Enter; focus is never lost.
+    await page.goto(`${WEB}/settings/workspace`);
+    await tabTo(page, { field: "workspace-name" });
+    await page.keyboard.press("End");
+    await page.keyboard.type(" K");
+    const patched = page.waitForResponse(
+      (r) => r.request().method() === "PATCH" && /\/api\/v1\/workspace$/.test(r.url()),
+    );
+    await tabTo(page, { action: "save-workspace" });
+    await page.keyboard.press("Enter");
+    expect((await patched).status()).toBe(200);
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement !== document.body))
+      .toBe(true);
+
+    // Account settings: the language's radio group by arrows (cancelled - nothing saved), then the
+    // close-account dialog opened and dismissed with Escape, focus back on its button.
+    await page.goto(`${WEB}/settings/account`);
+    await tabTo(page, { role: "radio" });
+    await page.keyboard.press("ArrowDown");
+    await tabTo(page, { action: "close-account" });
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator('[data-action="close-account"]')).toBeFocused();
   });
 }

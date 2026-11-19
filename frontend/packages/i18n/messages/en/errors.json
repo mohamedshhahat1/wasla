@@ -73,5 +73,21 @@
   "stale_lead_status": "Someone else changed this lead's status. It has been reloaded.",
   "open_lead_exists": "This customer already has an open lead.",
   "connection_lost": "The connection was lost. Check it and try again.",
-  "fallback": "Something went wrong. Try again."
+  "fallback": "Something went wrong. Try again.",
+  "invitation_pending": "That address already has a pending invitation.",
+  "already_member": "That person is already a member of this workspace.",
+  "invitation_not_pending": "This invitation is no longer open.",
+  "workspace_slug_taken": "That address is taken. Choose another.",
+  "current_password_invalid": "The current password is incorrect.",
+  "password_unchanged": "The new password must differ from the current one.",
+  "google_already_connected": "A Google account is already connected.",
+  "google_identity_in_use": "That Google account is connected to another Wasla account.",
+  "google_unlink_requires_password": "Set a password before you disconnect Google.",
+  "ownership_transfer_invalid": "Ownership can only go to another active member who can sign in.",
+  "workspace_confirmation_invalid": "Type the workspace's address exactly as shown.",
+  "reauthentication_required": "Confirm it is you with your password or with Google.",
+  "reauthentication_unavailable": "Google cannot confirm it is you for this account.",
+  "workspace_owner_required": "Only the owner can do this.",
+  "account_owns_workspaces": "Hand over or close the workspaces you own first.",
+  "last_workspace_owner": "You are the only owner. Make someone else the owner first."
 }

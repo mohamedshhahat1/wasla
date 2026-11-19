@@ -8502,3 +8502,56 @@ editor library.
 
 **Consequences.** FE-7 reuses the read-only view pattern and the role rule; FE-8 owns the billing link a
 `plan_limit_exceeded` will point to. The ar / fr / tr texts are drafts (FEQ-08).
+
+## ADR-201 — Team And Settings (FE-7): The Account's Language And E-mails In It, The Last-Used Workspace, Google Relays For Linking And Re-authentication, Every Service's Logs Bounded, A Dockerfile That Reuses Its Dependency Layer
+
+**Status.** Accepted, 2026-11-19 (FE-7; report FE7_TEAM_SETTINGS.md). FRONTEND_PLAN.md section 29's FE-7: APP-TEAM-01/02,
+APP-SET-01..03, APP-ACC-01 with FEB-09; the owner's FEB-36 improvement (2026-11-17), the owner's Dockerfile item
+(2026-11-19), FEB-41, FEB-06's codes for these screens, FEF-43 looked into. No ADR number is kept for the postponed
+"Tend" restyle.
+
+**Context.** The team, settings and account screens needed the account's language (FEB-09: stored nowhere, e-mails English
+only), a way to connect Google and to re-authenticate with Google under S-2 (the API binds both flows to the browser with a
+cookie the browser never sends to the API directly), errors a screen can tell apart, and a sign-in that returns a person to
+where they were. The backend image reinstalled ~458 MB of locked dependencies on every code change because `COPY app` came
+before the install. Only nginx's output was bounded in the example compose file.
+
+**Decision.**
+
+- Migration 0141 adds `users.locale` and `tenant_invitations.locale` (en / ar / fr / tr or NULL, checked) and
+  `users.last_workspace_id` (FK, ON DELETE SET NULL). No backfill.
+- `GET /auth/me` reads the language; `PATCH /auth/me` writes only it (extra fields refused; not audited - a display
+  language is not a security event). Sign-up and invitations carry an optional `locale`. Every e-mail to a Wasla user is
+  rendered in the recipient's language and an invitation in the inviter's choice, chosen in one function
+  (`locale_for_recipient`); English is byte-identical for all 16 templates; ar / fr / tr are unreviewed drafts (FEQ-08);
+  the rendered language rides in the outbox context only when it is not English (no new column).
+- A sign-in that names no workspace opens the last workspace the person chose (a switch, or a sign-in naming one) while it
+  is active and their membership stands, else the oldest active one, never a suspended or closed one. Recorded with one
+  conditional UPDATE only when it changes; never shown to anybody.
+- Nine specific codes, same status and sentence: invitation_pending, already_member, invitation_not_pending,
+  workspace_slug_taken, current_password_invalid, password_unchanged, google_already_connected, google_identity_in_use,
+  google_unlink_requires_password.
+- The session routes gain `/session/google/link/*`, `/session/google/reauth/*` and `/session/account/close`, built like
+  FE-2's sign-in relay. The re-authentication token stays in a sealed, path-scoped cookie and is spent once; page scripts
+  never see it. A one-word tab flag ("link" / "reauth") tells the shared callback page which flow it finishes.
+- A 401 `current_password_invalid` is a form's refusal, not a session's: the session no longer refreshes and signs out on
+  it (FEF-45).
+- A /auth/me answer is filed only under the session state it was asked for; a stale one is dropped (FEF-43's cause found
+  by reading: a withdrawn member's stale failure overwrote the new state's profile and PageGate read "none" as unverified).
+- The app follows the account's language on every device once per tab, and writes the language in use into an account
+  without one (OQ-2). The account page writes both the account and the device cookie.
+- Every service of docker-compose.prod.yml shares one `x-logging` block (json-file, 10m × 5); a test fails for any
+  service without a bound.
+- The Dockerfiles install the hashed locks before copying the code and install the package with `--no-deps` after it;
+  the installed distributions, flags and hash pinning are unchanged. Pruning Docker's cache is the owner's.
+- The owner's testing rule (2026-11-19): every ci.yml and frontend.yml job runs on this machine before the push, the
+  nightly and the clock-shifted lanes excepted; GitHub's runs still decide.
+
+**Rejected.** A role change between member and administrator (no route; FEB-42); FEB-17; the workspace's default locale,
+currency and country (no screen reads them); a remote avatar; a resend-invitation route; a client-side copy of the
+plan's "30 days" retention (the code keeps a tombstone and has no scheduled purge); GET workspace/local-time for "now"
+(it resolves a wall time in the saved zone - the page computes the chosen zone's time with Intl); a BuildKit cache mount.
+
+**Consequences.** FE-8 owns the billing link a seats refusal will point to; FE-9 can reuse the re-authentication relay for
+staff. Invitations do not say who sent them or when (FEB-44); /auth/me does not say whether the account has a password
+or Google connected (FEB-45); the e2e image and ci.yml install the dev tools unhashed (FEB-43).

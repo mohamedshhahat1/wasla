@@ -73,5 +73,21 @@
   "stale_lead_status": "Quelqu'un d'autre a changé le statut de ce prospect. Il a été rechargé.",
   "open_lead_exists": "Ce client a déjà un prospect ouvert.",
   "connection_lost": "La connexion a été perdue. Vérifiez-la et réessayez.",
-  "fallback": "Un problème est survenu. Réessayez."
+  "fallback": "Un problème est survenu. Réessayez.",
+  "invitation_pending": "Cette adresse a déjà une invitation en attente.",
+  "already_member": "Cette personne est déjà membre de cet espace de travail.",
+  "invitation_not_pending": "Cette invitation n'est plus ouverte.",
+  "workspace_slug_taken": "Cette adresse est déjà prise. Choisissez-en une autre.",
+  "current_password_invalid": "Le mot de passe actuel est incorrect.",
+  "password_unchanged": "Le nouveau mot de passe doit être différent de l'actuel.",
+  "google_already_connected": "Un compte Google est déjà connecté.",
+  "google_identity_in_use": "Ce compte Google est connecté à un autre compte Wasla.",
+  "google_unlink_requires_password": "Définissez un mot de passe avant de déconnecter Google.",
+  "ownership_transfer_invalid": "La propriété ne peut être transmise qu'à un autre membre actif qui peut se connecter.",
+  "workspace_confirmation_invalid": "Saisissez l'adresse de l'espace de travail exactement comme affichée.",
+  "reauthentication_required": "Confirmez que c'est vous avec votre mot de passe ou avec Google.",
+  "reauthentication_unavailable": "Google ne peut pas confirmer votre identité pour ce compte.",
+  "workspace_owner_required": "Seul le propriétaire peut faire cela.",
+  "account_owns_workspaces": "Transmettez ou fermez d'abord les espaces de travail que vous possédez.",
+  "last_workspace_owner": "Vous êtes le seul propriétaire. Nommez d'abord quelqu'un d'autre."
 }

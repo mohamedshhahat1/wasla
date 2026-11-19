@@ -642,7 +642,10 @@ class GoogleAuthService:
                 user=user,
                 reason="already_connected",
             )
-            raise ConflictError("This account is already connected to a Google account.")
+            raise ConflictError(
+                "This account is already connected to a Google account.",
+                error_code="google_already_connected",
+            )
 
         try:
             # No `last_login_at`: connecting an account is not signing in with
@@ -696,8 +699,14 @@ class GoogleAuthService:
             },
         )
         if same:
-            raise ConflictError("This Google account is already connected to your account.")
-        raise ConflictError("This Google account is already connected to another account.")
+            raise ConflictError(
+                "This Google account is already connected to your account.",
+                error_code="google_already_connected",
+            )
+        raise ConflictError(
+            "This Google account is already connected to another account.",
+            error_code="google_identity_in_use",
+        )
 
     def _adopt_verification(self, *, user: User, claims: GoogleIdentityClaims) -> None:
         """Record Wasla email verification from a Google link, when it applies.
@@ -741,7 +750,8 @@ class GoogleAuthService:
             if remaining <= 1:
                 raise PermissionDeniedError(
                     "Set a password before disconnecting Google, "
-                    "or you will not be able to sign in."
+                    "or you will not be able to sign in.",
+                    error_code="google_unlink_requires_password",
                 )
 
         # One conditional DELETE. Two concurrent requests cannot both believe

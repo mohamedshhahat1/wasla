@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.locales import MAX_LOCALE_LENGTH, locale_check_sql
 from app.db.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.models.enums import (
     INVITATION_STATUS_TYPE,
@@ -32,6 +33,7 @@ class TenantInvitation(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, B
         UniqueConstraint("token_hash", name="uq_tenant_invitations_token_hash"),
         Index("ix_tenant_invitations_tenant_id", "tenant_id"),
         Index("ix_tenant_invitations_tenant_id_email", "tenant_id", "email"),
+        CheckConstraint(locale_check_sql("locale"), name="locale_supported"),
     )
 
     email: Mapped[str] = mapped_column(String(320), nullable=False)
@@ -48,6 +50,11 @@ class TenantInvitation(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, B
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    # The language the inviter chose for the e-mail (FEB-09). The invitee may
+    # have no account, so it cannot come from one; NULL renders it in English.
+    locale: Mapped[str | None] = mapped_column(
+        String(MAX_LOCALE_LENGTH), nullable=True, default=None
     )
 
     def is_open(self, *, now: datetime) -> bool:

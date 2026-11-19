@@ -288,6 +288,29 @@ loops. 0 s under reduced motion.
 | emil-design-eng | no looping "processing" cue, the switch and badge changes on FE-1's tokens, nothing animates under reduce |
 | impeccable      | the audit of the new screens and of FE-5's three leftovers (FE6_AI_KNOWLEDGE.md)                          |
 
+## Team, settings and the account (FE-7, ADR-201)
+
+**Members and invitations** are rows (MemberRow, InvitationRow) on white: the name and the address isolated in `<bdi>`,
+the role as a RoleBadge (the owner alone in the accent role, with its shield icon; administrator on `secondary-subtle`;
+member outlined), then "Joined 3 days ago" with the exact moment for a screen reader. A row draws only the actions the
+viewer may take - absent, never disabled: an administrator never sees Remove on an owner, nobody sees it on the last
+owner, and the last owner's own row says what to do instead of offering Leave. Every action that changes who has access
+opens a dialog that says what happens; nothing is optimistic. When the pressed control goes, the page heading takes
+the focus.
+
+**The settings area** has its own navigation (SettingsNav): a list beside the page from `md`, a wrapped row of links on a
+phone - always links, never a select. Workspace, Activity, Close workspace (the owner only) and Account. The workspace
+form keeps one save bar at its foot: Save is the one primary and says it has nothing to do (`aria-disabled`) until a
+field changes; Discard and "You have unsaved changes" appear with the change, and the bar sticks to the foot only then.
+
+**The activity log** is a list of ActivityRows: who (a name, "Wasla", "Wasla support", "The AI agent", "A former member"),
+what in words, on what - an action the catalogue has no words for is its code in a `code` element, as text. Before →
+after only for role, name, address and time zone. "Load more" pages by the API's own bound and never animates.
+
+**Danger zones** (DangerZone) are a white section with the `danger` border: a heading, what the action does as a short
+list in the code's terms, and one `danger` button. Closing a workspace asks for its address typed exactly; closing an
+account asks for one proof - the password or Google - never both, and lists the workspaces to hand over first.
+
 ## Right to left
 
 Logical properties only (the lint forbids physical sides). The brand panel sits at the inline end

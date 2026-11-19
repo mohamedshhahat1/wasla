@@ -379,7 +379,10 @@ class WorkspaceService:
             if normalised != tenant.slug:
                 existing = await self._tenants.get_by_slug(normalised)
                 if existing is not None:
-                    raise ConflictError("That workspace address is already in use.")
+                    raise ConflictError(
+                        "That workspace address is already in use.",
+                        error_code="workspace_slug_taken",
+                    )
                 changed = {"previous_slug": tenant.slug, "slug": normalised}
                 tenant.slug = normalised
 

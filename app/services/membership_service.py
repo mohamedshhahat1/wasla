@@ -224,7 +224,9 @@ class MembershipService:
         if membership is None:
             raise ValidationError("That person has never been a member of this workspace.")
         if membership.is_active:
-            raise ConflictError("That person is already a member of this workspace.")
+            raise ConflictError(
+                "That person is already a member of this workspace.", error_code="already_member"
+            )
 
         membership.status = MembershipStatus.ACTIVE
         membership.role = role

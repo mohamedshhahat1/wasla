@@ -73,5 +73,21 @@
   "stale_lead_status": "Başka biri bu potansiyel müşterinin durumunu değiştirdi. Yeniden yüklendi.",
   "open_lead_exists": "Bu müşterinin zaten açık bir potansiyel müşterisi var.",
   "connection_lost": "Bağlantı kesildi. Kontrol edip tekrar deneyin.",
-  "fallback": "Bir sorun oluştu. Tekrar deneyin."
+  "fallback": "Bir sorun oluştu. Tekrar deneyin.",
+  "invitation_pending": "Bu adrese ait bekleyen bir davet zaten var.",
+  "already_member": "Bu kişi zaten bu çalışma alanının üyesi.",
+  "invitation_not_pending": "Bu davet artık açık değil.",
+  "workspace_slug_taken": "Bu adres alınmış. Başka bir tane seçin.",
+  "current_password_invalid": "Mevcut parola yanlış.",
+  "password_unchanged": "Yeni parola mevcut paroladan farklı olmalı.",
+  "google_already_connected": "Zaten bağlı bir Google hesabı var.",
+  "google_identity_in_use": "Bu Google hesabı başka bir Wasla hesabına bağlı.",
+  "google_unlink_requires_password": "Google bağlantısını kesmeden önce bir parola belirleyin.",
+  "ownership_transfer_invalid": "Sahiplik yalnızca giriş yapabilen başka bir aktif üyeye devredilebilir.",
+  "workspace_confirmation_invalid": "Çalışma alanının adresini gösterildiği gibi tam olarak yazın.",
+  "reauthentication_required": "Parolanızla veya Google ile siz olduğunuzu doğrulayın.",
+  "reauthentication_unavailable": "Google bu hesap için kimliğinizi doğrulayamıyor.",
+  "workspace_owner_required": "Bunu yalnızca sahip yapabilir.",
+  "account_owns_workspaces": "Önce sahibi olduğunuz çalışma alanlarını devredin veya kapatın.",
+  "last_workspace_owner": "Tek sahip sizsiniz. Önce başka birini sahip yapın."
 }

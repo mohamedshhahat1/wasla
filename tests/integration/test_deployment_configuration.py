@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from app.core.config import Settings
 
@@ -736,3 +737,42 @@ def test_the_deploy_guide_lists_the_log_retention_before_the_first_deploy() -> N
     assert section is not None, "docs/DEPLOYMENT.md has no 'Before the first deploy' list"
     assert "- [ ] **nginx's log retention**" in section.group(1)
     assert "- [ ] **nginx's log readers restricted**" in section.group(1)
+
+
+# The bound every service's own output keeps on the host (FEB-41, ADR-201): the
+# one nginx has carried since FE-6, now shared - about 50 MB per service.
+SERVICE_LOG_MAX_SIZE_MB = 10
+SERVICE_LOG_MAX_FILES = 5
+
+
+def _rendered_services() -> dict[str, dict[str, object]]:
+    rendered = yaml.safe_load(PROD_COMPOSE.read_text(encoding="utf-8"))
+    services: dict[str, dict[str, object]] = rendered["services"]
+    return services
+
+
+def test_every_service_keeps_its_output_bounded() -> None:
+    """SL-T1: every service, present or added later, logs through a bounded json-file."""
+    unbounded = []
+    for name, service in _rendered_services().items():
+        logging = service.get("logging")
+        if not isinstance(logging, dict) or logging.get("driver") != "json-file":
+            unbounded.append(name)
+            continue
+        options = logging.get("options") or {}
+        assert isinstance(options, dict), name
+        size, files = options.get("max-size"), options.get("max-file")
+        if not isinstance(size, str) or not isinstance(files, str):
+            unbounded.append(name)
+            continue
+        assert 0 < _size_in_mb(size) <= SERVICE_LOG_MAX_SIZE_MB, name
+        assert 1 <= int(files) <= SERVICE_LOG_MAX_FILES, name
+    assert unbounded == [], f"services whose output Docker keeps without a bound: {unbounded}"
+
+
+def test_the_shared_bound_is_nginx_s_own() -> None:
+    """SL-T2: one bound for every service, the values nginx already carried."""
+    rendered = yaml.safe_load(PROD_COMPOSE.read_text(encoding="utf-8"))
+    shared = rendered["x-logging"]
+    assert shared == {"driver": "json-file", "options": {"max-size": "10m", "max-file": "5"}}
+    assert rendered["services"]["nginx"]["logging"] == shared
