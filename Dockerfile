@@ -14,10 +14,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-COPY pyproject.toml README.md requirements.lock requirements-build.lock ./
+# The locked dependencies first, from the lock files alone, so their layer is
+# reused when only the code changes; then the code, and the package without them.
+COPY requirements.lock requirements-build.lock ./
+RUN pip install --require-hashes -r requirements.lock -r requirements-build.lock
+COPY pyproject.toml README.md ./
 COPY app ./app
-RUN pip install --require-hashes -r requirements.lock -r requirements-build.lock \
- && pip install --no-deps --no-build-isolation .
+RUN pip install --no-deps --no-build-isolation .
 
 
 FROM base AS runtime
