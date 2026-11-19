@@ -1,7 +1,38 @@
-# CI sharding: ci.yml from ~55-63 minutes to ~12
+# CI sharding: ci.yml from 55-63 minutes to about 14
 
 Branch `ci-shard-20261117`, cut from canonical `worktree-billing-google-auth` at
-`baa0664`. Local commits only; nothing pushed, `main` untouched, no PR.
+`baa0664`. The branch is pushed (at the owner's go-ahead). It is not merged,
+`main` is untouched and there is no PR.
+
+## Measured on CI (two green runs)
+
+| Run | Commit | Wall time | Slowest job | Coverage TOTAL (stmts / miss) | Completeness |
+| --- | --- | --- | --- | --- | --- |
+| 44146445974 (before, unsharded) | `baa0664` | 55.1 min | Tests and migrations, 55.1 min | 42054 / 3484 / 92% | n/a |
+| 44515075702 | `a390723` | **14.2 min** | model shard 2/7, 13.3 min | 42054 / 3501 / 92% | 8338 + 4292, each exactly once |
+| 44517635295 (rebalanced) | `383623a` | **14.7 min** | model shard 3/7, 13.5 min | 42054 / **3486** / 92% | 8338 + 4292, each exactly once |
+
+The measured wall time is 14-15 min, against the 11-12 min estimated below,
+for two reasons:
+
+1. **Session overhead.** Each shard pays about 64 s of session start-up (schema
+   build, imports, session fixtures) that a single run pays once. The model
+   tests total 3,640-4,237 s when sharded, against 3,195 s unsharded.
+2. **Runner speed variance.** After `383623a` rebalanced on the first run's
+   exact per-test JUnit times, every model shard was planned at 520 s. They
+   ran at 0.88x-1.36x that, spread evenly across each shard's files, which is
+   runner speed rather than any one test. Balance is no longer what sets the
+   wall time.
+
+Coverage: the 17-line gap in the first run went in both directions across 25
+files, in race, retry and conflict branches. The rebalanced run came within 2
+lines of the baseline. That is run-to-run noise, not lost coverage; the
+statement count is identical.
+
+Running more shards would cut further, for about 1.1 min of fixed overhead per
+extra job. For example, 9 model shards would bring the slowest job to about
+11 min, with 19 jobs at peak against the 20-job account cap. This was left at
+7/5 for the owner to decide.
 
 ## What changed
 
