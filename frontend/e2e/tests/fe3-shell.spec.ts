@@ -130,9 +130,10 @@ for (const locale of ["en", "ar"] as Locale[]) {
       const nav = page
         .getByRole("navigation", { name: label(locale, "app.navLabel") })
         .filter({ visible: true });
-      // FE-4 registers the inbox, FE-5 Customers and Leads, FE-6 the AI agent and Knowledge (an
-      // owner's): Home, Inbox, Customers, Leads, Channels, AI agent, Knowledge - only what exists.
-      await expect(nav.getByRole("link")).toHaveCount(7);
+      // FE-4 registers the inbox, FE-5 Customers and Leads, FE-6 the AI agent and Knowledge, FE-7
+      // Team and Settings (an owner's): Home, Inbox, Customers, Leads, Channels, AI agent,
+      // Knowledge, Team, Settings - only what exists.
+      await expect(nav.getByRole("link")).toHaveCount(9);
       for (const key of ["app.nav.contacts", "app.nav.leads"]) {
         await expect(nav.getByRole("link", { name: label(locale, key), exact: true })).toHaveCount(
           1,
