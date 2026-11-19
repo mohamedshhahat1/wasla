@@ -67,6 +67,18 @@ type Listener = () => void;
 
 const realDelay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** 401 codes that refuse a form's proof, not the session (FEF-45): never refreshed or signed out. */
+export const FORM_REFUSAL_CODES: ReadonlySet<string> = new Set(["current_password_invalid"]);
+
+async function notASessionRefusal(response: Response): Promise<boolean> {
+  const body: unknown = await response
+    .clone()
+    .json()
+    .catch(() => null);
+  const code = (body as { error?: { code?: unknown } } | null)?.error?.code;
+  return typeof code === "string" && FORM_REFUSAL_CODES.has(code);
+}
+
 /** How long a tab that just opened waits for another tab's token before it refreshes (JT-03). */
 export const TOKEN_HANDOFF_WAIT_MS = 300;
 
@@ -331,11 +343,16 @@ export class WebSession {
     return parsed as T;
   }
 
-  /** SB-01: a 401 refreshes once under the lock and retries the request once; a second 401 signs out. */
+  /**
+   * SB-01: a 401 refreshes once under the lock and retries the request once; a second 401 signs out.
+   * FEF-45: a 401 that says the *password* was wrong (`current_password_invalid`, FE-7's account
+   * page) is about the form, not the session - answered as it is, never refreshed or signed out.
+   */
   async #authFetch(request: Request): Promise<Response> {
     const retry = request.clone();
     const response = await this.#fetch(request);
     if (response.status !== 401 || !request.headers.has("Authorization")) return response;
+    if (await notASessionRefusal(response)) return response;
     let token: string;
     try {
       token = await this.refresh();
