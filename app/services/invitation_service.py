@@ -120,7 +120,10 @@ class InvitationService:
         if existing is not None:
             memberships = MembershipRepository(self._session, tenant_id=tenant_id)
             if await memberships.get_for_user(existing.id) is not None:
-                raise ConflictError("That person is already a member of this workspace.")
+                raise ConflictError(
+                    "That person is already a member of this workspace.",
+                    error_code="already_member",
+                )
 
         raw_token, token_hash = generate_invitation_token()
         invitations = InvitationRepository(self._session, tenant_id=tenant_id)
@@ -203,7 +206,9 @@ class InvitationService:
         await invitations.require_by_id(invitation_id)
         invitation = await invitations.revoke_pending(invitation_id)
         if invitation is None:
-            raise ConflictError("That invitation is no longer pending.")
+            raise ConflictError(
+                "That invitation is no longer pending.", error_code="invitation_not_pending"
+            )
         await self._session.flush()
 
         # Written only here, past the conditional UPDATE that actually changed

@@ -423,7 +423,9 @@ class AccountService:
             # caller holding a session but not the password is precisely the
             # caller this is defending against.
             observe_lifecycle_event(operation="account_delete", outcome="conflict")
-            raise AuthenticationError("The current password is incorrect.")
+            raise AuthenticationError(
+                "The current password is incorrect.", error_code="current_password_invalid"
+            )
 
     async def _sole_ownerships(self, user: User) -> list[Tenant]:
         """Live workspaces this account is the last active owner of.
@@ -764,11 +766,16 @@ class AccountService:
             # Deliberately the same shape as a failed login. A caller who has an
             # access token but not the password is exactly the caller this is
             # defending against.
-            raise AuthenticationError("The current password is incorrect.")
+            raise AuthenticationError(
+                "The current password is incorrect.", error_code="current_password_invalid"
+            )
 
         validate_password_strength(new_password)
         if verify_password(password=new_password, password_hash=user.hashed_password):
-            raise ValidationError("The new password must differ from the current one.")
+            raise ValidationError(
+                "The new password must differ from the current one.",
+                error_code="password_unchanged",
+            )
 
         user.hashed_password = hash_password(new_password)
         version = self._bump(user)

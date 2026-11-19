@@ -930,10 +930,45 @@ async def test_a_google_account_already_connected_elsewhere_is_refused(
     )
 
     assert response.status_code == 409
+    # Its own code (FEB-06, FE-7): the account page tells it apart from a
+    # retryable flow conflict, and it names nobody.
+    assert response.json()["error"]["code"] == "google_identity_in_use"
+    assert "owner@example.com" not in response.text
     identities = await _identities(db_session)
     assert len(identities) == 1
     assert identities[0].user_id == owner.id
     assert await _audit(db_session, AuditAction.GOOGLE_IDENTITY_LINK_FAILED)
+
+
+async def test_linking_a_second_google_account_is_refused_by_its_code(
+    http: AsyncClient,
+    exchange: _Exchange,
+    google_settings: Settings,
+    db_session: AsyncSession,
+) -> None:
+    """FEB-06 (FE-7): an account already connected says so with its own code."""
+    user = await _account(db_session, email="linked@example.com")
+    db_session.add(
+        FederatedIdentity(
+            user_id=user.id,
+            provider=IdentityProvider.GOOGLE,
+            provider_subject=SUBJECT,
+        )
+    )
+    await db_session.flush()
+
+    headers = _bearer(user, google_settings)
+    state, nonce = await _start(http, "/auth/identities/google/authorize", headers=headers)
+    exchange.id_token = _id_token(nonce=nonce)
+    response = await http.post(
+        f"{API}/auth/identities/google/link",
+        json={"code": "c", "state": state},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "google_already_connected"
+    assert len(await _identities(db_session)) == 1
 
 
 # --- DELETE /auth/identities/google ---------------------------------------
@@ -993,6 +1028,7 @@ async def test_unlinking_the_last_way_in_is_refused(
     )
 
     assert response.status_code == 403
+    assert response.json()["error"]["code"] == "google_unlink_requires_password"
     assert len(await _identities(db_session)) == 1
 
 

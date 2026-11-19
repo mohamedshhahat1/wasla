@@ -74,7 +74,10 @@ class InvitationRepository(TenantScopedRepository[TenantInvitation]):
         """
         normalised = normalise_email(email)
         if await self.get_pending_for_email(normalised) is not None:
-            raise ConflictError("That address already has a pending invitation.")
+            raise ConflictError(
+                "That address already has a pending invitation.",
+                error_code="invitation_pending",
+            )
 
         invitation = TenantInvitation(
             # From the repository's fixed scope, never from request input.
