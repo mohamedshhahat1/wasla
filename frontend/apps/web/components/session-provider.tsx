@@ -22,6 +22,7 @@ import { Toast } from "@wasla/ui";
 import { publicEnv } from "../lib/env";
 import { clearDrafts } from "../lib/inbox/composer";
 import { draftStorage } from "../lib/inbox/draft-storage";
+import { answerIsCurrent } from "../lib/session/profile-answer";
 import { sessionTransports } from "../lib/session/transports";
 import { WebSession, type SessionStatus } from "../lib/session/web-session";
 
@@ -95,10 +96,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
     try {
       const me = await unwrap(session.api.GET("/api/v1/auth/me"));
-      setLoaded({ key: keyRef.current, profile: me });
+      // FEF-43: an answer for an earlier session state is dropped; that state's successor
+      // loads its own profile.
+      if (answerIsCurrent(key, keyRef.current)) setLoaded({ key, profile: me });
       return me;
     } catch {
-      setLoaded({ key: keyRef.current, profile: null });
+      if (answerIsCurrent(key, keyRef.current)) setLoaded({ key, profile: null });
       return null;
     }
   }, [session]);
