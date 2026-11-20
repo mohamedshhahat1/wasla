@@ -122,3 +122,53 @@ FEB-11 not built. Nothing of the Tend restyle. ADR-201 in DECISIONS.md.
 - Free Docker's disk by hand: `docker builder prune -f --filter until=168h` (or `-a -f`), and look at the unused volumes.
 - Review the ar / fr / tr screen texts and e-mails (FEQ-08).
 - Decide FEB-42 .. FEB-45; the next stage (FE-8, the Embedded Signup backend stage, or FEB-11).
+
+## Addendum 1 — GitHub runs, the two CI fixes, and the previews
+
+**Verdict: FE-7 MERGED AND PUSHED, CI GREEN. PREVIEWS UPDATED.**
+
+| Push | Head | ci.yml | frontend.yml |
+| --- | --- | --- | --- |
+| 1 (merge 54937c8 + report) | 648b996 | 44638302896 — green, all 19 jobs, 13.4 min | 44638302967 — red: Firefox phone 3 (FE-2 J6, FE-5 CJ-05..08, FE-6 AJ-07; all green locally in Firefox phone), WebKit 6 (TJ-03, TJ-06 ×2, KY-02 en sent to /verify mid-navigation; KY-03 phone ×2, the save bar) |
+| 2 (merge of 3ac448d, 8c02bfb) | 7120744 | 44648984526 — green | 44648984555 — red: Chromium phone JR-04 (network never idle), Firefox desktop AJ-02/03 (ar) and AJ-07 (green 6/6 locally), WebKit phone KY-03 en (the save bar) |
+| 3 (merge of f1ce4bb) | 8f2996b | 44654262285 — green | 44654262240 — **green, all 8 jobs** |
+
+Fixes, each its own commit on fe7-team-settings-20261119:
+
+- **3ac448d** (FEF-43, the broader half): WebKit aborts a page's fetches as it navigates and rejects them as
+  `network_error`; the session filed that as "no profile", read as an unverified account → /verify mid-navigation. A
+  failure that never reached the API is no longer filed. With 10bf99d (stale answers dropped), **FEF-43 CLOSED**: the
+  /verify jumps are gone in every project of the last two runs.
+- **8c02bfb, f1ce4bb** (KY7-03): the workspace save bar covered the focused field on a WebKit phone; it is sticky only
+  from the sm width now.
+
+The JR-04 / AJ-* reds of push 2 did not reproduce locally and were green in push 3 — recorded as runner-only
+intermittents in earlier stages' specs (no change made for them). The owner chose to push before the local full runs
+finished (23:29Z) and later to stop the local backend lanes; FULL-B's 12 shards and FULL-F were therefore not completed
+on this machine, and GitHub's runs above are the full check.
+
+### Part C — previews
+
+Account "Mohamedshhahat1@gmail.com's Account", 1cc89863… (= FE-6's). Sources since FE-6's deploy (5267367): web 45 app
+files; console and marketing no app file but `@wasla/ui` and `@wasla/i18n` changed → all three rebuilt with
+`build-workers-linux.mjs --env preview` (three workers.dev origins, `PUBLIC_PREVIEW_NO_API=true`; the first attempt lacked
+the origins, the second lost Docker's container connection, the third built in 5 min). `workers:smoke`: every page 200,
+session routes GET 405 / POST 503, console 404 for an unknown page. Every wrangler.jsonc unchanged; nothing on
+iwasla.tech; no secret; no account setting.
+
+| Worker | Previous (FE-6) | New version | Upload (gzip) |
+| --- | --- | --- | --- |
+| wasla-preview-web | e9d20bca | d1a2c7f6 | 9293.35 KiB (1823.84 KiB) |
+| wasla-preview-console | d0520a0d | f3bd3605 | 6668.69 KiB (1409.55 KiB) |
+| wasla-preview-marketing | 2d4d5535 | 91da1e05 | 0.35 KiB (0.24 KiB) |
+
+Live checks: web `/`, `/login`, `/team`, `/settings/account`, `/settings/workspace`, console `/`, marketing `/ar/`
+`/en/` → 200; HSTS, CSP, referrer and permissions policy, nosniff present; `/session/login`, `/session/refresh` and the new
+`/session/google/link/*`, `/session/google/reauth/*`, `/session/account/close` alike: GET 405, cross-origin POST 403,
+same-origin POST 403 `session_request_refused`.
+
+### Still open
+
+DK-05 (the measured code-only rebuild) not done; FEB-42 .. FEB-45; FEQ-08 (ar / fr / tr texts and e-mails); the owner's
+Docker cache prune. This docs-only commit does not start frontend.yml (its path filter): the last frontend.yml on the
+code, 44654262240, decides the verdict.
