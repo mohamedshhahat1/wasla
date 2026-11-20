@@ -392,7 +392,8 @@ class SubscriptionService:
         if timing is ChangeTiming.PURCHASE_NOW:
             raise PaymentRequiredError(
                 f"The {plan.name} plan at that price is a purchase. Start a checkout for "
-                "it and it applies once the payment is confirmed."
+                "it and it applies once the payment is confirmed.",
+                error_code="plan_requires_checkout",
             )
         if timing is ChangeTiming.FREE_NOW:
             # Free to free: nothing is paid for, so nothing is forfeited.
@@ -815,7 +816,8 @@ class SubscriptionService:
             # permissive path from being the one a caller gets by forgetting.
             raise PaymentRequiredError(
                 f"The {plan.name} plan is not free. Start a checkout for it and "
-                "the plan applies once the payment is confirmed."
+                "the plan applies once the payment is confirmed.",
+                error_code="plan_requires_checkout",
             )
         return plan
 

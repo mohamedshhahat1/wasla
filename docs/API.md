@@ -1159,6 +1159,15 @@ from an authorized caller that the *state* refuses is not a server error.
 | `workspace_orphaned` | The workspace has no active owner; assign one before restoring |
 | `workspace_has_owner` | Ownership repair was attempted on a workspace that is not orphaned |
 | `workspace_owner_required` | The named person cannot take ownership |
+| `member_role_self` | A role change named the caller (FEB-42) |
+| `member_role_owner` | A role change named an owner, or asked for ownership - use the ownership transfer |
+| `member_role_admin_owner_required` | An administrator tried to change another administrator's role (403) |
+| `member_not_active` | A role change named somebody whose access was withdrawn |
+| `plan_requires_checkout` | `POST /billing/subscription` or `/subscription/plan` named a plan that must be paid for first (402) |
+| `checkout_already_started` | A checkout or top-up checkout repeated an idempotency key; read the payment's status instead |
+| `payment_provider_unavailable` | No payment provider is configured (422) |
+| `offer_not_open` | A custom plan offer can no longer be accepted or declined |
+| `refund_already_requested` | A refund review was already requested for this payment |
 
 ## Re-authenticating with Google
 

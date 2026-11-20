@@ -175,7 +175,9 @@ class TopupService:
         """
         moment = now if now is not None else self._clock()
         if self._checkout is None or not self._checkout.has_provider:
-            raise ValidationError("No payment provider is configured.")
+            raise ValidationError(
+                "No payment provider is configured.", error_code="payment_provider_unavailable"
+            )
         if idempotency_key:
             existing = await self._purchases.get_by_idempotency_key(idempotency_key)
             if existing is not None:
@@ -183,6 +185,7 @@ class TopupService:
                     "A top-up checkout has already been started for this request. "
                     "Read its status rather than starting another.",
                     details={"purchase_id": str(existing.id)},
+                    error_code="checkout_already_started",
                 )
 
         product = await self._products.get_by_id(product_id)
@@ -271,7 +274,8 @@ class TopupService:
             # Another request with the same key got here first and committed.
             raise ConflictError(
                 "A top-up checkout has already been started for this request. "
-                "Read its status rather than starting another."
+                "Read its status rather than starting another.",
+                error_code="checkout_already_started",
             ) from None
 
         try:

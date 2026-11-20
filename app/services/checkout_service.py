@@ -233,7 +233,9 @@ class CheckoutService:
         commits afterwards.
         """
         if self._provider is None:
-            raise ValidationError("No payment provider is configured.")
+            raise ValidationError(
+                "No payment provider is configured.", error_code="payment_provider_unavailable"
+            )
         if sum(value is not None for value in (plan_code, plan_price_id, invoice_id)) != 1:
             raise ValidationError("Name exactly one of a price, a plan or an invoice.")
 
@@ -283,7 +285,9 @@ class CheckoutService:
         meantime.
         """
         if self._provider is None:
-            raise ValidationError("No payment provider is configured.")
+            raise ValidationError(
+                "No payment provider is configured.", error_code="payment_provider_unavailable"
+            )
         await self._refuse_repeat(idempotency_key)
         subscription = await self._subscriptions.get()
         await self._refuse_purchase(plan, version=version, price=price, subscription=subscription)
@@ -331,7 +335,9 @@ class CheckoutService:
         customer's retry opens a page instead of being told one exists.
         """
         if self._provider is None:
-            raise ValidationError("No payment provider is configured.")
+            raise ValidationError(
+                "No payment provider is configured.", error_code="payment_provider_unavailable"
+            )
         await self._session.flush()
 
         payment = await self._new_attempt(
@@ -443,7 +449,8 @@ class CheckoutService:
                 raise
             raise ConflictError(
                 "A checkout has already been started for this request. "
-                "Read its status rather than starting another."
+                "Read its status rather than starting another.",
+                error_code="checkout_already_started",
             ) from None
         return payment
 
@@ -461,7 +468,8 @@ class CheckoutService:
         if existing is not None:
             raise ConflictError(
                 "A checkout has already been started for this request. "
-                "Read its status rather than starting another."
+                "Read its status rather than starting another.",
+                error_code="checkout_already_started",
             )
 
     async def _selected_price(
