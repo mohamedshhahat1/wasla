@@ -7834,6 +7834,7 @@ applied while the application is imported (ADR-157, FRM-03).
 3. The insert runs in a savepoint. Should it still meet a unique key, the checks run again and the request gets the repeat's answer - never a `5xx`.
 4. On every exception path of `submit` and `replace_content` the request's original is deleted from the store directly; nothing can refer to a key generated for a request whose transaction is rolled back.
 5. Every CI job that installs Python packages installs `requirements.lock` and `requirements-build.lock` by hash first, then the project with its dev extras, and `scripts/check_installed_lock.py` plus `pip check` fail the job on any pinned package at another version.
+   *Amended by ADR-202 (FEB-43):* the dev tools are a third hashed lock, `requirements-dev.lock`, installed with the other two by hash; the project follows with `--no-deps`, and the drift guard checks all three locks.
 6. `docs/RUNBOOK.md` "Changing the embedding model" sets `OPENAI_EMBEDDING_MODEL_NEXT` on the API (the admin search preview), the indexing worker and the agent worker before `start`, and confirms it on each.
 
 **Consequences.** Two concurrent uploads end as two sequential ones: one document, and the other request answered exactly as a second upload a minute later would be (`202` `created: false`, or `409 document_exists_in_other_knowledge_base`) - proved by tests that hold the lock themselves until every request is queued on it, so they fail every time the checks run first. The lock is held for milliseconds, never for a parse. Replacement still asks the plan for nothing (ADR-161). A pinned package can no longer drift under CI unnoticed. `docker-compose.prod.yml` now passes `OPENAI_EMBEDDING_MODEL_NEXT` and every `RAG_*` setting to `api` and `worker` with their `Settings` defaults (RGM-12: it passed none of them, so the first deploy's `RAG_HYBRID_ENABLED=false` and the switch's target never reached a container), and `test_deployment_configuration.py` maps both prefixes, so a new knowledge setting cannot be left out again.
@@ -8555,3 +8556,53 @@ plan's "30 days" retention (the code keeps a tombstone and has no scheduled purg
 **Consequences.** FE-8 owns the billing link a seats refusal will point to; FE-9 can reuse the re-authentication relay for
 staff. Invitations do not say who sent them or when (FEB-44); /auth/me does not say whether the account has a password
 or Google connected (FEB-45); the e2e image and ci.yml install the dev tools unhashed (FEB-43).
+
+## ADR-202 — Subscription And Payment (FE-8): The Billing Screens, A Return Page That Asks The API, The Callback On The API's Origin, A Member's Role, The Dev Tools By Hash
+
+**Status.** Accepted, 2026-11-20 (FE-8; report FE8_BILLING.md). FRONTEND_PLAN.md section 29's FE-8: APP-BILL-01 .. 06 with
+FEB-12; the owner's FEB-42 ("build it", 2026-11-20); FE-7's FEB-43 .. FEB-45; FEB-06's codes for these screens; FEB-13
+decided, not built. No ADR number is kept for the postponed "Tend" restyle.
+
+**Context.** The plan's FE-8 waited for FEB-12: the provider's server-to-server callback was built on APP_PUBLIC_URL, the
+app's own origin, which is a Cloudflare Worker with no payment webhook route, so every real payment would have been taken
+at Paymob and never recorded. A real Paymob Test walk had shown the redirect saying success=true while a payment was
+pending, and for a decline (P02, P54). FE-7 left a member's role unchangeable (FEB-42), invitations silent about their
+sender (FEB-44), /auth/me silent about the account's ways in (FEB-45) and the dev tools installed without hashes (FEB-43).
+
+**Decision.**
+
+- API_PUBLIC_URL is the API's own public origin; the callback is built on it, the browser's return stays on
+  APP_PUBLIC_URL. Required with BILLING_PROVIDER=paymob in staging and production; elsewhere, unset, the callback falls
+  back to APP_PUBLIC_URL (OQ-2).
+- The return page decides only from GET /billing/payments/{id}: success only when the status is succeeded; every 2 s for
+  a minute, then every 10 s, paused while hidden; a read that never reached the API decides nothing; the redirect's query
+  string is dropped unread. Which payment it follows comes from the API (the newest payable invoice of the last two hours
+  and its newest attempt), never from storage - FE-2's JR-07 stands (OQ-4).
+- The code's billing roles win over the plan's "owner/admin (read)": the owner reads and acts; an administrator reads the
+  plan, usage and capacity and is never sent the owner's reads; a member has no Billing (OQ-5).
+- Every hosted payment is one function: a fresh idempotency key per press, one POST, then a top-level navigation only to
+  an absolute https URL (http on localhost in the e2e hooks build alone). Nothing of it is stored, logged or shown.
+- FEB-42: PATCH /workspace/members/{user_id} moves an active member between member and administrator. An owner changes
+  anyone's but an owner's and their own; an administrator promotes a member but never demotes a peer (the authority an
+  administrator already has at invitation and reinstatement); ownership is handed over, never assigned. Audited as
+  member_role_changed (migration 0142). No token is revoked and no event published: authorization reads the membership
+  on every request (OQ-1).
+- FEB-44: invitation reads carry created_at and invited_by (null for a closed account). FEB-45: /auth/me carries
+  has_password and google_connected, two booleans and nothing else (OQ-7).
+- FEB-43: requirements-dev.lock, compiled by uv from requirements-dev.in (which mirrors pyproject.toml's dev extra, a test
+  holding them equal) and constrained by the other two locks; every dev install is the three locks by hash (OQ-6).
+- FEB-13: no invoice document, tax fields or numbering; the invoice page prints as "a record of Wasla charges", never a tax
+  invoice (OQ-3). Cancel "now" sits behind the workspace's typed address (OQ-8); "Ask for a refund review" is offered and
+  says it moves no money (OQ-9).
+- Codes added at their raise sites, same status and sentence: plan_requires_checkout, checkout_already_started,
+  payment_provider_unavailable, offer_not_open, refund_already_requested, member_role_self, member_role_owner,
+  member_role_admin_owner_required, member_not_active.
+
+**Rejected.** A PDF or a tax invoice now (FEQ-17 is the owner's); a billing read role for administrators; a stream event for
+payments (polled, as the plan says); "We'll email you" (no payment e-mail exists); "Add card" (no route adds one); the
+plan's sessionStorage memory for the return page; `--no-build-isolation` for the editable install (it needs `editables`,
+which no lock carries).
+
+**Consequences.** The owner sets API_PUBLIC_URL and the Paymob dashboard's two URLs before the first real payment
+(docs/DEPLOYMENT.md). FEB-13 waits for FEQ-17. DK-05's measured rebuild was not run in FE-8 (C: below 8 GB) and stays open.
+
