@@ -293,7 +293,9 @@ export function WorkspaceSettings() {
         <div
           className={cn(
             "z-10 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm",
-            dirty && "sticky bottom-0",
+            // Sticky from sm only: on a phone a sticky bar still covered the field WebKit focused
+            // (frontend.yml 44648984555, KY7-03), so there Save sits at the form's end.
+            dirty && "sm:sticky sm:bottom-0",
           )}
           data-save-bar=""
         >
