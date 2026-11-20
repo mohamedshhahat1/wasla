@@ -33,9 +33,11 @@ import {
   invitableRoles,
   isAdminRole,
   memberControls,
+  otherRole,
   type TenantRole,
 } from "../../lib/team/rules";
 import { useWorkspace } from "../app/workspace-context";
+import { PlanLimitLink } from "../billing/plan-limit-link";
 import { useTimes } from "../customers/shared";
 import { useCodeText } from "../inbox/error-text";
 import { useSession } from "../session-provider";
@@ -63,6 +65,7 @@ type Pending =
   | { kind: "leave"; member: Member }
   | { kind: "reinstate"; member: Member }
   | { kind: "owner"; member: Member }
+  | { kind: "role"; member: Member }
   | null;
 
 export function MembersPage() {
@@ -81,6 +84,7 @@ export function MembersPage() {
   const left = admin && params.get("left") === "1";
   const [pending, setPending] = useState<Pending>(null);
   const [reinstateRole, setReinstateRole] = useState<TenantRole>("member");
+  const [newRole, setNewRole] = useState<"member" | "tenant_admin">("tenant_admin");
 
   const members = useQuery({
     queryKey: teamMembersKey(scope, left),
@@ -118,6 +122,13 @@ export function MembersPage() {
             body: { role: reinstateRole },
           }),
         );
+      } else if (action.kind === "role") {
+        await unwrap(
+          session.api.PATCH("/api/v1/workspace/members/{user_id}", {
+            params: { path: { user_id: id } },
+            body: { role: newRole },
+          }),
+        );
       } else {
         await unwrap(session.api.POST("/api/v1/workspace/ownership", { body: { user_id: id } }));
       }
@@ -134,6 +145,17 @@ export function MembersPage() {
       }
       await afterChange();
       if (action.kind === "owner") await reloadProfile();
+      if (action.kind === "role") {
+        // The row stays and keeps its controls (KY8-04): focus goes back to its "Change role".
+        const id = action.member.user_id;
+        requestAnimationFrame(() =>
+          focusIfLost(
+            document.querySelector<HTMLElement>(`[data-change-role="${id}"]`) ??
+              document.getElementById(HEADING),
+          ),
+        );
+        return;
+      }
       // The pressed row's controls changed or left: the page heading takes the focus (KY7-04).
       requestAnimationFrame(() => focusIfLost(document.getElementById(HEADING)));
     },
@@ -165,6 +187,23 @@ export function MembersPage() {
           data-action="make-owner"
         >
           {t("makeOwner")}
+        </Button>,
+      );
+    }
+    if (controls.changeRole) {
+      buttons.push(
+        <Button
+          key="role"
+          variant="secondary"
+          onClick={() => {
+            setNewRole(otherRole(member.role));
+            setPending({ kind: "role", member });
+          }}
+          aria-label={t("changeRoleOf", { name })}
+          data-action="change-role"
+          data-change-role={member.user_id}
+        >
+          {t("changeRole")}
         </Button>,
       );
     }
@@ -301,7 +340,9 @@ export function MembersPage() {
         ? t("leaveTitle", { workspace: workspaceName })
         : pending?.kind === "reinstate"
           ? t("reinstateTitle", { name: targetName })
-          : t("ownerTitle", { name: targetName });
+          : pending?.kind === "role"
+            ? t("roleTitle", { name: targetName })
+            : t("ownerTitle", { name: targetName });
   const dialogBody =
     pending?.kind === "remove"
       ? t("removeBody")
@@ -309,7 +350,9 @@ export function MembersPage() {
         ? t("leaveBody")
         : pending?.kind === "reinstate"
           ? t("reinstateBody")
-          : t("ownerBody");
+          : pending?.kind === "role"
+            ? t("roleBody")
+            : t("ownerBody");
   const confirmWord =
     pending?.kind === "remove"
       ? t("remove")
@@ -317,7 +360,9 @@ export function MembersPage() {
         ? t("leave")
         : pending?.kind === "reinstate"
           ? t("reinstate")
-          : t("makeOwner");
+          : pending?.kind === "role"
+            ? t("saveRole")
+            : t("makeOwner");
 
   return (
     <div className="flex flex-col gap-6" data-screen="team">
@@ -364,7 +409,11 @@ export function MembersPage() {
             </Button>
             <Button
               variant={
-                pending?.kind === "reinstate" || pending?.kind === "owner" ? "primary" : "danger"
+                pending?.kind === "reinstate" ||
+                pending?.kind === "owner" ||
+                pending?.kind === "role"
+                  ? "primary"
+                  : "danger"
               }
               {...busyProps(act.isPending)}
               onClick={() => pending && !act.isPending && act.mutate(pending)}
@@ -390,13 +439,44 @@ export function MembersPage() {
               .map((option) => ({ value: option, label: roleWord(option) }))}
           />
         ) : null}
+        {pending?.kind === "role" ? (
+          <>
+            <p id="change-role-label" className="m-0 mb-2 text-sm font-medium text-text">
+              {t("roleLabel")}
+            </p>
+            <RadioGroup
+              name="change-role"
+              aria-labelledby="change-role-label"
+              value={newRole}
+              onValueChange={(value) => setNewRole(value as "member" | "tenant_admin")}
+              options={(["member", "tenant_admin"] as const).map((value) => ({
+                value,
+                label: (
+                  <span className="flex flex-col">
+                    <span>{roleWord(value)}</span>
+                    <span className="text-sm text-text-muted">
+                      {t(value === "member" ? "roleMemberLine" : "roleAdminLine")}
+                    </span>
+                  </span>
+                ),
+              }))}
+            />
+          </>
+        ) : null}
         {act.isError ? (
           <p
             role="alert"
             className="m-0 mt-3 text-sm font-medium text-danger"
             data-error={code ?? ""}
           >
-            {code === "plan_limit_exceeded" ? t("seatsUsed") : errors(code)}
+            {code === "plan_limit_exceeded" ? (
+              <>
+                {t("seatsUsed")}
+                <PlanLimitLink />
+              </>
+            ) : (
+              errors(code)
+            )}
           </p>
         ) : null}
       </Dialog>

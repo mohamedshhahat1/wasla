@@ -14,7 +14,8 @@
     "ai": "Yapay zekâ asistanı",
     "knowledge": "Bilgi",
     "team": "Ekip",
-    "settings": "Ayarlar"
+    "settings": "Ayarlar",
+    "billing": "Faturalandırma"
   },
   "account": {
     "label": "Hesap",
@@ -66,11 +67,13 @@
     "payment": {
       "owner": "Bu çalışma alanının çalışmaya devam etmesi için ödeme gerekiyor.",
       "ownerDetail": "Wasla üzerinden ödeme, uygulamanın sonraki bir sürümünde geliyor.",
-      "member": "Bu çalışma alanında bir fatura sorunu var. Çalışma alanı sahibine sorun."
+      "member": "Bu çalışma alanında bir fatura sorunu var. Çalışma alanı sahibine sorun.",
+      "payNow": "Şimdi öde"
     },
     "ended": {
       "title": "Bu çalışma alanının aboneliği sona erdi.",
-      "detail": "Wasla'da plan seçimi, uygulamanın sonraki bir sürümünde geliyor."
+      "detail": "Wasla'da plan seçimi, uygulamanın sonraki bir sürümünde geliyor.",
+      "choose": "Plan seç"
     },
     "trial": "{days, plural, =0 {Deneme bugün bitiyor.} one {Deneme yarın bitiyor.} other {Deneme # gün içinde bitiyor.}}",
     "trialOn": "Son gün: {date}.",
@@ -128,7 +131,8 @@
     "plan": "Bir plan seçin",
     "agentAction": "Yapay zekâ asistanını kurun",
     "knowledgeAction": "Bilgi ekleyin",
-    "teamAction": "Birini davet et"
+    "teamAction": "Birini davet et",
+    "planAction": "Plan seç"
   },
   "roles": {
     "onlyAdmins": "Kanalları yalnızca sahipler ve yöneticiler bağlayabilir ve değiştirebilir.",
@@ -1160,7 +1164,20 @@
         "required": "Bir e-posta adresi girin.",
         "email": "Geçerli bir e-posta adresi girin."
       }
-    }
+    },
+    "changeRole": "Rolü değiştir",
+    "changeRoleOf": "{name} kişisinin rolünü değiştir",
+    "roleTitle": "{name} kişisinin rolü değişsin mi?",
+    "roleBody": "Bundan sonra yaptığı her şey için geçerli olur. Sahiplik ayrıca devredilir.",
+    "roleLabel": "Yeni rol",
+    "roleMemberLine": "Gelen kutusu, müşteriler ve potansiyel müşterilerle çalışır.",
+    "roleAdminLine": "Ayrıca ekibi, kanalları, yapay zekâ ajanını ve ayarları yönetir.",
+    "saveRole": "Rolü kaydet",
+    "invitedBy": "Davet eden: {name}",
+    "invitedByGone": "Kapatılmış bir hesap tarafından davet edildi",
+    "sentAt": "Gönderildi: {time}",
+    "billingLink": "Planları gör",
+    "askOwnerPlan": "Planı değiştirmesi için çalışma alanı sahibine başvurun."
   },
   "settings": {
     "nav": {
@@ -1304,7 +1321,8 @@
       "toSet": "Google ile kaydoldum ve parolam yok",
       "toChange": "Zaten bir parolam var",
       "noPasswordYet": "Bu hesabın henüz parolası yok. Bunun yerine bir parola belirleyin.",
-      "alreadyHas": "Bu hesabın zaten bir parolası var. Bunun yerine değiştirin."
+      "alreadyHas": "Bu hesabın zaten bir parolası var. Bunun yerine değiştirin.",
+      "setLine": "Bugün Google ile giriş yapıyorsunuz. Bir parola, onsuz giriş yapmanızı sağlar."
     },
     "google": {
       "title": "Google",
@@ -1343,5 +1361,241 @@
       "noGoogle": "Google ile giriş şu anda kullanılamıyor. Parolanızı kullanın.",
       "confirm": "Hesabımı kapat"
     }
+  },
+  "billing": {
+    "title": "Faturalandırma",
+    "line": "Planınız, kullandıklarınız ve ödedikleriniz.",
+    "tabs": {
+      "label": "Faturalandırma sayfaları",
+      "plan": "Plan",
+      "usage": "Kullanım",
+      "capacity": "Kanallar ve ek paketler",
+      "invoices": "Faturalar",
+      "methods": "Ödeme yöntemleri"
+    },
+    "ownerOnly": "Planı yalnızca çalışma alanı sahibi değiştirebilir veya ödeme yapabilir.",
+    "loading": "Yükleniyor…",
+    "loadError": "Bu yüklenemedi.",
+    "retry": "Tekrar dene",
+    "reference": "Referans",
+    "cancel": "İptal",
+    "close": "Kapat",
+    "unlimited": "Sınırsız",
+    "interval": {
+      "month": "aylık",
+      "year": "yıllık"
+    },
+    "current": {
+      "title": "Planınız",
+      "none": "Bu çalışma alanının henüz bir planı yok. Aşağıdan birini seçin.",
+      "renews": "{date} tarihinde {amount} ile yenilenir",
+      "period": "Geçerli dönem: {start} – {end}",
+      "autoOn": "Yenilemeler varsayılan kartınızdan otomatik olarak tahsil edilir.",
+      "autoOff": "Yenilemeler ödenecek fatura olarak gelir."
+    },
+    "status": {
+      "trialing": "Deneme – {date} tarihinde biter",
+      "active": "Etkin",
+      "pastDue": "Ödeme gecikti",
+      "cancelling": "{date} tarihinde biter",
+      "changing": "{date} tarihinde {plan} planına geçer",
+      "cancelled": "İptal edildi",
+      "ended": "Sona erdi",
+      "none": "Plan yok"
+    },
+    "owed": {
+      "title": "Ödenmesi gereken",
+      "row": "{start} – {end} için {amount}"
+    },
+    "payNow": "Şimdi öde",
+    "plans": {
+      "title": "Planlar",
+      "current": "Planınız",
+      "madeForYou": "Size özel",
+      "free": "Ücretsiz",
+      "choose": "Seç",
+      "upgrade": "Yükselt",
+      "switchLater": "Dönem sonunda geç",
+      "switchNow": "Geç",
+      "chooseOf": "{action}: {price} ile {plan}",
+      "scheduled": "Planınız {date} tarihinde değişecek."
+    },
+    "limit": {
+      "channel_connections": "Kanal bağlantıları",
+      "agents": "Yapay zekâ ajanları",
+      "owned_workspaces": "Sahip olduğunuz çalışma alanları",
+      "team_members": "Ekip üyeleri",
+      "knowledge_documents": "Bilgi belgeleri",
+      "storage_bytes": "Depolama (bayt)",
+      "period_messages": "Bu dönemdeki mesajlar",
+      "period_ai_turns": "Bu dönemdeki yapay zekâ yanıtları",
+      "period_campaign_messages": "Bu dönemdeki kampanya mesajları"
+    },
+    "actions": {
+      "cancel": "Aboneliği iptal et",
+      "resume": "Planımı koru",
+      "keep": "{plan} planını koru"
+    },
+    "cancelDialog": {
+      "title": "Aboneliğiniz iptal edilsin mi?",
+      "body": "Ne zaman biteceğini seçin.",
+      "atEnd": "Dönem sonunda ({date})",
+      "now": "Şimdi – ödenmiş dönemin geri kalanından vazgeçersiniz",
+      "type": "Şimdi iptal etmek için çalışma alanı adresini ({slug}) yazın",
+      "confirm": "İptal et",
+      "keep": "Koru",
+      "mismatch": "Adresi tam olarak gösterildiği gibi yazın."
+    },
+    "offer": {
+      "title": "Size özel bir teklif",
+      "expires": "{date} tarihine kadar açık",
+      "accept": "Kabul et ve öde",
+      "decline": "Reddet",
+      "declineTitle": "Bu teklif reddedilsin mi?",
+      "declineBody": "Wasla ekibine bildirilir. Nedenini söyleyebilirsiniz.",
+      "reason": "Neden (isteğe bağlı)",
+      "past": "Önceki teklifler",
+      "state": {
+        "offered": "Açık",
+        "accepted": "Kabul edildi",
+        "active": "Etkin",
+        "declined": "Reddedildi",
+        "expired": "Süresi doldu",
+        "cancelled": "Geri çekildi"
+      }
+    },
+    "checkout": {
+      "opening": "Ödeme sayfası açılıyor…",
+      "badUrl": "Ödeme sayfası adresi geçerli değildi. Hiçbir ücret alınmadı."
+    },
+    "return": {
+      "title": "Ödemeniz",
+      "finding": "Ödemeniz aranıyor…",
+      "confirming": "Ödemeniz onaylanıyor…",
+      "slow": "Paymob henüz onaylamadı. Bazı ödeme yöntemleri birkaç dakika sürer. Onaylanır onaylanmaz burada göstereceğiz – bu sayfadan da çıkabilirsiniz; faturanız gösterecek.",
+      "succeeded": "Ödeme alındı",
+      "succeededFor": "{start} – {end} faturası için {amount}.",
+      "failed": "Ödeme gerçekleşmedi",
+      "failedGeneric": "Hiçbir ücret alınmadı. Tekrar deneyebilirsiniz.",
+      "failedAuth": "Kartın bankası ödemeyi onaylamadı.",
+      "refunded": "Bu ödeme iade edildi",
+      "none": "Son iki saatte başlattığınız bir ödeme bulunamadı. Faturalarınız burada.",
+      "elsewhere": "Bu ödeme başka bir çalışma alanına ait. Yukarıdaki menüden çalışma alanını değiştirin.",
+      "others": "Yakın zamanda başlatılan diğer ödemeler:",
+      "toBilling": "Faturalandırma'ya git",
+      "tryAgain": "Tekrar dene",
+      "toInvoice": "Faturayı aç"
+    },
+    "methods": {
+      "title": "Ödeme yöntemleri",
+      "empty": "Kayıtlı kart yok. Kartlar, Paymob'un ödeme sayfasında “Kartı kaydet” seçildiğinde kaydedilir.",
+      "how": "Kart kaydetmek için Paymob'un ödeme sayfasında “Kartı kaydet” seçin.",
+      "card": "{last4} ile biten {brand}",
+      "cardNoBrand": "{last4} ile biten kart",
+      "cardUnknown": "Kayıtlı kart",
+      "default": "Varsayılan",
+      "added": "Eklendi: {time}",
+      "makeDefault": "Varsayılan yap",
+      "remove": "Kaldır",
+      "removeTitle": "Bu kart kaldırılsın mı?",
+      "removeBody": "Bundan sonra bu karttan ücret alınmaz.",
+      "removeDefaultBody": "Yenilemeler artık bu karttan tahsil edilmez."
+    },
+    "invoices": {
+      "title": "Faturalar",
+      "empty": "Henüz fatura yok.",
+      "latest": "Son 50 gösteriliyor.",
+      "issued": "Düzenlenme: {date}",
+      "outstanding": "{amount} kalan",
+      "payOf": "{amount} öde",
+      "open": "Aç",
+      "purpose": {
+        "checkout": "Satın alma",
+        "renewal": "Yenileme",
+        "manual": "Manuel",
+        "adjustment": "Düzeltme",
+        "topup": "Ek paket"
+      },
+      "status": {
+        "draft": "Taslak",
+        "open": "Açık",
+        "paid": "Ödendi",
+        "uncollectible": "Tahsil edilemez",
+        "void": "Geçersiz"
+      }
+    },
+    "invoice": {
+      "heading": "Wasla ücretleri – kayıt",
+      "notFound": "Fatura bulunamadı.",
+      "recordNote": "Bu çalışma alanı için Wasla ücretlerinin kaydıdır. Vergi faturası değildir.",
+      "id": "Kayıt {id}",
+      "period": "Dönem",
+      "lines": "Kalemler",
+      "description": "Açıklama",
+      "quantity": "Miktar",
+      "amount": "Tutar",
+      "due": "Ödenecek",
+      "paid": "Ödenen",
+      "outstanding": "Kalan",
+      "payments": "Ödemeler",
+      "noPayments": "Henüz ödeme denenmedi.",
+      "print": "Yazdır",
+      "back": "Tüm faturalar"
+    },
+    "payment": {
+      "status": {
+        "pending": "Beklemede",
+        "succeeded": "Başarılı",
+        "failed": "Başarısız",
+        "refunded": "İade edildi"
+      },
+      "refundPending": "İade yolda",
+      "reviewRequested": "İade incelemesi istendi"
+    },
+    "refund": {
+      "ask": "İade incelemesi iste",
+      "title": "İade incelemesi istensin mi?",
+      "body": "Bu, Wasla ekibine bir istek gönderir. Kendi başına hiçbir para hareketi yapmaz.",
+      "reason": "Neden (isteğe bağlı)",
+      "send": "İsteği gönder"
+    },
+    "usage": {
+      "title": "Kullanım",
+      "period": "Bu dönem: {start} – {end}",
+      "of": "{used} / {limit}",
+      "ofUnlimited": "{used} kullanıldı",
+      "held": "Süren yanıtlar için {held} ayrıldı",
+      "daily": "Günlük mesajlar",
+      "showTable": "Tablo olarak göster",
+      "showChart": "Grafik olarak göster",
+      "day": "Gün",
+      "messages": "Mesajlar",
+      "noData": "Bu dönemde henüz kayıt yok."
+    },
+    "capacity": {
+      "title": "Kanal kapasitesi",
+      "line": "{limit} içinden {active} bağlı",
+      "lineUnlimited": "{active} bağlı",
+      "parts": "Plan {base} · ek paketler {topups} · Wasla tarafından verilen {granted}",
+      "over": "Planınızın izin verdiğinden fazla kanal bağlı.",
+      "reduction": "Kanal yuvalarınız azaltılıyor. Kalacak bağlantıları Kanallar sayfasından seçin.",
+      "toChannels": "Kanalları aç"
+    },
+    "topups": {
+      "title": "Ek paketler",
+      "empty": "Bu plan için ek paket sunulmuyor.",
+      "adds": "Dönem sonuna kadar {quantity} ekler",
+      "buy": "Satın al",
+      "buyOf": "{price} karşılığında {name} satın al"
+    },
+    "purchases": {
+      "title": "Satın alımlar ve tahsisler",
+      "empty": "Henüz satın alınan veya verilen bir şey yok.",
+      "bought": "Satın alındı",
+      "granted": "Wasla tarafından verildi",
+      "until": "{date} tarihine kadar",
+      "more": "Daha fazla yükle"
+    },
+    "preview": "Faturalandırma için bu önizlemede bulunmayan API gerekir."
   }
 }

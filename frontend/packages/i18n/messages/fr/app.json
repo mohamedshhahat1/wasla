@@ -14,7 +14,8 @@
     "ai": "Agent IA",
     "knowledge": "Connaissances",
     "team": "Équipe",
-    "settings": "Paramètres"
+    "settings": "Paramètres",
+    "billing": "Facturation"
   },
   "account": {
     "label": "Compte",
@@ -66,11 +67,13 @@
     "payment": {
       "owner": "Un paiement est nécessaire pour que cet espace de travail continue de fonctionner.",
       "ownerDetail": "Le paiement depuis Wasla arrive dans une prochaine version de l'application.",
-      "member": "Cet espace de travail a un problème de facturation. Demandez au propriétaire de l'espace de travail."
+      "member": "Cet espace de travail a un problème de facturation. Demandez au propriétaire de l'espace de travail.",
+      "payNow": "Payer maintenant"
     },
     "ended": {
       "title": "L'abonnement de cet espace de travail a pris fin.",
-      "detail": "Le choix d'une offre dans Wasla arrive dans une prochaine version de l'application."
+      "detail": "Le choix d'une offre dans Wasla arrive dans une prochaine version de l'application.",
+      "choose": "Choisir une offre"
     },
     "trial": "{days, plural, =0 {L'essai se termine aujourd'hui.} one {L'essai se termine demain.} many {L'essai se termine dans # jours.} other {L'essai se termine dans # jours.}}",
     "trialOn": "Dernier jour : {date}.",
@@ -128,7 +131,8 @@
     "plan": "Choisir une offre",
     "agentAction": "Configurer l’agent IA",
     "knowledgeAction": "Ajouter des connaissances",
-    "teamAction": "Inviter quelqu'un"
+    "teamAction": "Inviter quelqu'un",
+    "planAction": "Choisir une offre"
   },
   "roles": {
     "onlyAdmins": "Seuls les propriétaires et les administrateurs peuvent connecter et modifier les canaux.",
@@ -1160,7 +1164,20 @@
         "required": "Saisissez une adresse e-mail.",
         "email": "Saisissez une adresse e-mail valide."
       }
-    }
+    },
+    "changeRole": "Changer le rôle",
+    "changeRoleOf": "Changer le rôle de {name}",
+    "roleTitle": "Changer le rôle de {name} ?",
+    "roleBody": "Cela s'applique à tout ce qu'ils feront ensuite. La propriété se transfère à part.",
+    "roleLabel": "Nouveau rôle",
+    "roleMemberLine": "Travaille dans la boîte de réception, les clients et les prospects.",
+    "roleAdminLine": "Gère aussi l'équipe, les canaux, l'agent IA et les réglages.",
+    "saveRole": "Enregistrer le rôle",
+    "invitedBy": "Invité par {name}",
+    "invitedByGone": "Invité par un compte fermé",
+    "sentAt": "Envoyée {time}",
+    "billingLink": "Voir les offres",
+    "askOwnerPlan": "Demandez au propriétaire de l'espace de changer d'offre."
   },
   "settings": {
     "nav": {
@@ -1304,7 +1321,8 @@
       "toSet": "Je me suis inscrit avec Google et n'ai pas de mot de passe",
       "toChange": "J'ai déjà un mot de passe",
       "noPasswordYet": "Ce compte n'a pas encore de mot de passe. Définissez-en un.",
-      "alreadyHas": "Ce compte a déjà un mot de passe. Changez-le plutôt."
+      "alreadyHas": "Ce compte a déjà un mot de passe. Changez-le plutôt.",
+      "setLine": "Vous vous connectez avec Google aujourd'hui. Un mot de passe vous permet de vous en passer."
     },
     "google": {
       "title": "Google",
@@ -1343,5 +1361,241 @@
       "noGoogle": "La connexion Google n'est pas disponible pour le moment. Utilisez votre mot de passe.",
       "confirm": "Fermer mon compte"
     }
+  },
+  "billing": {
+    "title": "Facturation",
+    "line": "Votre offre, ce que vous avez utilisé et ce que vous avez payé.",
+    "tabs": {
+      "label": "Pages de facturation",
+      "plan": "Offre",
+      "usage": "Utilisation",
+      "capacity": "Canaux et recharges",
+      "invoices": "Factures",
+      "methods": "Moyens de paiement"
+    },
+    "ownerOnly": "Seul le propriétaire de l'espace peut changer d'offre ou payer.",
+    "loading": "Chargement…",
+    "loadError": "Impossible de charger ceci.",
+    "retry": "Réessayer",
+    "reference": "Référence",
+    "cancel": "Annuler",
+    "close": "Fermer",
+    "unlimited": "Illimité",
+    "interval": {
+      "month": "par mois",
+      "year": "par an"
+    },
+    "current": {
+      "title": "Votre offre",
+      "none": "Cet espace n'a pas encore d'offre. Choisissez-en une ci-dessous.",
+      "renews": "Se renouvelle à {amount} le {date}",
+      "period": "Période en cours : {start} – {end}",
+      "autoOn": "Les renouvellements sont prélevés automatiquement sur votre carte par défaut.",
+      "autoOff": "Les renouvellements arrivent sous forme de factures à payer."
+    },
+    "status": {
+      "trialing": "Essai – se termine le {date}",
+      "active": "Active",
+      "pastDue": "Paiement en retard",
+      "cancelling": "Se termine le {date}",
+      "changing": "Passe à {plan} le {date}",
+      "cancelled": "Annulée",
+      "ended": "Terminée",
+      "none": "Aucune offre"
+    },
+    "owed": {
+      "title": "Paiement dû",
+      "row": "{amount} pour {start} – {end}"
+    },
+    "payNow": "Payer maintenant",
+    "plans": {
+      "title": "Offres",
+      "current": "Votre offre",
+      "madeForYou": "Conçue pour vous",
+      "free": "Gratuite",
+      "choose": "Choisir",
+      "upgrade": "Passer à cette offre",
+      "switchLater": "Changer en fin de période",
+      "switchNow": "Changer",
+      "chooseOf": "{action} : {plan} à {price}",
+      "scheduled": "Votre offre change le {date}."
+    },
+    "limit": {
+      "channel_connections": "Connexions de canaux",
+      "agents": "Agents IA",
+      "owned_workspaces": "Espaces que vous possédez",
+      "team_members": "Membres de l'équipe",
+      "knowledge_documents": "Documents de connaissances",
+      "storage_bytes": "Stockage (octets)",
+      "period_messages": "Messages sur la période",
+      "period_ai_turns": "Réponses IA sur la période",
+      "period_campaign_messages": "Messages de campagne sur la période"
+    },
+    "actions": {
+      "cancel": "Résilier l'abonnement",
+      "resume": "Garder mon offre",
+      "keep": "Garder {plan}"
+    },
+    "cancelDialog": {
+      "title": "Résilier votre abonnement ?",
+      "body": "Choisissez quand il se termine.",
+      "atEnd": "En fin de période ({date})",
+      "now": "Maintenant – vous renoncez au reste de la période payée",
+      "type": "Saisissez l'adresse de l'espace {slug} pour résilier maintenant",
+      "confirm": "Résilier",
+      "keep": "Le garder",
+      "mismatch": "Saisissez l'adresse exactement comme indiqué."
+    },
+    "offer": {
+      "title": "Une proposition pour vous",
+      "expires": "Ouverte jusqu'au {date}",
+      "accept": "Accepter et payer",
+      "decline": "Refuser",
+      "declineTitle": "Refuser cette proposition ?",
+      "declineBody": "L'équipe Wasla sera prévenue. Vous pouvez dire pourquoi.",
+      "reason": "Raison (facultatif)",
+      "past": "Propositions précédentes",
+      "state": {
+        "offered": "Ouverte",
+        "accepted": "Acceptée",
+        "active": "Active",
+        "declined": "Refusée",
+        "expired": "Expirée",
+        "cancelled": "Retirée"
+      }
+    },
+    "checkout": {
+      "opening": "Ouverture de la page de paiement…",
+      "badUrl": "L'adresse de la page de paiement n'était pas valide. Rien n'a été prélevé."
+    },
+    "return": {
+      "title": "Votre paiement",
+      "finding": "Recherche de votre paiement…",
+      "confirming": "Confirmation de votre paiement…",
+      "slow": "Paymob ne l'a pas encore confirmé. Certains moyens de paiement prennent quelques minutes. Il s'affichera ici dès sa confirmation – vous pouvez aussi quitter cette page ; votre facture l'indiquera.",
+      "succeeded": "Paiement reçu",
+      "succeededFor": "{amount} pour la facture du {start} – {end}.",
+      "failed": "Le paiement n'a pas abouti",
+      "failedGeneric": "Rien n'a été prélevé. Vous pouvez réessayer.",
+      "failedAuth": "La banque de la carte n'a pas confirmé le paiement.",
+      "refunded": "Ce paiement a été remboursé",
+      "none": "Aucun paiement commencé ces deux dernières heures n'a été trouvé. Vos factures sont ici.",
+      "elsewhere": "Ce paiement appartient à un autre espace. Changez d'espace depuis le menu ci-dessus.",
+      "others": "Autres paiements commencés récemment :",
+      "toBilling": "Aller à Facturation",
+      "tryAgain": "Réessayer",
+      "toInvoice": "Ouvrir la facture"
+    },
+    "methods": {
+      "title": "Moyens de paiement",
+      "empty": "Aucune carte enregistrée. Les cartes sont enregistrées quand vous cochez « Enregistrer la carte » sur la page de paiement de Paymob.",
+      "how": "Pour enregistrer une carte, cochez « Enregistrer la carte » sur la page de paiement de Paymob.",
+      "card": "{brand} se terminant par {last4}",
+      "cardNoBrand": "Carte se terminant par {last4}",
+      "cardUnknown": "Carte enregistrée",
+      "default": "Par défaut",
+      "added": "Ajoutée {time}",
+      "makeDefault": "Définir par défaut",
+      "remove": "Retirer",
+      "removeTitle": "Retirer cette carte ?",
+      "removeBody": "Elle ne sera plus débitée.",
+      "removeDefaultBody": "Les renouvellements ne seront plus prélevés sur cette carte."
+    },
+    "invoices": {
+      "title": "Factures",
+      "empty": "Aucune facture pour l'instant.",
+      "latest": "Affichage des 50 dernières.",
+      "issued": "Émise le {date}",
+      "outstanding": "{amount} restant dû",
+      "payOf": "Payer {amount}",
+      "open": "Ouvrir",
+      "purpose": {
+        "checkout": "Achat",
+        "renewal": "Renouvellement",
+        "manual": "Manuelle",
+        "adjustment": "Ajustement",
+        "topup": "Recharge"
+      },
+      "status": {
+        "draft": "Brouillon",
+        "open": "Ouverte",
+        "paid": "Payée",
+        "uncollectible": "Irrécouvrable",
+        "void": "Annulée"
+      }
+    },
+    "invoice": {
+      "heading": "Frais Wasla – relevé",
+      "notFound": "Facture introuvable.",
+      "recordNote": "Un relevé des frais Wasla pour cet espace. Ce n'est pas une facture fiscale.",
+      "id": "Relevé {id}",
+      "period": "Période",
+      "lines": "Lignes",
+      "description": "Description",
+      "quantity": "Quantité",
+      "amount": "Montant",
+      "due": "Dû",
+      "paid": "Payé",
+      "outstanding": "Restant dû",
+      "payments": "Paiements",
+      "noPayments": "Aucun paiement n'a été tenté.",
+      "print": "Imprimer",
+      "back": "Toutes les factures"
+    },
+    "payment": {
+      "status": {
+        "pending": "En attente",
+        "succeeded": "Réussi",
+        "failed": "Échoué",
+        "refunded": "Remboursé"
+      },
+      "refundPending": "Remboursement en cours",
+      "reviewRequested": "Examen du remboursement demandé"
+    },
+    "refund": {
+      "ask": "Demander un examen de remboursement",
+      "title": "Demander un examen de remboursement ?",
+      "body": "Cela envoie une demande à l'équipe Wasla. Aucun argent n'est déplacé par cette seule demande.",
+      "reason": "Raison (facultatif)",
+      "send": "Envoyer la demande"
+    },
+    "usage": {
+      "title": "Utilisation",
+      "period": "Cette période : {start} – {end}",
+      "of": "{used} sur {limit}",
+      "ofUnlimited": "{used} utilisés",
+      "held": "{held} réservées pour des réponses en cours",
+      "daily": "Messages par jour",
+      "showTable": "Afficher en tableau",
+      "showChart": "Afficher en graphique",
+      "day": "Jour",
+      "messages": "Messages",
+      "noData": "Rien d'enregistré sur cette période pour l'instant."
+    },
+    "capacity": {
+      "title": "Capacité des canaux",
+      "line": "{active} connectés sur {limit}",
+      "lineUnlimited": "{active} connectés",
+      "parts": "Offre {base} · recharges {topups} · accordés par Wasla {granted}",
+      "over": "Plus de canaux sont connectés que votre offre ne le permet.",
+      "reduction": "Vos emplacements de canaux sont réduits. Choisissez les connexions à garder sur la page Canaux.",
+      "toChannels": "Ouvrir Canaux"
+    },
+    "topups": {
+      "title": "Recharges",
+      "empty": "Aucune recharge n'est proposée pour cette offre.",
+      "adds": "Ajoute {quantity} jusqu'à la fin de la période",
+      "buy": "Acheter",
+      "buyOf": "Acheter {name} pour {price}"
+    },
+    "purchases": {
+      "title": "Achats et octrois",
+      "empty": "Rien d'acheté ou d'accordé pour l'instant.",
+      "bought": "Achetée",
+      "granted": "Accordée par Wasla",
+      "until": "Jusqu'au {date}",
+      "more": "Charger plus"
+    },
+    "preview": "La facturation a besoin de l'API, absente de cet aperçu."
   }
 }
