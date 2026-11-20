@@ -3349,6 +3349,7 @@
         "description": "Where to send the customer, and what they are about to pay.\n\nThe amount is echoed so a client can show it before redirecting, and it is\nthe server's figure - a client that displays this is displaying what will\nactually be charged.\n\nThe provider's client secret is not here. It travels inside\n`redirect_url` because the customer's browser has to carry it, and putting\nit in a field of its own would invite a client to store or log it.",
         "properties": {
           "amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Amount",
             "type": "string"
           },
@@ -4186,6 +4187,7 @@
           "total": {
             "anyOf": [
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -4849,6 +4851,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -5638,6 +5641,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -9206,6 +9210,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,15}0*$)\\d{0,12}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -9461,6 +9466,7 @@
           "budget_amount": {
             "anyOf": [
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -9785,6 +9791,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,15}0*$)\\d{0,12}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -10196,6 +10203,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -10274,6 +10282,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -10346,6 +10355,7 @@
             "type": "string"
           },
           "rate": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Rate",
             "type": "string"
           },
@@ -10354,6 +10364,7 @@
             "type": "integer"
           },
           "subtotal": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Subtotal",
             "type": "string"
           }
@@ -12134,6 +12145,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -12571,6 +12583,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -12777,6 +12790,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -12996,6 +13010,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -13114,6 +13129,7 @@
             "type": "string"
           },
           "price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Price",
             "type": "string"
           },
@@ -13473,6 +13489,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -13782,6 +13799,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -14829,6 +14847,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -15774,6 +15793,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -16170,6 +16190,7 @@
           "new": {
             "anyOf": [
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -16181,6 +16202,7 @@
           "old": {
             "anyOf": [
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -16210,6 +16232,7 @@
             "type": "string"
           },
           "rate": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Rate",
             "type": "string"
           }
@@ -19306,6 +19329,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -19528,6 +19552,7 @@
                 "type": "number"
               },
               {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
