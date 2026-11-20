@@ -30,8 +30,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { messagesFor } from "@wasla/i18n";
 
 import { InvoicePage } from "../components/billing/invoices";
+import { PlanLimitLink } from "../components/billing/plan-limit-link";
 import { PlanPage } from "../components/billing/plan-page";
 import { ReturnPage } from "../components/billing/return-page";
+import { CapacityPage } from "../components/billing/usage-capacity";
 
 const SCOPE = { workspaceId: "ws", sessionGeneration: 1 };
 const INVOICE = "66666666-6666-4666-8666-666666666666";
@@ -456,5 +458,65 @@ describe("an invoice (IN)", () => {
     });
     await screen.findByText(/Refunded/i, undefined, { timeout: 5_000 });
     expect(document.querySelector('[data-action="ask-refund"]')).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------- roles, team */
+
+describe("who acts on billing (BL-02, CY)", () => {
+  it("tells an administrator who changes the plan, with no link (M-S38)", () => {
+    role = "tenant_admin";
+    render(<PlanLimitLink />, { wrapper: Wrapper });
+    expect(document.querySelector('[data-action="see-plans"]')).toBeNull();
+    expect(screen.getByText(app.team["askOwnerPlan"]!)).toBeTruthy();
+  });
+
+  it("draws no Buy for an administrator on capacity (M-S47)", async () => {
+    role = "tenant_admin";
+    answers["GET /api/v1/billing/channel-capacity"] = () => ({
+      effective_limit: 1,
+      base_limit: 1,
+      topup_limit: 0,
+      platform_grant_limit: 0,
+      active: 1,
+      remaining: 0,
+      over_limit: false,
+      breakdown: [],
+      scheduled: null,
+      reduction: null,
+      automatic_fallback: false,
+      preselected: [],
+      selection_revision: 0,
+    });
+    answers["GET /api/v1/billing/topups"] = () => [
+      {
+        id: "topup-1",
+        code: "number",
+        name: "One more number",
+        description: null,
+        entitlement_key: "whatsapp_numbers",
+        kind: "capacity",
+        enforced: true,
+        quantity: 1,
+        price: "50.00",
+        currency: "EGP",
+        scope: "period",
+        validity_policy: "period",
+      },
+    ];
+    render(<CapacityPage />, { wrapper: Wrapper });
+    await screen.findByText("One more number", undefined, { timeout: 5_000 });
+    expect(document.querySelector('[data-action="buy-topup"]')).toBeNull();
+  });
+
+  it("names every member-row action by its visible words first (2.5.3, M-S39)", () => {
+    for (const locale of ["en", "ar", "fr", "tr"] as const) {
+      const team = (messagesFor(locale)["app"] as unknown as { team: Record<string, string> }).team;
+      for (const action of ["changeRole", "makeOwner"]) {
+        const visible = team[action]!;
+        const named = team[`${action}Of`]!.replace("{name}", "Nour Test");
+        expect(named.startsWith(visible), `${locale} ${action}Of: "${named}"`).toBe(true);
+      }
+    }
   });
 });
