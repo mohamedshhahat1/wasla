@@ -1,0 +1,11 @@
+# The dev tools CI and the e2e image install, by hash (FEB-43). Mirrors
+# pyproject.toml's `dev` extra pin for pin - tests/unit/test_dev_lock.py fails
+# when they differ. To change a tool: edit its pin in BOTH files, then recompile
+# requirements-dev.lock with the command in its header and commit all three.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==6.3.0
+ruff==0.12.12
+black==26.5.1
+mypy==1.20.2
+types-PyYAML==6.0.12.20260815

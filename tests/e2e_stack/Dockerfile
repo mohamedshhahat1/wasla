@@ -23,23 +23,17 @@ RUN apt-get update \
  && groupadd --system --gid 1001 wasla \
  && useradd --system --uid 1001 --gid wasla --home-dir /app wasla
 
-# What ci.yml does: the locks by hash first, then the project's dev tools, which
-# leaves every locked package at its pin - and then the drift guard. Ordered so a
-# code change reuses both dependency layers (ADR-201): the locks from the lock
-# files alone, the dev tools from pyproject.toml's own list (resolved as ci.yml
-# resolves them, unhashed - FEB-43), and only then the code, and the package
-# without its dependencies.
-COPY requirements.lock requirements-build.lock ./
-RUN pip install --require-hashes -r requirements.lock -r requirements-build.lock
+# What ci.yml does: the three locks by hash first - the runtime, the build
+# backend and the dev tools (FEB-43) - and then the drift guard. Ordered so a
+# code change reuses the dependency layer (ADR-201): the locks from the lock
+# files alone, and only then the code, and the package without its
+# dependencies.
+COPY requirements.lock requirements-build.lock requirements-dev.lock ./
+RUN pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
 COPY pyproject.toml README.md ./
-RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['optional-dependencies']['dev']))" > /tmp/dev-requirements.txt \
- && pip install -r /tmp/dev-requirements.txt \
- && rm /tmp/dev-requirements.txt
 COPY app ./app
 COPY scripts ./scripts
-RUN pip install --no-deps -e . \
- && python -m scripts.check_installed_lock requirements.lock requirements-build.lock \
- && pip check
+RUN pip install --no-deps -e .  && python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock  && pip check
 
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
