@@ -15,14 +15,14 @@ import {
   type ReactNode,
 } from "react";
 
-import { unwrap, type components } from "@wasla/api-client";
+import { ApiError, unwrap, type components } from "@wasla/api-client";
 import type { WorkspaceRef } from "@wasla/session";
 import { Toast } from "@wasla/ui";
 
 import { publicEnv } from "../lib/env";
 import { clearDrafts } from "../lib/inbox/composer";
 import { draftStorage } from "../lib/inbox/draft-storage";
-import { answerIsCurrent } from "../lib/session/profile-answer";
+import { answerIsCurrent, failureIsAnAnswer } from "../lib/session/profile-answer";
 import { sessionTransports } from "../lib/session/transports";
 import { WebSession, type SessionStatus } from "../lib/session/web-session";
 
@@ -100,8 +100,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // loads its own profile.
       if (answerIsCurrent(key, keyRef.current)) setLoaded({ key, profile: me });
       return me;
-    } catch {
-      if (answerIsCurrent(key, keyRef.current)) setLoaded({ key, profile: null });
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : null;
+      if (answerIsCurrent(key, keyRef.current) && failureIsAnAnswer(code)) {
+        setLoaded({ key, profile: null });
+      }
       return null;
     }
   }, [session]);

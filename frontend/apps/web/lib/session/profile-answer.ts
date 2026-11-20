@@ -12,3 +12,15 @@
 export function answerIsCurrent(askedFor: string, current: string): boolean {
   return askedFor === current;
 }
+
+/**
+ * FEF-43, the broader half (frontend.yml 44638302967, WebKit): whether a failed /auth/me says
+ * anything about the account. A request that never got an answer - WebKit aborts the page's
+ * fetches as it navigates away and rejects them as `network_error` - is not "no profile"; filed
+ * as one, PageGate read it as an unverified account and sent the page to /verify mid-navigation.
+ * Such a failure is not filed: the page keeps waiting (or leaves), and the session's own state
+ * says when the connection itself is lost.
+ */
+export function failureIsAnAnswer(code: string | null | undefined): boolean {
+  return code !== "network_error";
+}
