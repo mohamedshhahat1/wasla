@@ -15,9 +15,10 @@ suites already have a double, it is reused rather than rewritten:
   "price" or "سعر" (then a reply once the tool's output is back).
 - **Paymob**: an intention answers with the order id the suites' double uses
   (`tests.paymob_orders.order_for`); the hosted checkout page (``/paymob/``),
-  when opened, sends the signed callback Paymob would send - to the API itself,
-  because the notification URL the API asked for is built on the *frontend*
-  origin (FEB-12) - and then redirects to the return URL.
+  when opened, sends the signed callback Paymob would send - to the API's
+  address on the e2e network, because the notification URL (built on
+  API_PUBLIC_URL since FEB-12) names the host's published port, which a
+  container cannot reach - and then redirects to the return URL.
 - **Google**: ``/google/authorize`` redirects straight back to the redirect URI
   with a code (append ``&email=`` to choose who signs in); the token endpoint
   checks PKCE and answers with an ID token really signed by a key generated at
@@ -30,6 +31,7 @@ to stdout by host and path only.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import itertools
@@ -215,6 +217,43 @@ def _transaction(intention: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PAYMOB_OUTCOMES = frozenset({"paid", "declined", "pending", "late"})
+
+# The late callbacks in flight, held so the event loop does not collect them.
+_late_callbacks: set[asyncio.Task[None]] = set()
+
+
+def _declined(transaction: dict[str, Any]) -> dict[str, Any]:
+    """The callback a real Test decline sent (P54): not a success, a message."""
+    return {
+        **transaction,
+        "success": False,
+        "error_occured": False,
+        "data": {"message": "AUTHENTICATION_FAILED"},
+    }
+
+
+async def _paymob_callback(transaction: dict[str, Any], *, delay: float = 0.0) -> None:
+    """Send the signed callback to the API.
+
+    The notification URL names the API's published port on the host
+    (API_PUBLIC_URL, FEB-12); from inside this network the API is reached by
+    its service name instead.
+    """
+    if delay:
+        await asyncio.sleep(delay)
+    signature = hmac_signature(transaction, secret=PAYMOB_HMAC_SECRET)
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        callback = await client.post(
+            f"{API_INTERNAL}/api/v1/webhooks/paymob",
+            params={"hmac": signature},
+            json={"type": "TRANSACTION", "obj": transaction},
+        )
+    _say(
+        "paymob callback", callback.status_code, "success" if transaction["success"] else "declined"
+    )
+
+
 # ----------------------------------------------------------------------- Google
 
 
@@ -297,23 +336,47 @@ def service() -> FastAPI:
 
     @api.get("/paymob/")
     async def paymob_checkout(request: Request) -> Response:
+        """The hosted page: pay, then send the browser back.
+
+        `outcome` is the journeys' own switch, read here and never by the API
+        (EC8-04). Whatever happens, the redirect says `success=true`, as a real
+        redirect can while the payment is still pending or declined (P02, P54) -
+        the return page must decide from the payment the API reads, not from
+        this query string.
+
+        - ``paid`` (default): the signed success callback, then the redirect.
+        - ``declined``: a signed callback with ``success=false`` and the
+          provider's message, then the redirect.
+        - ``pending``: no callback at all; the redirect says ``pending=true``.
+        - ``late``: the redirect at once; the success callback ``delay``
+          seconds later (at most 30).
+        """
         intention = _intentions.get(request.query_params.get("clientSecret", ""))
         if intention is None:
             return JSONResponse({"error": "unknown client secret"}, status_code=404)
+        outcome = request.query_params.get("outcome", "paid")
+        if outcome not in PAYMOB_OUTCOMES:
+            return JSONResponse({"error": f"unknown outcome {outcome}"}, status_code=400)
         transaction = _transaction(intention)
-        signature = hmac_signature(transaction, secret=PAYMOB_HMAC_SECRET)
-        # The API asked for its callback on the frontend origin (FEB-12); this
-        # stack has no frontend, so the callback goes to the API directly.
-        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
-            callback = await client.post(
-                f"{API_INTERNAL}/api/v1/webhooks/paymob",
-                params={"hmac": signature},
-                json={"type": "TRANSACTION", "obj": transaction},
-            )
-        _say("paymob callback", callback.status_code)
+        if outcome == "declined":
+            transaction = _declined(transaction)
+        if outcome in ("paid", "declined"):
+            await _paymob_callback(transaction)
+        elif outcome == "late":
+            delay = min(max(float(request.query_params.get("delay", "5")), 0.0), 30.0)
+            task = asyncio.create_task(_paymob_callback(transaction, delay=delay))
+            _late_callbacks.add(task)
+            task.add_done_callback(_late_callbacks.discard)
+            _say("paymob callback scheduled", int(delay))
         back = str(intention.get("redirection_url") or "/")
         separator = "&" if "?" in back else "?"
-        query = urlencode({"success": "true", "id": transaction["id"], "pending": "false"})
+        query = urlencode(
+            {
+                "success": "true",
+                "id": transaction["id"],
+                "pending": "true" if outcome == "pending" else "false",
+            }
+        )
         return RedirectResponse(f"{back}{separator}{query}", status_code=302)
 
     return api
