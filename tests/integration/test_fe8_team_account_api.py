@@ -26,9 +26,13 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import ConflictError
 from app.db.models import Membership, MembershipStatus, TenantInvitation, TenantRole, User
 from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.identity import FederatedIdentity, IdentityProvider
+from app.repositories.membership_repository import MembershipRepository
+from app.repositories.tenant_repository import TenantRepository
+from app.services.membership_service import MembershipService
 from tests.integration import test_fe7_account_api as _shared
 from tests.integration.test_fe7_account_api import (
     API,
@@ -349,3 +353,81 @@ async def test_patch_me_reports_the_same_facts(http: AsyncClient, db_session: As
     assert changed.status_code == 200, changed.text
     assert changed.json()["has_password"] is True
     assert changed.json()["google_connected"] is False
+
+
+# --- FE-8 leftovers: what the mutants showed untested (M-R03, M-R06, M-S05, M-S06) -----
+
+
+async def test_each_audit_row_says_what_the_role_was_and_what_it_became(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
+    """M-S05: `from` and `to` are each person's own, not a pair in either order."""
+    team = await _team(db_session, "rc-meta")
+    session = await _login(http, "rc-meta-owner@example.com", "rc-meta")
+    assert (await _change(http, session, team["member"], "tenant_admin")).status_code == 200
+    assert (await _change(http, session, team["admin"], "member")).status_code == 200
+
+    memberships = {
+        str(row.id): row.user_id
+        for row in (
+            await db_session.execute(
+                select(Membership).where(Membership.tenant_id == team["tenant"].id)
+            )
+        ).scalars()
+    }
+    moves = {
+        memberships[str(row.target_id)]: (row.meta or {})
+        for row in await _role_changes(db_session, team["tenant"].id)
+    }
+    assert moves[team["member"].id] == {"from": "member", "to": "tenant_admin"}
+    assert moves[team["admin"].id] == {"from": "tenant_admin", "to": "member"}
+
+
+async def test_the_service_never_assigns_ownership(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
+    """M-R03: the request schema refuses "tenant_owner", and so does the service the
+    schema sits in front of - it is the service other callers reuse."""
+    team = await _team(db_session, "rc-svc-owner")
+    service = MembershipService(session=db_session, tenant_id=team["tenant"].id)
+    with pytest.raises(ConflictError) as refused:
+        await service.change_role(
+            actor=team["owner"],
+            actor_role=TenantRole.TENANT_OWNER,
+            user_id=team["member"].id,
+            role=TenantRole.TENANT_OWNER,
+        )
+    assert refused.value.error_code == "member_role_owner"
+    membership = await db_session.get(Membership, await _membership(db_session, team["member"]))
+    assert membership is not None and membership.role is TenantRole.MEMBER
+    assert await _role_changes(db_session, team["tenant"].id) == []
+
+
+async def test_a_role_change_holds_the_workspace_lock(
+    http: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-S06: the change is read and written under the tenant row lock the removal,
+    reinstatement and ownership transfer take, before the membership is read."""
+    team = await _team(db_session, "rc-lock")
+    order: list[str] = []
+    real_lock = TenantRepository.lock
+    real_read = MembershipRepository.get_any_for_user
+
+    async def lock(self: TenantRepository, tenant_id: Any) -> Any:
+        order.append(f"lock {tenant_id}")
+        return await real_lock(self, tenant_id)
+
+    async def read(self: MembershipRepository, user_id: Any) -> Any:
+        order.append("read")
+        return await real_read(self, user_id)
+
+    monkeypatch.setattr(TenantRepository, "lock", lock)
+    monkeypatch.setattr(MembershipRepository, "get_any_for_user", read)
+    service = MembershipService(session=db_session, tenant_id=team["tenant"].id)
+    await service.change_role(
+        actor=team["owner"],
+        actor_role=TenantRole.TENANT_OWNER,
+        user_id=team["member"].id,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    assert order[:2] == [f"lock {team['tenant'].id}", "read"]
