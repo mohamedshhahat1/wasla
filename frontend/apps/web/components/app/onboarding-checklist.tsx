@@ -33,6 +33,8 @@ const STEP_LINKS: Partial<Record<ChecklistStep, { href: string; action: string }
   agent: { href: "/ai/agents", action: "agentAction" },
   knowledge: { href: "/knowledge", action: "knowledgeAction" },
   team: { href: "/team/invitations", action: "teamAction" },
+  // FE-8 (BL-04): the plan step leads to Billing.
+  plan: { href: "/billing", action: "planAction" },
 };
 
 /**

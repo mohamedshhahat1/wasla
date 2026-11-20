@@ -46,12 +46,12 @@ jobs:
         # tested whatever was newest that day - pypdf drifted CI red three
         # times that way (CPM-05, RGM-07).
         run: |
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
 
       - name: Ruff
@@ -155,12 +155,12 @@ jobs:
         # tested whatever was newest that day - pypdf drifted CI red three
         # times that way (CPM-05, RGM-07).
         run: |
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
 
       - name: Start an object store for the media suites
@@ -328,12 +328,12 @@ jobs:
       - name: Install dependencies
         # The lock by hash, then the project and its dev tools (CPM-05, RGM-07).
         run: |
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
 
       - name: Application starts
@@ -436,12 +436,12 @@ jobs:
       - name: Install dependencies
         # The lock by hash, then the project and its dev tools (CPM-05, RGM-07).
         run: |
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
 
       - name: Every integration and end-to-end suite against the migrated schema
@@ -562,12 +562,12 @@ jobs:
         # tested whatever was newest that day - pypdf drifted CI red three
         # times that way (CPM-05, RGM-07).
         run: |
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
 
       - name: Model and database enums agree
@@ -719,12 +719,12 @@ jobs:
       - name: Install dependencies
         # The lock by hash, then the project and its dev tools (CPM-05, RGM-07).
         run: |
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

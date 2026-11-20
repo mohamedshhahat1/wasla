@@ -115,6 +115,9 @@ class StubAuthService:
         self.calls.append(("list_workspaces", {"include_suspended": include_suspended}))
         return [self.workspace]
 
+    async def google_connected(self, *, user: User) -> bool:
+        return False
+
 
 @pytest.fixture
 def service(app: FastAPI, user: User, workspace: WorkspaceContext) -> StubAuthService:

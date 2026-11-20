@@ -89,5 +89,14 @@
   "reauthentication_unavailable": "لا يستطيع Google تأكيد هويتك لهذا الحساب.",
   "workspace_owner_required": "يستطيع المالك فقط فعل ذلك.",
   "account_owns_workspaces": "سلّم مساحات العمل التي تملكها أو أغلقها أولًا.",
-  "last_workspace_owner": "أنت المالك الوحيد. اجعل شخصًا آخر مالكًا أولًا."
+  "last_workspace_owner": "أنت المالك الوحيد. اجعل شخصًا آخر مالكًا أولًا.",
+  "member_role_self": "لا يمكنك تغيير دورك بنفسك.",
+  "member_role_owner": "لا يُغيَّر دور المالك من هنا. انقل الملكية بدلاً من ذلك.",
+  "member_role_admin_owner_required": "مالك مساحة العمل وحده يستطيع تغيير دور المسؤول.",
+  "member_not_active": "هذا الشخص لم يعد عضواً في مساحة العمل هذه.",
+  "plan_requires_checkout": "يجب الدفع لهذه الخطة أولاً.",
+  "checkout_already_started": "فُتحت صفحة دفع لهذا من قبل. تحقق من حالتها في الفواتير.",
+  "payment_provider_unavailable": "المدفوعات غير متاحة بعد. تواصل مع الدعم.",
+  "offer_not_open": "لم يعد بالإمكان قبول هذا العرض أو رفضه.",
+  "refund_already_requested": "طُلبت مراجعة استرداد لهذه الدفعة من قبل."
 }

@@ -14,7 +14,8 @@
     "ai": "AI agent",
     "knowledge": "Knowledge",
     "team": "Team",
-    "settings": "Settings"
+    "settings": "Settings",
+    "billing": "Billing"
   },
   "account": {
     "label": "Account",
@@ -66,11 +67,13 @@
     "payment": {
       "owner": "Payment is required to keep this workspace running.",
       "ownerDetail": "Paying from Wasla is coming in a later version of the app.",
-      "member": "There is a billing issue with this workspace. Ask the workspace owner."
+      "member": "There is a billing issue with this workspace. Ask the workspace owner.",
+      "payNow": "Pay now"
     },
     "ended": {
       "title": "This workspace's subscription has ended.",
-      "detail": "Choosing a plan in Wasla is coming in a later version of the app."
+      "detail": "Choosing a plan in Wasla is coming in a later version of the app.",
+      "choose": "Choose a plan"
     },
     "trial": "{days, plural, =0 {The trial ends today.} one {The trial ends tomorrow.} other {The trial ends in # days.}}",
     "trialOn": "Last day: {date}.",
@@ -128,7 +131,8 @@
     "plan": "Choose a plan",
     "agentAction": "Set up the AI agent",
     "knowledgeAction": "Add knowledge",
-    "teamAction": "Invite someone"
+    "teamAction": "Invite someone",
+    "planAction": "Choose a plan"
   },
   "roles": {
     "onlyAdmins": "Only owners and admins can connect and change channels.",
@@ -1112,7 +1116,7 @@
     "memberNote": "Owners and administrators manage the team. Your own account is on",
     "accountLink": "Account settings",
     "makeOwner": "Make owner",
-    "makeOwnerOf": "Make {name} the owner",
+    "makeOwnerOf": "Make owner: {name}",
     "remove": "Remove",
     "removeOf": "Remove {name}",
     "leave": "Leave this workspace",
@@ -1160,7 +1164,20 @@
         "required": "Enter an e-mail address.",
         "email": "Enter a valid e-mail address."
       }
-    }
+    },
+    "changeRole": "Change role",
+    "changeRoleOf": "Change role: {name}",
+    "roleTitle": "Change {name}'s role?",
+    "roleBody": "It applies to everything they do next. Ownership is handed over separately.",
+    "roleLabel": "New role",
+    "roleMemberLine": "Works in the inbox, customers and leads.",
+    "roleAdminLine": "Also manages the team, channels, the AI agent and settings.",
+    "saveRole": "Save role",
+    "invitedBy": "Invited by {name}",
+    "invitedByGone": "Invited by an account that was closed",
+    "sentAt": "Sent {time}",
+    "billingLink": "See plans",
+    "askOwnerPlan": "Ask the workspace owner to change the plan."
   },
   "settings": {
     "nav": {
@@ -1304,7 +1321,8 @@
       "toSet": "I signed up with Google and have no password",
       "toChange": "I already have a password",
       "noPasswordYet": "This account has no password yet. Set one instead.",
-      "alreadyHas": "This account already has a password. Change it instead."
+      "alreadyHas": "This account already has a password. Change it instead.",
+      "setLine": "You sign in with Google today. A password lets you sign in without it."
     },
     "google": {
       "title": "Google",
@@ -1343,5 +1361,241 @@
       "noGoogle": "Google sign-in is not available right now. Use your password.",
       "confirm": "Close my account"
     }
+  },
+  "billing": {
+    "title": "Billing",
+    "line": "Your plan, what you have used and what you have paid.",
+    "tabs": {
+      "label": "Billing pages",
+      "plan": "Plan",
+      "usage": "Usage",
+      "capacity": "Channels and top-ups",
+      "invoices": "Invoices",
+      "methods": "Payment methods"
+    },
+    "ownerOnly": "Only the workspace owner can change the plan or pay.",
+    "loading": "Loading…",
+    "loadError": "This could not be loaded.",
+    "retry": "Try again",
+    "reference": "Reference",
+    "cancel": "Cancel",
+    "close": "Close",
+    "unlimited": "Unlimited",
+    "interval": {
+      "month": "per month",
+      "year": "per year"
+    },
+    "current": {
+      "title": "Your plan",
+      "none": "This workspace has no plan yet. Choose one below.",
+      "renews": "Renews at {amount} on {date}",
+      "period": "Current period: {start} – {end}",
+      "autoOn": "Renewals are charged automatically to your default card.",
+      "autoOff": "Renewals arrive as invoices to pay."
+    },
+    "status": {
+      "trialing": "Trial – ends on {date}",
+      "active": "Active",
+      "pastDue": "Payment overdue",
+      "cancelling": "Ends on {date}",
+      "changing": "Changes to {plan} on {date}",
+      "cancelled": "Cancelled",
+      "ended": "Ended",
+      "none": "No plan"
+    },
+    "owed": {
+      "title": "Payment owed",
+      "row": "{amount} for {start} – {end}"
+    },
+    "payNow": "Pay now",
+    "plans": {
+      "title": "Plans",
+      "current": "Your plan",
+      "madeForYou": "Made for you",
+      "free": "Free",
+      "choose": "Choose",
+      "upgrade": "Upgrade",
+      "switchLater": "Switch at period end",
+      "switchNow": "Switch",
+      "chooseOf": "{action}: {plan} at {price}",
+      "scheduled": "Your plan changes on {date}."
+    },
+    "limit": {
+      "channel_connections": "Channel connections",
+      "agents": "AI agents",
+      "owned_workspaces": "Workspaces you own",
+      "team_members": "Team members",
+      "knowledge_documents": "Knowledge documents",
+      "storage_bytes": "Storage (bytes)",
+      "period_messages": "Messages this period",
+      "period_ai_turns": "AI replies this period",
+      "period_campaign_messages": "Campaign messages this period"
+    },
+    "actions": {
+      "cancel": "Cancel subscription",
+      "resume": "Keep my plan",
+      "keep": "Keep {plan}"
+    },
+    "cancelDialog": {
+      "title": "Cancel your subscription?",
+      "body": "Choose when it ends.",
+      "atEnd": "At the end of the period ({date})",
+      "now": "Now – you give up the rest of the paid period",
+      "type": "Type the workspace address {slug} to cancel now",
+      "confirm": "Cancel subscription",
+      "keep": "Keep it",
+      "mismatch": "Type the address exactly as shown."
+    },
+    "offer": {
+      "title": "An offer made for you",
+      "expires": "Open until {date}",
+      "accept": "Accept and pay",
+      "decline": "Decline",
+      "declineTitle": "Decline this offer?",
+      "declineBody": "The Wasla team is told. You can tell them why.",
+      "reason": "Reason (optional)",
+      "past": "Earlier offers",
+      "state": {
+        "offered": "Open",
+        "accepted": "Accepted",
+        "active": "Active",
+        "declined": "Declined",
+        "expired": "Expired",
+        "cancelled": "Withdrawn"
+      }
+    },
+    "checkout": {
+      "opening": "Opening the payment page…",
+      "badUrl": "The payment page address was not valid. Nothing was charged."
+    },
+    "return": {
+      "title": "Your payment",
+      "finding": "Finding your payment…",
+      "confirming": "Confirming your payment…",
+      "slow": "Paymob has not confirmed it yet. Some payment methods take a few minutes. We'll show it here as soon as it is confirmed – you can also leave this page; your invoice will show it.",
+      "succeeded": "Payment received",
+      "succeededFor": "{amount} for the invoice of {start} – {end}.",
+      "failed": "The payment did not go through",
+      "failedGeneric": "Nothing was charged. You can try again.",
+      "failedAuth": "The card's bank did not confirm the payment.",
+      "refunded": "This payment was refunded",
+      "none": "We could not find a payment you started in the last two hours. Your invoices are here.",
+      "elsewhere": "This payment belongs to another workspace. Switch workspace from the menu above.",
+      "others": "Other payments started recently:",
+      "toBilling": "Go to Billing",
+      "tryAgain": "Try again",
+      "toInvoice": "Open the invoice"
+    },
+    "methods": {
+      "title": "Payment methods",
+      "empty": "No card is saved. Cards are saved when you tick “Save card” on Paymob's payment page.",
+      "how": "To save a card, tick “Save card” on Paymob's payment page.",
+      "card": "{brand} ending {last4}",
+      "cardNoBrand": "Card ending {last4}",
+      "cardUnknown": "Saved card",
+      "default": "Default",
+      "added": "Added {time}",
+      "makeDefault": "Make default",
+      "remove": "Remove",
+      "removeTitle": "Remove this card?",
+      "removeBody": "It will not be charged again.",
+      "removeDefaultBody": "Renewals will no longer be charged to this card."
+    },
+    "invoices": {
+      "title": "Invoices",
+      "empty": "No invoices yet.",
+      "latest": "Showing the latest 50.",
+      "issued": "Issued {date}",
+      "outstanding": "{amount} outstanding",
+      "payOf": "Pay {amount}",
+      "open": "Open",
+      "purpose": {
+        "checkout": "Purchase",
+        "renewal": "Renewal",
+        "manual": "Manual",
+        "adjustment": "Adjustment",
+        "topup": "Top-up"
+      },
+      "status": {
+        "draft": "Draft",
+        "open": "Open",
+        "paid": "Paid",
+        "uncollectible": "Not collectable",
+        "void": "Void"
+      }
+    },
+    "invoice": {
+      "heading": "Wasla charges – record",
+      "notFound": "Invoice not found.",
+      "recordNote": "A record of Wasla charges for this workspace. It is not a tax invoice.",
+      "id": "Record {id}",
+      "period": "Period",
+      "lines": "Lines",
+      "description": "Description",
+      "quantity": "Quantity",
+      "amount": "Amount",
+      "due": "Due",
+      "paid": "Paid",
+      "outstanding": "Outstanding",
+      "payments": "Payments",
+      "noPayments": "No payment has been attempted.",
+      "print": "Print",
+      "back": "All invoices"
+    },
+    "payment": {
+      "status": {
+        "pending": "Pending",
+        "succeeded": "Succeeded",
+        "failed": "Failed",
+        "refunded": "Refunded"
+      },
+      "refundPending": "Refund on its way",
+      "reviewRequested": "Refund review requested"
+    },
+    "refund": {
+      "ask": "Ask for a refund review",
+      "title": "Ask for a refund review?",
+      "body": "This sends a request to the Wasla team. It does not move any money by itself.",
+      "reason": "Reason (optional)",
+      "send": "Send request"
+    },
+    "usage": {
+      "title": "Usage",
+      "period": "This period: {start} – {end}",
+      "of": "{used} of {limit}",
+      "ofUnlimited": "{used} used",
+      "held": "{held} held for replies in progress",
+      "daily": "Messages per day",
+      "showTable": "Show as table",
+      "showChart": "Show as chart",
+      "day": "Day",
+      "messages": "Messages",
+      "noData": "Nothing recorded in this period yet."
+    },
+    "capacity": {
+      "title": "Channel capacity",
+      "line": "{active} connected of {limit}",
+      "lineUnlimited": "{active} connected",
+      "parts": "Plan {base} · top-ups {topups} · granted by Wasla {granted}",
+      "over": "More channels are connected than your plan allows.",
+      "reduction": "Your channel slots are being reduced. Choose which connections stay on the Channels page.",
+      "toChannels": "Open Channels"
+    },
+    "topups": {
+      "title": "Top-ups",
+      "empty": "No top-ups are offered for this plan.",
+      "adds": "Adds {quantity} until the period ends",
+      "buy": "Buy",
+      "buyOf": "Buy {name} for {price}"
+    },
+    "purchases": {
+      "title": "Purchases and grants",
+      "empty": "Nothing bought or granted yet.",
+      "bought": "Bought",
+      "granted": "Granted by Wasla",
+      "until": "Until {date}",
+      "more": "Load more"
+    },
+    "preview": "Billing needs the API, which this preview does not have."
   }
 }

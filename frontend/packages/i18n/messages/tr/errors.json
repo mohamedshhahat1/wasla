@@ -89,5 +89,14 @@
   "reauthentication_unavailable": "Google bu hesap için kimliğinizi doğrulayamıyor.",
   "workspace_owner_required": "Bunu yalnızca sahip yapabilir.",
   "account_owns_workspaces": "Önce sahibi olduğunuz çalışma alanlarını devredin veya kapatın.",
-  "last_workspace_owner": "Tek sahip sizsiniz. Önce başka birini sahip yapın."
+  "last_workspace_owner": "Tek sahip sizsiniz. Önce başka birini sahip yapın.",
+  "member_role_self": "Kendi rolünüzü değiştiremezsiniz.",
+  "member_role_owner": "Bir sahibin rolü burada değiştirilmez. Bunun yerine sahipliği devredin.",
+  "member_role_admin_owner_required": "Bir yöneticinin rolünü yalnızca çalışma alanı sahibi değiştirebilir.",
+  "member_not_active": "Bu kişi artık bu çalışma alanının üyesi değil.",
+  "plan_requires_checkout": "Bu planın önce ödenmesi gerekiyor.",
+  "checkout_already_started": "Bunun için zaten bir ödeme sayfası açıldı. Durumunu Faturalar'da kontrol edin.",
+  "payment_provider_unavailable": "Ödemeler henüz kullanılamıyor. Destekle iletişime geçin.",
+  "offer_not_open": "Bu teklif artık kabul edilemez veya reddedilemez.",
+  "refund_already_requested": "Bu ödeme için zaten bir iade incelemesi istendi."
 }

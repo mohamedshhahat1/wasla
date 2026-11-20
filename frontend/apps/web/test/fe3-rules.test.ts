@@ -407,6 +407,7 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
       "/knowledge",
       "/team",
       "/settings/workspace",
+      "/billing",
     ]);
     for (const role of ALL_ROLES)
       expect(entriesFor(role).map((entry) => entry.key)).toEqual([
@@ -421,12 +422,15 @@ describe("SH-03: the navigation goes only where a page exists (M-Z21)", () => {
         // FE-7 (HM7-01): Team for every role, Settings for owners and administrators.
         "team",
         ...(role === "member" ? [] : ["settings"]),
+        // FE-8 (BL-03, OQ-5): Billing for owners and administrators.
+        ...(role === "member" ? [] : ["billing"]),
       ]);
     expect(entriesFor(null)).toEqual([]);
     expect(currentEntry("/ai/agents/abc")).toBe("ai");
     expect(currentEntry("/knowledge/abc")).toBe("knowledge");
     expect(currentEntry("/team/invitations")).toBe("team");
     expect(currentEntry("/settings/activity")).toBe("settings");
+    expect(currentEntry("/billing/checkout/return")).toBe("billing");
   });
   it("the current entry follows the path", () => {
     expect(currentEntry("/")).toBe("home");

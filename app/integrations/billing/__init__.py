@@ -64,6 +64,10 @@ def build_checkout_provider(settings: Settings) -> CheckoutProvider | None:
     public_key = settings.paymob_public_key or ""
     hmac_secret = settings.paymob_hmac_secret or ""
     public_url = (settings.app_public_url or "").rstrip("/")
+    # The provider calls the API; the browser comes back to the app (FEB-12).
+    # Outside staging and production API_PUBLIC_URL may be unset, and the
+    # callback then goes to the app's origin, the single-origin local stack.
+    callback_origin = (settings.api_public_url or settings.app_public_url or "").rstrip("/")
 
     return PaymobProvider(
         secret_key=secret_key,
@@ -77,7 +81,7 @@ def build_checkout_provider(settings: Settings) -> CheckoutProvider | None:
         # Built from configuration and a literal path, never from a request
         # Host header - a callback URL an attacker can aim is a callback that
         # never reaches us and a payment that is never recorded.
-        notification_url=f"{public_url}{CALLBACK_PATH}" if public_url else None,
+        notification_url=f"{callback_origin}{CALLBACK_PATH}" if callback_origin else None,
         redirection_url=f"{public_url}/billing/checkout/return" if public_url else None,
     )
 

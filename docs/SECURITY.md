@@ -163,8 +163,9 @@ Redis, nginx, Prometheus, and Alertmanager production inputs use registry
 digests. `security.yml` continues to run pip-audit, secret scanning, and Trivy.
 
 **The scheduled scan audits what ships (RGM-21, ADR-188).** Its jobs install
-exactly as `ci.yml` and the Dockerfile do - both locks by hash, then the
-project and the dev tools - and run `scripts/check_installed_lock.py` and
+exactly as `ci.yml` does - the three locks by hash (the runtime, the build
+backend and, since FEB-43, the dev tools in `requirements-dev.lock`), then the
+project without its dependencies - and run `scripts/check_installed_lock.py` and
 `pip check` before anything else, so a scan never runs on versions the image
 does not carry. The dependency job prints the audited versions, then audits the
 locks themselves (`pip-audit -r requirements.lock -r requirements-build.lock
@@ -178,8 +179,17 @@ scan resolved `pyproject.toml` afresh and audited that environment: 36 of 64
 packages were not the lock's, and none of the 24 advisories in the image were
 reported.
 
+**The dev tools are hashed too (FEB-43, ADR-202).** `requirements-dev.lock` is
+compiled from `requirements-dev.in`, which mirrors `pyproject.toml`'s `dev`
+extra pin for pin (`tests/unit/test_dev_lock.py` fails when they differ), and
+constrained by the two other locks, so a package both need resolves to the
+runtime lock's version. Every CI job and the e2e image install it with
+`--require-hashes`; nothing installs `.[dev]` any more. To change a tool, edit its
+pin in `pyproject.toml` and `requirements-dev.in`, recompile the lock with the
+command in its header, and commit all three.
+
 Review updates at least monthly and promptly after a relevant advisory. With
-uv, regenerate both locks using the command recorded at the top of each lock
+uv, regenerate the three locks using the command recorded at the top of each lock
 file (Python 3.12, Linux x86-64), review the complete version and hash diff,
 and build the Docker image. Resolve new image digests from the upstream
 registry; do not guess or copy a digest from another tag. Update the matching

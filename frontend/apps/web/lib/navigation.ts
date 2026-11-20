@@ -7,6 +7,7 @@ import {
   BookOpenText,
   Bot,
   Contact,
+  CreditCard,
   House,
   Inbox,
   RadioTower,
@@ -123,6 +124,17 @@ export const NAVIGATION: readonly NavEntry[] = [
     iconName: "Settings",
     roles: ADMIN_ROLES,
     page: "app/(app)/settings/workspace/page.tsx",
+  },
+  {
+    // FE-8 (BL-03, OQ-5): the owner acts; an administrator reads the plan, usage and capacity; a
+    // member has no billing (the payment banner tells them to ask the owner).
+    key: "billing",
+    route: "/billing",
+    labelKey: "billing",
+    icon: CreditCard,
+    iconName: "CreditCard",
+    roles: ADMIN_ROLES,
+    page: "app/(app)/billing/page.tsx",
   },
 ];
 

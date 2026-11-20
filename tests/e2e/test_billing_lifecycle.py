@@ -340,7 +340,7 @@ async def test_paying_a_plan_settles_the_invoice_and_moves_the_entitlements(
                 headers=auth,
             )
             assert asked.status_code == 402, asked.text
-            assert asked.json()["error"]["code"] == "payment_required"
+            assert asked.json()["error"]["code"] == "plan_requires_checkout"
 
             before = await client.get("/api/v1/billing/subscription", headers=auth)
             was = {row["key"]: row["limit"] for row in before.json()["entitlements"]}

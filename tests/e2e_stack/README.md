@@ -68,9 +68,23 @@ when its mail is late it must never be read as the send's.
 | WhatsApp ownership | `tests/fake_ownership.FakeOwnershipVerifier`: every phone number id starting `PNID-E2E` is owned |
 | Meta Graph | a send answers `wamid.E2E<n>`; a media id starting `e2e-media` resolves to a 1x1 PNG |
 | OpenAI | embeddings from `tests/fake_embeddings.py`; sentiment neutral; the agent replies in the customer's language, calls `request_human_handoff` on "agent" / "موظف" and `search_knowledge` on "price" / "سعر" |
-| Paymob | intentions as the suites' double; `http://localhost:8026/paymob/?…` sends the signed callback to the API and redirects to `{APP_PUBLIC_URL}/billing/checkout/return` |
+| Paymob | intentions as the suites' double; `http://localhost:8026/paymob/?…` sends the signed callback to the API and redirects to `{APP_PUBLIC_URL}/billing/checkout/return` with `success=true` whatever happened. A journey appends `&outcome=` (read by the fake only, never by the API): `paid` (default), `declined` (a `success=false` callback with `AUTHENTICATION_FAILED`), `pending` (no callback; `pending=true`), `late&delay=<s>` (the redirect at once, the success callback up to 30 s later). The API builds the callback on `API_PUBLIC_URL` (FEB-12); the fake posts it to the API by service name |
 | Google | `http://localhost:8026/google/authorize` redirects to `GOOGLE_REDIRECT_URI` with a code (append `&email=` to choose who); the token is RS256-signed by a key generated at start-up; the binding cookie, PKCE, state and nonce checks are the API's real ones |
 | Email | the repository's fake provider, plus the mailbox |
+
+## Billing states (FE-8)
+
+```bash
+docker exec wasla-fe-e2e-api python -m tests.e2e_stack.billing_states saved-card <slug>
+docker exec wasla-fe-e2e-api python -m tests.e2e_stack.billing_states refunded <slug>
+```
+
+A saved card (MasterCard, last four `2346`, the default - sealed with the stack's own
+key, as the TOKEN callback would) and a paid checkout refunded in full: the two
+billing states the fake page cannot produce. Every other one is reached through the
+API and the fake: a purchase paid, declined, pending or confirmed late; a scheduled
+downgrade and a cancellation at period end (the owner's routes); a renewal owed
+(`gate_states past-due`); a custom offer (the platform's route, as staff).
 
 ## How nothing leaves the machine
 

@@ -21,6 +21,8 @@ export interface MemberControls {
   leaveBlocked: boolean;
   reinstate: boolean;
   makeOwner: boolean;
+  /** FEB-42: move this person between member and administrator (PATCH …/members/{id}). */
+  changeRole: boolean;
 }
 
 export const NO_CONTROLS: MemberControls = {
@@ -29,6 +31,7 @@ export const NO_CONTROLS: MemberControls = {
   leaveBlocked: false,
   reinstate: false,
   makeOwner: false,
+  changeRole: false,
 };
 
 export function isAdminRole(role: string | null | undefined): boolean {
@@ -63,7 +66,24 @@ export function memberControls(
     ...NO_CONTROLS,
     remove: mayRemove,
     makeOwner: viewer.role === "tenant_owner" && row.role !== "tenant_owner",
+    changeRole: mayChangeRole(viewer.role, row.role),
   };
+}
+
+/**
+ * FEB-42's rules as the API holds them (RC-03, OQ-1): never an owner's role and never one's own
+ * (both handled before this is asked); an owner moves anyone else between member and
+ * administrator; an administrator may promote a member but never demote a peer.
+ */
+export function mayChangeRole(viewer: TenantRole, target: TenantRole): boolean {
+  if (target === "tenant_owner") return false;
+  if (viewer === "tenant_owner") return true;
+  return viewer === "tenant_admin" && target === "member";
+}
+
+/** The role a change offers for a row: the other of member and administrator. */
+export function otherRole(role: TenantRole): "member" | "tenant_admin" {
+  return role === "tenant_admin" ? "member" : "tenant_admin";
 }
 
 /** The roles an invitation may carry from this inviter (the API refuses an admin inviting an owner). */

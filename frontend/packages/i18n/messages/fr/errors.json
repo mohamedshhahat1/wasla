@@ -89,5 +89,14 @@
   "reauthentication_unavailable": "Google ne peut pas confirmer votre identité pour ce compte.",
   "workspace_owner_required": "Seul le propriétaire peut faire cela.",
   "account_owns_workspaces": "Transmettez ou fermez d'abord les espaces de travail que vous possédez.",
-  "last_workspace_owner": "Vous êtes le seul propriétaire. Nommez d'abord quelqu'un d'autre."
+  "last_workspace_owner": "Vous êtes le seul propriétaire. Nommez d'abord quelqu'un d'autre.",
+  "member_role_self": "Vous ne pouvez pas changer votre propre rôle.",
+  "member_role_owner": "Le rôle d'un propriétaire ne se change pas ici. Transférez plutôt la propriété.",
+  "member_role_admin_owner_required": "Seul le propriétaire de l'espace peut changer le rôle d'un administrateur.",
+  "member_not_active": "Cette personne n'est plus membre de cet espace.",
+  "plan_requires_checkout": "Cette offre doit d'abord être payée.",
+  "checkout_already_started": "Une page de paiement a déjà été ouverte pour cela. Vérifiez son statut dans Factures.",
+  "payment_provider_unavailable": "Les paiements ne sont pas encore disponibles. Contactez le support.",
+  "offer_not_open": "Cette proposition ne peut plus être acceptée ni refusée.",
+  "refund_already_requested": "Un examen de remboursement a déjà été demandé pour ce paiement."
 }

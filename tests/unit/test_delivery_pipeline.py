@@ -320,8 +320,11 @@ def test_the_security_scan_installs_and_audits_what_the_image_ships() -> None:
     for name in installing:
         runs = [str(step.get("run", "")) for step in _steps(_load("security.yml"), name)]
         locked = next(i for i, run in enumerate(runs) if "--require-hashes" in run)
-        assert "-r requirements.lock -r requirements-build.lock" in runs[locked], name
-        project = next(i for i, run in enumerate(runs) if '-e ".[dev]"' in run)
+        assert (
+            "-r requirements.lock -r requirements-build.lock -r requirements-dev.lock"
+            in runs[locked]
+        ), name
+        project = next(i for i, run in enumerate(runs) if "pip install --no-deps -e ." in run)
         guard = next(i for i, run in enumerate(runs) if "scripts.check_installed_lock" in run)
         checked = next(i for i, run in enumerate(runs) if "pip check" in run)
         first_use = next(i for i, run in enumerate(runs) if 'pip-audit"' in run or "pytest" in run)
@@ -509,8 +512,12 @@ def test_every_ci_job_that_installs_python_installs_the_lock_first() -> None:
         if not any("pip install" in run for run in runs):
             continue
         locked = next(i for i, run in enumerate(runs) if "--require-hashes" in run)
-        assert "-r requirements.lock -r requirements-build.lock" in runs[locked], name
+        assert (
+            "-r requirements.lock -r requirements-build.lock -r requirements-dev.lock"
+            in runs[locked]
+        ), name
         guard = next(i for i, run in enumerate(runs) if "scripts.check_installed_lock" in run)
+        assert "requirements-dev.lock" in runs[guard], name
         first_use = next(
             i
             for i, run in enumerate(runs)

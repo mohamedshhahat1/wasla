@@ -14,24 +14,42 @@ import { useWorkspace } from "./workspace-context";
 function BannerFor({ banner }: { banner: GateBanner }) {
   const t = useTranslations("app");
   const format = useFormatter();
-  const { gates, dismiss, reconnectStream } = useWorkspace();
+  const { gates, dismiss, reconnectStream, role } = useWorkspace();
+  const reader = role === "tenant_owner" || role === "tenant_admin";
   const dismissProps = banner.dismissible
     ? { onDismiss: () => dismiss(banner.key), dismissLabel: t("gates.dismiss") }
     : {};
   switch (banner.key) {
     case "payment":
       return (
-        <Banner name="payment" tone="danger" title={t("gates.payment.owner")}>
-          {t("gates.payment.ownerDetail")}
-        </Banner>
+        <Banner
+          name="payment"
+          tone="danger"
+          title={t("gates.payment.owner")}
+          action={
+            // FE-8 (BL-01): the owner's banner leads to the payment owed. No amount in a banner.
+            <NextLink href="/billing" className={buttonClasses("primary")} data-action="pay-now">
+              {t("gates.payment.payNow")}
+            </NextLink>
+          }
+        />
       );
     case "billing-member":
       return <Banner name="billing-member" tone="warning" title={t("gates.payment.member")} />;
     case "ended":
       return (
-        <Banner name="ended" tone="warning" title={t("gates.ended.title")}>
-          {t("gates.ended.detail")}
-        </Banner>
+        <Banner
+          name="ended"
+          tone="warning"
+          title={t("gates.ended.title")}
+          action={
+            reader ? (
+              <NextLink href="/billing" className={buttonClasses("secondary")}>
+                {t("gates.ended.choose")}
+              </NextLink>
+            ) : undefined
+          }
+        />
       );
     case "capacity":
       return (

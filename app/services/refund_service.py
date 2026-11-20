@@ -135,7 +135,9 @@ class RefundService:
         made.
         """
         if self._provider is None:
-            raise ValidationError("No payment provider is configured.")
+            raise ValidationError(
+                "No payment provider is configured.", error_code="payment_provider_unavailable"
+            )
 
         moment = now if now is not None else datetime.now(UTC)
         payment = await self._refundable(payment_id)
@@ -272,5 +274,8 @@ class RefundService:
             # the commit left no reference - and the next request reversed
             # money that was already on its way back. The request is committed
             # before the provider is called, so it survives that (ADR-088).
-            raise ConflictError("A refund has already been requested for this payment.")
+            raise ConflictError(
+                "A refund has already been requested for this payment.",
+                error_code="refund_already_requested",
+            )
         return payment

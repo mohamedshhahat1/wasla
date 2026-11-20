@@ -802,6 +802,7 @@
           "member_removed",
           "member_left",
           "member_reinstated",
+          "member_role_changed",
           "user_disabled",
           "user_enabled",
           "platform_role_granted",
@@ -3348,7 +3349,6 @@
         "description": "Where to send the customer, and what they are about to pay.\n\nThe amount is echoed so a client can show it before redirecting, and it is\nthe server's figure - a client that displays this is displaying what will\nactually be charged.\n\nThe provider's client secret is not here. It travels inside\n`redirect_url` because the customer's browser has to carry it, and putting\nit in a field of its own would invite a client to store or log it.",
         "properties": {
           "amount": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Amount",
             "type": "string"
           },
@@ -4186,7 +4186,6 @@
           "total": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -4850,7 +4849,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -5640,7 +5638,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -8367,6 +8364,11 @@
             ],
             "title": "Accepted At"
           },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
           "email": {
             "title": "Email",
             "type": "string"
@@ -8380,6 +8382,16 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "invited_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InvitationSender"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "locale": {
             "anyOf": [
@@ -8410,9 +8422,42 @@
           "email",
           "role",
           "status",
-          "expires_at"
+          "expires_at",
+          "created_at"
         ],
         "title": "InvitationResponse",
+        "type": "object"
+      },
+      "InvitationSender": {
+        "description": "Who sent an invitation - what the member list already shows a colleague.",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "full_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Full Name"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "full_name",
+          "email"
+        ],
+        "title": "InvitationSender",
         "type": "object"
       },
       "InvitationStatus": {
@@ -9161,7 +9206,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,15}0*$)\\d{0,12}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -9417,7 +9461,6 @@
           "budget_amount": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -9742,7 +9785,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,12}|(?=[\\d.]{1,15}0*$)\\d{0,12}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -10154,7 +10196,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -10233,7 +10274,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -10306,7 +10346,6 @@
             "type": "string"
           },
           "rate": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Rate",
             "type": "string"
           },
@@ -10315,7 +10354,6 @@
             "type": "integer"
           },
           "subtotal": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Subtotal",
             "type": "string"
           }
@@ -10444,6 +10482,26 @@
           "joined_at"
         ],
         "title": "MemberResponse",
+        "type": "object"
+      },
+      "MemberRoleChangeRequest": {
+        "additionalProperties": false,
+        "description": "Move an active member between member and administrator (FEB-42).\n\nOwner is not a value here: ownership is handed over through the transfer,\nwhich is where the rule about never leaving a workspace ownerless lives.",
+        "properties": {
+          "role": {
+            "description": "The role this person holds from their next request on.",
+            "enum": [
+              "member",
+              "tenant_admin"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "MemberRoleChangeRequest",
         "type": "object"
       },
       "MembershipStatus": {
@@ -12076,7 +12134,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -12514,7 +12571,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -12721,7 +12777,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -12941,7 +12996,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -13060,7 +13114,6 @@
             "type": "string"
           },
           "price": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Price",
             "type": "string"
           },
@@ -13420,7 +13473,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -13730,7 +13782,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -14778,7 +14829,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -15724,7 +15774,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -15806,6 +15855,16 @@
               }
             ],
             "title": "Full Name"
+          },
+          "google_connected": {
+            "default": false,
+            "title": "Google Connected",
+            "type": "boolean"
+          },
+          "has_password": {
+            "default": false,
+            "title": "Has Password",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -16111,7 +16170,6 @@
           "new": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -16123,7 +16181,6 @@
           "old": {
             "anyOf": [
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
                 "type": "string"
               },
               {
@@ -16153,7 +16210,6 @@
             "type": "string"
           },
           "rate": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Rate",
             "type": "string"
           }
@@ -19250,7 +19306,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               }
             ],
@@ -19473,7 +19528,6 @@
                 "type": "number"
               },
               {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,10}|(?=[\\d.]{1,13}0*$)\\d{0,10}\\.\\d{0,2}0*$)",
                 "type": "string"
               },
               {
@@ -39067,6 +39121,93 @@
           }
         ],
         "summary": "Withdraw somebody's access to this workspace",
+        "tags": [
+          "Team"
+        ]
+      },
+      "patch": {
+        "description": "Move somebody between member and administrator (FEB-42).\n\nAn owner may change any member's or administrator's role; an administrator\nmay make a member an administrator but not the reverse; nobody changes\ntheir own, and ownership is handed over, never assigned. Takes effect on\nthe person's next request. Takes no seat and frees none.",
+        "operationId": "change_member_role_api_v1_workspace_members__user_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberRoleChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "The caller may not change this person's role."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Removed, an owner, or the caller's own role."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Change a member's role",
         "tags": [
           "Team"
         ]

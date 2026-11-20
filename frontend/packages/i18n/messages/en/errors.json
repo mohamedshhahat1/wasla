@@ -89,5 +89,14 @@
   "reauthentication_unavailable": "Google cannot confirm it is you for this account.",
   "workspace_owner_required": "Only the owner can do this.",
   "account_owns_workspaces": "Hand over or close the workspaces you own first.",
-  "last_workspace_owner": "You are the only owner. Make someone else the owner first."
+  "last_workspace_owner": "You are the only owner. Make someone else the owner first.",
+  "member_role_self": "You can't change your own role.",
+  "member_role_owner": "An owner's role isn't changed here. Hand over ownership instead.",
+  "member_role_admin_owner_required": "Only the workspace owner can change an administrator's role.",
+  "member_not_active": "That person is no longer a member of this workspace.",
+  "plan_requires_checkout": "This plan has to be paid for first.",
+  "checkout_already_started": "A payment page was already opened for this. Check its status in Invoices.",
+  "payment_provider_unavailable": "Payments aren't available yet. Contact support.",
+  "offer_not_open": "This offer can no longer be accepted or declined.",
+  "refund_already_requested": "A refund review has already been requested for this payment."
 }

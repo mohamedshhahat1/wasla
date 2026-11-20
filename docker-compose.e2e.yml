@@ -40,6 +40,8 @@ x-app: &app
     SESSION_FORWARD_SECRET: e2e-not-a-secret-0123456789abcdef0123456789abcdef
     CORS_ORIGINS: http://localhost:3000,http://localhost:3001,http://localhost:4321
     APP_PUBLIC_URL: http://localhost:3000
+    # FEB-12: the callback is built on the API's published address.
+    API_PUBLIC_URL: http://localhost:${WASLA_E2E_API_PORT:-8000}
     EMAIL_ENABLED: "true"
     EMAIL_PROVIDER: fake
     EMAIL_FROM: no-reply@example.com

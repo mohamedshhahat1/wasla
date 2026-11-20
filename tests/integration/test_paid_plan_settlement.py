@@ -347,7 +347,8 @@ async def test_the_refusal_answers_402_over_http(
     )
 
     assert response.status_code == 402
-    assert response.json()["error"]["code"] == "payment_required"
+    # Its own code since FEB-06 (EC8-02): a screen sends this plan to checkout.
+    assert response.json()["error"]["code"] == "plan_requires_checkout"
     assert await _agent_limit(db_session, tenant) == 1
 
 

@@ -9,13 +9,14 @@ from fastapi import APIRouter, Depends, status
 from app.api.dependencies import InvitationServiceDep, SeatDep, TenantAdminDep
 from app.api.rate_limits import auth_rate_limit, workspace_rate_limit
 from app.api.route import CommittingRoute
-from app.db.models import TenantInvitation
+from app.db.models import TenantInvitation, User
 from app.schemas.auth import WorkspaceSummary
 from app.schemas.invitation import (
     InvitationAcceptedResponse,
     InvitationAcceptRequest,
     InvitationCreateRequest,
     InvitationResponse,
+    InvitationSender,
 )
 
 router = APIRouter(route_class=CommittingRoute, prefix="/invitations", tags=["Invitations"])
@@ -27,7 +28,8 @@ _WORKSPACE_LIMIT = Depends(workspace_rate_limit)
 _CLIENT_LIMIT = Depends(auth_rate_limit)
 
 
-def _response(invitation: TenantInvitation) -> InvitationResponse:
+def _response(invitation: TenantInvitation, senders: dict[uuid.UUID, User]) -> InvitationResponse:
+    sender = senders.get(invitation.invited_by_id) if invitation.invited_by_id else None
     return InvitationResponse(
         id=invitation.id,
         email=invitation.email,
@@ -36,6 +38,12 @@ def _response(invitation: TenantInvitation) -> InvitationResponse:
         expires_at=invitation.expires_at,
         accepted_at=invitation.accepted_at,
         locale=invitation.locale,
+        created_at=invitation.created_at,
+        invited_by=(
+            InvitationSender(user_id=sender.id, full_name=sender.full_name, email=sender.email)
+            if sender is not None
+            else None
+        ),
     )
 
 
@@ -70,7 +78,7 @@ async def issue_invitation(
         role=payload.role,
         locale=payload.locale,
     )
-    return _response(invitation)
+    return _response(invitation, {workspace.user.id: workspace.user})
 
 
 @router.get(
@@ -84,7 +92,8 @@ async def list_invitations(
     service: InvitationServiceDep,
 ) -> list[InvitationResponse]:
     invitations = await service.list_pending(tenant_id=workspace.tenant.id)
-    return [_response(invitation) for invitation in invitations]
+    senders = await service.senders(invitations)
+    return [_response(invitation, senders) for invitation in invitations]
 
 
 @router.delete(
@@ -103,7 +112,7 @@ async def revoke_invitation(
         invitation_id=invitation_id,
         actor=workspace.user,
     )
-    return _response(invitation)
+    return _response(invitation, await service.senders([invitation]))
 
 
 @router.post(

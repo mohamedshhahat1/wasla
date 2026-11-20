@@ -8,8 +8,9 @@
  * re-authentication (SG-02). When the account still owns workspaces, the page lists exactly the
  * ones the API names, each with a way to hand it over or close it, and closes nothing.
  *
- * GET /auth/me says neither whether a password exists nor whether Google is connected (FEB-45), so
- * the page offers both paths and reads the API's refusal for the one that does not apply.
+ * GET /auth/me says whether the account has a password and whether Google is connected (FEB-45,
+ * ADR-202), so the page offers only the password mode, the Google action and the closing proofs
+ * that apply (lib/account/methods.ts), and reads /auth/me again after each change.
  * Passwords live in this page's memory only and are cleared when the API answers.
  */
 import { useMutation } from "@tanstack/react-query";
@@ -32,6 +33,7 @@ import {
 
 import { noteGoogleFlow } from "../../lib/account/google-flow";
 import { postDeviceLocale } from "../../lib/account/locale";
+import { accountModes, signInFacts } from "../../lib/account/methods";
 import { tabFlags } from "../../lib/account/tab-flags";
 import { googleEnabled } from "../../lib/env";
 import { switchTo } from "../../lib/switch";
@@ -120,9 +122,9 @@ function PasswordSection() {
   const t = useTranslations("app.accountPage");
   const errors = useCodeText();
   const router = useRouter();
-  const { session } = useSession();
+  const { session, profile } = useSession();
   const formId = useId();
-  const [mode, setMode] = useState<"change" | "set">("change");
+  const mode = accountModes(signInFacts(profile), googleEnabled()).password;
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -164,6 +166,11 @@ function PasswordSection() {
   return (
     <Section id="account-password" title={t("password.title")}>
       <p className="m-0 text-md text-text-muted">{t("password.sessions")}</p>
+      {mode === "set" ? (
+        <p className="m-0 text-md text-text-muted" data-password-mode="set">
+          {t("password.setLine")}
+        </p>
+      ) : null}
       <form id={formId} noValidate className="flex max-w-form flex-col gap-4" onSubmit={submit}>
         {mode === "change" ? (
           <FormField
@@ -241,17 +248,6 @@ function PasswordSection() {
           <Button type="submit" {...busyProps(change.isPending)} data-action="save-password">
             {mode === "change" ? t("password.change") : t("password.set")}
           </Button>
-          <Button
-            variant="ghost"
-            onClick={() => {
-              setMode(mode === "change" ? "set" : "change");
-              change.reset();
-              setTried(false);
-            }}
-            data-action="password-mode"
-          >
-            {mode === "change" ? t("password.toSet") : t("password.toChange")}
-          </Button>
         </div>
       </form>
     </Section>
@@ -263,7 +259,8 @@ function PasswordSection() {
 function GoogleSection() {
   const t = useTranslations("app.accountPage");
   const errors = useCodeText();
-  const { session } = useSession();
+  const { session, profile, reloadProfile } = useSession();
+  const action = accountModes(signInFacts(profile), googleEnabled()).google;
   const params = useSearchParams();
   const [confirming, setConfirming] = useState(false);
   const [disconnected, setDisconnected] = useState(false);
@@ -276,14 +273,21 @@ function GoogleSection() {
   });
   const disconnect = useMutation({
     mutationFn: () => unwrap(session.api.DELETE("/api/v1/auth/identities/google")),
-    onSuccess: () => {
+    onSuccess: async () => {
       setConfirming(false);
       setDisconnected(true);
+      // The account's ways in changed: read them again so the section redraws (AC8-02).
+      await reloadProfile();
     },
   });
   const connectCode = connect.error instanceof ApiError ? connect.error.code : null;
   const code = disconnect.error instanceof ApiError ? disconnect.error.code : null;
   const connected = params.get("google") === "connected";
+  // Back from linking Google: the profile this tab loaded predates the link, so the account's ways
+  // in are read again (AC8-02) - the closing proofs and this section follow the fresh answer.
+  useEffect(() => {
+    if (connected) void reloadProfile();
+  }, [connected, reloadProfile]);
   return (
     <Section id="account-google" title={t("google.title")}>
       <p className="m-0 text-md text-text-muted">{t("google.line")}</p>
@@ -297,18 +301,31 @@ function GoogleSection() {
           {t("google.disconnected")}
         </p>
       ) : null}
+      {action === "disconnect-blocked" ? (
+        <p className="m-0 text-md text-text" data-google-mode="blocked">
+          {t("google.setPasswordFirst")}
+        </p>
+      ) : null}
       <div className="flex flex-wrap gap-3">
-        <Button
-          variant="secondary"
-          {...busyProps(connect.isPending)}
-          onClick={() => !connect.isPending && connect.mutate()}
-          data-action="connect-google"
-        >
-          {t("google.connect")}
-        </Button>
-        <Button variant="ghost" onClick={() => setConfirming(true)} data-action="disconnect-google">
-          {t("google.disconnect")}
-        </Button>
+        {action === "connect" ? (
+          <Button
+            variant="secondary"
+            {...busyProps(connect.isPending)}
+            onClick={() => !connect.isPending && connect.mutate()}
+            data-action="connect-google"
+          >
+            {t("google.connect")}
+          </Button>
+        ) : null}
+        {action === "disconnect" ? (
+          <Button
+            variant="ghost"
+            onClick={() => setConfirming(true)}
+            data-action="disconnect-google"
+          >
+            {t("google.disconnect")}
+          </Button>
+        ) : null}
       </div>
       {connect.isError ? (
         <p role="alert" className="m-0 text-sm font-medium text-danger">
@@ -410,10 +427,12 @@ function CloseAccountSection({ reauthReady }: { reauthReady: boolean }) {
   const t = useTranslations("app.accountPage");
   const errors = useCodeText();
   const router = useRouter();
-  const { session } = useSession();
-  const google = googleEnabled();
+  const { session, profile } = useSession();
+  const proofs = accountModes(signInFacts(profile), googleEnabled()).closeProofs;
   const [open, setOpen] = useState(reauthReady);
-  const [proof, setProof] = useState<"password" | "google">(reauthReady ? "google" : "password");
+  const [proof, setProof] = useState<"password" | "google">(
+    reauthReady || !proofs.includes("password") ? "google" : "password",
+  );
   const [password, setPassword] = useState("");
   const [tried, setTried] = useState(false);
   const formId = useId();
@@ -552,7 +571,7 @@ function CloseAccountSection({ reauthReady }: { reauthReady: boolean }) {
         }
       >
         <form id={formId} noValidate onSubmit={submit} className="flex flex-col gap-4">
-          {google ? (
+          {proofs.length > 1 ? (
             <>
               <p id="close-proof" className="m-0 text-sm font-medium text-text">
                 {t("close.proof")}

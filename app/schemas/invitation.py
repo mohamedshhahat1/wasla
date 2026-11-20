@@ -47,6 +47,14 @@ class InvitationAcceptRequest(_Payload):
     full_name: StorableText | None = Field(default=None, max_length=MAXIMUM_NAME_LENGTH)
 
 
+class InvitationSender(BaseModel):
+    """Who sent an invitation - what the member list already shows a colleague."""
+
+    user_id: uuid.UUID
+    full_name: str | None
+    email: str
+
+
 class InvitationResponse(BaseModel):
     """An invitation as an administrator sees it, at every point in its life.
 
@@ -72,6 +80,10 @@ class InvitationResponse(BaseModel):
     expires_at: datetime
     accepted_at: datetime | None = None
     locale: Locale | None = None
+    # When it was sent, and by whom (FEB-44). The sender is null when the row
+    # names nobody or that account has been closed.
+    created_at: datetime
+    invited_by: InvitationSender | None = None
 
 
 class InvitationAcceptedResponse(BaseModel):

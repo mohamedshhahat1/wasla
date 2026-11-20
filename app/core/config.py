@@ -1115,6 +1115,13 @@ class Settings(BaseSettings):
     # from a request: a reset link built from a Host header is a reset link
     # an attacker can aim at their own origin.
     app_public_url: str | None = None
+    # The API's own public origin (FEB-12). Configured, never derived from a
+    # request. The payment provider's server-to-server callback is built on it,
+    # because the app's origin (a Cloudflare Worker) does not serve the API.
+    # Required with BILLING_PROVIDER=paymob in staging and production; where it
+    # is unset elsewhere the callback falls back to APP_PUBLIC_URL, the
+    # single-origin local stack.
+    api_public_url: str | None = None
     email_max_attempts: int = Field(default=8, gt=0)
     email_worker_poll_seconds: float = Field(default=10.0, gt=0)
 
@@ -1568,6 +1575,8 @@ class Settings(BaseSettings):
                 )
             if self.app_public_url:
                 problems.extend(_internet_origin_problems(self.app_public_url))
+            if self.api_public_url:
+                problems.extend(_internet_origin_problems(self.api_public_url))
 
         if self.is_production:
             if self.debug:
@@ -1682,6 +1691,15 @@ class Settings(BaseSettings):
                 problems.append(
                     "APP_PUBLIC_URL must be set when BILLING_PROVIDER is paymob: "
                     "the callback URL is built from it"
+                )
+            if self.is_internet_facing and not self.api_public_url:
+                # The app's origin is a Worker with no payment webhook route, so
+                # a callback built on it is taken at Paymob and never recorded
+                # here (FEB-12). A refused boot is loud; a lost payment is not.
+                problems.append(
+                    "API_PUBLIC_URL must be set when BILLING_PROVIDER is paymob: the "
+                    "provider's callback is built from it, and the app's origin does "
+                    "not serve the API"
                 )
 
             problems.extend(self._paymob_key_problems())

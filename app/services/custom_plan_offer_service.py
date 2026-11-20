@@ -178,7 +178,9 @@ class CustomPlanOfferService:
         """
         moment = now if now is not None else self._clock()
         if self._checkout is None or not self._checkout.has_provider:
-            raise ValidationError("No payment provider is configured.")
+            raise ValidationError(
+                "No payment provider is configured.", error_code="payment_provider_unavailable"
+            )
         offer = await self._offers.lock(offer_id)
         if offer is None:
             raise NotFoundError("No such offer.")
@@ -187,6 +189,7 @@ class CustomPlanOfferService:
             raise ConflictError(
                 "This offer can no longer be accepted.",
                 details={"status": offer.status.value},
+                error_code="offer_not_open",
             )
         version = await self._session.get(PlanVersion, offer.plan_version_id)
         plan = await self._session.get(Plan, offer.plan_id)
@@ -224,6 +227,7 @@ class CustomPlanOfferService:
             raise ConflictError(
                 "This offer can no longer be accepted.",
                 details={"status": relocked.status.value if relocked else "missing"},
+                error_code="offer_not_open",
             )
         offer = relocked
         first = offer.status is CustomPlanOfferStatus.OFFERED
@@ -281,6 +285,7 @@ class CustomPlanOfferService:
             raise ConflictError(
                 "This offer can no longer be declined.",
                 details={"status": offer.status.value},
+                error_code="offer_not_open",
             )
         previous = offer.status
         offer.status = CustomPlanOfferStatus.DECLINED

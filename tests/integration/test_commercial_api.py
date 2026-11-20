@@ -919,6 +919,7 @@ async def test_a_workspace_buys_a_topup_through_its_own_checkout(
         f"{BILLING}/topups/{shared.id}/checkout", json={"idempotency_key": "req-1"}
     )
     assert again.status_code == 409
+    assert again.json()["error"]["code"] == "checkout_already_started"
     assert again.json()["error"]["details"]["purchase_id"] == body["purchase_id"]
     assert intentions.count == 1
 
@@ -1234,6 +1235,7 @@ async def test_offers_are_declined_withdrawn_and_refused_by_the_rules(
     assert declined.status_code == 200 and declined.json()["status"] == "declined"
     again = await http.post(f"{BILLING}/custom-offers/{first.json()['id']}/accept", json={})
     assert again.status_code == 409
+    assert again.json()["error"]["code"] == "offer_not_open"
 
     third = await http.post(
         f"{PLATFORM}/tenants/{tenant.id}/custom-offers",

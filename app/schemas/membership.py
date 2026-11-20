@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,3 +48,15 @@ class MemberReinstateRequest(_Payload):
     """
 
     role: TenantRole = Field(description="The role to readmit this person at.")
+
+
+class MemberRoleChangeRequest(_Payload):
+    """Move an active member between member and administrator (FEB-42).
+
+    Owner is not a value here: ownership is handed over through the transfer,
+    which is where the rule about never leaving a workspace ownerless lives.
+    """
+
+    role: Literal[TenantRole.MEMBER, TenantRole.TENANT_ADMIN] = Field(
+        description="The role this person holds from their next request on."
+    )

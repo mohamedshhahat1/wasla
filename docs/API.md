@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **268 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **269 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -46,7 +46,7 @@ ADR-191):
 
 | File | What |
 | --- | --- |
-| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (268 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (269 operations less `/metrics`, which keeps itself out of the schema) |
 | `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
 
 `python -m scripts.export_openapi` writes both from the application factory, in
@@ -234,6 +234,7 @@ The account's `email` is **not** refreshed - it is written once, at enrolment. S
 | POST | `/api/v1/invitations/accept` | Redeem an invitation token | Public |
 | GET | `/api/v1/workspace/members` | Who is in this workspace (`?include_revoked=true` for the full history) | Workspace member |
 | DELETE | `/api/v1/workspace/members/{user_id}` | Withdraw access, or leave by naming yourself | Workspace member (see below) |
+| PATCH | `/api/v1/workspace/members/{user_id}` | Change a member's role between `member` and `tenant_admin` (FEB-42) | Tenant admin (see below) |
 | POST | `/api/v1/workspace/members/{user_id}/reinstate` | Readmit somebody who was removed | Tenant admin |
 
 Only the hash of an invitation token is stored, so a database disclosure does not yield usable invitations. **The raw token is not returned by `POST /api/v1/invitations`** and never has been readable from any other route (ADR-057): it travels only in the email queued to the invited address, so an invitation cannot be delivered by a deployment with `EMAIL_ENABLED=false`.
@@ -1158,6 +1159,15 @@ from an authorized caller that the *state* refuses is not a server error.
 | `workspace_orphaned` | The workspace has no active owner; assign one before restoring |
 | `workspace_has_owner` | Ownership repair was attempted on a workspace that is not orphaned |
 | `workspace_owner_required` | The named person cannot take ownership |
+| `member_role_self` | A role change named the caller (FEB-42) |
+| `member_role_owner` | A role change named an owner, or asked for ownership - use the ownership transfer |
+| `member_role_admin_owner_required` | An administrator tried to change another administrator's role (403) |
+| `member_not_active` | A role change named somebody whose access was withdrawn |
+| `plan_requires_checkout` | `POST /billing/subscription` or `/subscription/plan` named a plan that must be paid for first (402) |
+| `checkout_already_started` | A checkout or top-up checkout repeated an idempotency key; read the payment's status instead |
+| `payment_provider_unavailable` | No payment provider is configured (422) |
+| `offer_not_open` | A custom plan offer can no longer be accepted or declined |
+| `refund_already_requested` | A refund review was already requested for this payment |
 
 ## Re-authenticating with Google
 
@@ -1264,6 +1274,26 @@ released. Nobody else's account is touched.
 Revocation takes effect on the **next request**: authorization loads the membership every time rather than trusting the token. It does not touch the person's account, their sessions, or their other workspaces — being removed from one company is not a reason to be signed out of another.
 
 Readmission reuses the same membership row, so the removal and the return are both visible on one record, and it counts against the plan's seat limit exactly as an invitation does.
+
+**Every invitation read says who sent it and when (FEB-44).** `InvitationResponse` carries `created_at` and `invited_by {user_id, full_name, email}` - the same facts the member list shows any member - or `null` when the row names nobody or that account has been closed (a closed account's kept address is never read back). The senders of a list are read in one statement. The public accept answer does not carry the sender.
+
+### Changing a member's role
+
+`PATCH /workspace/members/{user_id}` with `{"role": "member" | "tenant_admin"}` (FEB-42, ADR-202). Owner is not a value: ownership is handed over through the transfer, where the last-owner rule lives.
+
+| Case | Answer |
+| --- | --- |
+| An owner changes a member's or an administrator's role | `200`, the row as it now stands |
+| An administrator makes a member an administrator | `200` - the authority an administrator already has at invitation and reinstatement |
+| An administrator turns an administrator into a member | `403 member_role_admin_owner_required` |
+| Anybody names themselves | `409 member_role_self` |
+| The target is an owner | `409 member_role_owner` |
+| The target's access was withdrawn | `409 member_not_active` |
+| Somebody who is not a member here | `422`, as removal answers |
+| The role they already hold | `200`, unchanged, nothing audited |
+| A member calls it | `403` |
+
+Each change is audited as `member_role_changed` with `{"from", "to"}`. It takes effect on the person's next request - authorization reads the membership every time - so no token is revoked and no event is published. It takes no seat and frees none.
 
 ### Connecting a WhatsApp number
 

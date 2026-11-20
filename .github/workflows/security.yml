@@ -61,12 +61,12 @@ jobs:
         # What the image installs, exactly as ci.yml does: the lock, by hash,
         # first; then the project and the dev-only tools (RGM-21).
         run: |
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
       - name: Run authentication security suite without skips
         run: >-
@@ -102,12 +102,12 @@ jobs:
         # lock, and none of the 24 advisories in what ships (RGM-21).
         run: |
           python -m pip install --upgrade pip
-          pip install --require-hashes -r requirements.lock -r requirements-build.lock
-          pip install -e ".[dev]"
+          pip install --require-hashes -r requirements.lock -r requirements-build.lock -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Installed packages are the lock's
         run: |
-          python -m scripts.check_installed_lock requirements.lock requirements-build.lock
+          python -m scripts.check_installed_lock requirements.lock requirements-build.lock requirements-dev.lock
           pip check
 
       - name: Show the versions this scan audits

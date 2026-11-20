@@ -44,12 +44,14 @@ from app.core.timezones import validated as validated_timezone
 from app.core.token_store import RefreshTokenStore
 from app.db.models import Membership, Tenant, TenantRole, TenantStatus, User
 from app.db.models.audit import AuditAction, AuditActorKind
+from app.db.models.identity import IdentityProvider
 from app.repositories import (
     MembershipRepository,
     TenantRepository,
     UserMembershipRepository,
     UserRepository,
 )
+from app.repositories.identity_repository import FederatedIdentityRepository
 from app.services.audit_service import AuditTrail
 from app.services.email_service import EmailOutbox
 from app.services.email_templates import EmailTemplate
@@ -695,6 +697,17 @@ class AuthService:
             expires_in=self._settings.access_token_ttl_seconds,
             workspace=workspace,
         )
+
+    async def google_connected(self, *, user: User) -> bool:
+        """Whether this account has a Google identity attached (FEB-45).
+
+        One indexed lookup on `(user_id, provider)`. A fact about the caller's
+        own account, read for `/auth/me`; nothing of the identity is returned.
+        """
+        identity = await FederatedIdentityRepository(self._session).get_for_user(
+            user_id=user.id, provider=IdentityProvider.GOOGLE
+        )
+        return identity is not None
 
     async def list_workspaces(
         self, *, user: User, include_suspended: bool = False

@@ -34,6 +34,7 @@ import {
   type TenantRole,
 } from "../../lib/team/rules";
 import { useWorkspace } from "../app/workspace-context";
+import { PlanLimitLink } from "../billing/plan-limit-link";
 import { useMinuteClock, useTimes } from "../customers/shared";
 import { useCodeText } from "../inbox/error-text";
 import { useSession } from "../session-provider";
@@ -150,7 +151,14 @@ function InviteForm() {
         </FormField>
         {invite.isError && !(code && ADDRESS_CODES.has(code)) ? (
           <p role="alert" className="m-0 text-sm font-medium text-danger" data-error={code ?? ""}>
-            {code === "plan_limit_exceeded" ? t("seatsUsed") : errors(code)}
+            {code === "plan_limit_exceeded" ? (
+              <>
+                {t("seatsUsed")}
+                <PlanLimitLink />
+              </>
+            ) : (
+              errors(code)
+            )}
           </p>
         ) : null}
         {sent ? (
@@ -245,6 +253,7 @@ export function InvitationsPage() {
         {open.map((invitation) => {
           const state = invitationState(invitation, now);
           const at = times(invitation.expires_at);
+          const sentAt = times(invitation.created_at);
           const lang = isLocale(invitation.locale) ? invitation.locale : null;
           return (
             <InvitationRow
@@ -258,6 +267,15 @@ export function InvitationsPage() {
               stateFull={at?.full ?? null}
               language={lang ? LOCALE_NAMES[lang] : null}
               languageLabel={t("emailIn")}
+              sender={
+                invitation.invited_by
+                  ? t("invitedBy", {
+                      name: invitation.invited_by.full_name || invitation.invited_by.email,
+                    })
+                  : t("invitedByGone")
+              }
+              sent={sentAt ? t("sentAt", { time: sentAt.time }) : null}
+              sentFull={sentAt?.full ?? null}
               actions={
                 <Button
                   variant="ghost"

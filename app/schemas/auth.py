@@ -244,6 +244,13 @@ class ProfileResponse(BaseModel):
     # The account's language (FEB-09), or None when the person never chose one
     # - their e-mail is then in English. Every device they sign in on follows it.
     locale: Locale | None = None
+    # Which ways in the account has (FEB-45): a password of its own, and a
+    # Google identity. Two yes / no facts about the caller's own account, so a
+    # client offers "change" or "set" a password, "connect" or "disconnect"
+    # Google, and the proof that closes the account. Nothing else of the
+    # identity is reported.
+    has_password: bool = False
+    google_connected: bool = False
     workspaces: list[WorkspaceSummary] = Field(default_factory=list)
 
 
