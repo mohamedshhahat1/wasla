@@ -811,6 +811,8 @@ Do not change `OPENAI_EMBEDDING_MODEL` in a running deployment: every document b
 
 **Migration `0140` (FE-5, ADR-199)** is additive and online: `contacts.name` (nullable, the name a member gives a customer), the new empty table `contact_consent_events` with its enum `consent_action`, and the audit label `contact_renamed`. No back-fill: an opt-out older than the table is shown from the consent row's own timestamp. The downgrade drops the table, the enum and the column (the names members gave and the history go with them; the consent state is untouched) and refuses while an audit row records a rename.
 
+**Migration `0142` (FE-8, ADR-202)** is online: the audit label `member_role_changed` (FEB-42), appended to `audit_action` in an autocommit block. No table is touched. The downgrade leaves the label - PostgreSQL cannot drop one - and refuses while an audit row records a role change.
+
 **Migration `0141` (FE-7, ADR-201)** is additive and online: `users.locale` and `tenant_invitations.locale` (nullable, checked against en / ar / fr / tr) and `users.last_workspace_id` (nullable, `ON DELETE SET NULL` to `tenants`). No back-fill: every account keeps English e-mail and today's sign-in workspace until a choice is made. The downgrade drops the three columns: e-mail returns to English and a sign-in naming no workspace to the oldest active one.
 
 **Migration `0139` (FE-4, ADR-198)** is additive and online: three nullable columns on `conversations` (`last_read_message_id`, `last_read_by_user_id` with a `SET NULL` key to `users`, `last_read_at`) - the team's shared read position. No back-fill: every existing conversation starts unread. The downgrade drops the three columns.

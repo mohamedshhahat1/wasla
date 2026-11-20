@@ -181,6 +181,8 @@ Switching workspace mints a new access token and leaves the refresh token untouc
 
 **The account's language (FEB-09, ADR-201).** `users.locale` is `en`, `ar`, `fr`, `tr` or NULL, set by `PATCH /auth/me` and optionally at sign-up. It changes which language the account's e-mail is written in ([EMAIL.md](EMAIL.md)) and nothing about authentication or authorization. It is not sent to other members.
 
+**The account's ways in (FEB-45, ADR-202).** `GET /auth/me` (and `PATCH /auth/me`'s answer) carries two booleans about the caller's own account: `has_password` (a password of its own is set) and `google_connected` (a Google identity is attached). A client offers "change" or "set" a password, "connect" or "disconnect" Google, and exactly the proof that closes the account from them. Nothing else of the identity is reported - no Google address, subject or date - and nobody else's methods are readable anywhere.
+
 ## Invitations
 
 Invitation tokens are generated from `secrets` and stored **only** as a SHA-256 hash on the invitation. The raw token is never returned by the API; its outbox copy is encrypted and delivered only to the invited address.

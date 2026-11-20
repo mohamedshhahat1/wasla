@@ -104,6 +104,9 @@ class RecordingSession:
     async def flush(self) -> None:
         return None
 
+    async def refresh(self, entity: object, attribute_names: list[str] | None = None) -> None:
+        return None
+
     async def commit(self) -> None:
         return None
 

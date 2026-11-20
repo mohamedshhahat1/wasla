@@ -229,6 +229,8 @@ async def _profile(user: User, service: AuthServiceDep) -> ProfileResponse:
         email_verified_at=user.email_verified_at,
         platform_role=user.platform_role,
         locale=user.locale,
+        has_password=user.hashed_password is not None,
+        google_connected=await service.google_connected(user=user),
         workspaces=[_summarise(workspace) for workspace in workspaces],
     )
 

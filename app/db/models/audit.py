@@ -97,6 +97,8 @@ class AuditAction(StrEnum):
     MEMBER_REMOVED = "member_removed"
     MEMBER_LEFT = "member_left"
     MEMBER_REINSTATED = "member_reinstated"
+    # Between member and administrator, never to or from owner (FEB-42).
+    MEMBER_ROLE_CHANGED = "member_role_changed"
 
     # The account itself, and the sessions it holds (ADR-036). Platform-level
     # rather than workspace-level: an account is a global identity, so disabling
@@ -729,6 +731,8 @@ AUDIT_ACTION_DATABASE_ORDER: Final[tuple[str, ...]] = (
     "knowledge_embedding_switch",
     # 0140
     "contact_renamed",
+    # 0142
+    "member_role_changed",
 )
 AUDIT_ACTION_TYPE = _enum_type(
     AuditAction, name="audit_action", database_order=AUDIT_ACTION_DATABASE_ORDER

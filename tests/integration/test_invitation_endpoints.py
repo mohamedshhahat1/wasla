@@ -53,6 +53,7 @@ def _invitation(tenant_id: uuid.UUID) -> TenantInvitation:
         status=InvitationStatus.PENDING,
         token_hash="a" * 64,
         expires_at=datetime.now(UTC) + timedelta(days=7),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -72,6 +73,9 @@ class StubInvitationService:
     async def list_pending(self, **kwargs: Any) -> list[Any]:
         self.calls.append(("list_pending", kwargs))
         return [self.invitation]
+
+    async def senders(self, invitations: list[Any]) -> dict[Any, Any]:
+        return {}
 
     async def revoke(self, **kwargs: Any) -> TenantInvitation:
         self.calls.append(("revoke", kwargs))

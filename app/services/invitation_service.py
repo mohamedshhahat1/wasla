@@ -136,6 +136,10 @@ class InvitationService:
             locale=locale,
         )
         await self._session.flush()
+        # The database stamps the time; read it now, because the answer reports
+        # when the invitation was sent (FEB-44) and an expired attribute cannot
+        # be loaded lazily under an async session.
+        await self._session.refresh(invitation, ["created_at"])
 
         tenant = await self._tenants.get_by_id(tenant_id)
         # Keyed to the invitation row, so re-issuing against the same row cannot
@@ -183,6 +187,16 @@ class InvitationService:
     async def list_pending(self, *, tenant_id: uuid.UUID) -> list[TenantInvitation]:
         invitations = InvitationRepository(self._session, tenant_id=tenant_id)
         return await invitations.list_pending()
+
+    async def senders(self, invitations: list[TenantInvitation]) -> dict[uuid.UUID, User]:
+        """Who sent each invitation, in one statement whatever the list's size.
+
+        Keyed by user id. A sender whose account was closed is absent, so the
+        tombstone's address is never read back (FEB-44). Membership is not a
+        condition: somebody who sent an invitation and later left still sent it.
+        """
+        ids = {invitation.invited_by_id for invitation in invitations}
+        return await self._users.get_many([user_id for user_id in ids if user_id is not None])
 
     async def revoke(
         self,

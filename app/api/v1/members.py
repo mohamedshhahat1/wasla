@@ -27,6 +27,7 @@ from app.schemas.membership import (
     MemberListResponse,
     MemberReinstateRequest,
     MemberResponse,
+    MemberRoleChangeRequest,
 )
 from app.services.membership_service import MemberView
 
@@ -90,6 +91,38 @@ async def remove_member(
         actor=workspace.user,
         actor_role=workspace.role,
         user_id=user_id,
+    )
+    members = await service.list_members(include_revoked=True)
+    view = next(entry for entry in members if entry.membership.id == membership.id)
+    return _response(view)
+
+
+@router.patch(
+    "/{user_id}",
+    summary="Change a member's role",
+    responses={
+        403: {"description": "The caller may not change this person's role."},
+        409: {"description": "Removed, an owner, or the caller's own role."},
+    },
+)
+async def change_member_role(
+    user_id: uuid.UUID,
+    payload: MemberRoleChangeRequest,
+    workspace: TenantAdminDep,
+    service: MembershipServiceDep,
+) -> MemberResponse:
+    """Move somebody between member and administrator (FEB-42).
+
+    An owner may change any member's or administrator's role; an administrator
+    may make a member an administrator but not the reverse; nobody changes
+    their own, and ownership is handed over, never assigned. Takes effect on
+    the person's next request. Takes no seat and frees none.
+    """
+    membership = await service.change_role(
+        actor=workspace.user,
+        actor_role=workspace.role,
+        user_id=user_id,
+        role=payload.role,
     )
     members = await service.list_members(include_revoked=True)
     view = next(entry for entry in members if entry.membership.id == membership.id)

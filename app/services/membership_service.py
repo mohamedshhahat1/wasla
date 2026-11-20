@@ -45,6 +45,17 @@ logger = get_logger(__name__)
 # the account-deletion path for the same reason.
 LAST_WORKSPACE_OWNER = "last_workspace_owner"
 
+# The role-change refusals a screen tells apart (FEB-42, EC8-02). Each shares
+# its status with another refusal, so the code is what distinguishes them.
+MEMBER_ROLE_SELF = "member_role_self"
+MEMBER_ROLE_OWNER = "member_role_owner"
+MEMBER_ROLE_ADMIN_OWNER_REQUIRED = "member_role_admin_owner_required"
+MEMBER_NOT_ACTIVE = "member_not_active"
+
+# The roles a role change moves between. Ownership is handed over through the
+# transfer, never assigned here.
+ASSIGNABLE_ROLES = frozenset({TenantRole.MEMBER, TenantRole.TENANT_ADMIN})
+
 
 @dataclass(frozen=True, slots=True)
 class MemberView:
@@ -248,6 +259,96 @@ class MembershipService:
             "membership.reinstated",
             extra={
                 "event": "membership.reinstated",
+                "tenant_id": str(self._tenant_id),
+                "user_id": str(user_id),
+                "actor_id": str(actor.id),
+            },
+        )
+        return membership
+
+    async def change_role(
+        self,
+        *,
+        actor: User,
+        actor_role: TenantRole,
+        user_id: uuid.UUID,
+        role: TenantRole,
+    ) -> Membership:
+        """Move an active member between member and administrator (FEB-42).
+
+        The rules, and what each one is protecting:
+
+        - **Owner or administrator only.** The dependency already says so; the
+          service repeats it because it is the service that is reused.
+        - **Never to or from owner.** Ownership has its own hand-over, which
+          keeps the last-owner rule in one place.
+        - **Never your own role.** Leaving and the ownership transfer exist for
+          that; a self-demotion by mistake strands nobody but is still a
+          surprise, and a self-promotion is not a thing an administrator has.
+        - **An administrator may promote a member but not demote a peer.** The
+          same authority the invitation and reinstatement paths already give
+          an administrator, and no more: a peer demoting a peer is a takeover.
+        - **A removed person is refused.** Their role is set when they are
+          readmitted.
+        - **The same role again is answered unchanged and not audited.**
+
+        Read under the tenant row lock, the queue removal, reinstatement and
+        ownership transfer stand in, so a removal racing this change cannot
+        leave a revoked row with a fresh role or an audit row for a change
+        that did not stand. Authorization loads the membership on every
+        request, so the person's next request carries the new role.
+        """
+        if actor_role not in (TenantRole.TENANT_OWNER, TenantRole.TENANT_ADMIN):
+            raise PermissionDeniedError("This action requires a different role in this workspace.")
+        if role not in ASSIGNABLE_ROLES:
+            raise ConflictError(
+                "Ownership is handed over, not assigned: use the ownership transfer.",
+                error_code=MEMBER_ROLE_OWNER,
+            )
+        if user_id == actor.id:
+            raise ConflictError("You cannot change your own role.", error_code=MEMBER_ROLE_SELF)
+
+        await self._tenants.lock(self._tenant_id)
+
+        membership = await self._memberships.get_any_for_user(user_id)
+        if membership is None:
+            raise ValidationError("That person is not a member of this workspace.")
+        if not membership.is_active:
+            raise ConflictError(
+                "That person is no longer a member of this workspace.",
+                error_code=MEMBER_NOT_ACTIVE,
+            )
+        if membership.role is TenantRole.TENANT_OWNER:
+            raise ConflictError(
+                "Ownership is handed over, not assigned: use the ownership transfer.",
+                error_code=MEMBER_ROLE_OWNER,
+            )
+        if membership.role is role:
+            return membership
+        if membership.role is TenantRole.TENANT_ADMIN and actor_role is not TenantRole.TENANT_OWNER:
+            raise PermissionDeniedError(
+                "Only a workspace owner can change an administrator's role.",
+                error_code=MEMBER_ROLE_ADMIN_OWNER_REQUIRED,
+            )
+
+        previous = membership.role
+        membership.role = role
+        await self._session.flush()
+
+        target = await self._users.get_by_id(user_id)
+        self._audit.record(
+            AuditAction.MEMBER_ROLE_CHANGED,
+            actor=actor,
+            actor_kind=AuditActorKind.USER,
+            target_type="membership",
+            target_id=membership.id,
+            target_label=target.email if target is not None else None,
+            meta={"from": previous.value, "to": role.value},
+        )
+        logger.info(
+            "membership.role_changed",
+            extra={
+                "event": "membership.role_changed",
                 "tenant_id": str(self._tenant_id),
                 "user_id": str(user_id),
                 "actor_id": str(actor.id),
