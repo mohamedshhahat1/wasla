@@ -129,6 +129,11 @@ export interface InvitationRowProps {
   /** The e-mail's language, in its own name ("العربية"). */
   language?: string | null;
   languageLabel?: string;
+  /** FEB-44: "Invited by Mona" (or "Invited by an account that was closed"). */
+  sender?: string | null;
+  /** FEB-44: "Sent 3 days ago", with the full time for assistive technology. */
+  sent?: string | null;
+  sentFull?: string | null;
   actions?: ReactNode;
 }
 
@@ -140,9 +145,13 @@ export function InvitationRow({
   stateFull,
   language,
   languageLabel,
+  sender,
+  sent,
+  sentFull,
   actions,
 }: InvitationRowProps) {
   const stateId = useId();
+  const sentId = useId();
   return (
     <li
       data-invitation-row=""
@@ -176,6 +185,21 @@ export function InvitationRow({
           {language ? (
             <span>
               {languageLabel} <span className="font-medium text-text">{language}</span>
+            </span>
+          ) : null}
+          {sender ? (
+            <span data-invitation-sender="">
+              <bdi>{sender}</bdi>
+            </span>
+          ) : null}
+          {sent ? (
+            <span data-invitation-sent="" aria-describedby={sentFull ? sentId : undefined}>
+              {sent}
+            </span>
+          ) : null}
+          {sent && sentFull ? (
+            <span id={sentId} className="sr-only">
+              {sentFull}
             </span>
           ) : null}
         </span>
