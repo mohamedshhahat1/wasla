@@ -29,6 +29,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { messagesFor } from "@wasla/i18n";
 
+import { AccountPage } from "../components/account/account-page";
 import { InvoicePage } from "../components/billing/invoices";
 import { PlanLimitLink } from "../components/billing/plan-limit-link";
 import { PlanPage } from "../components/billing/plan-page";
@@ -518,5 +519,20 @@ describe("who acts on billing (BL-02, CY)", () => {
         expect(named.startsWith(visible), `${locale} ${action}Of: "${named}"`).toBe(true);
       }
     }
+  });
+});
+
+/* ----------------------------------------------------------------- account */
+
+describe("the account page back from linking Google (AC8-02)", () => {
+  it("reads the profile again (M-S41)", async () => {
+    vi.stubEnv("PUBLIC_GOOGLE_ENABLED", "true");
+    search = new URLSearchParams("google=connected");
+    answers["GET /api/v1/auth/sessions"] = () => [];
+    render(<AccountPage />, { wrapper: Wrapper });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(reloadProfile).toHaveBeenCalled();
   });
 });
