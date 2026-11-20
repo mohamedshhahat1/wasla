@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
@@ -797,3 +799,19 @@ def test_the_dunning_thresholds_are_configurable() -> None:
 
     assert settings.billing_past_due_days == 3
     assert settings.billing_suspend_after_days == 14
+
+
+def test_every_production_service_that_can_take_payments_is_given_the_callback_origin() -> None:
+    """FEB-12 (M-S14): a production service started with BILLING_PROVIDER=paymob
+    and no API_PUBLIC_URL refuses to boot - so every service in the production
+    compose file that is handed the provider is handed the API's origin too."""
+    compose = Path(__file__).resolve().parents[2] / "docker-compose.prod.yml"
+    services = yaml.safe_load(compose.read_text(encoding="utf-8"))["services"]
+    paying = {
+        name: service.get("environment") or {}
+        for name, service in services.items()
+        if "BILLING_PROVIDER" in (service.get("environment") or {})
+    }
+    assert {"api", "worker"} <= set(paying)
+    for name, environment in paying.items():
+        assert environment.get("API_PUBLIC_URL") == "${API_PUBLIC_URL:-}", name
