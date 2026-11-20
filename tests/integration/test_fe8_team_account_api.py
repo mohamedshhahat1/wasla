@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError
@@ -32,6 +32,7 @@ from app.db.models.audit import AuditAction, AuditLog
 from app.db.models.identity import FederatedIdentity, IdentityProvider
 from app.repositories.membership_repository import MembershipRepository
 from app.repositories.tenant_repository import TenantRepository
+from app.services.invitation_service import InvitationService
 from app.services.membership_service import MembershipService
 from tests.integration import test_fe7_account_api as _shared
 from tests.integration.test_fe7_account_api import (
@@ -431,3 +432,38 @@ async def test_a_role_change_holds_the_workspace_lock(
         role=TenantRole.TENANT_ADMIN,
     )
     assert order[:2] == [f"lock {team['tenant'].id}", "read"]
+
+
+async def test_the_senders_are_read_in_one_statement_whatever_their_number(
+    http: AsyncClient, db_session: AsyncSession
+) -> None:
+    """M-R06: one sender or three, one statement on the users table (no N+1)."""
+    team = await _team(db_session, "ib-one")
+    service = InvitationService(session=db_session)
+
+    def invitations(*senders: User) -> list[TenantInvitation]:
+        return [
+            TenantInvitation(tenant_id=team["tenant"].id, invited_by_id=sender.id)
+            for sender in senders
+        ]
+
+    connection = (await db_session.connection()).sync_connection
+    assert connection is not None
+    seen: list[str] = []
+
+    def count(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+        if "FROM users" in statement:
+            seen.append(statement)
+
+    event.listen(connection, "before_cursor_execute", count)
+    try:
+        one = await service.senders(invitations(team["admin"]))
+        single = len(seen)
+        seen.clear()
+        three = await service.senders(invitations(team["admin"], team["admin2"], team["owner"]))
+        many = len(seen)
+    finally:
+        event.remove(connection, "before_cursor_execute", count)
+    assert set(one) == {team["admin"].id}
+    assert set(three) == {team["admin"].id, team["admin2"].id, team["owner"].id}
+    assert single == many == 1
