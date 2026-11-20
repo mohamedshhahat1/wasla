@@ -21,9 +21,9 @@ import { ApiError, unwrap, type components } from "@wasla/api-client";
 import { Card, linkClasses, PaymentStatusPanel } from "@wasla/ui";
 
 import {
-  newestPayment,
+  newestRecentPayment,
   nextPollDelay,
-  recentPayableInvoices,
+  payableCandidates,
   returnView,
   type Found,
 } from "../../lib/billing/payment-return";
@@ -91,26 +91,31 @@ function ReturnScreen() {
         const invoices = await unwrap(
           session.api.GET("/api/v1/invoices", { params: { query: { limit: 10 } } }),
         );
-        const recent = recentPayableInvoices(invoices, appNow());
-        const first = recent[0];
-        if (!first) {
-          if (!cancelled) setFound("none");
-          return;
-        }
-        const payments = await unwrap(
-          session.api.GET("/api/v1/invoices/{invoice_id}/payments", {
-            params: { path: { invoice_id: first.id } },
-          }),
+        const candidates = payableCandidates(invoices);
+        const attempts = await Promise.all(
+          candidates.map(async (candidate) => ({
+            invoice: candidate,
+            payments: await unwrap(
+              session.api.GET("/api/v1/invoices/{invoice_id}/payments", {
+                params: { path: { invoice_id: candidate.id } },
+              }),
+            ),
+          })),
         );
-        const newest = newestPayment(payments);
+        const now = appNow();
+        const recent = attempts
+          .map((entry) => ({ ...entry, newest: newestRecentPayment(entry.payments, now) }))
+          .filter((entry) => entry.newest !== null)
+          .sort((a, b) => Date.parse(b.newest!.created_at) - Date.parse(a.newest!.created_at));
         if (cancelled) return;
-        setInvoice(first);
-        setOthers(recent.slice(1));
-        if (!newest) {
+        const first = recent[0];
+        if (!first?.newest) {
           setFound("none");
           return;
         }
-        setPayment(newest);
+        setInvoice(first.invoice);
+        setOthers(recent.slice(1).map((entry) => entry.invoice));
+        setPayment(first.newest);
         setFound("found");
       } catch (error) {
         if (cancelled) return;
@@ -158,12 +163,24 @@ function ReturnScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only on becoming visible
   }, [visible]);
 
-  const view = returnView({ found, status, elapsedMs: now - startedAt });
+  const view = returnView({
+    found,
+    status,
+    failureReason: payment?.failure_reason ?? null,
+    elapsedMs: now - startedAt,
+  });
 
   // A settled payment: the shell's gates and every billing read are read once again (GT-02's
   // invalidation, called, not changed), and the heading takes the focus once.
   useEffect(() => {
-    if (view.kind === "finding" || view.kind === "confirming" || settledOnce.current) return;
+    if (
+      view.kind === "finding" ||
+      view.kind === "confirming" ||
+      view.kind === "declined" ||
+      settledOnce.current
+    ) {
+      return;
+    }
     settledOnce.current = true;
     if (view.kind === "succeeded") {
       void client.invalidateQueries({ queryKey: billingFamily(scope) });
@@ -209,6 +226,7 @@ function ReturnScreen() {
       );
       break;
     case "failed":
+    case "declined":
       content = (
         <PaymentStatusPanel
           tone="danger"

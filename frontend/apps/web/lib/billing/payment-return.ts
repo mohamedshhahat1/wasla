@@ -18,6 +18,12 @@ export type ReturnView =
   | { kind: "confirming"; slow: boolean }
   | { kind: "succeeded" }
   | { kind: "failed" }
+  /**
+   * A declined attempt on the hosted page: the API keeps the payment pending, because the customer
+   * may try again on the same page (BILL-07), and records why in `failure_reason`. Shown as "did
+   * not go through" - never success - while the page keeps reading in case a retry succeeds.
+   */
+  | { kind: "declined" }
   | { kind: "refunded" }
   | { kind: "elsewhere" };
 
@@ -27,6 +33,7 @@ export type Found = "finding" | "none" | "found" | "elsewhere";
 export function returnView(input: {
   found: Found;
   status: string | null;
+  failureReason?: string | null;
   elapsedMs: number;
 }): ReturnView {
   if (input.found === "finding") return { kind: "finding" };
@@ -40,6 +47,7 @@ export function returnView(input: {
     case "refunded":
       return { kind: "refunded" };
     default:
+      if (input.failureReason) return { kind: "declined" };
       return { kind: "confirming", slow: input.elapsedMs >= FAST_WINDOW_MS };
   }
 }
@@ -53,7 +61,6 @@ export function nextPollDelay(status: string | null, elapsedMs: number): number 
 export interface InvoiceFacts {
   id: string;
   purpose: string;
-  issued_at: string | null;
 }
 
 /**
@@ -61,25 +68,35 @@ export interface InvoiceFacts {
  * a renewal paid by checkout, a top-up. `manual` and `adjustment` are never paid by the owner.
  */
 const PAYABLE_PURPOSES = new Set(["checkout", "renewal", "topup"]);
+/** How many of the newest payable invoices are asked for their attempts. */
+export const CANDIDATE_INVOICES = 5;
 
 /**
- * The invoices issued in the last two hours that a hosted payment could be for, newest first
- * (RT-02). The page follows the first; any others are listed with links to their invoices.
+ * The invoices a just-started payment could be for (RT-02): the newest payable ones, in the API's
+ * own order. Their date is no guide - a checkout invoice has no `issued_at` (it is not a debt until
+ * a part-reversal makes it one, ADR-096) and a renewal's period may lie ahead - so the attempt's own
+ * `created_at` decides, in `newestRecentPayment`.
  */
-export function recentPayableInvoices<T extends InvoiceFacts>(
-  invoices: readonly T[],
-  now: number,
-): T[] {
+export function payableCandidates<T extends InvoiceFacts>(invoices: readonly T[]): T[] {
   return invoices
-    .filter((invoice) => {
-      if (!PAYABLE_PURPOSES.has(invoice.purpose) || !invoice.issued_at) return false;
-      const at = Date.parse(invoice.issued_at);
-      return Number.isFinite(at) && now - at <= RECENT_WINDOW_MS && at - now <= 60_000;
-    })
-    .sort((a, b) => Date.parse(b.issued_at ?? "") - Date.parse(a.issued_at ?? ""));
+    .filter((invoice) => PAYABLE_PURPOSES.has(invoice.purpose))
+    .slice(0, CANDIDATE_INVOICES);
 }
 
-/** The newest attempt on one invoice, or null when there is none. */
+/** The newest attempt created in the last two hours, or null (RT-02, OQ-4). */
+export function newestRecentPayment<T extends { created_at: string }>(
+  payments: readonly T[],
+  now: number,
+): T | null {
+  return newestPayment(
+    payments.filter((payment) => {
+      const at = Date.parse(payment.created_at);
+      return Number.isFinite(at) && now - at <= RECENT_WINDOW_MS && at - now <= 60_000;
+    }),
+  );
+}
+
+/** The newest attempt of a list, or null when there is none. */
 export function newestPayment<T extends { created_at: string }>(payments: readonly T[]): T | null {
   let newest: T | null = null;
   for (const payment of payments) {

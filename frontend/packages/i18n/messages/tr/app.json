@@ -1116,7 +1116,7 @@
     "memberNote": "Ekibi sahipler ve yöneticiler yönetir. Kendi hesabınız şurada:",
     "accountLink": "Hesap ayarları",
     "makeOwner": "Sahip yap",
-    "makeOwnerOf": "{name} adlı kişiyi sahip yap",
+    "makeOwnerOf": "Sahip yap: {name}",
     "remove": "Çıkar",
     "removeOf": "{name} adlı kişiyi çıkar",
     "leave": "Bu çalışma alanından ayrıl",
@@ -1166,7 +1166,7 @@
       }
     },
     "changeRole": "Rolü değiştir",
-    "changeRoleOf": "{name} kişisinin rolünü değiştir",
+    "changeRoleOf": "Rolü değiştir: {name}",
     "roleTitle": "{name} kişisinin rolü değişsin mi?",
     "roleBody": "Bundan sonra yaptığı her şey için geçerli olur. Sahiplik ayrıca devredilir.",
     "roleLabel": "Yeni rol",

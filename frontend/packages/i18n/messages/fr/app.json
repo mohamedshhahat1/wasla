@@ -1116,7 +1116,7 @@
     "memberNote": "Les propriétaires et administrateurs gèrent l'équipe. Votre compte se trouve dans",
     "accountLink": "Paramètres du compte",
     "makeOwner": "Nommer propriétaire",
-    "makeOwnerOf": "Nommer {name} propriétaire",
+    "makeOwnerOf": "Nommer propriétaire : {name}",
     "remove": "Retirer",
     "removeOf": "Retirer {name}",
     "leave": "Quitter cet espace de travail",
@@ -1166,7 +1166,7 @@
       }
     },
     "changeRole": "Changer le rôle",
-    "changeRoleOf": "Changer le rôle de {name}",
+    "changeRoleOf": "Changer le rôle : {name}",
     "roleTitle": "Changer le rôle de {name} ?",
     "roleBody": "Cela s'applique à tout ce qu'ils feront ensuite. La propriété se transfère à part.",
     "roleLabel": "Nouveau rôle",

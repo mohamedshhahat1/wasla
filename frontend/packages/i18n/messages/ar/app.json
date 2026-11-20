@@ -1116,7 +1116,7 @@
     "memberNote": "يدير المالكون والمسؤولون الفريق. حسابك الشخصي في",
     "accountLink": "إعدادات الحساب",
     "makeOwner": "اجعله المالك",
-    "makeOwnerOf": "اجعل {name} المالك",
+    "makeOwnerOf": "اجعله المالك: {name}",
     "remove": "إزالة",
     "removeOf": "إزالة {name}",
     "leave": "مغادرة مساحة العمل",
@@ -1166,7 +1166,7 @@
       }
     },
     "changeRole": "تغيير الدور",
-    "changeRoleOf": "تغيير دور {name}",
+    "changeRoleOf": "تغيير الدور: {name}",
     "roleTitle": "تغيير دور {name}؟",
     "roleBody": "يسري على كل ما يفعله بعد ذلك. نقل الملكية يتم بشكل منفصل.",
     "roleLabel": "الدور الجديد",

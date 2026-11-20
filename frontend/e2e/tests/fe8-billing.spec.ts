@@ -31,7 +31,8 @@ import {
   WEB,
   type Account,
 } from "../support/fe2";
-import { login, memberOf } from "../support/fe3";
+import { login, memberOf, revoke } from "../support/fe3";
+import { freshEmail } from "../support/helpers";
 import { expect, test } from "../support/page-guard";
 
 test.use({ timezoneId: "Africa/Cairo" });
@@ -79,7 +80,9 @@ async function recordReturnStates(context: BrowserContext): Promise<void> {
       const node = document.querySelector("[data-return-state]");
       const state = node?.getAttribute("data-return-state");
       if (state && seen[seen.length - 1] !== state) seen.push(state);
-      if (document.body?.textContent?.includes("Payment received")) {
+      // The panel's own title: the page's script data carries every message, this phrase too.
+      const title = document.querySelector("[data-payment-title]")?.textContent ?? "";
+      if (title.includes("Payment received")) {
         if (seen[seen.length - 1] !== "text:received") seen.push("text:received");
       }
     };
@@ -160,12 +163,14 @@ test.describe("FE-8 billing (BJ)", () => {
     await payWith(context, "outcome=declined");
     await signIn(page, context, owner.email);
     await startProCheckout(page);
-    await expect(page.locator('[data-return-state="failed"]')).toBeVisible({ timeout: BOUND });
+    // BILL-07: a hosted decline leaves the payment pending with its reason - shown as declined.
+    await expect(page.locator('[data-return-state="declined"]')).toBeVisible({ timeout: BOUND });
+    await expect(page.getByText("The payment did not go through")).toBeVisible();
     const states = await statesOf(page);
     expect(states).not.toContain("succeeded");
     expect(states).not.toContain("text:received");
     expect(await planCode(owner)).not.toBe("pro");
-    await axe(page, "return failed");
+    await axe(page, "return declined");
   });
 
   test("BJ-04: no callback yet - confirming, never success", async ({ page, context }) => {
@@ -266,9 +271,12 @@ test.describe("FE-8 billing (BJ)", () => {
     expect(row?.role).toBe("tenant_admin");
     await axe(page, "team after role change");
 
+    // The plan's seats are the owner's and this member's: free one for the invitation below.
+    await revoke(owner, member);
+
     const invited = await api("POST", "/api/v1/invitations", {
       token: owner.token,
-      body: { email: `bj10-invitee-${Date.now()}@example.test` },
+      body: { email: freshEmail("bj10inv") },
     });
     expect(invited.status).toBe(201);
     await page.goto(`${WEB}/team/invitations`);

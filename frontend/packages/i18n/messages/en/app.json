@@ -1116,7 +1116,7 @@
     "memberNote": "Owners and administrators manage the team. Your own account is on",
     "accountLink": "Account settings",
     "makeOwner": "Make owner",
-    "makeOwnerOf": "Make {name} the owner",
+    "makeOwnerOf": "Make owner: {name}",
     "remove": "Remove",
     "removeOf": "Remove {name}",
     "leave": "Leave this workspace",
@@ -1166,7 +1166,7 @@
       }
     },
     "changeRole": "Change role",
-    "changeRoleOf": "Change {name}'s role",
+    "changeRoleOf": "Change role: {name}",
     "roleTitle": "Change {name}'s role?",
     "roleBody": "It applies to everything they do next. Ownership is handed over separately.",
     "roleLabel": "New role",

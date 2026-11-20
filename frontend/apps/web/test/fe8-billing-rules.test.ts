@@ -17,10 +17,12 @@ import {
   FAST_POLL_MS,
   FAST_WINDOW_MS,
   maskedDigits,
+  CANDIDATE_INVOICES,
   newestPayment,
+  newestRecentPayment,
   nextPollDelay,
+  payableCandidates,
   RECENT_WINDOW_MS,
-  recentPayableInvoices,
   returnView,
   SLOW_POLL_MS,
 } from "../lib/billing/payment-return";
@@ -195,6 +197,21 @@ describe("the return page (RT-04, RT-05)", () => {
     });
   });
 
+  it("reads a pending payment with a reason as a decline - never success, still read (BILL-07)", () => {
+    expect(
+      returnView({
+        found: "found",
+        status: "pending",
+        failureReason: "AUTHENTICATION_FAILED",
+        elapsedMs: 0,
+      }),
+    ).toEqual({ kind: "declined" });
+    expect(nextPollDelay("pending", 0)).toBe(FAST_POLL_MS);
+    expect(
+      returnView({ found: "found", status: "succeeded", failureReason: "x", elapsedMs: 0 }),
+    ).toEqual({ kind: "succeeded" });
+  });
+
   it("confirms quietly for a minute, then says it may take longer", () => {
     expect(
       returnView({ found: "found", status: "pending", elapsedMs: FAST_WINDOW_MS - 1 }),
@@ -233,21 +250,40 @@ describe("which payment the return page follows (RT-02, OQ-4)", () => {
   const now = Date.parse("2026-11-20T12:00:00Z");
   const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
 
-  it("takes payable invoices of the last two hours, newest first", () => {
+  it("asks the newest payable invoices, whatever their dates say", () => {
     const invoices = [
-      { id: "old", purpose: "checkout", issued_at: at(121) },
-      { id: "manual", purpose: "manual", issued_at: at(1) },
-      { id: "draft", purpose: "checkout", issued_at: null },
-      { id: "topup", purpose: "topup", issued_at: at(30) },
-      { id: "plan", purpose: "checkout", issued_at: at(2) },
-      { id: "renewal", purpose: "renewal", issued_at: at(90) },
+      { id: "manual", purpose: "manual" },
+      { id: "plan", purpose: "checkout" },
+      { id: "topup", purpose: "topup" },
+      { id: "adjust", purpose: "adjustment" },
+      { id: "renewal", purpose: "renewal" },
+      { id: "c2", purpose: "checkout" },
+      { id: "c3", purpose: "checkout" },
+      { id: "c4", purpose: "checkout" },
     ];
-    expect(recentPayableInvoices(invoices, now).map((i) => i.id)).toEqual([
+    expect(payableCandidates(invoices).map((i) => i.id)).toEqual([
       "plan",
       "topup",
       "renewal",
+      "c2",
+      "c3",
     ]);
+    expect(CANDIDATE_INVOICES).toBe(5);
+  });
+
+  it("follows the newest attempt created in the last two hours", () => {
     expect(RECENT_WINDOW_MS).toBe(2 * 60 * 60 * 1_000);
+    expect(
+      newestRecentPayment(
+        [
+          { id: "old", created_at: at(121) },
+          { id: "a", created_at: at(30) },
+          { id: "b", created_at: at(2) },
+        ],
+        now,
+      )?.id,
+    ).toBe("b");
+    expect(newestRecentPayment([{ id: "old", created_at: at(121) }], now)).toBeNull();
   });
 
   it("follows the newest attempt on the invoice", () => {
