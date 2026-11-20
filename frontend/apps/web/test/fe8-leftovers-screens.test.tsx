@@ -22,13 +22,14 @@
  * are the real ones. The return page's schedule runs on fake timers.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { messagesFor } from "@wasla/i18n";
 
+import { PlanPage } from "../components/billing/plan-page";
 import { ReturnPage } from "../components/billing/return-page";
 
 const SCOPE = { workspaceId: "ws", sessionGeneration: 1 };
@@ -176,6 +177,62 @@ function payment(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const FREE = {
+  id: "plan-free",
+  code: "free",
+  name: "Free",
+  description: null,
+  version: 1,
+  price: "0.00",
+  currency: "EGP",
+  interval: "monthly",
+  trial_days: 0,
+  limits: [],
+  billing_required: false,
+  is_custom: false,
+  prices: [],
+};
+
+function pro(name = "Pro") {
+  return {
+    ...FREE,
+    id: "plan-pro",
+    code: "pro",
+    name,
+    price: "99.00",
+    billing_required: true,
+    prices: [
+      {
+        id: "price-pro-m",
+        amount: "99.00",
+        currency: "EGP",
+        interval: "monthly",
+        interval_count: 1,
+      },
+    ],
+  };
+}
+
+function subscription(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "sub",
+    status: "active",
+    plan: FREE,
+    plan_price: null,
+    plan_version_id: "v1",
+    current_period_start: "2026-11-01T00:00:00Z",
+    current_period_end: "2026-12-01T00:00:00Z",
+    billing_anchor_at: "2026-11-01T00:00:00Z",
+    trial_ends_at: null,
+    cancel_at_period_end: false,
+    cancelled_at: null,
+    ended_at: null,
+    scheduled_change: null,
+    revision: 1,
+    ...overrides,
+  };
+}
+
 function count(method: string, path: string): number {
   return calls.filter((call) => call.method === method && call.path === path).length;
 }
@@ -286,4 +343,89 @@ describe("the return page (RT-02 .. RT-05)", () => {
       expect(screen.getByText(app.billing.return["failedAuth"]!)).toBeTruthy();
     },
   );
+});
+
+/* -------------------------------------------------------------------- plan */
+
+describe("the plan page (BP, CK)", () => {
+  function planApi(sub: Record<string, unknown> = subscription(), proName = "Pro") {
+    answers["GET /api/v1/billing/subscription"] = () => ({ subscription: sub, entitlements: [] });
+    answers["GET /api/v1/billing/plans"] = () => [FREE, pro(proName)];
+    answers["GET /api/v1/billing/summary"] = () => ({
+      automatic_renewal: false,
+      payment_required: [],
+      open_offer: null,
+    });
+    answers["GET /api/v1/billing/custom-offers"] = () => [];
+  }
+
+  async function upgrade(): Promise<HTMLElement> {
+    return screen.findByRole("button", { name: /Pro/ }, { timeout: 5_000 });
+  }
+
+  it("never asks for the owner's summary for an administrator (OQ-5, M-R23)", async () => {
+    role = "tenant_admin";
+    planApi();
+    render(<PlanPage />, { wrapper: Wrapper });
+    await screen.findByText("Pro");
+    expect(count("GET", "/api/v1/billing/summary")).toBe(0);
+    expect(count("GET", "/api/v1/billing/custom-offers")).toBe(0);
+  });
+
+  it("offers to keep the plan only when a change is scheduled (M-S35)", async () => {
+    planApi();
+    render(<PlanPage />, { wrapper: Wrapper });
+    await screen.findByText("Pro");
+    await screen.findAllByText(/Cancel/);
+    expect(document.querySelector('[data-action="cancel-subscription"]')).not.toBeNull();
+    expect(document.querySelector('[data-action="keep-plan"]')).toBeNull();
+  });
+
+  it("sends one checkout for presses while it opens, and the button stays focusable (M-S32, M-S33)", async () => {
+    planApi();
+    answers["POST /api/v1/billing/checkout"] = () => new Promise(() => undefined);
+    render(<PlanPage />, { wrapper: Wrapper });
+    const button = await upgrade();
+    fireEvent.click(button);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    // Whatever a second press started has reached the API by now.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(count("POST", "/api/v1/billing/checkout")).toBe(1);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(button.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("gives each press its own idempotency key (CK-02, M-S31)", async () => {
+    planApi();
+    answers["POST /api/v1/billing/checkout"] = () => ({
+      __status: 409,
+      error: { error: { code: "checkout_already_started", message: "x" } },
+    });
+    render(<PlanPage />, { wrapper: Wrapper });
+    const button = await upgrade();
+    fireEvent.click(button);
+    await screen.findByRole("alert");
+    fireEvent.click(button);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const keys = calls
+      .filter((call) => call.method === "POST" && call.path === "/api/v1/billing/checkout")
+      .map((call) => (call.init?.["body"] as { idempotency_key: string }).idempotency_key);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("draws a plan's name as text, never as markup (UI8-04, M-S46)", async () => {
+    planApi(subscription(), "<b>Pro</b>");
+    render(<PlanPage />, { wrapper: Wrapper });
+    await screen.findByText("<b>Pro</b>");
+    expect(document.querySelector("[data-plans] b")).toBeNull();
+  });
 });
