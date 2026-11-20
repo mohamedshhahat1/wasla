@@ -320,7 +320,11 @@ export function WorkspaceSettings() {
           <p
             role="status"
             aria-live="polite"
-            className="m-0 text-sm text-text-muted"
+            // While dirty on a phone the line would wrap the sticky bar onto a second row, taller
+            // than the page's scroll padding, and hide the field focus moved to (WCAG 2.4.11,
+            // KY7-03 in WebKit). There Discard already says something changed; the line is still
+            // read out. "Saved." stays visible.
+            className={cn("m-0 text-sm text-text-muted", dirty && "max-sm:sr-only")}
             data-save-status=""
           >
             {saved && !dirty ? t("saved") : dirty ? t("unsaved") : ""}
