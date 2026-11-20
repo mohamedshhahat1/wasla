@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 
 import { decideRoute } from "../lib/routing";
-import { answerIsCurrent } from "../lib/session/profile-answer";
+import { answerIsCurrent, failureIsAnAnswer } from "../lib/session/profile-answer";
 
 describe("a profile answer belongs to the state it was asked for", () => {
   it("an answer for the current state is kept", () => {
@@ -35,5 +35,17 @@ describe("a profile answer belongs to the state it was asked for", () => {
         "/contacts",
       ),
     ).toEqual({ kind: "go", to: "/workspaces/new" });
+  });
+});
+
+describe("a failed /auth/me that never got an answer is not a profile (FEF-43, WebKit)", () => {
+  it("network_error - an aborted fetch on navigation - is not filed", () => {
+    expect(failureIsAnAnswer("network_error")).toBe(false);
+  });
+
+  it("an answer from the API is filed as before", () => {
+    expect(failureIsAnAnswer("unauthenticated")).toBe(true);
+    expect(failureIsAnAnswer("internal_error")).toBe(true);
+    expect(failureIsAnAnswer(null)).toBe(true);
   });
 });
