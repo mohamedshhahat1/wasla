@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * FE-8's composites (UI8-02, ADR-202): the billing screens' presentational parts. Presentational
  * only - every word arrives as a prop, every action as a node the screen builds. Role tokens only;
