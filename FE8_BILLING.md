@@ -1,7 +1,7 @@
 # FE-8 — Subscription and Payment (ADR-202)
 
-**Verdict: FE-8 MERGED, PUSH PENDING — CI result recorded in the addendum.** (This line is replaced by the addendum's
-verdict once GitHub's ci.yml and frontend.yml have run on the pushed head.)
+**Verdict: FE-8 MERGED AND PUSHED, CI GREEN. PREVIEWS UPDATED.** ci.yml 44799729888 and frontend.yml 44799730106 green in
+every job on `3d95093` (addendum 1).
 
 | | |
 |---|---|
@@ -107,3 +107,40 @@ Closed: FEB-12, FEB-42, FEB-43, FEB-44, FEB-45, FEB-06 (FE-8's part). Deferred: 
 4. FEQ-08: the ar / fr / tr drafts of the new copy.
 5. DK-05's measurement once C: has 8 GB free.
 6. security.yml RGM-23 / 24 / 27 (unchanged).
+
+## Addendum 1 — the pushes, CI, the previews (2026-11-20)
+
+| push | head | ci.yml | frontend.yml | outcome |
+|---|---|---|---|---|
+| 1 | `6a7ffb5` (merge `bb5cab7` + report) | 44790918148: 17/18 green; **model shard 4/7 red** (`test_openapi_export`: openapi.json stale); coverage skipped | 44790917906: e2e Chromium / Firefox / WebKit / visual roles, checks, drift green; **Storybook cancelled** (its browser download stalled 20 min to the job's limit — a runner fault, nothing ran) | fixed below |
+| 2 | `3d95093` (merge of `8c495c9`) | 44799729888: **18/18 green** (7 model, 5 migration shards, migrations, parity, coverage — every test exactly once — lint, Docker build, alert rules) | 44799730106: **8/8 green**, Storybook included | **CI GREEN** |
+
+**Shard 4's cause (`8c495c9`).** The local venv had drifted to pydantic 2.14.4 (the lock pins 2.13.5): its first lock
+install stopped at uvloop (Windows cannot build it) and the unchained `pip install -e ".[dev]"` then installed the newest
+of everything (34 of 65 pinned packages differed). That pydantic drops the decimal fields' `pattern`, so the contract this
+stage exported lost 25 of them. Re-exported in `python:3.12-slim` from the three locks: the only change is those 25
+patterns and one line of schema.d.ts. The venv was rebuilt from the locks by hash (0 of 79 differ; colorama, which pytest
+needs on Windows and the Linux-compiled dev lock does not carry, from a hashed notes-only file); the unit suite, the 90 FE-8
+and neighbouring integration tests, mypy, ruff and the export check re-ran green on it. **Every earlier local backend run
+of this stage used the drifted packages; GitHub's runs are the pinned proof.**
+
+### Part C — previews
+
+Account "Mohamedshhahat1@gmail.com's Account", 1cc89863… (= FE-7's). Changes since FE-7's deploy: web's app files, and
+`@wasla/ui` / `@wasla/i18n` bundled by all three → all three rebuilt with `build-workers-linux.mjs --env preview` (the three
+workers.dev origins, `PUBLIC_PREVIEW_NO_API=true`). `workers:smoke`: every page 200, session routes GET 405 / POST 503,
+console 404 for an unknown page (the first attempt crashed workerd on Windows; the second ran without the app origin and was
+answered 403 — both recorded). Every wrangler.jsonc unchanged; nothing on iwasla.tech; no secret; no account setting.
+
+| Worker | Previous (FE-7) | New version | Upload (gzip) |
+| --- | --- | --- | --- |
+| wasla-preview-web | d1a2c7f6 | 224eda62 | 9675.88 KiB (1876.82 KiB) |
+| wasla-preview-console | f3bd3605 | dfe706c0 | 6771.41 KiB (1434.19 KiB) |
+| wasla-preview-marketing | 91da1e05 | 23b89511 | 0.35 KiB (0.24 KiB) |
+
+Rollback, if ever needed (not run): `wrangler rollback <previous id> --name <worker>` from each app's folder.
+
+Live checks: web `/`, `/login`, `/billing`, `/billing/checkout/return`, `/team`, `/settings/account`, console `/`, marketing
+`/en/` `/ar/` → 200; HSTS, CSP, referrer and permissions policy, nosniff present; `/session/login` and `/session/refresh`:
+GET 405, cross-origin POST 403, same-origin POST 403 `session_request_refused`. (The first web checks timed out at TCP
+connect from this machine to two Cloudflare edge addresses and passed minutes later: this network, not the Worker.)
