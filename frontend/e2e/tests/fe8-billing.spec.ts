@@ -218,7 +218,8 @@ test.describe("FE-8 billing (BJ)", () => {
       if (request.url().startsWith(API_ORIGIN)) requests.push(new URL(request.url()).pathname);
     });
     await signIn(page, context, admin.email);
-    await page.getByRole("link", { name: "Billing", exact: true }).first().click();
+    // On a phone the navigation is a closed sheet: the page is opened by its address.
+    await page.goto(`${WEB}/billing`);
     await expect(page.locator("[data-current-plan]")).toBeVisible({ timeout: BOUND });
     await expect(page.locator('[data-action^="plan-"]')).toHaveCount(0);
     await expect(

@@ -283,6 +283,11 @@ function GoogleSection() {
   const connectCode = connect.error instanceof ApiError ? connect.error.code : null;
   const code = disconnect.error instanceof ApiError ? disconnect.error.code : null;
   const connected = params.get("google") === "connected";
+  // Back from linking Google: the profile this tab loaded predates the link, so the account's ways
+  // in are read again (AC8-02) - the closing proofs and this section follow the fresh answer.
+  useEffect(() => {
+    if (connected) void reloadProfile();
+  }, [connected, reloadProfile]);
   return (
     <Section id="account-google" title={t("google.title")}>
       <p className="m-0 text-md text-text-muted">{t("google.line")}</p>
