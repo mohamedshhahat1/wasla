@@ -29,6 +29,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { messagesFor } from "@wasla/i18n";
 
+import { InvoicePage } from "../components/billing/invoices";
 import { PlanPage } from "../components/billing/plan-page";
 import { ReturnPage } from "../components/billing/return-page";
 
@@ -427,5 +428,33 @@ describe("the plan page (BP, CK)", () => {
     render(<PlanPage />, { wrapper: Wrapper });
     await screen.findByText("<b>Pro</b>");
     expect(document.querySelector("[data-plans] b")).toBeNull();
+  });
+});
+
+/* ----------------------------------------------------------------- invoice */
+
+describe("an invoice (IN)", () => {
+  it("offers no refund review on a refunded payment (M-R22)", async () => {
+    answers["GET /api/v1/invoices/{invoice_id}"] = () =>
+      invoice({
+        status: "paid",
+        amount_paid: "99.00",
+        outstanding: "0.00",
+        paid_at: iso(Date.now()),
+      });
+    answers["GET /api/v1/invoices/{invoice_id}/payments"] = () => [
+      payment({
+        status: "refunded",
+        processed_at: iso(Date.now()),
+        refunded_amount: "99.00",
+        refunded_at: iso(Date.now()),
+      }),
+    ];
+    render(<InvoicePage id={INVOICE} />, { wrapper: Wrapper });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await screen.findByText(/Refunded/i, undefined, { timeout: 5_000 });
+    expect(document.querySelector('[data-action="ask-refund"]')).toBeNull();
   });
 });
