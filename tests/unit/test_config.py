@@ -11,6 +11,8 @@ from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
 from app.core.crypto import generate_key
+from app.integrations.billing import CALLBACK_PATH, build_checkout_provider
+from app.integrations.billing.paymob import PaymobProvider
 
 # Long enough to satisfy the signing-key rule, which now applies in every
 # environment except `test`. Supplied by the helper below so that the tests
@@ -409,6 +411,7 @@ PAYMOB: dict[str, Any] = {
     "paymob_hmac_secret": "a-test-hmac-secret",
     "paymob_integration_ids": [4097558],
     "app_public_url": "https://app.example.com",
+    "api_public_url": "https://api.example.com",
     "credential_encryption_keys": [generate_key()],
     "payment_token_fingerprint_key": generate_key(),
 }
@@ -449,6 +452,7 @@ def test_a_deployment_taking_payments_accepts_a_complete_configuration() -> None
         "credential_encryption_keys",
         "payment_token_fingerprint_key",
         "app_public_url",
+        "api_public_url",
     ],
 )
 def test_a_half_configured_payment_provider_refuses_to_boot(missing: str) -> None:
@@ -461,6 +465,37 @@ def test_a_half_configured_payment_provider_refuses_to_boot(missing: str) -> Non
     """
     with pytest.raises(ValidationError):
         _paymob(**{missing: None})
+
+
+def test_the_callback_origin_is_required_where_payments_are_taken() -> None:
+    """FEB-12: the app's origin is a Worker with no payment webhook route, so a
+    callback built on it is taken at Paymob and never recorded here."""
+    with pytest.raises(ValidationError) as caught:
+        _paymob(api_public_url=None)
+    assert "API_PUBLIC_URL must be set when BILLING_PROVIDER is paymob" in str(caught.value)
+
+
+def test_a_private_callback_origin_is_refused_where_payments_are_taken() -> None:
+    with pytest.raises(ValidationError):
+        _paymob(api_public_url="http://10.0.0.5")
+
+
+def test_a_developer_stack_may_take_its_callback_on_the_app_origin() -> None:
+    """Outside staging and production the single-origin local stack keeps
+    today's behaviour: the callback goes to APP_PUBLIC_URL."""
+    settings = _paymob(environment="local", api_public_url=None)
+    provider = build_checkout_provider(settings)
+    assert isinstance(provider, PaymobProvider)
+    # Private on purpose (it is configuration, not API); read here because the
+    # URL a provider was built with is exactly what this test is about.
+    assert provider._notification_url == "https://app.example.com" + CALLBACK_PATH
+
+
+def test_the_callback_goes_to_the_api_and_the_browser_back_to_the_app() -> None:
+    provider = build_checkout_provider(_paymob(api_public_url="https://api.example.com/"))
+    assert isinstance(provider, PaymobProvider)
+    assert provider._notification_url == "https://api.example.com/api/v1/webhooks/paymob"
+    assert provider._redirection_url == "https://app.example.com/billing/checkout/return"
 
 
 def test_no_integration_id_is_refused() -> None:

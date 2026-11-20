@@ -656,6 +656,8 @@ A partial unique index on `(tenant_id, period_start) WHERE purpose = 'renewal'` 
 
 ## Payments
 
+**Where the provider calls back (FEB-12).** The server-to-server callback is built on `API_PUBLIC_URL` - the API's own origin - and the browser's return on `APP_PUBLIC_URL`, the app's. They are different hosts in production (`api.<domain>`, `app.<domain>`), and the app's Worker has no payment webhook route, so a callback built on the app's origin would be taken at Paymob and never recorded. The setting is required with `BILLING_PROVIDER=paymob` in staging and production. The return page decides only from `GET /billing/payments/{id}`, never from the redirect's query string, which can say `success=true` while the payment is pending or declined.
+
 Every attempt is a row. A failure is not forgotten when a later attempt succeeds, because that history is what a dispute, a chargeback and an angry email all turn on. Part payments leave the invoice open with a smaller balance; an overpayment leaves nothing outstanding rather than a negative.
 
 `UNIQUE(provider, provider_reference)` is the processor's idempotency key: two webhooks about one charge become one payment.

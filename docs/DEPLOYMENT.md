@@ -176,6 +176,8 @@ Tick each line on the host before the first deploy that uses this example:
 - [ ] **Every service's log retention** - the shared `x-logging` bound kept on every service, or an equivalent bound by size or time set (the section above; FEB-41).
 - [ ] **nginx's log readers restricted** — only the host's administrators can run `docker logs` or read the journal or log file that holds them.
 - [ ] **security.yml's RGM-27 fixed** — the open security-workflow finding the owner tracks before the first deploy.
+- [ ] **`API_PUBLIC_URL` set** to the API's public origin (`https://api.<domain>`), beside `APP_PUBLIC_URL` (`https://app.<domain>`), wherever `BILLING_PROVIDER=paymob` (FEB-12).
+- [ ] **Paymob dashboard URLs** — Developers → Payment Integrations → each integration: the *Transaction processed callback* → `${API_PUBLIC_URL}/api/v1/webhooks/paymob`; the *Transaction response callback* (the browser's redirect) → `${APP_PUBLIC_URL}/billing/checkout/return`. The intention names both too; the dashboard's values are what Paymob uses when an intention does not.
 
 **TLS is not included and cannot be.** Certificates are issued to a domain by a certificate authority; nothing in this repository knows the domain. A self-signed certificate shipped here would be worse than none — it would look like TLS while failing every client that checks.
 
@@ -256,7 +258,8 @@ process that does not read it fails CI the same way a missing one does
 
 | Setting group | API | Worker | Why |
 | --- | :-: | :-: | --- |
-| `APP_PUBLIC_URL` | ✓ | ✓ | The API builds the Paymob callback URL from it; the worker builds emailed links |
+| `APP_PUBLIC_URL` | ✓ | ✓ | The browser's return from Paymob and every emailed link are built from it |
+| `API_PUBLIC_URL` | ✓ | ✓ | The Paymob server-to-server callback is built from it (FEB-12): the API's own public origin, because the app's origin - a Cloudflare Worker - does not serve `/api/v1/webhooks/paymob`. Required with `BILLING_PROVIDER=paymob` in staging and production; elsewhere, unset, the callback falls back to `APP_PUBLIC_URL` |
 | `EMAIL_ENABLED`, `EMAIL_PROVIDER`, `EMAIL_FROM`, `EMAIL_REPLY_TO` | ✓ | ✓ | The API writes outbox rows, the worker renders and sends |
 | `RESEND_API_KEY` | — | ✓ | The API never sends. The credential lives in one container |
 | `RESEND_WEBHOOK_SECRET` | ✓ | — | Only the API serves the delivery webhook, so only the API can verify one ([ADR-063](../DECISIONS.md)) |
@@ -302,8 +305,9 @@ grace period.
 
 Off unless `BILLING_PROVIDER=paymob`. With it set, all of
 `PAYMOB_SECRET_KEY`, `PAYMOB_PUBLIC_KEY`, `PAYMOB_HMAC_SECRET`,
-`PAYMOB_INTEGRATION_IDS` and `APP_PUBLIC_URL` are required and the application
-refuses to start without them — in staging as well as production, because a
+`PAYMOB_INTEGRATION_IDS` and `APP_PUBLIC_URL` are required - and in staging and
+production `API_PUBLIC_URL` too, the API's own origin the callback is built on
+(FEB-12) - and the application refuses to start without them — in staging as well as production, because a
 deployment taking real payments with no HMAC secret answers 503 to every
 callback while transactions complete at Paymob.
 

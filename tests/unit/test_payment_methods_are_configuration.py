@@ -87,6 +87,7 @@ BASE = {
     "paymob_public_key": "pk_test_notreal000000",
     "paymob_hmac_secret": "a-test-hmac-secret",
     "app_public_url": "https://app.example.com",
+    "api_public_url": "https://api.example.com",
     "credential_encryption_keys": [generate_key()],
     "payment_token_fingerprint_key": generate_key(),
 }
