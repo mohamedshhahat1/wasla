@@ -64,8 +64,10 @@ WHATSAPP_CAPABILITIES: Final = ChannelCapabilities(
     attachments_per_message=1,
     media_families=frozenset({"image", "document", "audio", "video"}),
     receipts=ReceiptModel.PER_MESSAGE,
-    # Only WhatsApp Coexistence echoes the business's own sends, and that is
-    # not supported: the adapter refuses `smb_message_echoes` as a field.
+    # A Cloud API number does not echo the business's own sends. A Coexistence
+    # number does (`smb_message_echoes`, ADR-204), so the capability is per
+    # connection: `echoes_for` answers it from the number's onboarding mode, and
+    # this is the answer for every number that is not Coexistence (CX-04).
     echoes=False,
     reply_to=True,
     # Delivered by Meta and stored as unsupported; nothing acts on one.
@@ -86,6 +88,20 @@ WHATSAPP_CAPABILITIES: Final = ChannelCapabilities(
         "document": MediaLimit(100 * MB),
     },
 )
+
+#: The onboarding mode whose number echoes the business's own sends (ADR-204).
+ECHOING_MODE: Final = "coexistence"
+
+
+def echoes_for(onboarding_mode: str | None) -> bool:
+    """Whether a number reports the WhatsApp Business app's sends back (CX-04, EXT-ES-28).
+
+    Only a Coexistence number is used from the app as well as through Wasla;
+    an echo on any other number should not exist, and is kept and counted
+    rather than projected (EH-06).
+    """
+    return onboarding_mode == ECHOING_MODE
+
 
 # What every agent is told about the channel it is answering on, appended to
 # whatever the workspace wrote. Two reasons it is here rather than in the

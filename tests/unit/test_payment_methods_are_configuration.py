@@ -52,6 +52,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # been withdrawn" apart from "this request was malformed" (MSG-24); they are
 # fixed vocabulary from another provider and cannot come from configuration.
 NOT_PAYMOB_IDS: set[tuple[str, str]] = {
+    # Meta's documented code for a history share the business turned off in
+    # the WhatsApp Business app (Coexistence, S5; ADR-204).
+    ("app/services/coexistence_service.py", "2593109"),
     ("app/integrations/whatsapp/client.py", "132001"),
     ("app/integrations/whatsapp/client.py", "132015"),
     ("app/integrations/whatsapp/client.py", "132016"),

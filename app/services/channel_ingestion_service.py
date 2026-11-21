@@ -105,6 +105,7 @@ _EVENT_KINDS: Mapping[InboundKind, ChannelEventKind] = MappingProxyType(
         InboundKind.STATUS: ChannelEventKind.STATUS,
         InboundKind.ECHO: ChannelEventKind.ECHO,
         InboundKind.PREFERENCE: ChannelEventKind.PREFERENCE,
+        InboundKind.REVISION: ChannelEventKind.REVISION,
     }
 )
 
@@ -374,7 +375,19 @@ class ChannelIngestionService:
             # the provider's own app is projected, and the AI stops talking
             # over them (OMNI-037).
             step.echoes += 1
-            await self._project_echo(event, connection, projection, step)
+            # A provider whose echoes depend on the connection says so: a
+            # WhatsApp number echoes only under Coexistence, and an echo on any
+            # other number is kept and counted, never projected (EH-06, CX-04).
+            projects = getattr(self._adapter, "echoes_projected", None)
+            if projects is None or await projects(self._session, connection):
+                await self._project_echo(event, connection, projection, step)
+            step.owed.append(_Handoff(event=record))
+            return
+
+        if event.kind is InboundKind.REVISION:
+            # A customer's edit or revoke changes the line it names and
+            # nothing else: no turn, no meter, no window, no follow-up (ER-05).
+            await projection.project_revision(connection=connection, event=event)
             step.owed.append(_Handoff(event=record))
             return
 

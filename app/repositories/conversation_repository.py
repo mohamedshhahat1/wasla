@@ -770,6 +770,42 @@ class MessageRepository(TenantScopedRepository[Message]):
         )
         return self.add(message)
 
+    def record_imported(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        connection_id: uuid.UUID,
+        provider_message_id: str,
+        kind: MessageKind,
+        body: str | None,
+        sent_at: datetime,
+        from_business: bool,
+        status: MessageStatus | None,
+    ) -> Message:
+        """Stage one line of the WhatsApp Business app's history (HI-05, ADR-204).
+
+        The business's own lines are outbound with origin `external`, the
+        customer's inbound with origin `customer`; both are `imported`. Neither
+        carries a delivery protocol of Wasla's: nothing may send one again.
+        """
+        message = Message(
+            id=uuid.uuid4(),
+            tenant_id=self.tenant_id,
+            conversation_id=conversation_id,
+            connection_id=connection_id,
+            wa_message_id=provider_message_id,
+            direction=MessageDirection.OUTBOUND if from_business else MessageDirection.INBOUND,
+            kind=kind,
+            status=(status or MessageStatus.SENT) if from_business else MessageStatus.RECEIVED,
+            delivery_state=MessageDeliveryState.SENT if from_business else None,
+            body=body,
+            sent_at=sent_at,
+            provider_sent_at=sent_at if from_business else None,
+            origin=MessageOrigin.EXTERNAL if from_business else MessageOrigin.CUSTOMER,
+            imported=True,
+        )
+        return self.add(message)
+
     async def requested_with_body(self, conversation_id: uuid.UUID, body: str | None) -> bool:
         """Whether a send of this body is in flight on this conversation (OMNI-037).
 

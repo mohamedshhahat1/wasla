@@ -55,7 +55,6 @@ SUNSET_WARNING_DAYS: Final = 90
 KNOWN_API_VERSIONS: Final[frozenset[str]] = frozenset(META_API_SUNSETS) | {"v26.0", "v27.0"}
 
 
-
 def api_version_warning(version: str, *, today: date | None = None) -> str | None:
     """What to say about this Graph API version, or None if nothing.
 

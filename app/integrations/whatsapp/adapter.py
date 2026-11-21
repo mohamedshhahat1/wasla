@@ -79,11 +79,17 @@ from app.db.models.whatsapp import WhatsAppAccount
 from app.integrations.whatsapp.client import WhatsAppClient, build_http_client
 from app.integrations.whatsapp.payload import (
     DeliveryStatus,
+    EchoedMessage,
     InboundMessage,
+    MessageRevision,
     UserPreference,
     parse_webhook,
 )
-from app.integrations.whatsapp.policy import INBOUND_MEDIA_LIFETIME, WhatsAppChannelPolicy
+from app.integrations.whatsapp.policy import (
+    INBOUND_MEDIA_LIFETIME,
+    WhatsAppChannelPolicy,
+    echoes_for,
+)
 from app.repositories.template_repository import WhatsAppTemplateRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.credential_service import CredentialService, ResolvedCredential
@@ -174,6 +180,66 @@ def message_event(message: InboundMessage) -> InboundEvent:
         action=message.action,
         profile_name=message.profile_name,
         raw=message.raw,
+    )
+
+
+def _attachments(media: Any) -> tuple[AttachmentLocator, ...]:
+    if media is None:
+        return ()
+    return (
+        AttachmentLocator(
+            locator_kind=MediaLocatorKind.HANDLE,
+            locator=media.media_id,
+            media_kind=media.kind,
+            mime_type=media.mime_type,
+            filename=media.filename,
+            is_voice=media.is_voice,
+            sha256=media.sha256,
+            expires_at=datetime.now(UTC) + INBOUND_MEDIA_LIFETIME,
+        ),
+    )
+
+
+def echo_event(echo: EchoedMessage) -> InboundEvent:
+    """A message the business sent from the WhatsApp Business app, as a neutral echo (EH-01).
+
+    The `sender` is the customer the echo was sent to - `to`, then `to_user_id`
+    (EXT-ES-28) - because the conversation an echo belongs to is the customer's;
+    ADR-129 then decides it exactly as for any provider's echo.
+    """
+    sender: list[Identifier] = []
+    if echo.to_number is not None:
+        sender.append(Identifier(kind=IdentityKind.PHONE, value=echo.to_number))
+    if echo.to_user_id is not None:
+        sender.append(Identifier(kind=IdentityKind.BSUID, value=echo.to_user_id))
+    return InboundEvent(
+        channel=Channel.WHATSAPP,
+        connection_key=echo.phone_number_id,
+        kind=InboundKind.ECHO,
+        event_id=echo.event_id,
+        occurred_at=echo.timestamp,
+        sender=tuple(sender),
+        message_id=echo.event_id,
+        message_kind=MESSAGE_KINDS.get(echo.message_type, MessageKind.UNSUPPORTED),
+        text=echo.text,
+        attachments=_attachments(echo.media),
+        raw=echo.raw,
+    )
+
+
+def revision_event(revision: MessageRevision) -> InboundEvent:
+    """A customer's edit or revoke as a neutral revision (ER-01). Never a turn."""
+    return InboundEvent(
+        channel=Channel.WHATSAPP,
+        connection_key=revision.phone_number_id,
+        kind=InboundKind.REVISION,
+        event_id=revision.event_id,
+        occurred_at=revision.timestamp,
+        message_id=revision.event_id,
+        text=revision.text,
+        raw=revision.raw,
+        revision_of=revision.original_message_id,
+        revoked=revision.revoked,
     )
 
 
@@ -360,6 +426,8 @@ class WhatsAppAdapter:
         events = [message_event(message) for message in envelope.messages]
         events.extend(status_event(status) for status in envelope.statuses)
         events.extend(preference_event(preference) for preference in envelope.preferences)
+        events.extend(echo_event(echo) for echo in envelope.echoes)
+        events.extend(revision_event(revision) for revision in envelope.revisions)
         return ParsedDelivery(events=tuple(events), refused=envelope.refused)
 
     async def identity_scope(
@@ -374,6 +442,11 @@ class WhatsAppAdapter:
             account = await self.account(session, connection)
             return IdentityScopeRef(scope=IdentityScope.PROVIDER_ACCOUNT, scope_ref=account.waba_id)
         raise IdentityNotAddressableError()
+
+    async def echoes_projected(self, session: AsyncSession, connection: ChannelConnection) -> bool:
+        """Whether this number's echoes are the business talking (CX-04): Coexistence only."""
+        account = await self.account(session, connection)
+        return echoes_for(account.onboarding_mode)
 
     def address(self, identity: ContactIdentity) -> Recipient:
         """The recipient for a conversation pinned to `identity`.

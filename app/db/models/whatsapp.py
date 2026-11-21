@@ -305,9 +305,7 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
     )
     # Meta's own words when it disconnected the number (AU-03, EXT-ES-32).
     provider_disconnect_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    provider_disconnect_initiated_by: Mapped[str | None] = mapped_column(
-        String(16), nullable=True
-    )
+    provider_disconnect_initiated_by: Mapped[str | None] = mapped_column(String(16), nullable=True)
     provider_disconnected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -374,10 +372,10 @@ event.listen(WhatsAppAccount.__table__, "after_create", install_whatsapp_connect
 
 __all__ = [
     "WHATSAPP_ACCOUNT_STATUS_TYPE",
-    "OnboardingMethod",
-    "OnboardingMode",
     "WHATSAPP_EVENT_KIND_TYPE",
     "WHATSAPP_EVENT_STATE_TYPE",
+    "OnboardingMethod",
+    "OnboardingMode",
     "WhatsAppAccount",
     "WhatsAppAccountStatus",
     "WhatsAppEvent",
