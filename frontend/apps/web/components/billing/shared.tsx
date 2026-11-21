@@ -78,9 +78,15 @@ export function BillingFrame({
 }) {
   const t = useTranslations("app.billing");
   const { owner } = useBillingRoles();
+  // The billing area's own navigation sits where the settings area's does (LY7-01, DESIGN.md):
+  // beside the page from `md`, a wrapped row of links above it on a phone - never stacked inside
+  // the head band, which made the band half the screen (FEF-46).
   return (
-    <div className="flex flex-col gap-6" data-screen={`billing-${current}`}>
-      <ScreenHead id={BILLING_HEADING} title={t("title")} line={line ?? t("line")}>
+    <div
+      className="flex flex-col gap-6 md:flex-row md:items-start"
+      data-screen={`billing-${current}`}
+    >
+      <div className="md:w-nav md:shrink-0">
         <SettingsNav
           label={t("tabs.label")}
           items={billingTabs(owner).map((tab) => ({
@@ -95,8 +101,11 @@ export function BillingFrame({
             </NextLink>
           )}
         />
-      </ScreenHead>
-      {children}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-6">
+        <ScreenHead id={BILLING_HEADING} title={t("title")} line={line ?? t("line")} />
+        {children}
+      </div>
     </div>
   );
 }
