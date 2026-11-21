@@ -315,7 +315,10 @@ function PlanList({ subscription, plans }: { subscription: Subscription | null; 
       <h2 id="billing-plans" className="m-0 mb-4 text-lg font-semibold text-text">
         {t("plans.title")}
       </h2>
-      <ul className="m-0 grid list-none grid-cols-1 gap-4 p-0 lg:grid-cols-3" data-plans="">
+      <ul
+        className="m-0 grid list-none grid-cols-1 gap-4 p-0 xl:grid-cols-2 2xl:grid-cols-3"
+        data-plans=""
+      >
         {plans.map((plan) => {
           const prices = plan.prices?.length
             ? plan.prices
