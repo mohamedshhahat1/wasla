@@ -11025,6 +11025,18 @@
           "direction": {
             "$ref": "#/components/schemas/MessageDirection"
           },
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
           "failure_reason": {
             "anyOf": [
               {
@@ -11041,6 +11053,11 @@
             "title": "Id",
             "type": "string"
           },
+          "imported": {
+            "default": false,
+            "title": "Imported",
+            "type": "boolean"
+          },
           "kind": {
             "$ref": "#/components/schemas/MessageKind"
           },
@@ -11053,6 +11070,17 @@
           },
           "origin": {
             "$ref": "#/components/schemas/MessageOrigin"
+          },
+          "original_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Body"
           },
           "provider_message_id": {
             "anyOf": [
@@ -11076,6 +11104,18 @@
               }
             ],
             "title": "Read At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
           },
           "sent_at": {
             "anyOf": [
@@ -18880,6 +18920,18 @@
           "direction": {
             "$ref": "#/components/schemas/MessageDirection"
           },
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
           "failure_reason": {
             "anyOf": [
               {
@@ -18895,6 +18947,11 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "imported": {
+            "default": false,
+            "title": "Imported",
+            "type": "boolean"
           },
           "kind": {
             "$ref": "#/components/schemas/MessageKind"
@@ -18915,6 +18972,17 @@
           },
           "origin": {
             "$ref": "#/components/schemas/MessageOrigin"
+          },
+          "original_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Body"
           },
           "provider_message_id": {
             "anyOf": [
@@ -18938,6 +19006,18 @@
               }
             ],
             "title": "Read At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
           },
           "sent_at": {
             "anyOf": [

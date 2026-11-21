@@ -984,7 +984,7 @@ class AgentOrchestrator:
         match, so **with tiers disabled or uncalibrated it does nothing at all**
         - not even the search, which would be a cost for no decision.
         """
-        text = (subject.body or "").strip() if subject is not None else ""
+        text = (subject.visible_body or "").strip() if subject is not None else ""
         if not self._knowledge.policy.tiers_active or not _worth_a_search(text):
             await record_preretrieval("skipped")
             return None
@@ -1042,7 +1042,7 @@ class AgentOrchestrator:
             else []
         )
         customer = [
-            message.body or ""
+            message.visible_body or ""
             for message in history
             if message.direction is MessageDirection.INBOUND
         ]

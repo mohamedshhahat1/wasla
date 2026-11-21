@@ -206,10 +206,10 @@ def _text(message: Message, files: Sequence[MessageMedia]) -> str:
         # "[interactive]", so the model was billed to answer a placeholder.
         # Marked as a tap rather than passed as typed text, because "Yes" on a
         # button the business wrote is not the customer composing a sentence.
-        title = message.action_title or message.body
+        title = message.action_title or message.visible_body
         if title:
             return f"[tapped: {title}]"
-    caption = message.body or ""
+    caption = message.visible_body or ""
     described = "\n".join(line for line in (_described(message, file) for file in files) if line)
 
     if caption and described:
