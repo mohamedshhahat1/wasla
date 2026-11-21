@@ -10,7 +10,8 @@
     "PUBLIC_MARKETING_ORIGIN",
     "PUBLIC_GOOGLE_ENABLED",
     "WASLA_ENV",
-    "WASLA_E2E_ROUTES"
+    "WASLA_E2E_ROUTES",
+    "WASLA_E2E_META_FAKE_ORIGIN"
   ],
   "tasks": {
     "generate": {
