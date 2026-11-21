@@ -50,6 +50,9 @@ x-app: &app
     # Embedded Signup (ADR-204) against the fakes' Graph, SDK and popup.
     META_APP_ID: "100000000000001"
     META_EMBEDDED_SIGNUP_CONFIG_ID: e2e-es-config
+    # Meta's limit is 10 new accounts a week (OQ-12); the journeys onboard more than that on
+    # one stack (every project), so the profile sets the validator's ceiling.
+    META_ONBOARDING_WEEKLY_LIMIT: "10000"
     BILLING_PROVIDER: paymob
     PAYMOB_SECRET_KEY: egy_sk_test_e2e_NOT_A_KEY
     PAYMOB_PUBLIC_KEY: egy_pk_test_e2e_NOT_A_KEY
