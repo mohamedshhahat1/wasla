@@ -531,8 +531,12 @@ def service() -> FastAPI:
 
     @api.get("/meta/sdk.js")
     async def meta_sdk() -> Response:
+        # Loaded with crossorigin="anonymous" as Meta documents it, so the answer carries the
+        # CORS header Meta's CDN sends; without it the browser refuses the script.
         return Response(
-            SDK.replace("__ORIGIN__", FAKES_PUBLIC), media_type="application/javascript"
+            SDK.replace("__ORIGIN__", FAKES_PUBLIC),
+            media_type="application/javascript",
+            headers={"Access-Control-Allow-Origin": "*"},
         )
 
     @api.get("/meta/popup")
