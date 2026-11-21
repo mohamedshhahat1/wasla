@@ -15,6 +15,7 @@ import { agentHref } from "../../lib/knowledge/view";
 import { HOME_CONVERSATIONS } from "../../lib/stream-handlers";
 import { useAgents } from "../ai/agents-list";
 import { useSession } from "../session-provider";
+import { CoexistenceWarnings } from "./coexistence-warnings";
 import { OnboardingChecklist } from "./onboarding-checklist";
 import { useWorkspace } from "./workspace-context";
 
@@ -189,6 +190,7 @@ export function Home() {
       </div>
 
       <AnswerWarnings manager={manager} />
+      <CoexistenceWarnings manager={manager} />
 
       {manager ? <OnboardingChecklist /> : null}
 
