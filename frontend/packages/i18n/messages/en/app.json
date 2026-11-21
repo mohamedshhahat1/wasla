@@ -1426,7 +1426,7 @@
       "owned_workspaces": "Workspaces you own",
       "team_members": "Team members",
       "knowledge_documents": "Knowledge documents",
-      "storage_bytes": "Storage (bytes)",
+      "storage_bytes": "Storage",
       "period_messages": "Messages this period",
       "period_ai_turns": "AI replies this period",
       "period_campaign_messages": "Campaign messages this period"

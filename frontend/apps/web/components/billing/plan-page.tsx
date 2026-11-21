@@ -10,12 +10,13 @@
  * every answer redraws from the API.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useState } from "react";
 
 import { ApiError, unwrap, type components } from "@wasla/api-client";
 import { Badge, Button, Card, Dialog, FormField, Input, RadioGroup, Textarea } from "@wasla/ui";
 
+import { limitAmount } from "../../lib/billing/limits";
 import { isZero } from "../../lib/billing/money";
 import {
   cancelNowConfirmed,
@@ -262,6 +263,7 @@ function OwedPayments({ owed }: { owed: components["schemas"]["PaymentRequiredRe
 
 function PlanList({ subscription, plans }: { subscription: Subscription | null; plans: Plan[] }) {
   const t = useTranslations("app.billing");
+  const locale = useLocale();
   const { owner } = useBillingRoles();
   const money = useMoney();
   const client = useQueryClient();
@@ -348,7 +350,9 @@ function PlanList({ subscription, plans }: { subscription: Subscription | null; 
                   <li key={limit.key} className="flex justify-between gap-3">
                     <span className="text-text-muted">{t(`limit.${limit.key}`)}</span>
                     <span className="tabular-nums">
-                      {limit.limit === null ? t("unlimited") : limit.limit}
+                      {limit.limit === null
+                        ? t("unlimited")
+                        : limitAmount(limit.key, limit.limit, locale)}
                     </span>
                   </li>
                 ))}
@@ -602,6 +606,7 @@ function SubscriptionActions({
 
 function OpenOffer({ offer }: { offer: Offer }) {
   const t = useTranslations("app.billing");
+  const locale = useLocale();
   const money = useMoney();
   const date = useDate();
   const errors = useCodeText();
@@ -650,7 +655,7 @@ function OpenOffer({ offer }: { offer: Offer }) {
           <li key={limit.key} className="flex justify-between gap-3">
             <span className="text-text-muted">{t(`limit.${limit.key}`)}</span>
             <span className="tabular-nums text-text">
-              {limit.limit === null ? t("unlimited") : limit.limit}
+              {limit.limit === null ? t("unlimited") : limitAmount(limit.key, limit.limit, locale)}
             </span>
           </li>
         ))}

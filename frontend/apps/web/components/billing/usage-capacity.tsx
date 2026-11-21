@@ -10,11 +10,12 @@
  */
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import NextLink from "next/link";
-import { useFormatter, useTranslations } from "next-intl";
+import { useFormatter, useLocale, useTranslations } from "next-intl";
 
 import { unwrap, type components } from "@wasla/api-client";
 import { BarSeries, Button, Card, linkClasses, UsageMeter } from "@wasla/ui";
 
+import { limitAmount } from "../../lib/billing/limits";
 import { isZero } from "../../lib/billing/money";
 import { useWorkspace } from "../app/workspace-context";
 import { useSession } from "../session-provider";
@@ -67,6 +68,7 @@ function UsageScreen() {
       ),
   });
 
+  const locale = useLocale();
   const meter = (row: Entitlement) => {
     const limit = row.effective_limit ?? row.limit;
     return (
@@ -78,10 +80,13 @@ function UsageScreen() {
         over={row.over_limit}
         valueText={
           limit === null
-            ? t("usage.ofUnlimited", { used: digits(row.used) })
-            : t("usage.of", { used: digits(row.used), limit: digits(limit) })
+            ? t("usage.ofUnlimited", { used: limitAmount(row.key, row.used, locale) })
+            : t("usage.of", {
+                used: limitAmount(row.key, row.used, locale),
+                limit: limitAmount(row.key, limit, locale),
+              })
         }
-        note={row.held ? t("usage.held", { held: digits(row.held) }) : null}
+        note={row.held ? t("usage.held", { held: limitAmount(row.key, row.held, locale) }) : null}
       />
     );
   };

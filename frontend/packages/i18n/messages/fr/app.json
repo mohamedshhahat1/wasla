@@ -1426,7 +1426,7 @@
       "owned_workspaces": "Espaces que vous possédez",
       "team_members": "Membres de l'équipe",
       "knowledge_documents": "Documents de connaissances",
-      "storage_bytes": "Stockage (octets)",
+      "storage_bytes": "Stockage",
       "period_messages": "Messages sur la période",
       "period_ai_turns": "Réponses IA sur la période",
       "period_campaign_messages": "Messages de campagne sur la période"

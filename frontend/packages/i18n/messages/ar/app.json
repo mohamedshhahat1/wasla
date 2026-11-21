@@ -1426,7 +1426,7 @@
       "owned_workspaces": "مساحات العمل التي تملكها",
       "team_members": "أعضاء الفريق",
       "knowledge_documents": "مستندات المعرفة",
-      "storage_bytes": "التخزين (بايت)",
+      "storage_bytes": "التخزين",
       "period_messages": "الرسائل في هذه الفترة",
       "period_ai_turns": "ردود الذكاء الاصطناعي في هذه الفترة",
       "period_campaign_messages": "رسائل الحملات في هذه الفترة"
