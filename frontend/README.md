@@ -187,6 +187,27 @@ journeys do. Create two more workspaces, switch to the last one, sign out and si
 the staff account and the oldest active one opens instead. Unit tests: `apps/web/test/fe7-rules.test.ts`; journeys:
 `e2e/tests/fe7-team-settings.spec.ts`.
 
+## Connecting with Meta (Embedded Signup, ADR-204)
+
+`/channels/connect/whatsapp-embedded` is the second connect adapter, before the access-token form (which stays). It is
+offered only when `GET /api/v1/whatsapp/embedded-signup/config` says `enabled`; the preview Workers have no API, so they
+show the form alone.
+
+- **Meta's SDK on one route** - `components/app/channels/embedded-signup.tsx` loads
+  `https://connect.facebook.net/en_US/sdk.js` when the route mounts and removes its listener on unmount; the URL lives in
+  `lib/embedded-signup.ts` and in one built chunk (`lib/coexistence.ts` holds what the connection page and home need).
+  `proxy.ts` widens the CSP on that route alone.
+- **The code** is held in a ref, sent once with one Idempotency-Key per flow, retried only on a network failure within
+  its five minutes; never in storage, a URL, a query cache or a log.
+- **The e2e build** loads the fakes' SDK and trusts their origin: `e2e/scripts/e2e-local.mjs` builds with
+  `WASLA_E2E_ROUTES=1` and `WASLA_E2E_META_FAKE_ORIGIN=http://localhost:<fakes port>`; `next.config.ts` inlines it only into
+  a development build, every other build inlines `none`. The fake popup (`/meta/popup` on the fakes) posts Meta's
+  documented events; its "Account" field gives each journey its own WhatsApp account (`…-W<n>` numbers), so an
+  `account_update` injected for one journey touches no other. The fakes' call log is `GET :8026/_meta/calls`.
+- **Journeys** - `e2e/tests/es-embedded-signup.spec.ts` (Chromium, desktop and phone).
+- The fake Paymob page numbers transactions from one counter per run (FEB-47): two checkouts in the same second no longer
+  share an id.
+
 ## Changing the look
 
 The design language is [packages/ui/DESIGN.md](packages/ui/DESIGN.md): one blue family and white in three
