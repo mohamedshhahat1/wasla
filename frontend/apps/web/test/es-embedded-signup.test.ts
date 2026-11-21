@@ -14,13 +14,11 @@ import { EVENT_TYPES } from "@wasla/api-client";
 import { buildCsp } from "@wasla/session/headers";
 
 import { availableAdapters, CONNECT_ADAPTERS } from "../lib/channels";
+import { coexistenceWarnings, disconnectReasonKey, DISCONNECT_REASONS } from "../lib/coexistence";
 import {
   CANCEL_STEPS,
   cancelStepKey,
   codeStillFresh,
-  coexistenceWarnings,
-  disconnectReasonKey,
-  DISCONNECT_REASONS,
   ERROR_SENTENCES,
   errorSentenceKey,
   loginExtras,
@@ -298,6 +296,17 @@ describe("SD-08: Meta's SDK lives in one file", () => {
       "utf8",
     );
     expect(component).toMatch(/sdkSource\(\)/);
+  });
+
+  it("the connection page and home never import the SDK's module (FGE-8)", () => {
+    for (const file of [
+      "../lib/coexistence.ts",
+      "../components/app/channels/connection-onboarding.tsx",
+      "../components/app/coexistence-warnings.tsx",
+    ]) {
+      const source = readFileSync(join(here, file), "utf8");
+      expect(source, file).not.toMatch(/connect\.facebook\.net|lib\/embedded-signup/);
+    }
   });
 
   it("the code is never put in storage, a URL or a log (ST-01)", () => {

@@ -10,7 +10,7 @@ import { queryKey, unwrap } from "@wasla/api-client";
 import { Badge, Banner, Button, buttonClasses, Card, Icon, KeyValueList, Link } from "@wasla/ui";
 
 import { canManageChannels } from "../../../lib/channels";
-import { disconnectReasonKey, META_PAYMENT_HELP } from "../../../lib/embedded-signup";
+import { disconnectReasonKey, META_PAYMENT_HELP } from "../../../lib/coexistence";
 import { FormAlert } from "../../auth/form-alert";
 import { useSession } from "../../session-provider";
 import { useWorkspace } from "../workspace-context";

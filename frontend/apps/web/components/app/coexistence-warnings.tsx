@@ -9,7 +9,7 @@ import { queryKey, unwrap } from "@wasla/api-client";
 import { Banner, buttonClasses } from "@wasla/ui";
 
 import { tabFlags } from "../../lib/account/tab-flags";
-import { coexistenceWarnings } from "../../lib/embedded-signup";
+import { coexistenceWarnings } from "../../lib/coexistence";
 import { useSession } from "../session-provider";
 import { useChannelReads } from "./channels/queries";
 import { useWorkspace } from "./workspace-context";
