@@ -8,7 +8,9 @@ export const EVENT_TYPES = [
   "conversation.updated",
   "follow_up.updated",
   "message.created",
+  "message.revised",
   "message.status",
+  "whatsapp.onboarding.updated",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -56,6 +58,17 @@ export interface CampaignChangedData {
   campaign_id: string;
 }
 
+/** A customer edited or revoked a message (ADR-204, ER): the transcript reads it again. */
+export interface MessageRevisedData {
+  conversation_id: string;
+  message_id: string;
+}
+
+/** An Embedded Signup number's onboarding moved (ADR-204, OS-05): its page reads it again. */
+export interface WhatsAppOnboardingUpdatedData {
+  connection_id: string;
+}
+
 export interface ClosedData {
   reason: CloseReason;
 }
@@ -66,7 +79,9 @@ export interface StreamEventMap {
   "conversation.updated": ConversationUpdatedData;
   "follow_up.updated": FollowUpUpdatedData;
   "message.created": MessageCreatedData;
+  "message.revised": MessageRevisedData;
   "message.status": MessageStatusData;
+  "whatsapp.onboarding.updated": WhatsAppOnboardingUpdatedData;
   closed: ClosedData;
   resync: Record<string, never>;
 }
