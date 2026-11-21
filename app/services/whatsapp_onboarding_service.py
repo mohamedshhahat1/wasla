@@ -376,30 +376,6 @@ class WhatsAppOnboardingService:
 
     # ----------------------------------------------------------------- release
 
-    async def prepare_release(
-        self, *, tenant_id: uuid.UUID, account_id: uuid.UUID
-    ) -> ReleaseFollowUp | None:
-        """Read what the unsubscribe needs before the release drops the token (RL-02)."""
-        account = await WhatsAppAccountRepository(
-            self._session, tenant_id=tenant_id
-        ).require_live_by_id(account_id)
-        if not account.is_embedded_signup or account.access_token_encrypted is None:
-            return None
-        try:
-            resolved = self._credentials.resolve(account)
-        except Exception:  # a token that cannot be opened cannot unsubscribe anything
-            logger.warning(
-                "whatsapp.unsubscribe_skipped",
-                extra={"event": "whatsapp.unsubscribe_skipped", "reason": "credential"},
-            )
-            return None
-        if not resolved.is_own:
-            return None
-        return ReleaseFollowUp(
-            token=resolved.token,
-            messaging_account_id=account.messaging_account_id or account.waba_id,
-        )
-
     async def unsubscribe(self, follow_up: ReleaseFollowUp) -> bool:
         """Best-effort, after the release commits; never undoes it (RL-02, RL-03).
 

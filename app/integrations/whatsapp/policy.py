@@ -89,18 +89,20 @@ WHATSAPP_CAPABILITIES: Final = ChannelCapabilities(
     },
 )
 
-#: The onboarding mode whose number echoes the business's own sends (ADR-204).
-ECHOING_MODE: Final = "coexistence"
+#: The onboarding mode Meta said cannot echo: a number only on the Cloud API.
+NON_ECHOING_MODE: Final = "cloud_api"
 
 
 def echoes_for(onboarding_mode: str | None) -> bool:
     """Whether a number reports the WhatsApp Business app's sends back (CX-04, EXT-ES-28).
 
-    Only a Coexistence number is used from the app as well as through Wasla;
-    an echo on any other number should not exist, and is kept and counted
-    rather than projected (EH-06).
+    A number Meta said at Embedded Signup is only on the Cloud API cannot be
+    used from the app, so an echo on it should not exist: it is kept and
+    counted rather than projected (EH-06). A Coexistence number echoes, and
+    so does a number whose mode was never read (an access-token connect),
+    which ADR-129 has always answered.
     """
-    return onboarding_mode == ECHOING_MODE
+    return onboarding_mode != NON_ECHOING_MODE
 
 
 # What every agent is told about the channel it is answering on, appended to

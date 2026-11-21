@@ -81,6 +81,10 @@ class WhatsAppAccountService:
         # Optional: without one, a workspace cannot store its own token and
         # says so, rather than storing it unencrypted.
         self._credentials = credentials
+        # What a release of an Embedded Signup number owes Meta afterwards -
+        # its token and Messaging account, read before the release drops the
+        # token (RL-02). Held for the length of the request, never stored.
+        self.release_follow_up: tuple[str, str] | None = None
         # The plan a workspace without a serving subscription is held to, for
         # the channel capacity guard (ENT-08). From settings, never a request.
         self._default_plan_code = default_plan_code
@@ -358,6 +362,26 @@ class WhatsAppAccountService:
         )
         return account
 
+    def _unsubscribe_owed(self, account: WhatsAppAccount) -> tuple[str, str] | None:
+        """The token and Messaging account an Embedded Signup release unsubscribes with."""
+        if (
+            not account.is_embedded_signup
+            or account.access_token_encrypted is None
+            or self._credentials is None
+        ):
+            return None
+        try:
+            resolved = self._credentials.resolve(account)
+        except Exception:  # a token that cannot be opened unsubscribes nothing
+            logger.warning(
+                "whatsapp.unsubscribe_skipped",
+                extra={"event": "whatsapp.unsubscribe_skipped", "reason": "credential"},
+            )
+            return None
+        if not resolved.is_own:
+            return None
+        return resolved.token, account.messaging_account_id or account.waba_id
+
     async def list_accounts(self, *, tenant_id: uuid.UUID) -> list[WhatsAppAccount]:
         return await self._accounts(tenant_id).list_all()
 
@@ -466,6 +490,7 @@ class WhatsAppAccountService:
         capability retained past the point of any authority to use it.
         """
         account = await self._accounts(tenant_id).require_live_by_id(account_id)
+        self.release_follow_up = self._unsubscribe_owed(account)
         account.status = WhatsAppAccountStatus.RELEASED
         account.released_at = datetime.now(UTC)
         account.access_token_encrypted = None

@@ -47,7 +47,7 @@ from app.schemas.whatsapp import (
     WhatsAppAccountVerifyRequest,
 )
 from app.services.business_initiated_ledger import limit_view
-from app.services.whatsapp_onboarding_service import EmbeddedSignupRequest
+from app.services.whatsapp_onboarding_service import EmbeddedSignupRequest, ReleaseFollowUp
 
 router = APIRouter(route_class=CommittingRoute, prefix="/whatsapp/accounts", tags=["WhatsApp"])
 # Embedded Signup (ADR-204): the second connect adapter beside the form above.
@@ -217,21 +217,22 @@ async def release_account(
     A POST rather than a DELETE, because nothing is deleted. The row - and every
     conversation and message hanging off it - stays exactly where it was.
     """
-    # An Embedded Signup number also stops its webhooks at Meta, best-effort and
-    # after the release has committed (RL-02); the token is read before the
-    # release drops it. Never the Deregister API (RL-04).
-    follow_up = await onboarding.prepare_release(
-        tenant_id=workspace.tenant.id, account_id=account_id
-    )
     account = await service.release(
         actor=workspace.user,
         tenant_id=workspace.tenant.id,
         account_id=account_id,
     )
     released = WhatsAppAccountResponse.model_validate(account)
-    if follow_up is not None:
+    # An Embedded Signup number also stops its webhooks at Meta, best-effort and
+    # after the release has committed (RL-02); the service read the token before
+    # the release dropped it. Never the Deregister API (RL-04).
+    owed = getattr(service, "release_follow_up", None)
+    if owed is not None:
         await session.commit()
-        await onboarding.unsubscribe(follow_up)
+        token, messaging_account = owed
+        await onboarding.unsubscribe(
+            ReleaseFollowUp(token=token, messaging_account_id=messaging_account)
+        )
     return released
 
 
