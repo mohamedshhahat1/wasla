@@ -29,12 +29,11 @@ from app.db.models.conversation import (
     ConversationMode,
     ConversationStatus,
     MessageDeliveryState,
-    MessageKind,
     MessageOrigin,
 )
+from app.db.models.whatsapp import WhatsAppAccount
 from app.db.models.whatsapp_template import TemplateCategory
-from app.repositories.conversation_repository import MessageRepository
-from tests.integration.test_campaigns import _account, _template, _tenant
+from tests.integration.test_campaigns import _template, _tenant
 
 pytestmark = pytest.mark.integration
 
@@ -65,7 +64,25 @@ async def _seed(url: str) -> dict[str, tuple[uuid.UUID, datetime | None]]:
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
             tenant = await _tenant(session, slug=f"cpf04-{uuid.uuid4().hex[:6]}")
-            account = await _account(session, tenant=tenant)
+            # Written with 0119's columns only, as the contacts below are: the model also maps
+            # 0143's onboarding columns, which an ORM INSERT would name (ADR-204).
+            account_id = await session.scalar(
+                text(
+                    "INSERT INTO whatsapp_accounts"
+                    " (id, tenant_id, phone_number_id, waba_id, display_phone_number, status,"
+                    " created_at, updated_at)"
+                    " VALUES (:id, :tenant, :number, :waba, '+201000000000', 'active',"
+                    " now(), now()) RETURNING id"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "tenant": tenant.id,
+                    "number": f"phone-{tenant.slug}-a",
+                    "waba": f"waba-{tenant.slug}",
+                },
+            )
+            assert account_id is not None
+            account = WhatsAppAccount(id=account_id, tenant_id=tenant.id)
             await _template(session, tenant=tenant, account=account)
             utility = await _template(session, tenant=tenant, account=account, name="receipt")
             utility.category = TemplateCategory.UTILITY
@@ -101,17 +118,27 @@ async def _seed(url: str) -> dict[str, tuple[uuid.UUID, datetime | None]]:
                     .returning(Conversation.id)
                 )
                 assert conversation_id is not None
-                message = await MessageRepository(session, tenant_id=tenant.id).stage_outbound(
-                    conversation_id=conversation_id,
-                    kind=MessageKind.TEMPLATE,
-                    body=None,
-                    template_name=name,
-                    template_language="ar_EG",
-                    origin=origin,
+                # The message too, with the columns `stage_outbound` writes and 0119 has: 0143's
+                # imported / edited / revoked markers are mapped by the model (ADR-204).
+                await session.execute(
+                    text(
+                        "INSERT INTO messages (id, tenant_id, conversation_id, direction, kind,"
+                        " status, delivery_state, template_name, template_language, origin,"
+                        " sent_at)"
+                        " VALUES (:id, :tenant, :conversation, 'outbound', 'template', 'pending',"
+                        " CAST(:state AS message_delivery_state), :name, 'ar_EG',"
+                        " CAST(:origin AS message_origin), :sent_at)"
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "tenant": tenant.id,
+                        "conversation": conversation_id,
+                        "state": state.value,
+                        "name": name,
+                        "origin": origin.value,
+                        "sent_at": now - ago,
+                    },
                 )
-                await session.flush()
-                message.sent_at = now - ago
-                message.delivery_state = state
                 return contact_id, now - ago
 
             recent, at = await sent("recent", ago=timedelta(hours=2))
