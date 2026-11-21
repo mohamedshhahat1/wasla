@@ -311,6 +311,19 @@ after only for role, name, address and time zone. "Load more" pages by the API's
 list in the code's terms, and one `danger` button. Closing a workspace asks for its address typed exactly; closing an
 account asks for one proof - the password or Google - never both, and lists the workspaces to hand over first.
 
+## Billing (FE-8, ADR-202; the FE-8 leftovers, ADR-203)
+
+**The billing area's tabs** (SettingsNav) sit beside the page from `md`, as the settings area's do, and never stack inside
+the head band; on a phone they are a wrapped row inside the head band, which keeps the 30 % on the head there. **Plan
+cards** are one a row below `xl`, two at `xl`, three from `2xl`: a card's words and its one button never break inside it.
+**Amounts** an entitlement states are grouped in the screen's locale with Latin digits, and a byte limit is in gigabytes.
+
+**Gated, out of the averages** (the owner's choice, 2026-11-21): every billing capture is held on every push to its
+hard limits and its targets, and none is in the averages - the billing pages carry one primary each and would move the
+1280 accent average, already at the band's floor. The pages (plan, return, invoices, an invoice, payment methods, usage,
+capacity, the administrator's plan) keep the screen's own limits (status ≤ 3 %); a confirmation dialog captured as itself
+(cancel, refund review, change role), the past-due plan page and a declined return are gate states (status ≤ 8 %).
+
 ## Right to left
 
 Logical properties only (the lint forbids physical sides). The brand panel sits at the inline end

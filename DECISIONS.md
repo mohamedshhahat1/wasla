@@ -8606,3 +8606,29 @@ which no lock carries).
 **Consequences.** The owner sets API_PUBLIC_URL and the Paymob dashboard's two URLs before the first real payment
 (docs/DEPLOYMENT.md). FEB-13 waits for FEQ-17. DK-05's measured rebuild was not run in FE-8 (C: below 8 GB) and stays open.
 
+## ADR-203 — The FE-8 Leftovers: The Billing Tabs' Place Per Width, Billing Captures Gated On Their Hard Limits, Amounts People Read
+
+**Status.** Accepted, 2026-11-21 (the FE-8 leftovers; report FE8_LEFTOVERS.md). The owner's choices of 2026-11-21 on how
+the billing screens join frontend.yml's visual-roles gate: "pages only", then "hard limits only".
+
+**Context.** Measured for the first time, three billing pages at 1280 were outside FE-RD's hard limit (dominant 37.9–44.4 %
+against at least 45 %): FE-8 had placed SettingsNav - a vertical list from `md` - inside the head band, so five stacked tabs
+made the secondary-role band half the screen. Joined to the gate, the billing captures also pushed the averages outside
+the bands (390: dominant 69.4, secondary 23.3; 1280: accent 5.8), chiefly through two confirmation dialogs measured as
+themselves (refund review, change role: about 94 % white each). The plan cards printed limits as raw integers and storage
+in bytes.
+
+**Decision.**
+
+- The billing tabs sit beside the page from `md` (the settings area's place, LY7-01) and, on a phone, are a wrapped row
+  inside the head band. Plan cards: one a row below `xl`, two at `xl`, three from `2xl`.
+- Every billing capture joins frontend.yml's visual-roles gate on its per-screen hard limits and its targets, and none
+  joins the averages: the pages keep the screen's own limits (status ≤ 3 %, dominant ≥ 45 %, accent ≤ 15 %); a confirmation
+  dialog captured as itself (cancel, refund review, change role), the past-due plan page and a declined return are gate
+  states (status ≤ 8 %). The bands and the per-screen hard limits are unchanged. Measured with them, the averages left the
+  bands (390 first; then 1280 accent 5.9 against 6, where Linux already measured exactly 6.0 for the earlier screens).
+- An entitlement's amount is grouped in the screen's locale (Latin digits); a byte limit is stated in gigabytes.
+
+**Rejected.** Widening a band or reading a hard limit differently; more secondary or accent area on the billing pages to
+move the averages (a redesign); measuring the billing screens once without gating them (a measurement that is not a gate
+drifts).
