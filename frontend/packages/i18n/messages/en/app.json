@@ -175,7 +175,8 @@
       "auth_failed": "The access token stopped working",
       "permission_missing": "A permission is missing at Meta",
       "rate_limited": "Meta is slowing messages down",
-      "webhook_unhealthy": "Messages from Meta are not arriving"
+      "webhook_unhealthy": "Messages from Meta are not arriving",
+      "provider_disconnected": "Disconnected by Meta"
     },
     "notCounted": "Does not take a slot",
     "open": "Open <name>name</name>",
@@ -514,6 +515,14 @@
       "leadActivity": "Last lead activity",
       "consent": "Marketing messages",
       "createLead": "Create lead"
+    },
+    "coexistence": {
+      "imported": "Imported from the WhatsApp Business app",
+      "fromApp": "Sent from the WhatsApp Business app",
+      "edited": "Edited",
+      "showOriginal": "Show the original",
+      "revoked": "This message was deleted",
+      "placeholder": "Media from before the connection"
     }
   },
   "customers": {
@@ -756,7 +765,12 @@
     "defaultInactiveAction": "Turn it on",
     "noAgentMember": "An owner or administrator can turn one on.",
     "unreachableTitle": "Your knowledge has ready documents, but no answering agent can search them.",
-    "unreachableAction": "Check the agent's tools"
+    "unreachableAction": "Check the agent's tools",
+    "reminderTitle": "Open the WhatsApp Business app at least every {days} days",
+    "reminderBody": "Meta disconnects a number whose app is not opened for about 14 days.",
+    "reminderDismiss": "Hide until next time",
+    "disconnectedTitle": "Number disconnected by Meta",
+    "disconnectedAction": "See the number"
   },
   "ai": {
     "title": "AI agent",
@@ -1597,5 +1611,98 @@
       "more": "Load more"
     },
     "preview": "Billing needs the API, which this preview does not have."
+  },
+  "embedded": {
+    "title": "Connect WhatsApp with Meta",
+    "line": "Sign in with Facebook and choose your WhatsApp number in Meta's own window.",
+    "loading": "Checking whether this can connect with Meta…",
+    "disabled": "Connecting with Meta is not available here yet. Use the access-token form instead.",
+    "useToken": "Connect with an access token instead",
+    "launch": "Continue with Facebook",
+    "again": "Try again",
+    "retry": "Retry",
+    "connecting": "Connecting your number…",
+    "sdkFailed": "Meta's window could not open. Check your connection or use the access-token form.",
+    "noCode": "Meta finished, but no code arrived. Try again.",
+    "expired": "The connection took too long and Meta's code expired. Start again.",
+    "cancelled": "You closed Meta's window at {step}.",
+    "sessionId": "Meta session:",
+    "copySession": "Copy for support",
+    "explainerTitle": "Before you start",
+    "withMeta": "With Meta",
+    "newTitle": "Use a new number",
+    "newBody": "A number that is not on WhatsApp yet. Meta checks it with a code by text or call, and Wasla finishes its setup.",
+    "appTitle": "Use the number already in your WhatsApp Business app",
+    "appVersion": "The app must be version 2.24.17 or newer.",
+    "appReminder": "Open the app on your phone at least every {days} days, or Meta disconnects the number.",
+    "appFeatures": "Groups, disappearing messages, view once, live location and broadcast lists stop working in the app.",
+    "appCompanions": "WhatsApp for Windows and WearOS are unlinked; other linked devices keep working.",
+    "appHistory": "You choose in the app whether to share your chat history.",
+    "payment": "Meta charges for messages directly. After connecting, add a payment method in WhatsApp Manager.",
+    "steps": {
+      "chooseAccount": "choosing the business account",
+      "createAccount": "creating the business account",
+      "addNumber": "adding the number",
+      "verifyNumber": "verifying the number",
+      "profile": "setting up the profile",
+      "permissions": "the permissions",
+      "save": "the last screen",
+      "qrCode": "scanning the QR code",
+      "verifyAccount": "verifying the account",
+      "unknown": "an early step"
+    },
+    "errors": {
+      "region": "Meta cannot connect numbers from this region yet.",
+      "permission": "This app is not approved by Meta for this yet. Ask your Wasla administrator.",
+      "partnerNotReady": "This app cannot connect WhatsApp Business app numbers yet.",
+      "businessAppUnsupported": "This number is on the WhatsApp Business app, which cannot be connected here.",
+      "numberOnWhatsApp": "This number is already used on WhatsApp. Use another number or the WhatsApp Business app option.",
+      "twoStep": "Turn off two-step verification for this number in WhatsApp, then try again.",
+      "updateApp": "Update the WhatsApp Business app on your phone, then try again.",
+      "waitAndRetry": "This number is still disconnecting. Wait 15 minutes and try again.",
+      "otherPartner": "This number is already connected through another provider.",
+      "tooManyTries": "Too many tries. Wait a while and try again.",
+      "accountLimit": "Your Meta business portfolio cannot have more WhatsApp accounts yet.",
+      "numberLimit": "Your Meta business portfolio cannot have more numbers.",
+      "twoFactor": "Turn on two-factor authentication on your Facebook account, then try again.",
+      "generic": "Meta could not finish the connection. Try again, or use the access-token form."
+    }
+  },
+  "onboarding": {
+    "title": "How this number is connected",
+    "assisted": "Connected with an access token.",
+    "withMeta": "Connected with Meta",
+    "coexistence": "Also used in the WhatsApp Business app",
+    "proved": "Proved with Meta",
+    "subscribed": "Messages from Meta",
+    "registered": "Registered",
+    "notNeeded": "Not needed",
+    "notYet": "Not yet",
+    "contacts": "Contacts from the app",
+    "history": "Chat history",
+    "historyRequested": "Waiting for the app",
+    "historyProgress": "Importing your chat history - {progress}%",
+    "historyComplete": "Complete",
+    "historyDeclined": "You chose not to share your chat history",
+    "finishing": "Finishing setup - keep the WhatsApp Business app open until {deadline}.",
+    "expired": "Setup did not finish in time. Disconnect in the WhatsApp Business app and connect again.",
+    "reminder": "Open the WhatsApp Business app on your phone at least every {days} days.",
+    "paymentTitle": "Add a payment method in WhatsApp Manager",
+    "paymentBody": "Meta charges for messages directly. Without a payment method, Meta stops delivering service replies after the free 1,000 each month.",
+    "paymentLink": "How to add a payment method",
+    "retry": "Retry setup",
+    "disconnectedTitle": "Meta disconnected this number",
+    "reconnect": "Connect again",
+    "reasons": {
+      "PRIMARY_INACTIVITY": "The WhatsApp Business app was not opened for about 14 days.",
+      "COMPANION_INACTIVITY": "A linked device was not used for about 30 days.",
+      "ACCOUNT_DISCONNECTED": "Disconnected in the WhatsApp Business app.",
+      "CHANGE_NUMBER": "The business changed its phone number.",
+      "BUSINESS_DOWNGRADE": "The number was moved to the ordinary WhatsApp app.",
+      "USER_RE_REGISTERED": "The number was registered again on another phone.",
+      "ACCOUNT_OFFBOARDED": "The WhatsApp account was moved to another phone or registered again.",
+      "PARTNER_APP_UNINSTALLED": "Wasla was removed from the business's Meta account.",
+      "unknown": "Meta disconnected this number."
+    }
   }
 }

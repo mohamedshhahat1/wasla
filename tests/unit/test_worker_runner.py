@@ -22,6 +22,7 @@ from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_recovery import MediaRecoveryWorker
 from app.workers.media_worker import MediaWorker
+from app.workers.onboarding_worker import OnboardingWorker
 from app.workers.purge_worker import PurgeWorker
 from app.workers.recovery import RecoveryWorker
 from app.workers.retention_worker import RetentionWorker
@@ -157,6 +158,9 @@ def test_each_kind_builds_its_own_worker(settings: Settings) -> None:
         # never reached Redis, so a deployment running it nowhere answers 200
         # to customer messages nothing will ever pick up (ADR-102).
         InboundRecoveryWorker,
+        # Beside it, under the same kind: Coexistence's one-time syncs and the
+        # history and contacts the inbound sweep leaves to it (ADR-204).
+        OnboardingWorker,
         # Ingestion recovery for the third of those failures: a document
         # committed while Redis was refusing is `PENDING` for ever with nobody
         # told, and until this loop existed nothing in the deployment called

@@ -37,6 +37,7 @@ from app.db.models.conversation import (
     Conversation,
     Message,
     MessageDirection,
+    MessageKind,
     MessageOrigin,
     MessageStatus,
 )
@@ -287,6 +288,94 @@ class ConversationProjectionService:
         )
         await self._conversations.touch_outbound(conversation, at=at)
         return EchoOutcome(EchoKind.EXTERNAL, message=message, conversation=conversation)
+
+    async def project_revision(
+        self, *, connection: ChannelConnection, event: InboundEvent
+    ) -> Message | None:
+        """A customer's edit or revoke of their own line (ER-01 .. ER-06, EXT-ES-29).
+
+        The line is found by its provider id on this connection, and only a
+        customer's own inbound line is changed. An edit keeps the original
+        body and stores the new words beside it; a second edit replaces them,
+        the original never lost. A revoke hides the text from every read; the
+        stored payload follows the usual retention. An edit after a revoke is
+        ignored. Nothing else moves: no turn, no meter, no window.
+        """
+        if event.revision_of is None:  # pragma: no cover - the adapter refuses these
+            return None
+        original = await self._messages.find_provider_message(
+            connection_id=connection.id, provider_message_id=event.revision_of
+        )
+        if (
+            original is None
+            or original.direction is not MessageDirection.INBOUND
+            or original.origin is not MessageOrigin.CUSTOMER
+        ):
+            logger.info(
+                "conversation.revision_without_original",
+                extra={"event": "conversation.revision_without_original"},
+            )
+            return None
+        at = event.occurred_at or datetime.now(UTC)
+        if event.revoked:
+            if original.revoked_at is None:
+                original.revoked_at = at
+            return original
+        if original.revoked_at is not None:
+            return original
+        original.edited_at = at
+        original.edited_body = event.text
+        return original
+
+    async def project_imported(
+        self,
+        *,
+        connection: ChannelConnection,
+        sender: SenderResolution,
+        message_id: str,
+        kind: MessageKind,
+        body: str | None,
+        sent_at: datetime,
+        from_business: bool,
+        status: MessageStatus | None,
+    ) -> ProjectedMessage:
+        """One line of the WhatsApp Business app's history, imported (HI-05 .. HI-14).
+
+        Never a turn, a meter, a window or a notification: the conversation is
+        found or created without the conversation meter, and only the inbox
+        order moves - forward, never past a newer live line (`touch_outbound`).
+        A provider id already on this connection is a duplicate or a collision,
+        never a second row (ADR-120).
+        """
+        existing = await self._messages.find_provider_message(
+            connection_id=connection.id, provider_message_id=message_id
+        )
+        if existing is not None:
+            return ProjectedMessage(ProjectionOutcome.DUPLICATE, message=existing)
+        if await self._messages.get_by_wa_message_id(message_id) is not None:
+            return ProjectedMessage(ProjectionOutcome.COLLISION)
+        conversation, created = await self._conversations.get_or_create(
+            contact_id=sender.contact.id,
+            account_id=connection.id,
+            channel=connection.channel,
+            participant_identity_id=sender.participant.id,
+        )
+        if created:
+            await self._session.flush()
+        message = self._messages.record_imported(
+            conversation_id=conversation.id,
+            connection_id=connection.id,
+            provider_message_id=message_id,
+            kind=kind,
+            body=body,
+            sent_at=sent_at,
+            from_business=from_business,
+            status=status,
+        )
+        await self._conversations.touch_outbound(conversation, at=sent_at)
+        return ProjectedMessage(
+            ProjectionOutcome.STORED, message=message, conversation=conversation
+        )
 
     async def project_status(
         self,

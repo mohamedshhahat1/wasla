@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -111,3 +112,85 @@ class MessagingLimitRead(BaseModel):
 
 class WhatsAppAccountListResponse(BaseModel):
     accounts: list[WhatsAppAccountResponse]
+
+
+# ------------------------------------------------------------- Embedded Signup
+
+
+class EmbeddedSignupConfigRead(BaseModel):
+    """What the browser needs to open Meta's popup (CF-03). Nothing secret.
+
+    `enabled` false means this deployment cannot finish an onboarding, and
+    every other field is then null: only the access-token form is offered.
+    """
+
+    enabled: bool
+    app_id: str | None = None
+    config_id: str | None = None
+    es_version: str | None = None
+    graph_version: str | None = None
+    coexistence: bool | None = None
+
+
+class EmbeddedSignupRequestBody(_Payload):
+    """The popup's code and session ids (EX-01). The ids are assertions, proven with Meta.
+
+    `messaging_account_id` is v5's `messaging_account_ids[0]`; `waba_id` is v4's.
+    One of the two is required. `is_on_biz_app` is a hint only (CX-02).
+    """
+
+    code: StorableText = Field(min_length=1, max_length=2048)
+    phone_number_id: StorableText = Field(min_length=1, max_length=64)
+    messaging_account_id: StorableText | None = Field(default=None, min_length=1, max_length=64)
+    waba_id: StorableText | None = Field(default=None, min_length=1, max_length=64)
+    business_id: StorableText | None = Field(default=None, max_length=64)
+    is_on_biz_app: bool | None = None
+    es_version: Literal["v4", "v5"] | None = None
+
+
+class OnboardingHistoryRead(BaseModel):
+    requested_at: datetime | None
+    progress: int | None
+    phase_max: int | None
+    completed_at: datetime | None
+    declined_at: datetime | None
+
+
+class OnboardingContactsRead(BaseModel):
+    requested_at: datetime | None
+
+
+class ProviderDisconnectRead(BaseModel):
+    """Meta's own reason word (EXT-ES-32), who started it, and when (AU-03)."""
+
+    reason: str | None
+    initiated_by: str | None
+    at: datetime | None
+
+
+class OnboardingStatusRead(BaseModel):
+    """How a number was connected and how far its onboarding got (OS-02).
+
+    Never a token, a PIN, a request id or Meta's payload (OS-03). An assisted
+    connection answers `method: assisted` and nulls (OS-04).
+    """
+
+    connection_id: uuid.UUID
+    method: str
+    mode: str | None
+    onboarded_at: datetime | None
+    subscribed_at: datetime | None
+    registered_at: datetime | None
+    registration_needed: bool
+    sync_deadline_at: datetime | None
+    contacts: OnboardingContactsRead
+    history: OnboardingHistoryRead
+    provider_disconnect: ProviderDisconnectRead | None
+    reminder_days: int | None
+
+
+class EmbeddedSignupResponse(BaseModel):
+    """The connection, as the assisted connect returns it, and its onboarding (EX-12)."""
+
+    account: WhatsAppAccountResponse
+    onboarding: OnboardingStatusRead

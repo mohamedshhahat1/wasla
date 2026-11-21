@@ -40,6 +40,14 @@ from app.repositories.base import BaseRepository, TenantScopedRepository
 logger = get_logger(__name__)
 
 
+#: Kinds the onboarding worker projects on its own schedule (ADR-204): a
+#: Coexistence history chunk or contacts sync waits for it, so the inbound
+#: recovery sweep - which settles events nothing is owed for - leaves them.
+WORKER_PROJECTED_KINDS: tuple[ChannelEventKind, ...] = (
+    ChannelEventKind.HISTORY,
+    ChannelEventKind.STATE_SYNC,
+)
+
 #: The prefix of a collided delivery's evidence key (OMNI-043).
 COLLISION_EVIDENCE_PREFIX = "collision:"
 #: Why collision evidence was failed - a bounded token, as every event error is.
@@ -293,6 +301,7 @@ class InboundEventSweep(BaseRepository[ChannelEvent]):
             .where(
                 ChannelEvent.state == ChannelEventState.RECEIVED,
                 ChannelEvent.created_at < older_than,
+                ChannelEvent.kind.not_in(WORKER_PROJECTED_KINDS),
             )
             .order_by(ChannelEvent.created_at, ChannelEvent.id)
             .limit(limit)
@@ -305,6 +314,7 @@ class InboundEventSweep(BaseRepository[ChannelEvent]):
             select(func.count(ChannelEvent.id), func.min(ChannelEvent.created_at)).where(
                 ChannelEvent.state == ChannelEventState.RECEIVED,
                 ChannelEvent.created_at < older_than,
+                ChannelEvent.kind.not_in(WORKER_PROJECTED_KINDS),
             )
         )
         count, oldest = rows.one()
@@ -319,6 +329,7 @@ class InboundEventSweep(BaseRepository[ChannelEvent]):
             .where(
                 ChannelEvent.state == ChannelEventState.RECEIVED,
                 ChannelEvent.created_at < older_than,
+                ChannelEvent.kind.not_in(WORKER_PROJECTED_KINDS),
             )
             .group_by(ChannelEvent.channel)
         )
@@ -326,6 +337,7 @@ class InboundEventSweep(BaseRepository[ChannelEvent]):
 
 
 __all__ = [
+    "WORKER_PROJECTED_KINDS",
     "ChannelEventRepository",
     "InboundEventSweep",
     "StoredEvent",

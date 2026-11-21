@@ -53,6 +53,10 @@ EVENT_TYPES: Final[frozenset[str]] = frozenset(
         "conversation.updated",
         "follow_up.updated",
         "campaign.changed",
+        # A customer edited or revoked a message (ADR-204, ER).
+        "message.revised",
+        # An Embedded Signup number's onboarding moved (ADR-204, OS-05).
+        "whatsapp.onboarding.updated",
     }
 )
 #: Sent by the stream itself, never published.
@@ -183,6 +187,15 @@ def _message_updated(_mapper: Any, _connection: Any, target: Any) -> None:
                 "conversation_id": str(_loaded(target, "conversation_id")),
                 "message_id": str(_loaded(target, "id")),
                 "status": getattr(status, "value", status),
+            },
+        )
+    if _changed(target, "edited_at", "revoked_at"):
+        _stage_for(
+            target,
+            "message.revised",
+            {
+                "conversation_id": str(_loaded(target, "conversation_id")),
+                "message_id": str(_loaded(target, "id")),
             },
         )
 

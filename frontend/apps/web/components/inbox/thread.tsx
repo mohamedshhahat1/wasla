@@ -327,6 +327,17 @@ export function Thread({
               const nodes = [];
               if (entry.message) {
                 const message = entry.message;
+                // IX-02: one divider per run of lines imported from the WhatsApp Business app.
+                const before = index > 0 ? items[index - 1] : undefined;
+                const beforeImported =
+                  before?.kind === "message" ? Boolean(before.message.message?.imported) : false;
+                if (message.imported && !beforeImported) {
+                  nodes.push(
+                    <ThreadNote key={`${item.key}:imported`}>
+                      {t("coexistence.imported")}
+                    </ThreadNote>,
+                  );
+                }
                 nodes.push(
                   <MessageBubble
                     key={item.key}
@@ -338,6 +349,19 @@ export function Thread({
                         <Badge tone="info" icon={false}>
                           {t("template")}
                         </Badge>
+                      ) : message.origin === "external" && conversation.channel === "whatsapp" ? (
+                        // IX-01: an echo from the WhatsApp Business app (ADR-129, ADR-204).
+                        <span data-mark="business-app" className="inline-flex">
+                          <Badge tone="neutral" icon={false}>
+                            {t("coexistence.fromApp")}
+                          </Badge>
+                        </span>
+                      ) : message.edited_at ? (
+                        <span data-mark="edited" className="inline-flex">
+                          <Badge tone="neutral" icon={false}>
+                            {t("coexistence.edited")}
+                          </Badge>
+                        </span>
                       ) : null
                     }
                     media={
@@ -363,11 +387,26 @@ export function Thread({
                     firstOfGroup={item.firstOfGroup}
                     lastOfGroup={item.lastOfGroup}
                   >
-                    {message.body &&
-                    !(message.media?.length && message.media[0]?.caption === message.body) ? (
-                      renderText(message.body)
+                    {message.revoked_at ? (
+                      // IX-05: a customer's revoke hides the words.
+                      <em data-mark="revoked">{t("coexistence.revoked")}</em>
+                    ) : message.body &&
+                      !(message.media?.length && message.media[0]?.caption === message.body) ? (
+                      <>
+                        {renderText(message.body)}
+                        {message.edited_at && message.original_body ? (
+                          // IX-04: the original on demand, keyboard reachable.
+                          <details className="mt-1 text-sm text-text-muted" data-mark="original">
+                            <summary>{t("coexistence.showOriginal")}</summary>
+                            <bdi>{message.original_body}</bdi>
+                          </details>
+                        ) : null}
+                      </>
                     ) : message.kind === "template" && message.template_name ? (
                       <bdi>{message.template_name}</bdi>
+                    ) : message.imported && message.kind === "unsupported" ? (
+                      // IX-03: a media placeholder from before the connection.
+                      <em data-mark="placeholder">{t("coexistence.placeholder")}</em>
                     ) : null}
                   </MessageBubble>,
                 );

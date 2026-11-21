@@ -33,6 +33,17 @@ const config: NextConfig = {
     // build inlines "0" and the hooks are dead code.
     PUBLIC_WASLA_E2E_HOOKS:
       environment === "development" && process.env["WASLA_E2E_ROUTES"] === "1" ? "1" : "0",
+    // ADR-204, SD-09: the e2e build loads the fakes' SDK and trusts their origin - only a
+    // development build made with WASLA_E2E_ROUTES=1 may; every other build inlines "none"
+    // and loads Meta's own SDK with Meta's origin rule.
+    PUBLIC_WASLA_META_FAKE_ORIGIN:
+      environment === "development" &&
+      process.env["WASLA_E2E_ROUTES"] === "1" &&
+      /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(
+        process.env["WASLA_E2E_META_FAKE_ORIGIN"] ?? "",
+      )
+        ? process.env["WASLA_E2E_META_FAKE_ORIGIN"]
+        : "none",
   },
 };
 

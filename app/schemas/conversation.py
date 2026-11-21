@@ -295,7 +295,18 @@ class MessageRead(BaseModel):
     # the transcript has, and because inferring it from `sent_by_id` gets
     # campaigns and follow-ups wrong (MSG-16).
     origin: MessageOrigin
+    # What a reader sees: the customer's edit where they edited, nothing
+    # where they revoked the message (ADR-204, ER-07).
     body: str | None
+    # From the WhatsApp Business app's history (Coexistence): shown, never
+    # answered, metered or a window (ADR-204, HI).
+    imported: bool = False
+    # Set when the customer edited this message; `original_body` is what they
+    # first wrote, for a reader who asks (ER-02).
+    edited_at: datetime | None = None
+    original_body: str | None = None
+    # Set when the customer deleted it; `body` is then null (ER-03).
+    revoked_at: datetime | None = None
     # Set when the customer tapped a button or a list row rather than typing:
     # `body` carries its words, this carries the payload a client routes on.
     # Null on everything else. Additive (OMNI-030).
@@ -326,7 +337,15 @@ class MessageRead(BaseModel):
             kind=message.kind,
             status=message.status,
             origin=message.origin,
-            body=message.body,
+            body=message.visible_body,
+            imported=bool(message.imported),
+            edited_at=message.edited_at if message.revoked_at is None else None,
+            original_body=(
+                message.body
+                if message.edited_at is not None and message.revoked_at is None
+                else None
+            ),
+            revoked_at=message.revoked_at,
             action=(
                 ReplyActionRead(
                     id_or_payload=message.action_payload,

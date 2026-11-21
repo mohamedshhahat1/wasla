@@ -8632,3 +8632,62 @@ in bytes.
 **Rejected.** Widening a band or reading a hard limit differently; more secondary or accent area on the billing pages to
 move the averages (a redesign); measuring the billing screens once without gating them (a measurement that is not a gate
 drifts).
+
+## ADR-204 — WhatsApp Embedded Signup and Coexistence: A Second Connect Adapter, Meta's Order, Imported History
+
+**Status.** Accepted, 2026-11-21 (the Embedded Signup stage; report WHATSAPP_EMBEDDED_SIGNUP.md). Meta's facts were read
+from its onboarding pages on 2026-11-21 (EXT-ES-01 .. 40). The owner's request of 2026-11-21: Embedded Signup and
+Coexistence "like Meta's official documentation page"; the open questions OQ-1 .. OQ-12 ran on their defaults.
+
+**Context.** A number could be connected only by pasting a token and ids (ADR-037). Meta's Embedded Signup gives a Tech
+Provider a five-minute code from a popup; its Coexistence lets a business keep the WhatsApp Business app on the same
+number and brings four webhook fields the parser refused (OMNI-010).
+
+**Decision.**
+
+- **A second adapter, the form kept** (OQ-7). Embedded Signup v5 by default, v4 accepted (OQ-1,
+  `META_EMBEDDED_SIGNUP_VERSION`); Coexistence offered unless `META_EMBEDDED_SIGNUP_COEXISTENCE=false` (OQ-2).
+- **Meta is asked last.** Enabled, Meta's onboarding limit counted platform-wide (OQ-12), then the plan and slot as the
+  form asks them (ADR-131); only then is the code exchanged, server to server, never retried. The popup's ids are
+  assertions proven with the exchanged token by the form's ownership verifier (ADR-037), with its one refusal.
+- **Meta decides the mode** (`is_on_biz_app` and `platform_type` read with the token); the browser's hint is recorded.
+  Coexistence: never registered, `sends_per_minute = 1200` (Meta's fixed 20 mps), echoes projected. A new number:
+  registered with a six-digit PIN Wasla generates and seals like the token (OQ-10).
+- **Written by the form's own claim path** (`claim_verified`), `onboarding_method = embedded_signup`; a number the
+  workspace still holds is proven again on its row (ADR-041). Subscribe, then register, after the commit; a failure is
+  the connection's health with a retry route, never a rollback.
+- **The two syncs once, inside 24 hours**, owed by the onboarding's own row and requested by the onboarding worker;
+  accepted requests never resent.
+- **History is imported, never live** (OQ-3): `imported = true`, origin `external` for the business and `customer` for
+  the customer; never a turn, meter, allowance, window, follow-up, opt-out or notification; idempotent per message id per
+  connection (ADR-120). A declined share is recorded and not retried.
+- **Contacts name only people who wrote** (OQ-4): an address-book `add` attaches the missing identity (ADR-118's pairing)
+  and a name only to a contact Wasla holds and only where it has none; nobody is created; `remove` removes nothing.
+- **Echoes through ADR-129 unchanged** (OQ-5); on a number Meta said is Cloud API-only an echo is kept, not projected.
+- **Edits and revokes revise the customer's line** (OQ-8): the original kept, `edited_body` beside it; a revoke hides the
+  text from every read. Never a turn.
+- **`account_update`** resolved by `waba_info.waba_id`, else `entry.id`; `PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED`,
+  `PARTNER_APP_UNINSTALLED` disable the connection with reason and health `provider_disconnected` and Meta's reason word,
+  through ENT-07's disable; nothing re-enables it but a new onboarding.
+- **Release unsubscribes, never deregisters** (OQ-6). Best-effort `DELETE subscribed_apps` after the commit.
+- **A dedicated Graph version for the onboarding calls** (OQ-9, the ADR-146 precedent): `META_ONBOARDING_API_VERSION`
+  `v27.0`; `META_API_VERSION` stays `v21.0` and its move is its own stage before 2027-01-21.
+- **The 13-day reminder** (OQ-11, `COEXISTENCE_REMINDER_DAYS`): a margin under Meta's "approximately 14 days".
+- Two stream types: `whatsapp.onboarding.updated` and `message.revised`. Migration 0143.
+- **In the browser** (ADR-196's adapter registry): `whatsapp-embedded` before the form, offered only when
+  `GET …/embedded-signup/config` says enabled. Meta's SDK is loaded by one component on one route; its URL lives in one
+  module and one browser chunk (the connection page's and home's helpers are in `lib/coexistence.ts`). That route's CSP
+  alone adds `https://connect.facebook.net` and `facebook.com` for frames and requests; every other route's policy is
+  unchanged. The message listener accepts `facebook.com` or a subdomain over https (Meta's `endsWith` without
+  `evilfacebook.com`). The code is held in a ref, sent once with one Idempotency-Key per flow, and retried only on a
+  network failure inside its five minutes. The e2e build loads the fakes' SDK and trusts their origin by a build-time
+  value refused outside a development build; never a runtime switch.
+
+**Rejected.** Trusting the popup's ids; registering a Coexistence number; calling the Deregister API; creating contacts
+from an address book; letting the AI answer or meter imported history; resuming the AI after an app reply (a product
+change of ADR-129); moving `META_API_VERSION` in this stage; naming a country in code or copy.
+
+**Consequences.** The owner's Meta steps (Business Verification, App Review, the configuration id, the four webhook
+fields) precede any real use; a real walk-through proves EXT-ES-12, 16, 33 (+20) and 39. History media within 14 days
+(Meta's separate media webhook) is not fetched yet. The business token's lifetime is not documented by Meta and is not
+invented.

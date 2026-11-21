@@ -26,7 +26,9 @@ from app.core.config import get_settings
 from app.integrations.whatsapp.adapter import WhatsAppAdapter
 from app.integrations.whatsapp.payload import (
     account_alert_events,
+    account_update_events,
     capability_events,
+    coexistence_deliveries,
     template_status_events,
 )
 from app.services.channel_ingestion_service import (
@@ -34,6 +36,10 @@ from app.services.channel_ingestion_service import (
     MEDIA_NOT_QUEUED,
     ChannelIngestionService,
     IngestionOutcome,
+)
+from app.services.coexistence_service import (
+    apply_account_updates,
+    store_coexistence_deliveries,
 )
 from app.services.messaging_limit_service import MessagingLimitService
 from app.services.template_status_updates import apply_template_status_events
@@ -79,6 +85,11 @@ class WhatsAppIngestionService:
             limits = MessagingLimitService(self._session, settings=get_settings())
             await limits.apply_capability_events(capabilities)
             await limits.apply_account_alerts(alerts)
+        # Coexistence (ADR-204): history and contacts are captured whole for the
+        # onboarding worker (HI-01, CT-01); Meta disconnecting a number is
+        # applied to the connections on that Messaging account (AU).
+        await store_coexistence_deliveries(self._session, coexistence_deliveries(payload))
+        await apply_account_updates(self._session, account_update_events(payload))
         return outcome
 
 

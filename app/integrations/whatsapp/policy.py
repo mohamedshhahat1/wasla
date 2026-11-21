@@ -64,8 +64,10 @@ WHATSAPP_CAPABILITIES: Final = ChannelCapabilities(
     attachments_per_message=1,
     media_families=frozenset({"image", "document", "audio", "video"}),
     receipts=ReceiptModel.PER_MESSAGE,
-    # Only WhatsApp Coexistence echoes the business's own sends, and that is
-    # not supported: the adapter refuses `smb_message_echoes` as a field.
+    # A Cloud API number does not echo the business's own sends. A Coexistence
+    # number does (`smb_message_echoes`, ADR-204), so the capability is per
+    # connection: `echoes_for` answers it from the number's onboarding mode, and
+    # this is the answer for every number that is not Coexistence (CX-04).
     echoes=False,
     reply_to=True,
     # Delivered by Meta and stored as unsupported; nothing acts on one.
@@ -86,6 +88,22 @@ WHATSAPP_CAPABILITIES: Final = ChannelCapabilities(
         "document": MediaLimit(100 * MB),
     },
 )
+
+#: The onboarding mode Meta said cannot echo: a number only on the Cloud API.
+NON_ECHOING_MODE: Final = "cloud_api"
+
+
+def echoes_for(onboarding_mode: str | None) -> bool:
+    """Whether a number reports the WhatsApp Business app's sends back (CX-04, EXT-ES-28).
+
+    A number Meta said at Embedded Signup is only on the Cloud API cannot be
+    used from the app, so an echo on it should not exist: it is kept and
+    counted rather than projected (EH-06). A Coexistence number echoes, and
+    so does a number whose mode was never read (an access-token connect),
+    which ADR-129 has always answered.
+    """
+    return onboarding_mode != NON_ECHOING_MODE
+
 
 # What every agent is told about the channel it is answering on, appended to
 # whatever the workspace wrote. Two reasons it is here rather than in the

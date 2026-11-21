@@ -105,6 +105,13 @@ def test_whatsapp_tables_declare_the_indexes_the_migrations_create() -> None:
         # Migration 0110. Partial: the numbers of one business portfolio
         # (LIM-02), and what deleting a portfolio sets null.
         "ix_whatsapp_accounts_portfolio_id",
+        # Migration 0143 (ADR-204): an Embedded Signup replay, the weekly
+        # onboarding count, the Coexistence syncs owed, and account_update
+        # resolving a Messaging account to its numbers.
+        "uq_whatsapp_accounts_onboarding_idempotency",
+        "ix_whatsapp_accounts_onboarded_at",
+        "ix_whatsapp_accounts_sync_due",
+        "ix_whatsapp_accounts_waba_id",
     }
     assert _index_names(as_table(WhatsAppEvent.__table__)) == {
         "ix_whatsapp_events_tenant_id",
@@ -134,6 +141,12 @@ def test_enum_values_match_the_migration_literals() -> None:
         "echo",
         # Migration 0089 (OMNI-046): a marketing stop or resume.
         "preference",
+        # Migration 0143 (ADR-204): Coexistence history and contacts, a
+        # customer's edit or revoke, and Meta's account_update.
+        "history",
+        "state_sync",
+        "revision",
+        "account_update",
     ]
     assert [member.value for member in WhatsAppEventState] == [
         "received",

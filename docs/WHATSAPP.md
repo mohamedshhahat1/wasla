@@ -14,6 +14,10 @@
 | `POST /api/v1/whatsapp/accounts/{id}/enable` | Owner, admin | Resume traffic |
 | `POST /api/v1/whatsapp/accounts/{id}/verify` | Owner, admin | Prove control of a number already held |
 | `POST /api/v1/whatsapp/accounts/{id}/release` | Owner, admin | Give the number up so another workspace can claim it |
+| `GET /api/v1/whatsapp/embedded-signup/config` | Owner, admin | What Meta's Embedded Signup popup needs (*Embedded Signup*) |
+| `POST /api/v1/whatsapp/embedded-signup` | Owner, admin | Connect a number with Meta's Embedded Signup |
+| `GET /api/v1/whatsapp/accounts/{id}/onboarding` | Any member | How the number was connected, step by step |
+| `POST /api/v1/whatsapp/accounts/{id}/subscription` | Owner, admin | Retry an Embedded Signup number's webhook subscription and registration |
 
 The webhook sits under the versioned prefix too, so the callback URL configured in the Meta app dashboard is `https://<host>/api/v1/webhooks/whatsapp`.
 
@@ -25,6 +29,12 @@ The webhook sits under the versioned prefix too, so the callback URL configured 
 | `META_VERIFY_TOKEN` | Shared secret for the subscription challenge |
 | `META_ACCESS_TOKEN` | Platform credential for outbound calls |
 | `META_APP_ID`, `META_API_VERSION` | Graph API target |
+| `META_EMBEDDED_SIGNUP_CONFIG_ID` | The Facebook Login for Business configuration of Embedded Signup; empty, only the form connects |
+| `META_EMBEDDED_SIGNUP_VERSION` | `v5` (default) or `v4` |
+| `META_ONBOARDING_API_VERSION` | The Graph version of the onboarding calls only (`v27.0`) |
+| `META_EMBEDDED_SIGNUP_COEXISTENCE` | Offer numbers already in the WhatsApp Business app (`true`) |
+| `COEXISTENCE_REMINDER_DAYS` | The reminder to open the WhatsApp Business app (`13`, 1..14) |
+| `META_ONBOARDING_WEEKLY_LIMIT` | Meta's limit on new accounts in a rolling 7 days (`10`) |
 
 ## Connecting a number
 
@@ -80,6 +90,36 @@ It is not reversible from here. Taking the number back means proving control of 
 The number is **not** a parameter. It is read from the row, so proving control of a number you hold can never move a claim the way connecting grants one. Everything Meta returns overwrites what is stored, exactly as at claim time — for a legacy row the business account was typed in when nothing checked it, so Meta's reply is the first trustworthy value that row has ever had, and the audit entry records what changed.
 
 It is not only a migration tool. Re-proving is how an operator establishes that a number they still hold is still theirs at Meta, and it is the only path by which a legacy number can acquire a stored credential: there is no update-credential endpoint, and `connect` refuses an already-claimed number.
+
+## Embedded Signup
+
+The second way to connect a number (ADR-204), beside the access-token form, which stays: it is the path for a deployment without Meta's App Review and for a business whose token is a system-user token. Meta's facts below were read from its onboarding pages on 2026-11-21 (`documentation/business-messaging/whatsapp/embedded-signup/*`); the report `WHATSAPP_EMBEDDED_SIGNUP.md` quotes each with its page.
+
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `GET /api/v1/whatsapp/embedded-signup/config` | Owner, admin | `enabled`, the app id, the configuration id, the Embedded Signup version, the SDK's Graph version, whether Coexistence is offered. Never a secret |
+| `POST /api/v1/whatsapp/embedded-signup` | Owner, admin; `Idempotency-Key` required | The popup's code and session ids → the connection |
+| `GET /api/v1/whatsapp/accounts/{id}/onboarding` | Any member | How the number was connected and each step's time |
+| `POST /api/v1/whatsapp/accounts/{id}/subscription` | Owner, admin | Retry the webhook subscription and the registration that failed |
+
+**The order is the design.** `POST /whatsapp/embedded-signup` asks, before Meta is called at all: whether this deployment can finish an onboarding (`embedded_signup_disabled`), Meta's onboarding limit of 10 new accounts in a rolling 7 days, counted platform-wide (`META_ONBOARDING_WEEKLY_LIMIT`, `embedded_signup_onboarding_limit`), and the plan and channel slot exactly as the form asks them (ADR-131). Only then is the code - Meta's, valid for 5 minutes - exchanged server to server with `GET /oauth/access_token` for the customer's business token. The ids the popup sent are **assertions**: the number is proven with the exchanged token by the same ownership verifier the form uses (ADR-037), with the same one refusal (`whatsapp_ownership_unverified`). Meta's `is_on_biz_app` and `platform_type`, read with the token, decide whether the number is also on the WhatsApp Business app; the browser's hint is recorded and never used. The connection is written by the form's own claim path, with `onboarding_method = embedded_signup`. After the commit, `POST /{messaging_account_id}/subscribed_apps` subscribes the app to the customer's webhooks (without it no message ever arrives), and a number **not** on the Business app is registered with `POST /{phone_number_id}/register` and a six-digit PIN Wasla generates, seals like the token and never shows. A failure of either leaves the connection written, its health `webhook_unhealthy` or `auth_failed`, and the connection page offers the retry. A number this workspace already holds - one Meta disconnected - is proven again on the same row (ADR-041).
+
+The onboarding calls use `META_ONBOARDING_API_VERSION` (`v27.0`); `META_API_VERSION` is not moved by this (see *Graph API version*). The business token's lifetime is not documented by Meta, so no expiry is invented.
+
+**Release** of an Embedded Signup number also calls `DELETE /{messaging_account_id}/subscribed_apps` with its token, best-effort, after the release commits. The Deregister API is never called: Meta says it cannot be used on a Coexistence number, and on any other number it is destructive at Meta.
+
+## Coexistence
+
+A number used in the WhatsApp Business app and through Wasla at once (Meta: "Onboard WhatsApp Business app users"). It is never registered by Wasla, sends at Meta's fixed 20 messages a second (`sends_per_minute = 1200`), and brings four webhook fields the App Dashboard must subscribe: `account_update`, `history`, `smb_app_state_sync`, `smb_message_echoes`.
+
+- **The two one-time syncs.** Within 24 hours of onboarding, the onboarding worker requests the contacts sync, then the history sync (`POST /{phone_number_id}/smb_app_data`), each exactly once; a failed request is retried with backoff until the deadline and never after. Past it, Meta's rule is that the business disconnects in the app and connects again.
+- **History** (up to 180 days; media only for the last 14) arrives in chunks by phase, stored as received and projected by the worker as **imported** lines: the business's as origin `external`, the customer's as `customer`, both `imported = true`. An imported line is never answered, metered or counted against an allowance, never opens, extends or moves the service window, never cancels a follow-up, opts anybody out or notifies anybody. Projected by message id per connection, so a chunk twice or out of order changes nothing. A share the business declined (`2593109`) is recorded and not retried. A media placeholder is shown as such; the separate media webhook for the last 14 days is not fetched yet.
+- **Contacts** from the app's address book name only contacts Wasla already holds or that imported history created, and only where the contact has no name; nobody is created from an address book, and a `remove` removes nothing.
+- **Echoes** (`smb_message_echoes`) are the neutral echo of ADR-129: an echo of Wasla's own send confirms it; a reply the owner typed in the app is projected as origin `external` and hands the conversation to a person. Echoes on a number that is not Coexistence are kept and counted, never projected.
+- **`account_update`** is resolved by `waba_info.waba_id` (the `PARTNER_*` deliveries carry the partner's business id in `entry.id`) or `entry.id` where Meta puts the account there. `PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED` and `PARTNER_APP_UNINSTALLED` disable the connection with reason `provider_disconnected` and Meta's reason word (`PRIMARY_INACTIVITY` - the app not opened for about 14 days - `COMPANION_INACTIVITY`, `ACCOUNT_DISCONNECTED`, `CHANGE_NUMBER`, `BUSINESS_DOWNGRADE`, `USER_RE_REGISTERED`): the token and PIN dropped, follow-ups and syncs stopped, the slot freed, the conversations kept. `ACCOUNT_RECONNECTED` and `PARTNER_ADDED` are recorded only; nothing re-enables a number but a new onboarding.
+- **Edits and revokes** (a customer's `edit` within 15 minutes, `revoke` within two days) change the line they name: an edit keeps the original and stores the new words beside it, a revoke hides the text from every read. Neither is a turn, a meter or a window.
+
+Meta's pages name no country list for Coexistence; Wasla names none either, and maps Meta's region refusal (`3441042`) to a sentence. Egypt (+20) is verified only by a real walk-through.
 
 ## Subscription verification
 
@@ -165,7 +205,7 @@ message rather than being merged.
 
 ## Parsing
 
-The parser never raises. A payload is WhatsApp's only if it says so: the top-level `object` must be `whatsapp_business_account` and each change's `field` must be `messages` or `user_preferences` (a customer stopping or resuming marketing messages in WhatsApp itself, OMNI-046); another product's delivery (`page`, `instagram`) and every other field (template updates, `user_id_update`, the Coexistence fields `history`, `smb_app_state_sync`, `smb_message_echoes`) are refused, never parsed by coincidence (OMNI-010). Meta adds fields and message types continuously, so entries that cannot be understood are counted - by a closed reason in `wasla_inbound_entries_refused_total` and in the webhook's log line - rather than rejected, a message type nobody maps is stored as `unsupported`, and the raw payload of every stored event is kept whole while it can still matter: until the event is processed, and for `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30 by default) after that, so it can be reinterpreted after new support ships. Then the retention worker clears it (DB-011): the payload repeats customer text and phone numbers already held in `messages`, and nothing reads it once an event is handled. The event row itself is kept — its id, event id, state and timestamps — because that is what deduplicates Meta's retries and what recovery reads; `payload_redacted_at` says when the payload went, and a CHECK refuses a missing payload without it. A received or failed event keeps its payload however old it is. `wasla_webhook_payload_retention_total{outcome="pending"}` above zero across passes is a sweep that is not keeping up.
+The parser never raises. A payload is WhatsApp's only if it says so: the top-level `object` must be `whatsapp_business_account` and each change's `field` must be one this adapter handles: `messages`, `user_preferences` (a customer stopping or resuming marketing messages in WhatsApp itself, OMNI-046), the account fields read apart from conversations (template status, messaging limit, account alerts, `account_update`) and the Coexistence fields `history`, `smb_app_state_sync` and `smb_message_echoes` (ADR-204, *Coexistence*); another product's delivery (`page`, `instagram`) and every other field (`user_id_update` among them) are refused, never parsed by coincidence (OMNI-010). Meta adds fields and message types continuously, so entries that cannot be understood are counted - by a closed reason in `wasla_inbound_entries_refused_total` and in the webhook's log line - rather than rejected, a message type nobody maps is stored as `unsupported`, and the raw payload of every stored event is kept whole while it can still matter: until the event is processed, and for `WHATSAPP_EVENT_PAYLOAD_RETENTION_DAYS` (30 by default) after that, so it can be reinterpreted after new support ships. Then the retention worker clears it (DB-011): the payload repeats customer text and phone numbers already held in `messages`, and nothing reads it once an event is handled. The event row itself is kept — its id, event id, state and timestamps — because that is what deduplicates Meta's retries and what recovery reads; `payload_redacted_at` says when the payload went, and a CHECK refuses a missing payload without it. A received or failed event keeps its payload however old it is. `wasla_webhook_payload_retention_total{outcome="pending"}` above zero across passes is a sweep that is not keeping up.
 
 ## Idempotency
 
@@ -370,7 +410,7 @@ Nothing else carries a key. A campaign recipient and a follow-up are protected b
 
 Set explicitly at every creation site rather than defaulted: a default is what an unlabelled send would silently inherit, and inheriting the wrong attribution is the defect the column removes.
 
-An unmatched echo is projected with origin `external` and hands the conversation to a person, so the AI never talks over them; an echo of Wasla's own send changes nothing, and no echo opens or moves the service window. WhatsApp delivers such echoes only under Coexistence (`smb_message_echoes`), which is still refused; Instagram and Messenger echo every business message.
+An unmatched echo is projected with origin `external` and hands the conversation to a person, so the AI never talks over them; an echo of Wasla's own send changes nothing, and no echo opens or moves the service window. WhatsApp delivers such echoes only under Coexistence (`smb_message_echoes`, handled since ADR-204; an echo on a number that is not Coexistence is kept, never projected); Instagram and Messenger echo every business message. History imported from the WhatsApp Business app carries `imported = true` beside its origin.
 
 ## Not supported
 
@@ -378,9 +418,9 @@ Stated here so a reader does not infer a capability from a client method:
 
 - **Sending interactive messages.** `send_buttons`, `send_list` and `send_location` exist on the client and are called by nothing. (Inbound taps are supported: *Taps and quick replies*.)
 - **Outbound chunking.** One logical message is one provider message. A reply over WhatsApp's 4096-character body limit is refused by `MessagingService.send_text` rather than truncated (which puts words in a business's mouth) or split (which reintroduces chunk ordering, partial failure and duplicate chunks). Agents are told the limit in their instructions, which reduces how often a reply runs long without pretending a token budget can bound a character count. An agent's reply never reaches the refusal: `app/agents/reply.py` shortens an over-long reply at a sentence, with an offer to continue, before it is sent — still one message (AI-05).
-- **Message edit, delete and revoke.**
+- **Sending an edit, delete or revoke.** A customer's own edit and revoke are applied (*Coexistence*).
 - **Reactions as first-class.** A reaction is stored as an `unsupported` message and deliberately does not trigger an agent turn: it has no content to answer, and doing so cost one billed inference and possibly one reply to nothing.
-- **Coexistence.** See *Message origin* for the groundwork in place; the Coexistence webhook fields are refused and counted, and an `echo` event kind exists so app-sent messages can be stored without ever being read as a customer's.
+- **Fetching Coexistence history media.** A media placeholder in imported history is shown as such; Meta's separate media webhook for the last 14 days is not fetched.
 - **BSUID rotation.** `user_id_update` is refused as an unsupported field; see *Who sent it*.
 
 ## Taps and quick replies
@@ -395,7 +435,7 @@ A tap opts the customer out of marketing when its words are a stop phrase, or wh
 
 ## Graph API version
 
-`META_API_VERSION` is `v21.0` - except the messaging-limit read, which uses `META_MESSAGING_LIMIT_API_VERSION` (`v24.0`) for that one call - and Meta retires v21.0 on **2027-01-21** (Graph API changelog, read 2026-09-11). Start-up warns inside the final ninety days, from a table this repository maintains by hand in `app/integrations/whatsapp/versions.py`.
+`META_API_VERSION` is `v21.0` - except the messaging-limit read, which uses `META_MESSAGING_LIMIT_API_VERSION` (`v24.0`) for that one call, and Embedded Signup's onboarding calls, which use `META_ONBOARDING_API_VERSION` (`v27.0`) - and Meta retires v21.0 on **2027-01-21** (Graph API changelog, read 2026-09-11). Start-up warns inside the final ninety days, from a table this repository maintains by hand in `app/integrations/whatsapp/versions.py`.
 
 **Maintaining it by hand is the design.** Fetching the changelog at boot would make starting the application depend on a third party's website being up and parseable, which is a worse failure than the one being prevented. So: when a version is added or retired, update `META_API_SUNSETS`. A version the table has never heard of warns too, because silence would make a typo look like an endorsement.
 

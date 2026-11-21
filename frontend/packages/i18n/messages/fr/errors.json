@@ -98,5 +98,10 @@
   "checkout_already_started": "Une page de paiement a déjà été ouverte pour cela. Vérifiez son statut dans Factures.",
   "payment_provider_unavailable": "Les paiements ne sont pas encore disponibles. Contactez le support.",
   "offer_not_open": "Cette proposition ne peut plus être acceptée ni refusée.",
-  "refund_already_requested": "Un examen de remboursement a déjà été demandé pour ce paiement."
+  "refund_already_requested": "Un examen de remboursement a déjà été demandé pour ce paiement.",
+  "embedded_signup_disabled": "La connexion avec Meta n'est pas disponible ici. Utilisez le formulaire avec jeton d'accès.",
+  "embedded_signup_onboarding_limit": "Les nouvelles connexions sont suspendues pour quelques jours. Utilisez le formulaire avec jeton d'accès ou réessayez plus tard.",
+  "embedded_signup_code_invalid": "Meta n'a pas accepté le code d'inscription. Recommencez la connexion.",
+  "embedded_signup_code_expired": "Le code d'inscription de Meta a expiré. Recommencez la connexion.",
+  "embedded_signup_coexistence_unavailable": "Ce numéro est utilisé dans l'application WhatsApp Business, qui ne peut pas être connectée ici. Utilisez un nouveau numéro."
 }

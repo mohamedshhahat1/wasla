@@ -48,6 +48,12 @@ META_API_SUNSETS: Final[dict[str, date]] = {
 # watch - rather than an incident.
 SUNSET_WARNING_DAYS: Final = 90
 
+# Every Graph version this release can name, sunset known or not. v26.0 and
+# v27.0 have no published expiry yet; v27.0 is the version Meta's Embedded
+# Signup pages use (implementation, read 2026-11-21: "Set this to the latest
+# API version: v27.0"). A setting naming anything else is refused (CF-01).
+KNOWN_API_VERSIONS: Final[frozenset[str]] = frozenset(META_API_SUNSETS) | {"v26.0", "v27.0"}
+
 
 def api_version_warning(version: str, *, today: date | None = None) -> str | None:
     """What to say about this Graph API version, or None if nothing.

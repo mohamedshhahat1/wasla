@@ -175,7 +175,8 @@
       "auth_failed": "Le jeton d'accès ne fonctionne plus",
       "permission_missing": "Une autorisation manque chez Meta",
       "rate_limited": "Meta ralentit les messages",
-      "webhook_unhealthy": "Les messages de Meta n'arrivent pas"
+      "webhook_unhealthy": "Les messages de Meta n'arrivent pas",
+      "provider_disconnected": "Déconnecté par Meta"
     },
     "notCounted": "N'occupe pas d'emplacement",
     "open": "Ouvrir <name>name</name>",
@@ -514,6 +515,14 @@
       "leadActivity": "Dernière activité du prospect",
       "consent": "Messages marketing",
       "createLead": "Créer un prospect"
+    },
+    "coexistence": {
+      "imported": "Importé de l'application WhatsApp Business",
+      "fromApp": "Envoyé depuis l'application WhatsApp Business",
+      "edited": "Modifié",
+      "showOriginal": "Afficher l'original",
+      "revoked": "Ce message a été supprimé",
+      "placeholder": "Média d'avant la connexion"
     }
   },
   "customers": {
@@ -756,7 +765,12 @@
     "defaultInactiveAction": "L’activer",
     "noAgentMember": "Un propriétaire ou un administrateur peut en activer un.",
     "unreachableTitle": "Vos connaissances ont des documents prêts, mais aucun agent qui répond ne peut les consulter.",
-    "unreachableAction": "Vérifier les outils de l’agent"
+    "unreachableAction": "Vérifier les outils de l’agent",
+    "reminderTitle": "Ouvrez l'application WhatsApp Business au moins tous les {days} jours",
+    "reminderBody": "Meta déconnecte un numéro dont l'application n'est pas ouverte pendant environ 14 jours.",
+    "reminderDismiss": "Masquer jusqu'à la prochaine fois",
+    "disconnectedTitle": "Numéro déconnecté par Meta",
+    "disconnectedAction": "Voir le numéro"
   },
   "ai": {
     "title": "Agent IA",
@@ -1597,5 +1611,98 @@
       "more": "Charger plus"
     },
     "preview": "La facturation a besoin de l'API, absente de cet aperçu."
+  },
+  "embedded": {
+    "title": "Connecter WhatsApp avec Meta",
+    "line": "Connectez-vous avec Facebook et choisissez votre numéro WhatsApp dans la fenêtre de Meta.",
+    "loading": "Vérification de la connexion possible avec Meta…",
+    "disabled": "La connexion avec Meta n'est pas encore disponible ici. Utilisez plutôt le formulaire avec jeton d'accès.",
+    "useToken": "Se connecter plutôt avec un jeton d'accès",
+    "launch": "Continuer avec Facebook",
+    "again": "Réessayer",
+    "retry": "Réessayer",
+    "connecting": "Connexion de votre numéro…",
+    "sdkFailed": "La fenêtre de Meta n'a pas pu s'ouvrir. Vérifiez votre connexion ou utilisez le formulaire avec jeton d'accès.",
+    "noCode": "Meta a terminé, mais aucun code n'est arrivé. Réessayez.",
+    "expired": "La connexion a pris trop de temps et le code de Meta a expiré. Recommencez.",
+    "cancelled": "Vous avez fermé la fenêtre de Meta à l'étape : {step}.",
+    "sessionId": "Session Meta :",
+    "copySession": "Copier pour le support",
+    "explainerTitle": "Avant de commencer",
+    "withMeta": "Avec Meta",
+    "newTitle": "Utiliser un nouveau numéro",
+    "newBody": "Un numéro qui n'est pas encore sur WhatsApp. Meta le vérifie avec un code par SMS ou appel, et Wasla termine sa configuration.",
+    "appTitle": "Utiliser le numéro déjà dans votre application WhatsApp Business",
+    "appVersion": "L'application doit être en version 2.24.17 ou plus récente.",
+    "appReminder": "Ouvrez l'application sur votre téléphone au moins tous les {days} jours, sinon Meta déconnecte le numéro.",
+    "appFeatures": "Les groupes, les messages éphémères, la vue unique, la position en direct et les listes de diffusion ne fonctionnent plus dans l'application.",
+    "appCompanions": "WhatsApp pour Windows et WearOS sont dissociés ; les autres appareils liés continuent de fonctionner.",
+    "appHistory": "Vous choisissez dans l'application de partager ou non l'historique de vos discussions.",
+    "payment": "Meta facture les messages directement. Après la connexion, ajoutez un moyen de paiement dans WhatsApp Manager.",
+    "steps": {
+      "chooseAccount": "le choix du compte professionnel",
+      "createAccount": "la création du compte professionnel",
+      "addNumber": "l'ajout du numéro",
+      "verifyNumber": "la vérification du numéro",
+      "profile": "la configuration du profil",
+      "permissions": "les autorisations",
+      "save": "le dernier écran",
+      "qrCode": "le scan du code QR",
+      "verifyAccount": "la vérification du compte",
+      "unknown": "une étape initiale"
+    },
+    "errors": {
+      "region": "Meta ne peut pas encore connecter les numéros de cette région.",
+      "permission": "Cette application n'est pas encore approuvée par Meta pour cela. Demandez à votre administrateur Wasla.",
+      "partnerNotReady": "Cette application ne peut pas encore connecter les numéros de l'application WhatsApp Business.",
+      "businessAppUnsupported": "Ce numéro est sur l'application WhatsApp Business, qui ne peut pas être connectée ici.",
+      "numberOnWhatsApp": "Ce numéro est déjà utilisé sur WhatsApp. Utilisez un autre numéro ou l'option application WhatsApp Business.",
+      "twoStep": "Désactivez la vérification en deux étapes de ce numéro dans WhatsApp, puis réessayez.",
+      "updateApp": "Mettez à jour l'application WhatsApp Business sur votre téléphone, puis réessayez.",
+      "waitAndRetry": "Ce numéro est encore en cours de déconnexion. Attendez 15 minutes puis réessayez.",
+      "otherPartner": "Ce numéro est déjà connecté via un autre fournisseur.",
+      "tooManyTries": "Trop de tentatives. Patientez un moment puis réessayez.",
+      "accountLimit": "Votre portefeuille professionnel Meta ne peut pas encore avoir plus de comptes WhatsApp.",
+      "numberLimit": "Votre portefeuille professionnel Meta ne peut pas avoir plus de numéros.",
+      "twoFactor": "Activez l'authentification à deux facteurs sur votre compte Facebook, puis réessayez.",
+      "generic": "Meta n'a pas pu terminer la connexion. Réessayez ou utilisez le formulaire avec jeton d'accès."
+    }
+  },
+  "onboarding": {
+    "title": "Comment ce numéro est connecté",
+    "assisted": "Connecté avec un jeton d'accès.",
+    "withMeta": "Connecté avec Meta",
+    "coexistence": "Aussi utilisé dans l'application WhatsApp Business",
+    "proved": "Prouvé auprès de Meta",
+    "subscribed": "Messages de Meta",
+    "registered": "Enregistré",
+    "notNeeded": "Pas nécessaire",
+    "notYet": "Pas encore",
+    "contacts": "Contacts de l'application",
+    "history": "Historique des discussions",
+    "historyRequested": "En attente de l'application",
+    "historyProgress": "Importation de votre historique - {progress} %",
+    "historyComplete": "Terminé",
+    "historyDeclined": "Vous avez choisi de ne pas partager votre historique",
+    "finishing": "Finalisation - gardez l'application WhatsApp Business ouverte jusqu'au {deadline}.",
+    "expired": "La configuration ne s'est pas terminée à temps. Déconnectez dans l'application WhatsApp Business et reconnectez.",
+    "reminder": "Ouvrez l'application WhatsApp Business sur votre téléphone au moins tous les {days} jours.",
+    "paymentTitle": "Ajoutez un moyen de paiement dans WhatsApp Manager",
+    "paymentBody": "Meta facture les messages directement. Sans moyen de paiement, Meta cesse de livrer les réponses de service après les 1 000 gratuites de chaque mois.",
+    "paymentLink": "Comment ajouter un moyen de paiement",
+    "retry": "Relancer la configuration",
+    "disconnectedTitle": "Meta a déconnecté ce numéro",
+    "reconnect": "Se reconnecter",
+    "reasons": {
+      "PRIMARY_INACTIVITY": "L'application WhatsApp Business n'a pas été ouverte pendant environ 14 jours.",
+      "COMPANION_INACTIVITY": "Un appareil lié n'a pas été utilisé pendant environ 30 jours.",
+      "ACCOUNT_DISCONNECTED": "Déconnecté dans l'application WhatsApp Business.",
+      "CHANGE_NUMBER": "L'entreprise a changé de numéro de téléphone.",
+      "BUSINESS_DOWNGRADE": "Le numéro a été déplacé vers l'application WhatsApp ordinaire.",
+      "USER_RE_REGISTERED": "Le numéro a été réenregistré sur un autre téléphone.",
+      "ACCOUNT_OFFBOARDED": "Le compte WhatsApp a été déplacé vers un autre téléphone ou réenregistré.",
+      "PARTNER_APP_UNINSTALLED": "Wasla a été retiré du compte Meta de l'entreprise.",
+      "unknown": "Meta a déconnecté ce numéro."
+    }
   }
 }

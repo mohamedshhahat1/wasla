@@ -98,5 +98,10 @@
   "checkout_already_started": "A payment page was already opened for this. Check its status in Invoices.",
   "payment_provider_unavailable": "Payments aren't available yet. Contact support.",
   "offer_not_open": "This offer can no longer be accepted or declined.",
-  "refund_already_requested": "A refund review has already been requested for this payment."
+  "refund_already_requested": "A refund review has already been requested for this payment.",
+  "embedded_signup_disabled": "Connecting with Meta is not available here. Use the access-token form.",
+  "embedded_signup_onboarding_limit": "New connections are paused for a few days. Use the access-token form or try again later.",
+  "embedded_signup_code_invalid": "Meta did not accept the sign-up code. Start the connection again.",
+  "embedded_signup_code_expired": "The sign-up code from Meta expired. Start the connection again.",
+  "embedded_signup_coexistence_unavailable": "This number is used in the WhatsApp Business app, which cannot be connected here. Use a new number."
 }

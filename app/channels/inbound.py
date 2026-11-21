@@ -54,6 +54,9 @@ class InboundKind(StrEnum):
     #: The person changed their marketing preference through the provider
     #: (WhatsApp `user_preferences`, OMNI-046). Never a turn.
     PREFERENCE = "preference"
+    #: The person edited or revoked a message they sent (WhatsApp `edit` /
+    #: `revoke`, ADR-204). A change to an existing line, never a turn.
+    REVISION = "revision"
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +209,10 @@ class InboundEvent:
     #: The provider's own record of this event, stored as evidence and
     #: redacted on the retention schedule (DB-011).
     raw: Mapping[str, Any] = field(default_factory=dict)
+    #: For a `REVISION`: the provider id of the line it changes, and whether
+    #: it is a revoke (`text` then None) or an edit (`text` the new words).
+    revision_of: str | None = None
+    revoked: bool = False
 
     def __post_init__(self) -> None:
         """A message or an echo is identified by the provider's message id (OMNI-032, ADR-120).

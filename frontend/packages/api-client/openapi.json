@@ -3452,7 +3452,8 @@
         "enum": [
           "manual",
           "capacity_reduction",
-          "capacity_reduction_automatic"
+          "capacity_reduction_automatic",
+          "provider_disconnected"
         ],
         "title": "ConnectionDisabledReason",
         "type": "string"
@@ -3464,7 +3465,8 @@
           "auth_failed",
           "permission_missing",
           "rate_limited",
-          "webhook_unhealthy"
+          "webhook_unhealthy",
+          "provider_disconnected"
         ],
         "title": "ConnectionHealth",
         "type": "string"
@@ -6384,6 +6386,180 @@
           "created"
         ],
         "title": "DocumentSubmission",
+        "type": "object"
+      },
+      "EmbeddedSignupConfigRead": {
+        "description": "What the browser needs to open Meta's popup (CF-03). Nothing secret.\n\n`enabled` false means this deployment cannot finish an onboarding, and\nevery other field is then null: only the access-token form is offered.",
+        "properties": {
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "coexistence": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coexistence"
+          },
+          "config_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Id"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "es_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es Version"
+          },
+          "graph_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graph Version"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "EmbeddedSignupConfigRead",
+        "type": "object"
+      },
+      "EmbeddedSignupRequestBody": {
+        "additionalProperties": false,
+        "description": "The popup's code and session ids (EX-01). The ids are assertions, proven with Meta.\n\n`messaging_account_id` is v5's `messaging_account_ids[0]`; `waba_id` is v4's.\nOne of the two is required. `is_on_biz_app` is a hint only (CX-02).",
+        "properties": {
+          "business_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Id"
+          },
+          "code": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "es_version": {
+            "anyOf": [
+              {
+                "enum": [
+                  "v4",
+                  "v5"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Es Version"
+          },
+          "is_on_biz_app": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is On Biz App"
+          },
+          "messaging_account_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Messaging Account Id"
+          },
+          "phone_number_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Phone Number Id",
+            "type": "string"
+          },
+          "waba_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waba Id"
+          }
+        },
+        "required": [
+          "code",
+          "phone_number_id"
+        ],
+        "title": "EmbeddedSignupRequestBody",
+        "type": "object"
+      },
+      "EmbeddedSignupResponse": {
+        "description": "The connection, as the assisted connect returns it, and its onboarding (EX-12).",
+        "properties": {
+          "account": {
+            "$ref": "#/components/schemas/WhatsAppAccountResponse"
+          },
+          "onboarding": {
+            "$ref": "#/components/schemas/OnboardingStatusRead"
+          }
+        },
+        "required": [
+          "account",
+          "onboarding"
+        ],
+        "title": "EmbeddedSignupResponse",
         "type": "object"
       },
       "EntitlementRead": {
@@ -10849,6 +11025,18 @@
           "direction": {
             "$ref": "#/components/schemas/MessageDirection"
           },
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
           "failure_reason": {
             "anyOf": [
               {
@@ -10865,6 +11053,11 @@
             "title": "Id",
             "type": "string"
           },
+          "imported": {
+            "default": false,
+            "title": "Imported",
+            "type": "boolean"
+          },
           "kind": {
             "$ref": "#/components/schemas/MessageKind"
           },
@@ -10877,6 +11070,17 @@
           },
           "origin": {
             "$ref": "#/components/schemas/MessageOrigin"
+          },
+          "original_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Body"
           },
           "provider_message_id": {
             "anyOf": [
@@ -10900,6 +11104,18 @@
               }
             ],
             "title": "Read At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
           },
           "sent_at": {
             "anyOf": [
@@ -11301,6 +11517,218 @@
           "if_paid_now_end"
         ],
         "title": "OfferPeriodRead",
+        "type": "object"
+      },
+      "OnboardingContactsRead": {
+        "properties": {
+          "requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested At"
+          }
+        },
+        "required": [
+          "requested_at"
+        ],
+        "title": "OnboardingContactsRead",
+        "type": "object"
+      },
+      "OnboardingHistoryRead": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "declined_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declined At"
+          },
+          "phase_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase Max"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
+          "requested_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requested At"
+          }
+        },
+        "required": [
+          "requested_at",
+          "progress",
+          "phase_max",
+          "completed_at",
+          "declined_at"
+        ],
+        "title": "OnboardingHistoryRead",
+        "type": "object"
+      },
+      "OnboardingStatusRead": {
+        "description": "How a number was connected and how far its onboarding got (OS-02).\n\nNever a token, a PIN, a request id or Meta's payload (OS-03). An assisted\nconnection answers `method: assisted` and nulls (OS-04).",
+        "properties": {
+          "connection_id": {
+            "format": "uuid",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "contacts": {
+            "$ref": "#/components/schemas/OnboardingContactsRead"
+          },
+          "history": {
+            "$ref": "#/components/schemas/OnboardingHistoryRead"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "onboarded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Onboarded At"
+          },
+          "provider_disconnect": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderDisconnectRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "registered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Registered At"
+          },
+          "registration_needed": {
+            "title": "Registration Needed",
+            "type": "boolean"
+          },
+          "reminder_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder Days"
+          },
+          "subscribed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subscribed At"
+          },
+          "sync_deadline_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Deadline At"
+          }
+        },
+        "required": [
+          "connection_id",
+          "method",
+          "mode",
+          "onboarded_at",
+          "subscribed_at",
+          "registered_at",
+          "registration_needed",
+          "sync_deadline_at",
+          "contacts",
+          "history",
+          "provider_disconnect",
+          "reminder_days"
+        ],
+        "title": "OnboardingStatusRead",
         "type": "object"
       },
       "OptOutRequest": {
@@ -15988,6 +16416,52 @@
         "title": "ProposedPriceRead",
         "type": "object"
       },
+      "ProviderDisconnectRead": {
+        "description": "Meta's own reason word (EXT-ES-32), who started it, and when (AU-03).",
+        "properties": {
+          "at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "initiated_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initiated By"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "reason",
+          "initiated_by",
+          "at"
+        ],
+        "title": "ProviderDisconnectRead",
+        "type": "object"
+      },
       "RangeBound": {
         "description": "The smallest and largest a number may be.",
         "properties": {
@@ -18446,6 +18920,18 @@
           "direction": {
             "$ref": "#/components/schemas/MessageDirection"
           },
+          "edited_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited At"
+          },
           "failure_reason": {
             "anyOf": [
               {
@@ -18461,6 +18947,11 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "imported": {
+            "default": false,
+            "title": "Imported",
+            "type": "boolean"
           },
           "kind": {
             "$ref": "#/components/schemas/MessageKind"
@@ -18481,6 +18972,17 @@
           },
           "origin": {
             "$ref": "#/components/schemas/MessageOrigin"
+          },
+          "original_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Body"
           },
           "provider_message_id": {
             "anyOf": [
@@ -18504,6 +19006,18 @@
               }
             ],
             "title": "Read At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
           },
           "sent_at": {
             "anyOf": [
@@ -38385,6 +38899,65 @@
         ]
       }
     },
+    "/api/v1/whatsapp/accounts/{account_id}/onboarding": {
+      "get": {
+        "description": "Any member (OS-01). Another workspace's number is not found.",
+        "operationId": "read_onboarding_api_v1_whatsapp_accounts__account_id__onboarding_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingStatusRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "How this number was connected and how far its onboarding got",
+        "tags": [
+          "WhatsApp"
+        ]
+      }
+    },
     "/api/v1/whatsapp/accounts/{account_id}/release": {
       "post": {
         "description": "Hand a number back, keeping its history.\n\nDistinct from disabling, which pauses traffic while the workspace keeps the\nclaim. Releasing frees the number for another workspace to prove and claim,\nand cannot be undone from here: taking it back means proving control of it\nagain, at the same bar anybody else would have to clear.\n\nA POST rather than a DELETE, because nothing is deleted. The row - and every\nconversation and message hanging off it - stays exactly where it was.",
@@ -38439,6 +39012,75 @@
           }
         ],
         "summary": "Give the number up so it can be claimed elsewhere",
+        "tags": [
+          "WhatsApp"
+        ]
+      }
+    },
+    "/api/v1/whatsapp/accounts/{account_id}/subscription": {
+      "post": {
+        "description": "Owner and administrator (SB-04). Retries whichever of subscribe and register is missing.",
+        "operationId": "retry_onboarding_setup_api_v1_whatsapp_accounts__account_id__subscription_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingStatusRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "The number was not connected with Meta, or is disabled."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retry the webhook subscription and registration of an Embedded Signup number",
         "tags": [
           "WhatsApp"
         ]
@@ -38508,6 +39150,135 @@
           }
         ],
         "summary": "Prove control of a number this workspace already holds",
+        "tags": [
+          "WhatsApp"
+        ]
+      }
+    },
+    "/api/v1/whatsapp/embedded-signup": {
+      "post": {
+        "description": "Exchange the popup's code, prove the number, connect it (EX-01 .. EX-12).\n\nThe code is exchanged in this request, server to server, after the plan,\nthe channel slot and Meta's weekly limit have been asked. The webhook\nsubscription - and a new number's registration - follow the commit; their\nfailure leaves the connection written, its health saying so (SB-03).",
+        "operationId": "embedded_signup_api_v1_whatsapp_embedded_signup_post",
+        "parameters": [
+          {
+            "description": "One key per Embedded Signup flow. Repeating the request with the same key returns the first answer and calls Meta not at all.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "description": "One key per Embedded Signup flow. Repeating the request with the same key returns the first answer and calls Meta not at all.",
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmbeddedSignupRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddedSignupResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Embedded Signup is not available here (`embedded_signup_disabled`); Meta's weekly onboarding limit is reached (`embedded_signup_onboarding_limit`); no channel slot is free (`channel_capacity_exceeded`) or the plan does not include WhatsApp (`channel_type_not_allowed`) - asked before Meta is called; another workspace holds the number; or the number is on the WhatsApp Business app and this deployment does not connect those (`embedded_signup_coexistence_unavailable`)."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Meta refused the code (`embedded_signup_code_invalid`) or it expired (`embedded_signup_code_expired`); or control of the number could not be proven with the exchanged token (`whatsapp_ownership_unverified`)."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Meta could not be reached."
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Connect a WhatsApp number with Meta's Embedded Signup",
+        "tags": [
+          "WhatsApp"
+        ]
+      }
+    },
+    "/api/v1/whatsapp/embedded-signup/config": {
+      "get": {
+        "description": "Owner and administrator (CF-03). Never the app secret, a token or the verify token.\n\n`enabled` is true only when this deployment can finish an onboarding: the\napp id and secret, the configuration id, a credential key and the verify\ntoken are all set (CF-04). Otherwise every other field is null.",
+        "operationId": "embedded_signup_config_api_v1_whatsapp_embedded_signup_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddedSignupConfigRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error envelope (see docs/API.md)"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "What the browser needs to open Meta's Embedded Signup popup",
         "tags": [
           "WhatsApp"
         ]

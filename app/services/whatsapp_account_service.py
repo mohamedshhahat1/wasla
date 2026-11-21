@@ -31,6 +31,7 @@ not need to keep is not a reason to refuse the claim.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +43,7 @@ from app.db.models.channel import Channel, ConnectionDisabledReason
 from app.db.models.messaging_limit import LimitSource
 from app.db.models.user import User
 from app.db.models.whatsapp import WhatsAppAccount, WhatsAppAccountStatus
-from app.integrations.whatsapp.ownership import OwnershipVerifier
+from app.integrations.whatsapp.ownership import OwnershipVerifier, VerifiedNumber
 from app.repositories.channel_repository import ChannelConnectionRepository
 from app.repositories.whatsapp_repository import WhatsAppAccountRepository
 from app.services.audit_service import AuditTrail
@@ -80,6 +81,10 @@ class WhatsAppAccountService:
         # Optional: without one, a workspace cannot store its own token and
         # says so, rather than storing it unencrypted.
         self._credentials = credentials
+        # What a release of an Embedded Signup number owes Meta afterwards -
+        # its token and Messaging account, read before the release drops the
+        # token (RL-02). Held for the length of the request, never stored.
+        self.release_follow_up: tuple[str, str] | None = None
         # The plan a workspace without a serving subscription is held to, for
         # the channel capacity guard (ENT-08). From settings, never a request.
         self._default_plan_code = default_plan_code
@@ -91,6 +96,14 @@ class WhatsAppAccountService:
         return ChannelCapacityGuard(
             self._session, tenant_id=tenant_id, default_plan_code=self._default_plan_code
         )
+
+    def capacity_guard(self, tenant_id: uuid.UUID) -> ChannelCapacityGuard:
+        """The channel capacity guard this service asks (ENT-08), for Embedded Signup too."""
+        return self._guard(tenant_id)
+
+    @property
+    def messaging_limits(self) -> MessagingLimitService | None:
+        return self._limits
 
     async def connect(
         self,
@@ -152,6 +165,35 @@ class WhatsAppAccountService:
             else None
         )
 
+        return await self.claim_verified(
+            tenant_id=tenant_id,
+            verified=verified,
+            access_token=access_token,
+            limit=limit,
+            guard=guard,
+            display_name=display_name,
+            actor=actor,
+        )
+
+    async def claim_verified(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        verified: VerifiedNumber,
+        access_token: str,
+        limit: str | None,
+        guard: ChannelCapacityGuard,
+        display_name: str | None = None,
+        actor: User | None = None,
+        audit_meta: Mapping[str, object] | None = None,
+    ) -> WhatsAppAccount:
+        """Write the claim Meta has just proven, under the workspace's lock (ENT-08).
+
+        The second half of `connect`, and the whole of what an Embedded Signup
+        onboarding writes for a new number (ADR-204, EX-09): one path for both,
+        so tenure, identities, the slot and the sealed token are the same
+        whichever way the number was proven.
+        """
         slot = await guard.reserve_or_refuse(Channel.WHATSAPP)
         account = await self._accounts(tenant_id).connect(
             phone_number_id=verified.phone_number_id,
@@ -206,7 +248,11 @@ class WhatsAppAccountService:
             # Records that the claim was proven and against which business
             # account, so the trail answers "on what basis did they get it?"
             # No part of the credential appears here or anywhere else.
-            meta={"waba_id": account.waba_id, "ownership_verified": True},
+            meta={
+                "waba_id": account.waba_id,
+                "ownership_verified": True,
+                **(audit_meta or {}),
+            },
         )
 
         logger.info(
@@ -316,6 +362,26 @@ class WhatsAppAccountService:
         )
         return account
 
+    def _unsubscribe_owed(self, account: WhatsAppAccount) -> tuple[str, str] | None:
+        """The token and Messaging account an Embedded Signup release unsubscribes with."""
+        if (
+            not account.is_embedded_signup
+            or account.access_token_encrypted is None
+            or self._credentials is None
+        ):
+            return None
+        try:
+            resolved = self._credentials.resolve(account)
+        except Exception:  # a token that cannot be opened unsubscribes nothing
+            logger.warning(
+                "whatsapp.unsubscribe_skipped",
+                extra={"event": "whatsapp.unsubscribe_skipped", "reason": "credential"},
+            )
+            return None
+        if not resolved.is_own:
+            return None
+        return resolved.token, account.messaging_account_id or account.waba_id
+
     async def list_accounts(self, *, tenant_id: uuid.UUID) -> list[WhatsAppAccount]:
         return await self._accounts(tenant_id).list_all()
 
@@ -424,9 +490,12 @@ class WhatsAppAccountService:
         capability retained past the point of any authority to use it.
         """
         account = await self._accounts(tenant_id).require_live_by_id(account_id)
+        self.release_follow_up = self._unsubscribe_owed(account)
         account.status = WhatsAppAccountStatus.RELEASED
         account.released_at = datetime.now(UTC)
         account.access_token_encrypted = None
+        # The PIN Wasla set at registration goes with the token (RL-08).
+        account.registration_pin_encrypted = None
         await self._session.flush()
 
         AuditTrail(self._session, tenant_id=tenant_id).record(

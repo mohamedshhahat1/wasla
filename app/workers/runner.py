@@ -50,6 +50,7 @@ from app.workers.ingestion_recovery import IngestionRecoveryWorker
 from app.workers.ingestion_worker import IngestionWorker
 from app.workers.media_recovery import MediaRecoveryWorker
 from app.workers.media_worker import MediaWorker
+from app.workers.onboarding_worker import OnboardingWorker
 from app.workers.purge_worker import PurgeWorker
 from app.workers.queue import LEASE_RENEWAL_FRACTION, ReliableQueue
 from app.workers.recovery import RecoveryWorker
@@ -205,6 +206,9 @@ def build_workers(
             workers.append(RecoveryWorker(redis=redis, settings=settings))
         elif kind == INBOUND_RECOVERY:
             workers.append(InboundRecoveryWorker(database=database, redis=redis, settings=settings))
+            # Coexistence's syncs and history (ADR-204): events the inbound
+            # sweep leaves to it, so it runs where the sweep runs.
+            workers.append(OnboardingWorker(database=database, settings=settings))
         elif kind == INGESTION_RECOVERY:
             workers.append(
                 IngestionRecoveryWorker(database=database, redis=redis, settings=settings)

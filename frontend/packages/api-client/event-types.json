@@ -11,7 +11,9 @@
     "conversation.updated",
     "follow_up.updated",
     "message.created",
-    "message.status"
+    "message.revised",
+    "message.status",
+    "whatsapp.onboarding.updated"
   ],
   "stream_frames": [
     "closed",

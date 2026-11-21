@@ -261,6 +261,29 @@ export const FRAME_HANDLERS: Record<
   },
   "follow_up.updated": noop,
   "campaign.changed": noop,
+  // A customer's edit or revoke (ADR-204, IX-04 / IX-05): the open transcript reads again.
+  "message.revised": (frame, context) => {
+    const conversationId = idOf(frame, "conversation_id");
+    if (!conversationId) return;
+    void context.queryClient.invalidateQueries({
+      queryKey: messagesKey(context.scope, conversationId),
+    });
+  },
+  // An Embedded Signup number's onboarding moved (OS-05, UD-10): its page and the lists read again.
+  "whatsapp.onboarding.updated": (frame, context) => {
+    const id = idOf(frame, "connection_id");
+    if (id) {
+      void context.queryClient.invalidateQueries({
+        queryKey: queryKey(context.scope, "whatsapp-onboarding", { id }),
+      });
+    }
+    void context.queryClient.invalidateQueries({
+      queryKey: queryKey(context.scope, "channel-connections"),
+    });
+    void context.queryClient.invalidateQueries({
+      queryKey: queryKey(context.scope, "whatsapp-accounts"),
+    });
+  },
   // A gap: the inbox reads its loaded lists, the open conversation and the panel from the top.
   resync: (_frame, context) => {
     coalescer.flush();

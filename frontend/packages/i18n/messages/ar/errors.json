@@ -98,5 +98,10 @@
   "checkout_already_started": "فُتحت صفحة دفع لهذا من قبل. تحقق من حالتها في الفواتير.",
   "payment_provider_unavailable": "المدفوعات غير متاحة بعد. تواصل مع الدعم.",
   "offer_not_open": "لم يعد بالإمكان قبول هذا العرض أو رفضه.",
-  "refund_already_requested": "طُلبت مراجعة استرداد لهذه الدفعة من قبل."
+  "refund_already_requested": "طُلبت مراجعة استرداد لهذه الدفعة من قبل.",
+  "embedded_signup_disabled": "الربط عبر Meta غير متاح هنا. استخدم نموذج رمز الوصول.",
+  "embedded_signup_onboarding_limit": "الروابط الجديدة متوقفة لبضعة أيام. استخدم نموذج رمز الوصول أو حاول لاحقًا.",
+  "embedded_signup_code_invalid": "لم تقبل Meta رمز التسجيل. ابدأ الربط من جديد.",
+  "embedded_signup_code_expired": "انتهت صلاحية رمز التسجيل من Meta. ابدأ الربط من جديد.",
+  "embedded_signup_coexistence_unavailable": "هذا الرقم مستخدم في تطبيق واتساب للأعمال ولا يمكن ربطه هنا. استخدم رقمًا جديدًا."
 }

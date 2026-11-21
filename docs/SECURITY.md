@@ -19,6 +19,8 @@ All secrets come from the environment. `.env` is never committed; `.env.example`
 - **No key configured is supported; plaintext is not.** Such a deployment sends through `META_ACCESS_TOKEN` as before and refuses to store a workspace credential, because "in the clear for now" is how a plaintext token column comes to exist.
 - **No silent fallback.** A stored credential that cannot be decrypted fails the send rather than quietly sending as the platform, which would be a different sender identity.
 
+**Embedded Signup (ADR-204).** The five-minute code from Meta's popup is a credential while it lives: it is sent once in one request body, exchanged at once, and never stored, logged or put in a URL - neither by the browser nor by the API. The app secret travels only in the exchange's query to Meta, as Meta's page shows it, and httpx's request log is held at WARNING so the URL is never written. The business token it yields is sealed like any workspace token. The six-digit registration PIN Wasla sets on a new number is generated from the operating system's secure generator and sealed under the same key ring with its own context (the connection's, suffixed), so neither ciphertext opens the other; it is never returned, logged or shown, and is dropped with the token on release and on Meta's disconnect. Meta's JavaScript SDK is loaded on the Embedded Signup route alone, and only that route's Content-Security-Policy admits Meta's origins.
+
 Keys come from configuration, which puts them in the environment of every API and worker container — the same exposure `JWT_SECRET` already has. Rotation is possible (prepend a key) but not yet automated: `needs_rotation` identifies stragglers and nothing sweeps them.
 
 ## Rate limiting

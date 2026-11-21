@@ -19,6 +19,7 @@ from typing import Any, Final
 from sqlalchemy import (
     DDL,
     BigInteger,
+    Boolean,
     Connection,
     DateTime,
     FetchedValue,
@@ -727,6 +728,24 @@ class Message(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMixin):
     # would silently inherit - and inheriting the wrong attribution is the
     # defect this column exists to remove (MSG-16).
     origin: Mapped[MessageOrigin] = mapped_column(MESSAGE_ORIGIN_TYPE, nullable=False)
+    # From the WhatsApp Business app's history (Coexistence, ADR-204): shown as
+    # imported, never answered, metered or counted, never a window (HI-08/09).
+    imported: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # A customer's edit (within 15 minutes) and revoke (within two days),
+    # EXT-ES-29. The original body is kept; `visible_body` is what is read.
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    edited_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def visible_body(self) -> str | None:
+        """What a reader is shown and the AI is given: never a revoked text (ER-07)."""
+        if self.revoked_at is not None:
+            return None
+        return self.edited_body if self.edited_at is not None else self.body
+
     # The per-contact marketing claim this send made (FREQ-01) and the value it
     # replaced, so a send Meta provably refused gives it back. 0113.
     marketing_cap_claimed_at: Mapped[datetime | None] = mapped_column(

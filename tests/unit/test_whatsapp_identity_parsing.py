@@ -248,15 +248,13 @@ def test_p5_p6_another_products_delivery_is_refused_and_counted(
 @pytest.mark.parametrize(
     "field",
     # `message_template_status_update` is handled now (CMQ-05): applied to the
-    # template registry by `template_status_events`, never projected.
-    ["smb_message_echoes", "history", "smb_app_state_sync"],
+    # template registry by `template_status_events`, never projected. The
+    # Coexistence fields are handled since ADR-204 - the one stated change of
+    # OMNI-010 - and the field below is one nothing subscribes Wasla to.
+    ["message_echoes_unknown", "calls", "phone_number_quality_update"],
 )
 def test_a_change_this_adapter_does_not_process_is_refused_by_rule(field: str) -> None:
-    """Coexistence fields used to be ignored by key-name coincidence (OMNI-010).
-
-    An `smb_message_echoes` value carries `messages` - the business's own - and
-    must never be read as a customer's.
-    """
+    """A field nobody handles is refused and counted, never read by key-name coincidence."""
     payload = _delivery(
         _value(
             message_echoes=[{"from": "15550000000", "to": "201234567890", "id": "wamid.echo"}],
@@ -270,6 +268,55 @@ def test_a_change_this_adapter_does_not_process_is_refused_by_rule(field: str) -
     assert envelope.is_empty
     assert envelope.refused == {RefusalReason.UNSUPPORTED_FIELD: 1}
     assert RefusalReason.UNSUPPORTED_FIELD not in MESSAGE_LOSS_REASONS
+
+
+@pytest.mark.parametrize("field", ["history", "smb_app_state_sync"])
+def test_coexistence_syncs_are_handled_not_refused_and_never_read_as_messages(
+    field: str,
+) -> None:
+    """ADR-204 (P-E01, P-E02): captured whole for the onboarding worker, not projected here.
+
+    A value carrying `messages` under a Coexistence field is still never read
+    as a customer's message.
+    """
+    payload = _delivery(
+        _value(
+            messages=[{"from": "201234567890", "id": "wamid.looks.inbound", "type": "text"}],
+        ),
+        field=field,
+    )
+
+    envelope = parse_webhook(payload)
+
+    assert envelope.is_empty
+    assert envelope.refused == {}
+
+
+def test_smb_message_echoes_become_echoes_never_customer_messages() -> None:
+    """ADR-204 (P-E03): the business's sends are echoes to the customer, never a turn."""
+    payload = _delivery(
+        _value(
+            message_echoes=[
+                {
+                    "from": "15550000000",
+                    "to": "201234567890",
+                    "id": "wamid.echo",
+                    "type": "text",
+                    "text": {"body": "Sent from the app"},
+                }
+            ],
+            messages=[{"from": "201234567890", "id": "wamid.looks.inbound", "type": "text"}],
+        ),
+        field="smb_message_echoes",
+    )
+
+    envelope = parse_webhook(payload)
+
+    assert envelope.is_empty
+    assert [echo.event_id for echo in envelope.echoes] == ["wamid.echo"]
+    assert envelope.echoes[0].to_number == "201234567890"
+    assert envelope.echoes[0].text == "Sent from the app"
+    assert envelope.refused == {}
 
 
 def test_a_payload_with_no_object_is_malformed_not_an_empty_success() -> None:

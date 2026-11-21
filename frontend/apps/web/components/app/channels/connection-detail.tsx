@@ -30,6 +30,7 @@ import { canManageChannels, lastFourDigits } from "../../../lib/channels";
 import { FormAlert } from "../../auth/form-alert";
 import { useSession } from "../../session-provider";
 import { useWorkspace } from "../workspace-context";
+import { ConnectionOnboarding } from "./connection-onboarding";
 import { useChannelReads, useChannelsChanged } from "./queries";
 
 const STATUS_TONE: Record<string, StatusTone> = {
@@ -307,6 +308,7 @@ export function ConnectionDetail({ id }: { id: string }) {
           <KeyValueList items={facts} />
         </div>
       </Card>
+      <ConnectionOnboarding id={id} />
       <Card as="div" data-testid="messaging-limit">
         <div className="flex flex-col gap-4">
           <h2 id="limit-title" className="m-0 text-lg font-semibold text-text">

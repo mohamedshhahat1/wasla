@@ -84,6 +84,7 @@ WORKSPACE_ROUTERS = (
     template_header_media.router,
     usage.router,
     whatsapp.router,
+    whatsapp.signup_router,
 )
 
 # Routers where the limit cannot be applied to the whole router, because not

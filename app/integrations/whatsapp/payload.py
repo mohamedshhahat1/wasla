@@ -22,8 +22,14 @@ links two identities (ADR-118).
 **A payload is WhatsApp's only if it says so** (OMNI-010). The top-level `object`
 must be `whatsapp_business_account` and each change's `field` must be one this
 adapter processes. A Page event posted here by a misconfigured subscription, or
-a Coexistence `smb_message_echoes` change, used to parse to nothing with
+a change of a field nobody handles, used to parse to nothing with
 `ignored: 0`; both are now refused and counted by reason.
+
+**Coexistence is a field set, not a refusal** (ADR-204). `history` and
+`smb_app_state_sync` are captured whole for the onboarding worker,
+`smb_message_echoes` become the neutral echo ADR-129 already answers,
+`account_update` is applied to the connections it names, and a customer's
+`edit` and `revoke` are revisions of the line they name - never a new turn.
 
 Provider facts relied on here were re-checked against Meta's documentation on
 2026-10-01 (OMNICHANNEL_READINESS_FINDINGS_REMEDIATION.md, section 5).
@@ -31,6 +37,8 @@ Provider facts relied on here were re-checked against Meta's documentation on
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -51,6 +59,11 @@ from app.db.models.channel import MAX_IDENTITY_VALUE_LENGTH
 from app.db.models.media import MAX_MEDIA_HANDLE_LENGTH
 
 TEXT_TYPE = "text"
+# A customer editing (within 15 minutes) or revoking (within two days) a
+# message they sent (Coexistence, EXT-ES-29, S5; changelog 2025-11-25).
+EDIT_TYPE = "edit"
+REVOKE_TYPE = "revoke"
+REVISION_TYPES: Final = frozenset({EDIT_TYPE, REVOKE_TYPE})
 # A tap on a template's quick-reply button: `"button": {"payload", "text"}`.
 BUTTON_TYPE = "button"
 # A tap on an interactive reply button or list row: `interactive.button_reply`
@@ -69,10 +82,9 @@ USER_PREFERENCES_FIELD: Final = "user_preferences"
 WHATSAPP_OBJECT: Final = "whatsapp_business_account"
 
 # The change fields this adapter processes. Messages and their statuses both
-# arrive under `messages`; everything else a WABA can be subscribed to -
-# template status updates, account updates, and the Coexistence fields
-# `history`, `smb_app_state_sync` and `smb_message_echoes` - is refused and
-# counted until something here handles it (ADR-120).
+# arrive under `messages`; anything else a WABA can be subscribed to is
+# refused and counted until something here handles it (ADR-120). The four
+# Coexistence fields are handled since ADR-204 (EXT-ES-22).
 # A template's status changing at Meta (CMQ-05): keyed by the business
 # account, not a phone number, and applied to the registry by
 # `template_status_events` rather than as an inbound event.
@@ -84,8 +96,25 @@ TEMPLATE_STATUS_FIELD: Final = "message_template_status_update"
 # status, and applied by `MessagingLimitService` rather than as inbound events.
 CAPABILITY_FIELD: Final = "business_capability_update"
 ACCOUNT_ALERTS_FIELD: Final = "account_alerts"
-WABA_FIELDS: Final = frozenset({TEMPLATE_STATUS_FIELD, CAPABILITY_FIELD, ACCOUNT_ALERTS_FIELD})
-SUPPORTED_FIELDS: Final = frozenset({"messages", USER_PREFERENCES_FIELD}) | WABA_FIELDS
+# Meta's word that a partner was added to or removed from a customer's
+# Messaging account, or that the account was offboarded (EXT-ES-34, S8).
+ACCOUNT_UPDATE_FIELD: Final = "account_update"
+WABA_FIELDS: Final = frozenset(
+    {TEMPLATE_STATUS_FIELD, CAPABILITY_FIELD, ACCOUNT_ALERTS_FIELD, ACCOUNT_UPDATE_FIELD}
+)
+# Coexistence (S5): the business app's history and contacts, captured whole
+# and projected by a worker; and its sends, echoed back.
+HISTORY_FIELD: Final = "history"
+STATE_SYNC_FIELD: Final = "smb_app_state_sync"
+ECHOES_FIELD: Final = "smb_message_echoes"
+COEXISTENCE_SYNC_FIELDS: Final = frozenset({HISTORY_FIELD, STATE_SYNC_FIELD})
+SUPPORTED_FIELDS: Final = (
+    frozenset({"messages", USER_PREFERENCES_FIELD, ECHOES_FIELD})
+    | WABA_FIELDS
+    | COEXISTENCE_SYNC_FIELDS
+)
+# Meta's event and reason words are short upper-case words.
+MAX_EVENT_WORD_LENGTH: Final = 64
 # Meta's documented `alert_type`s for a limit increase that was not granted;
 # anything else is counted as `other`.
 LIMIT_ALERT_TYPES: Final = frozenset(
@@ -212,6 +241,37 @@ class UserPreference:
 
 
 @dataclass(frozen=True, slots=True)
+class EchoedMessage:
+    """A message the business sent from the WhatsApp Business app (`smb_message_echoes`)."""
+
+    event_id: str
+    phone_number_id: str
+    #: The customer: Meta's `to` and `to_user_id` (EXT-ES-28).
+    to_number: str | None
+    to_user_id: str | None
+    message_type: str
+    timestamp: datetime | None
+    text: str | None
+    raw: dict[str, Any]
+    media: InboundMedia | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRevision:
+    """A customer's edit or revoke of a message they sent (EXT-ES-29)."""
+
+    #: The edit or revoke message's own id: its deduplication key.
+    event_id: str
+    phone_number_id: str
+    original_message_id: str
+    revoked: bool
+    #: The new text of an edit; None for a revoke.
+    text: str | None
+    timestamp: datetime | None
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class WebhookEnvelope:
     """What one delivery held. `ignored` is every refusal; `refused` says why."""
 
@@ -220,6 +280,8 @@ class WebhookEnvelope:
     ignored: int
     refused: Mapping[RefusalReason, int] = field(default_factory=lambda: MappingProxyType({}))
     preferences: tuple[UserPreference, ...] = ()
+    echoes: tuple[EchoedMessage, ...] = ()
+    revisions: tuple[MessageRevision, ...] = ()
 
     @property
     def is_empty(self) -> bool:
@@ -408,6 +470,8 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
     messages: list[InboundMessage] = []
     statuses: list[DeliveryStatus] = []
     preferences: list[UserPreference] = []
+    echoes: list[EchoedMessage] = []
+    revisions: list[MessageRevision] = []
     refused: Counter[RefusalReason] = Counter()
     entries = _sequence(payload.get("entry"))
 
@@ -435,9 +499,11 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                 refused[RefusalReason.UNSUPPORTED_FIELD] += 1
                 continue
 
-            if change_field in WABA_FIELDS:
+            if change_field in WABA_FIELDS or change_field in COEXISTENCE_SYNC_FIELDS:
                 # Not a conversation event: `template_status_events`,
-                # `capability_events` and `account_alert_events` read them.
+                # `capability_events`, `account_alert_events` and
+                # `account_update_events` read the account's fields, and
+                # `coexistence_deliveries` the Coexistence syncs (ADR-204).
                 continue
 
             value = _mapping(change.get("value"))
@@ -449,6 +515,10 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
 
             if change_field == USER_PREFERENCES_FIELD:
                 preferences.extend(_preferences(value, phone_number_id, refused))
+                continue
+
+            if change_field == ECHOES_FIELD:
+                echoes.extend(_echoes(value, phone_number_id, refused))
                 continue
 
             profile_names = _profile_names(value)
@@ -471,6 +541,13 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                     continue
 
                 message_type = _text(message.get("type")) or "unknown"
+                if message_type in REVISION_TYPES:
+                    revision = _revision(message, event_id, phone_number_id, message_type)
+                    if revision is None:
+                        refused[RefusalReason.MALFORMED] += 1
+                    else:
+                        revisions.append(revision)
+                    continue
                 messages.append(
                     InboundMessage(
                         event_id=event_id,
@@ -518,7 +595,7 @@ def parse_webhook(payload: Mapping[str, Any]) -> WebhookEnvelope:
                     )
                 )
 
-    return _envelope(messages, statuses, refused, preferences)
+    return _envelope(messages, statuses, refused, preferences, echoes, revisions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +752,8 @@ def _envelope(
     statuses: list[DeliveryStatus],
     refused: Counter[RefusalReason],
     preferences: list[UserPreference] | None = None,
+    echoes: list[EchoedMessage] | None = None,
+    revisions: list[MessageRevision] | None = None,
 ) -> WebhookEnvelope:
     return WebhookEnvelope(
         messages=tuple(messages),
@@ -682,4 +761,171 @@ def _envelope(
         ignored=sum(refused.values()),
         refused=MappingProxyType(dict(refused)),
         preferences=tuple(preferences or ()),
+        echoes=tuple(echoes or ()),
+        revisions=tuple(revisions or ()),
     )
+
+
+# ------------------------------------------------ Coexistence (ADR-204, S5)
+
+
+@dataclass(frozen=True, slots=True)
+class CoexistenceDelivery:
+    """One `history` or `smb_app_state_sync` change, kept whole for the onboarding worker.
+
+    Not interpreted here beyond its number: Meta's advice is to "capture its
+    contents first, then process the contents asynchronously" (EXT-ES-25), so
+    the webhook stores it and `OnboardingWorker` projects it (HI-01, CT-01).
+    `event_id` is a digest of the change, so Meta's retry of the same delivery
+    is the same event and is stored once (HI-13).
+    """
+
+    field: str
+    phone_number_id: str
+    event_id: str
+    value: dict[str, Any]
+    at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountUpdateEvent:
+    """An `account_update` about a customer's Messaging account (AU-01, EXT-ES-34).
+
+    `waba_id` is `waba_info.waba_id` where Meta sends it - the PARTNER_*
+    examples carry the *partner's* business id in `entry.id` - and `entry.id`
+    otherwise (ACCOUNT_OFFBOARDED / RECONNECTED put the WABA there).
+    """
+
+    waba_id: str
+    event: str
+    reason: str | None
+    initiated_by: str | None
+    at: datetime | None
+    event_id: str
+
+
+def _digest(field_name: str, value: Mapping[str, Any]) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"{field_name}:{hashlib.sha256(canonical.encode()).hexdigest()[:40]}"
+
+
+def coexistence_deliveries(payload: Mapping[str, Any]) -> list[CoexistenceDelivery]:
+    """Every well-addressed `history` and `smb_app_state_sync` change in one delivery."""
+    if payload.get("object") != WHATSAPP_OBJECT:
+        return []
+    found: list[CoexistenceDelivery] = []
+    for raw_entry in _sequence(payload.get("entry")):
+        entry = _mapping(raw_entry)
+        at = _timestamp(entry.get("time"))
+        for raw_change in _sequence(entry.get("changes")):
+            change = _mapping(raw_change)
+            name = change.get("field")
+            if name not in COEXISTENCE_SYNC_FIELDS:
+                continue
+            value = _mapping(change.get("value"))
+            phone_number_id = _text(_mapping(value.get("metadata")).get("phone_number_id"))
+            if phone_number_id is None:
+                continue
+            found.append(
+                CoexistenceDelivery(
+                    field=str(name),
+                    phone_number_id=phone_number_id,
+                    event_id=_digest(str(name), value),
+                    value=value,
+                    at=at,
+                )
+            )
+    return found
+
+
+def account_update_events(payload: Mapping[str, Any]) -> list[AccountUpdateEvent]:
+    """Every `account_update` naming an event and a Messaging account (AU-01, AU-02)."""
+    found: list[AccountUpdateEvent] = []
+    for entry_id, at, value in _waba_changes(payload, ACCOUNT_UPDATE_FIELD):
+        event = _bounded(value.get("event"), MAX_EVENT_WORD_LENGTH)
+        if event is None:
+            continue
+        waba = _bounded(_mapping(value.get("waba_info")).get("waba_id"), MAX_WABA_ID_LENGTH)
+        info = _mapping(value.get("disconnection_info"))
+        stamp = int(at.timestamp()) if at is not None else 0
+        found.append(
+            AccountUpdateEvent(
+                waba_id=waba or entry_id,
+                event=event,
+                reason=_bounded(info.get("reason"), MAX_EVENT_WORD_LENGTH),
+                initiated_by=_bounded(info.get("initiated_by"), MAX_EVENT_WORD_LENGTH),
+                at=at,
+                event_id=f"{ACCOUNT_UPDATE_FIELD}:{event}:{waba or entry_id}:{stamp}",
+            )
+        )
+    return found
+
+
+def _echoes(
+    value: Mapping[str, Any], phone_number_id: str, refused: Counter[RefusalReason]
+) -> list[EchoedMessage]:
+    """`smb_message_echoes`: what the business sent from the WhatsApp Business app (EXT-ES-28).
+
+    `from` is the business; the customer is `to` and `to_user_id`.
+    """
+    found: list[EchoedMessage] = []
+    for raw in _sequence(value.get("message_echoes")):
+        echo = _mapping(raw)
+        event_id = _text(echo.get("id"))
+        if event_id is None:
+            refused[RefusalReason.MISSING_EVENT_ID] += 1
+            continue
+        raw_phone = _text(echo.get("to"))
+        raw_user = _text(echo.get("to_user_id"))
+        phone = _bounded(raw_phone, MAX_PHONE_LENGTH)
+        user = _bounded(raw_user, MAX_IDENTITY_VALUE_LENGTH)
+        if phone is None and user is None:
+            dropped = raw_phone is not None or raw_user is not None
+            refused[
+                RefusalReason.IDENTIFIER_TOO_LONG if dropped else RefusalReason.MISSING_SENDER
+            ] += 1
+            continue
+        message_type = _text(echo.get("type")) or "unknown"
+        found.append(
+            EchoedMessage(
+                event_id=event_id,
+                phone_number_id=phone_number_id,
+                to_number=phone,
+                to_user_id=user,
+                message_type=message_type,
+                timestamp=_timestamp(echo.get("timestamp")),
+                text=_message_text(echo, message_type),
+                raw=echo,
+                media=_media(echo, message_type),
+            )
+        )
+    return found
+
+
+def _revision(
+    message: Mapping[str, Any], event_id: str, phone_number_id: str, message_type: str
+) -> MessageRevision | None:
+    """A customer's `edit` or `revoke` (EXT-ES-29), or None when it names no original."""
+    detail = _mapping(message.get(message_type))
+    original = _text(detail.get("original_message_id"))
+    if original is None:
+        return None
+    text: str | None = None
+    if message_type == EDIT_TYPE:
+        edited = _mapping(detail.get("message"))
+        inner_type = _text(edited.get("type")) or TEXT_TYPE
+        text = _message_text(edited, inner_type)
+    return MessageRevision(
+        event_id=event_id,
+        phone_number_id=phone_number_id,
+        original_message_id=original,
+        revoked=message_type == REVOKE_TYPE,
+        text=text,
+        timestamp=_timestamp(message.get("timestamp")),
+        raw=dict(message),
+    )
+
+
+#: The words a message carries, for readers outside the parser (the Coexistence
+#: history projection reads the same fields a live message does).
+message_text = _message_text
