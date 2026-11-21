@@ -283,6 +283,10 @@ for (const locale of ["en", "ar"] as const) {
     );
     await tabTo(page, { role: "radio" });
     await page.keyboard.press("ArrowDown");
+    // Arrow keys move the focus within the group; Space selects the focused radio (WAI-ARIA) -
+    // WebKit may not have checked it yet when the arrow's focus lands.
+    await expect(page.getByRole("radio").nth(1)).toBeFocused();
+    await page.keyboard.press("Space");
     await expect(page.getByRole("radio").nth(1)).toBeChecked();
     await tabTo(page, { field: "cancel-confirm" });
     await page.keyboard.press("Escape");
