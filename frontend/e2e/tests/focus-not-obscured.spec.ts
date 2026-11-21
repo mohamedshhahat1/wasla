@@ -1,14 +1,17 @@
 /**
- * KY-03: focus not obscured (WCAG 2.2 2.4.11) over FE-4's, FE-5's and FE-6's screens, at 1280 and
- * 390, in en and ar. Tab from the top until focus comes round (bounded at 200 stops); at each stop
+ * KY-03: focus not obscured (WCAG 2.2 2.4.11) over FE-4's, FE-5's and FE-6's screens (FE-7's
+ * team and settings screens, and - FE-8 leftovers, KY8-03 - every billing screen state), at 1280
+ * and 390, in en and ar. Tab from the top until focus comes round (bounded at 200 stops); at each stop
  * the focused element's box is compared with every fixed or sticky element drawn above it. Fully
  * covered fails; covered past half its area is reported (2.4.12, AAA) and does not fail.
  */
 import type { Page } from "@playwright/test";
 
 import { logInThroughTheApp, useAddress, useLocale, WEB } from "../support/fe2";
+import { memberOf } from "../support/fe3";
 import { connectedOwner, conversationOf, freshCustomer, inbound, text } from "../support/fe4";
 import { answeringAgent, baseWithDocument, settled } from "../support/fe6";
+import { axeScan, checkoutAnswer, returnSucceeded } from "../support/fe8";
 import { expect, test } from "../support/page-guard";
 
 test.use({ timezoneId: "Africa/Cairo" });
@@ -170,6 +173,99 @@ for (const [width, height] of [
         const stops = await sweep(page, `${name} ${locale} ${width}`);
         for (const stop of stops.filter((s) => s.covered >= 0.999)) {
           failures.push(`${name}: stop ${stop.stop} ${stop.element} hidden by ${stop.by}`);
+        }
+      }
+      expect(failures).toEqual([]);
+    });
+  }
+}
+
+// FE-8 leftovers (KY8-03 / KYL-03): every billing screen state, at 1280 and 390, en and ar. The
+// owner pays for pro on the fake page first (so invoices, a paid invoice's attempts and a cancel
+// dialog exist); the dialogs are swept as themselves (focus stays inside them until Escape).
+for (const [width, height] of [
+  [1280, 800],
+  [390, 844],
+] as const) {
+  for (const locale of ["en", "ar"] as const) {
+    test(`KY8-03 (${locale}, ${width}): no focused element is fully hidden on Billing`, async ({
+      page,
+      context,
+    }) => {
+      test.skip(
+        (width === 390) !== /phone/.test(test.info().project.name),
+        "the other project sweeps this width",
+      );
+      await page.setViewportSize({ width, height });
+      const line = await connectedOwner(`ky8${locale}${width}`);
+      await memberOf(line.owner);
+      await useAddress(context);
+      await useLocale(context, locale);
+      await logInThroughTheApp(page, locale, line.owner.email);
+      await page.waitForURL(`${WEB}/`);
+
+      // Pay for pro on the fake page: the paid invoice, its attempt and the subscription exist.
+      await page.goto(`${WEB}/billing`);
+      const upgrade = page.locator('[data-plan-price="pro:monthly"]');
+      await expect(upgrade).toBeVisible({ timeout: 30_000 });
+      const started = checkoutAnswer(page);
+      await upgrade.press("Enter");
+      expect((await started).status()).toBe(201);
+      await returnSucceeded(page);
+
+      const failures: string[] = [];
+      const sweepOn = async (name: string) => {
+        await axeScan(page, `${name} ${locale} ${width}`);
+        const stops = await sweep(page, `${name} ${locale} ${width}`);
+        for (const stop of stops.filter((s) => s.covered >= 0.999)) {
+          failures.push(`${name}: stop ${stop.stop} ${stop.element} hidden by ${stop.by}`);
+        }
+      };
+      await sweepOn("billing-return-succeeded");
+
+      // Each full load refreshes the session (ten a minute per address): a fresh address here.
+      await useAddress(context);
+      const screens: Array<[string, string, string]> = [
+        ["billing", "/billing", "[data-plans]"],
+        ["billing-invoices", "/billing/invoices", '[data-action="open-invoice"]'],
+        ["billing-methods", "/billing/payment-methods", '[data-screen="billing-methods"]'],
+        ["billing-usage", "/billing/usage", "[data-bar-series], [data-screen='billing-usage']"],
+        [
+          "billing-capacity",
+          "/billing/capacity",
+          "[data-topups], [data-screen='billing-capacity']",
+        ],
+        ["team", "/team", "[data-members-list]"],
+        ["invitations", "/team/invitations", '[data-screen="invitations"]'],
+      ];
+      for (const [name, path, ready] of screens) {
+        await page.goto(`${WEB}${path}`);
+        await expect(page.locator(ready).first()).toBeVisible({ timeout: 30_000 });
+        await expect(page.locator('[role="status"]', { hasText: /…|\.\.\./ })).toHaveCount(0);
+        await sweepOn(name);
+        if (name === "billing") {
+          await page.locator('[data-action="cancel-subscription"]').press("Enter");
+          await expect(page.getByRole("dialog")).toBeVisible();
+          await sweepOn("billing-cancel-dialog");
+          await page.keyboard.press("Escape");
+          await expect(page.getByRole("dialog")).toHaveCount(0);
+        }
+        if (name === "billing-invoices") {
+          await page.locator('[data-action="open-invoice"]').first().press("Enter");
+          await expect(page.locator("[data-invoice-page]")).toBeVisible({ timeout: 30_000 });
+          await sweepOn("billing-invoice");
+          await page.locator('[data-action="ask-refund"]').press("Enter");
+          await expect(page.getByRole("dialog")).toBeVisible();
+          await sweepOn("billing-refund-dialog");
+          await page.keyboard.press("Escape");
+          await expect(page.getByRole("dialog")).toHaveCount(0);
+        }
+        if (name === "team") {
+          await page.locator('[data-action="change-role"]').first().press("Enter");
+          await expect(page.getByRole("dialog")).toBeVisible();
+          await sweepOn("team-change-role-dialog");
+          await page.keyboard.press("Escape");
+          await expect(page.getByRole("dialog")).toHaveCount(0);
         }
       }
       expect(failures).toEqual([]);

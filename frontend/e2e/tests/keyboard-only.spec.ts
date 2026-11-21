@@ -1,7 +1,8 @@
 /**
  * KY-02: one keyboard-only journey (FE-5's CJ-12 half that was not written) over FE-4's inbox,
- * FE-5's customers and leads and FE-6's AI and knowledge screens. No pointer at all: the first
- * test reads this file and fails if a mouse call appears in it. Each step waits on a fact.
+ * FE-5's customers and leads and FE-6's AI and knowledge screens; FE-8 leftovers (KY8-02) add the
+ * billing journey. No pointer at all: the first test reads this file and fails if a mouse call
+ * appears in it. Each step waits on a fact.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -9,7 +10,9 @@ import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 
 import { label, logInThroughTheApp, useAddress, useLocale, WEB } from "../support/fe2";
+import { memberOf } from "../support/fe3";
 import { connectedOwner, freshCustomer, inbound, text } from "../support/fe4";
+import { checkoutAnswer, printCalls, returnSucceeded, stubPrint } from "../support/fe8";
 import { expect, test } from "../support/page-guard";
 
 test.use({ timezoneId: "Africa/Cairo" });
@@ -32,7 +35,8 @@ type Target =
   | { role: string }
   | { inside: string }
   | { rowLinkPrefix: string }
-  | { field: string };
+  | { field: string }
+  | { planPrice: string };
 
 /** Tab (or Shift+Tab) until the focused element is the target, bounded; the fact is focus. */
 async function tabTo(page: Page, target: Target, reverse = false): Promise<void> {
@@ -45,6 +49,7 @@ async function tabTo(page: Page, target: Target, reverse = false): Promise<void>
       if ("role" in wanted) return el.getAttribute("role") === wanted.role;
       if ("inside" in wanted) return el.closest(wanted.inside) !== null;
       if ("field" in wanted) return el.getAttribute("data-field") === wanted.field;
+      if ("planPrice" in wanted) return el.getAttribute("data-plan-price") === wanted.planPrice;
       return (el.getAttribute("data-row-link") ?? "").startsWith(wanted.rowLinkPrefix);
     }, target);
     if (hit) return;
@@ -218,5 +223,92 @@ for (const locale of ["en", "ar"] as const) {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.locator('[data-action="close-account"]')).toBeFocused();
+  });
+}
+
+// FE-8 leftovers (KY8-02 / KYL-02): Billing, keyboard only - the navigation's Billing entry →
+// the plans → Upgrade with Enter → the fake Paymob page (outside the app: it answers and sends the
+// browser back by itself) → the return page (focus on its heading once; the state read as text) →
+// Go to Billing → the cancel dialog opened and dismissed with Escape → "cancel now"'s typed field
+// reached and dismissed → /team: Change role saved by arrows and Enter → an invoice → Print (the
+// print call stubbed) → "Ask for a refund review" opened and dismissed with Escape.
+for (const locale of ["en", "ar"] as const) {
+  test(`KY8-02 (${locale}): billing, keyboard only`, async ({ page, context }) => {
+    const line = await connectedOwner(`kb8${locale}`);
+    const mate = await memberOf(line.owner);
+    await stubPrint(context);
+    await useAddress(context);
+    await useLocale(context, locale);
+    await logInThroughTheApp(page, locale, line.owner.email);
+    await page.waitForURL(`${WEB}/`);
+    await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+
+    // The navigation's Billing entry (on the phone it sits behind the menu button: by address).
+    if (/phone/.test(test.info().project.name)) {
+      await page.goto(`${WEB}/billing`);
+    } else {
+      await tabTo(page, { name: label(locale, "app.nav.billing") });
+      await page.keyboard.press("Enter");
+      await page.waitForURL(`${WEB}/billing`);
+    }
+    await tabTo(page, { planPrice: "pro:monthly" });
+    const started = checkoutAnswer(page);
+    await page.keyboard.press("Enter");
+    expect((await started).status()).toBe(201);
+    await returnSucceeded(page);
+    await expect(page.locator(`#billing-title`)).toBeFocused();
+    await tabTo(page, { action: "to-billing" });
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`${WEB}/billing`);
+
+    // The cancel dialog: opened by Enter, dismissed with Escape, focus back on its opener.
+    await tabTo(page, { action: "cancel-subscription" });
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator('[data-action="cancel-subscription"]')).toBeFocused();
+    // "Cancel now": the radio by arrows, the typed confirmation's field reached, Escape.
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await tabTo(page, { role: "radio" });
+    await page.keyboard.press("ArrowDown");
+    await tabTo(page, { field: "cancel-confirm" });
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator('[data-action="cancel-subscription"]')).toBeFocused();
+
+    // /team: Change role (FEB-42) by keys; the row keeps focus on its actions.
+    await page.goto(`${WEB}/team`);
+    await expect(page.locator("[data-members-list] li")).toHaveCount(2, { timeout: 30_000 });
+    await tabTo(page, { action: "change-role" });
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    const changed = page.waitForResponse(
+      (r) =>
+        r.request().method() === "PATCH" && r.url().includes(`/workspace/members/${mate.userId}`),
+    );
+    await tabTo(page, { action: "confirm" });
+    await page.keyboard.press("Enter");
+    expect((await changed).status()).toBe(200);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement !== document.body))
+      .toBe(true);
+
+    // The invoice: Print (stubbed), then the refund review opened and dismissed with Escape.
+    await page.goto(`${WEB}/billing/invoices`);
+    await tabTo(page, { action: "open-invoice" });
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/billing\/invoices\/[0-9a-f-]{36}$/);
+    await tabTo(page, { action: "print" });
+    await page.keyboard.press("Enter");
+    await expect.poll(() => printCalls(page)).toBe(1);
+    await tabTo(page, { action: "ask-refund" });
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.locator('[data-action="ask-refund"]')).toBeFocused();
   });
 }
