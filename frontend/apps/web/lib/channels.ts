@@ -15,11 +15,18 @@ export interface ConnectAdapter {
 }
 
 /**
- * CN-02: a channel is connected by an adapter, not a screen family. FE-3 registers the assisted
- * WhatsApp form only; Embedded Signup (FEQ-14, the next backend stage) adds a "whatsapp-embedded"
- * entry beside it. No Instagram or Messenger adapter exists (LP-FE-02), so none is offered.
+ * CN-02: a channel is connected by an adapter, not a screen family. Embedded Signup (ADR-204,
+ * UA-01) comes first and the assisted form stays beside it (FEQ-14 "both"); Embedded Signup is
+ * offered only where the API says this deployment can finish it (UA-02, `availableAdapters`).
+ * No Instagram or Messenger adapter exists (LP-FE-02), so none is offered.
  */
 export const CONNECT_ADAPTERS: readonly ConnectAdapter[] = [
+  {
+    key: "whatsapp-embedded",
+    channel: "whatsapp",
+    labelKey: "connectWhatsAppWithMeta",
+    roles: ["tenant_owner", "tenant_admin"],
+  },
   {
     key: "whatsapp",
     channel: "whatsapp",
@@ -27,6 +34,13 @@ export const CONNECT_ADAPTERS: readonly ConnectAdapter[] = [
     roles: ["tenant_owner", "tenant_admin"],
   },
 ];
+
+/** UA-02: the adapters this deployment offers - Embedded Signup only when its config is on. */
+export function availableAdapters(embeddedEnabled: boolean): readonly ConnectAdapter[] {
+  return CONNECT_ADAPTERS.filter(
+    (adapter) => adapter.key !== "whatsapp-embedded" || embeddedEnabled,
+  );
+}
 
 export type ConnectRefusal = "role" | "loading" | "noAdapter" | "notAllowed" | "noSlots";
 

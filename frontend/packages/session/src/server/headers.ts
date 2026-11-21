@@ -1,8 +1,8 @@
 /**
  * The browser applications' response headers and CSP (plan section 18, AP-05) - the server
  * half of their security, beside the signer. web and console build the same policy with their
- * own API origin; console has no exception at all, and neither does web in FE-1 (the Embedded
- * Signup exception arrives with its adapter, later).
+ * own API origin. Console has no exception at all; web has one, on one route: the Embedded
+ * Signup adapter adds the origins Meta's SDK needs (ADR-204, SD-06) and no other route does.
  */
 
 export type Environment = "development" | "preview" | "production";
@@ -12,9 +12,11 @@ export interface CspInput {
   apiOrigin: string;
   /** `next dev` needs eval for React's development build; never in a production build. */
   devServer: boolean;
+  /** Origins one route adds (SD-06); absent everywhere else. */
+  extra?: { script?: readonly string[]; frame?: readonly string[]; connect?: readonly string[] };
 }
 
-export function buildCsp({ nonce, apiOrigin, devServer }: CspInput): string {
+export function buildCsp({ nonce, apiOrigin, devServer, extra }: CspInput): string {
   if (!/^[A-Za-z0-9+/=_-]{16,}$/.test(nonce))
     throw new Error("a nonce of at least 16 base64 characters");
   const script = [
@@ -22,16 +24,19 @@ export function buildCsp({ nonce, apiOrigin, devServer }: CspInput): string {
     `'nonce-${nonce}'`,
     "'strict-dynamic'",
     ...(devServer ? ["'unsafe-eval'"] : []),
+    ...(extra?.script ?? []),
   ];
+  const connect = ["'self'", apiOrigin, ...(extra?.connect ?? [])];
+  const frame = extra?.frame?.length ? extra.frame.join(" ") : "'none'";
   return [
     "default-src 'self'",
     `script-src ${script.join(" ")}`,
     "style-src 'self' 'unsafe-inline'",
-    `connect-src 'self' ${apiOrigin}`,
+    `connect-src ${connect.join(" ")}`,
     "img-src 'self' blob: data:",
     "media-src 'self' blob:",
     "font-src 'self'",
-    "frame-src 'none'",
+    `frame-src ${frame}`,
     "frame-ancestors 'none'",
     "base-uri 'none'",
     "form-action 'self'",

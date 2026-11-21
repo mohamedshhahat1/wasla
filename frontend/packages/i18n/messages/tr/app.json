@@ -175,7 +175,8 @@
       "auth_failed": "Erişim belirteci çalışmayı bıraktı",
       "permission_missing": "Meta'da bir izin eksik",
       "rate_limited": "Meta mesajları yavaşlatıyor",
-      "webhook_unhealthy": "Meta'dan mesajlar gelmiyor"
+      "webhook_unhealthy": "Meta'dan mesajlar gelmiyor",
+      "provider_disconnected": "Meta bağlantıyı kesti"
     },
     "notCounted": "Yuva kullanmaz",
     "open": "<name>name</name> aç",
@@ -514,6 +515,14 @@
       "leadActivity": "Potansiyel müşterinin son etkinliği",
       "consent": "Pazarlama mesajları",
       "createLead": "Potansiyel müşteri oluştur"
+    },
+    "coexistence": {
+      "imported": "WhatsApp Business uygulamasından içe aktarıldı",
+      "fromApp": "WhatsApp Business uygulamasından gönderildi",
+      "edited": "Düzenlendi",
+      "showOriginal": "Orijinali göster",
+      "revoked": "Bu mesaj silindi",
+      "placeholder": "Bağlantıdan önceki medya"
     }
   },
   "customers": {
@@ -756,7 +765,12 @@
     "defaultInactiveAction": "Açın",
     "noAgentMember": "Bir sahip ya da yönetici bir asistanı açabilir.",
     "unreachableTitle": "Bilginizde hazır belgeler var ama yanıtlayan hiçbir asistan bunlarda arama yapamıyor.",
-    "unreachableAction": "Asistanın araçlarını kontrol edin"
+    "unreachableAction": "Asistanın araçlarını kontrol edin",
+    "reminderTitle": "WhatsApp Business uygulamasını en az {days} günde bir açın",
+    "reminderBody": "Meta, uygulaması yaklaşık 14 gün açılmayan numaranın bağlantısını keser.",
+    "reminderDismiss": "Bir dahaki sefere kadar gizle",
+    "disconnectedTitle": "Meta'nın bağlantısını kestiği numara",
+    "disconnectedAction": "Numarayı gör"
   },
   "ai": {
     "title": "Yapay zekâ asistanı",
@@ -1597,5 +1611,98 @@
       "more": "Daha fazla yükle"
     },
     "preview": "Faturalandırma için bu önizlemede bulunmayan API gerekir."
+  },
+  "embedded": {
+    "title": "WhatsApp'ı Meta ile bağla",
+    "line": "Facebook ile giriş yapın ve WhatsApp numaranızı Meta'nın kendi penceresinde seçin.",
+    "loading": "Meta ile bağlantı kurulabilir mi kontrol ediliyor…",
+    "disabled": "Meta ile bağlanma burada henüz kullanılamıyor. Bunun yerine erişim belirteci formunu kullanın.",
+    "useToken": "Bunun yerine erişim belirteciyle bağlan",
+    "launch": "Facebook ile devam et",
+    "again": "Yeniden dene",
+    "retry": "Yeniden dene",
+    "connecting": "Numaranız bağlanıyor…",
+    "sdkFailed": "Meta'nın penceresi açılamadı. Bağlantınızı kontrol edin veya erişim belirteci formunu kullanın.",
+    "noCode": "Meta işlemi bitirdi ama kod gelmedi. Yeniden deneyin.",
+    "expired": "Bağlantı çok uzun sürdü ve Meta'nın kodunun süresi doldu. Baştan başlayın.",
+    "cancelled": "Meta'nın penceresini şu adımda kapattınız: {step}.",
+    "sessionId": "Meta oturumu:",
+    "copySession": "Destek için kopyala",
+    "explainerTitle": "Başlamadan önce",
+    "withMeta": "Meta ile",
+    "newTitle": "Yeni bir numara kullan",
+    "newBody": "Henüz WhatsApp'ta olmayan bir numara. Meta onu SMS veya arama koduyla doğrular, Wasla kurulumunu tamamlar.",
+    "appTitle": "WhatsApp Business uygulamanızdaki numarayı kullan",
+    "appVersion": "Uygulama 2.24.17 veya daha yeni sürümde olmalıdır.",
+    "appReminder": "Uygulamayı telefonunuzda en az {days} günde bir açın, aksi halde Meta numaranın bağlantısını keser.",
+    "appFeatures": "Gruplar, kaybolan mesajlar, tek seferlik görüntüleme, canlı konum ve yayın listeleri uygulamada çalışmaz.",
+    "appCompanions": "Windows için WhatsApp ve WearOS'un bağlantısı kesilir; diğer bağlı cihazlar çalışmaya devam eder.",
+    "appHistory": "Sohbet geçmişinizi paylaşıp paylaşmayacağınızı uygulamada seçersiniz.",
+    "payment": "Meta mesajları doğrudan ücretlendirir. Bağlandıktan sonra WhatsApp Manager'da bir ödeme yöntemi ekleyin.",
+    "steps": {
+      "chooseAccount": "işletme hesabını seçme",
+      "createAccount": "işletme hesabını oluşturma",
+      "addNumber": "numarayı ekleme",
+      "verifyNumber": "numarayı doğrulama",
+      "profile": "profili ayarlama",
+      "permissions": "izinler",
+      "save": "son ekran",
+      "qrCode": "QR kodunu tarama",
+      "verifyAccount": "hesabı doğrulama",
+      "unknown": "erken bir adım"
+    },
+    "errors": {
+      "region": "Meta bu bölgedeki numaraları henüz bağlayamıyor.",
+      "permission": "Bu uygulama henüz Meta tarafından bunun için onaylanmadı. Wasla yöneticinize sorun.",
+      "partnerNotReady": "Bu uygulama henüz WhatsApp Business uygulaması numaralarını bağlayamıyor.",
+      "businessAppUnsupported": "Bu numara WhatsApp Business uygulamasında ve burada bağlanamaz.",
+      "numberOnWhatsApp": "Bu numara zaten WhatsApp'ta kullanılıyor. Başka bir numara veya WhatsApp Business uygulaması seçeneğini kullanın.",
+      "twoStep": "Bu numara için WhatsApp'ta iki adımlı doğrulamayı kapatın ve yeniden deneyin.",
+      "updateApp": "Telefonunuzdaki WhatsApp Business uygulamasını güncelleyin ve yeniden deneyin.",
+      "waitAndRetry": "Bu numaranın bağlantısı hâlâ kesiliyor. 15 dakika bekleyip yeniden deneyin.",
+      "otherPartner": "Bu numara zaten başka bir sağlayıcı üzerinden bağlı.",
+      "tooManyTries": "Çok fazla deneme. Bir süre bekleyip yeniden deneyin.",
+      "accountLimit": "Meta işletme portföyünüz henüz daha fazla WhatsApp hesabına sahip olamaz.",
+      "numberLimit": "Meta işletme portföyünüz daha fazla numaraya sahip olamaz.",
+      "twoFactor": "Facebook hesabınızda iki faktörlü kimlik doğrulamayı açın ve yeniden deneyin.",
+      "generic": "Meta bağlantıyı tamamlayamadı. Yeniden deneyin veya erişim belirteci formunu kullanın."
+    }
+  },
+  "onboarding": {
+    "title": "Bu numara nasıl bağlandı",
+    "assisted": "Erişim belirteciyle bağlandı.",
+    "withMeta": "Meta ile bağlandı",
+    "coexistence": "WhatsApp Business uygulamasında da kullanılıyor",
+    "proved": "Meta ile kanıtlandı",
+    "subscribed": "Meta'dan mesajlar",
+    "registered": "Kayıtlı",
+    "notNeeded": "Gerekmiyor",
+    "notYet": "Henüz değil",
+    "contacts": "Uygulamadan kişiler",
+    "history": "Sohbet geçmişi",
+    "historyRequested": "Uygulama bekleniyor",
+    "historyProgress": "Sohbet geçmişiniz içe aktarılıyor - %{progress}",
+    "historyComplete": "Tamamlandı",
+    "historyDeclined": "Sohbet geçmişinizi paylaşmamayı seçtiniz",
+    "finishing": "Kurulum tamamlanıyor - WhatsApp Business uygulamasını {deadline} tarihine kadar açık tutun.",
+    "expired": "Kurulum zamanında bitmedi. WhatsApp Business uygulamasında bağlantıyı kesip yeniden bağlanın.",
+    "reminder": "WhatsApp Business uygulamasını telefonunuzda en az {days} günde bir açın.",
+    "paymentTitle": "WhatsApp Manager'da bir ödeme yöntemi ekleyin",
+    "paymentBody": "Meta mesajları doğrudan ücretlendirir. Ödeme yöntemi olmadan Meta, her ayın ücretsiz 1.000 mesajından sonra hizmet yanıtlarını teslim etmez.",
+    "paymentLink": "Ödeme yöntemi nasıl eklenir",
+    "retry": "Kurulumu yeniden dene",
+    "disconnectedTitle": "Meta bu numaranın bağlantısını kesti",
+    "reconnect": "Yeniden bağlan",
+    "reasons": {
+      "PRIMARY_INACTIVITY": "WhatsApp Business uygulaması yaklaşık 14 gün açılmadı.",
+      "COMPANION_INACTIVITY": "Bağlı bir cihaz yaklaşık 30 gün kullanılmadı.",
+      "ACCOUNT_DISCONNECTED": "WhatsApp Business uygulamasında bağlantı kesildi.",
+      "CHANGE_NUMBER": "İşletme telefon numarasını değiştirdi.",
+      "BUSINESS_DOWNGRADE": "Numara normal WhatsApp uygulamasına taşındı.",
+      "USER_RE_REGISTERED": "Numara başka bir telefonda yeniden kaydedildi.",
+      "ACCOUNT_OFFBOARDED": "WhatsApp hesabı başka bir telefona taşındı veya yeniden kaydedildi.",
+      "PARTNER_APP_UNINSTALLED": "Wasla işletmenin Meta hesabından kaldırıldı.",
+      "unknown": "Meta bu numaranın bağlantısını kesti."
+    }
   }
 }

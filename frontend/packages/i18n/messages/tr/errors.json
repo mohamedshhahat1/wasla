@@ -98,5 +98,10 @@
   "checkout_already_started": "Bunun için zaten bir ödeme sayfası açıldı. Durumunu Faturalar'da kontrol edin.",
   "payment_provider_unavailable": "Ödemeler henüz kullanılamıyor. Destekle iletişime geçin.",
   "offer_not_open": "Bu teklif artık kabul edilemez veya reddedilemez.",
-  "refund_already_requested": "Bu ödeme için zaten bir iade incelemesi istendi."
+  "refund_already_requested": "Bu ödeme için zaten bir iade incelemesi istendi.",
+  "embedded_signup_disabled": "Meta ile bağlanma burada kullanılamıyor. Erişim belirteci formunu kullanın.",
+  "embedded_signup_onboarding_limit": "Yeni bağlantılar birkaç günlüğüne duraklatıldı. Erişim belirteci formunu kullanın veya daha sonra deneyin.",
+  "embedded_signup_code_invalid": "Meta kayıt kodunu kabul etmedi. Bağlantıyı yeniden başlatın.",
+  "embedded_signup_code_expired": "Meta'nın kayıt kodunun süresi doldu. Bağlantıyı yeniden başlatın.",
+  "embedded_signup_coexistence_unavailable": "Bu numara WhatsApp Business uygulamasında kullanılıyor ve burada bağlanamaz. Yeni bir numara kullanın."
 }

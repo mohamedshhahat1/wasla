@@ -21,13 +21,14 @@ import {
 } from "@wasla/ui";
 
 import {
+  availableAdapters,
   canChooseConnections,
   canManageChannels,
   connectDecision,
   type ConnectRefusal,
 } from "../../../lib/channels";
 import { useWorkspace } from "../workspace-context";
-import { useChannelReads } from "./queries";
+import { useChannelReads, useEmbeddedSignupConfig } from "./queries";
 import { SelectionDialog } from "./selection-dialog";
 
 type Connection = components["schemas"]["ChannelConnectionRead"];
@@ -43,9 +44,12 @@ const STATUS_TONE: Record<string, StatusTone> = {
 export function ConnectAction({
   refusal,
   allowed,
+  adapterKey = "whatsapp",
 }: {
   refusal: ConnectRefusal | null;
   allowed: boolean;
+  /** UA-01: Embedded Signup where it is offered, the access-token form otherwise. */
+  adapterKey?: string;
 }) {
   const t = useTranslations("app");
   if (refusal === "role") {
@@ -58,7 +62,7 @@ export function ConnectAction({
   if (allowed) {
     return (
       <NextLink
-        href="/channels/connect/whatsapp"
+        href={`/channels/connect/${adapterKey}`}
         className={buttonClasses("primary")}
         data-testid="connect-action"
       >
@@ -152,6 +156,7 @@ export function ChannelsList() {
   const format = useFormatter();
   const { role } = useWorkspace();
   const { connections, capacity, accounts } = useChannelReads();
+  const embedded = useEmbeddedSignupConfig();
   const [showReleased, setShowReleased] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const released_ok = useSearchParams().get("notice") === "released";
@@ -163,9 +168,14 @@ export function ChannelsList() {
     capacity: cap
       ? { remaining: cap.remaining, allowed_channel_types: cap.breakdown.allowed_channel_types }
       : null,
+    adapters: availableAdapters(embedded.data?.enabled === true),
   });
   const action = (
-    <ConnectAction allowed={decision.allowed} refusal={decision.allowed ? null : decision.reason} />
+    <ConnectAction
+      allowed={decision.allowed}
+      refusal={decision.allowed ? null : decision.reason}
+      adapterKey={decision.allowed ? decision.adapter.key : "whatsapp"}
+    />
   );
   const byId = new Map((accounts.data?.accounts ?? []).map((account) => [account.id, account]));
   const released = (accounts.data?.accounts ?? []).filter(
