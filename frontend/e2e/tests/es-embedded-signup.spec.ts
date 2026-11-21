@@ -139,7 +139,10 @@ async function runFlow(
   if (options.number) await popup.locator("#number").fill(options.number);
   if (options.code) await popup.locator("#code").fill(options.code);
   if (options.waba) await popup.locator("#waba").fill(options.waba);
+  const closed = popup.waitForEvent("close");
   await popup.locator(`button[data-action="${options.action}"]`).click();
+  // The fake closes itself; a second window.open with the same name before then would reuse it.
+  await closed;
 }
 
 async function connected(page: Page): Promise<string> {
@@ -509,7 +512,11 @@ test.describe("Embedded Signup and Coexistence (ADR-204)", () => {
     await connected(page);
 
     await page.getByRole("button", { name: label(locale, "app.detail.release") }).click();
-    const dialog = page.getByRole("alertdialog");
+    const dialog = page.getByRole("dialog");
+    const digits = (await page.locator('[data-key="number"] bdi').innerText())
+      .replace(/\D/g, "")
+      .slice(-4);
+    await dialog.getByRole("textbox").fill(digits);
     await dialog.getByRole("button", { name: label(locale, "app.detail.release") }).click();
     await page.waitForURL(/\/channels\?notice=released$/, { timeout: BOUND_MS });
     await expect

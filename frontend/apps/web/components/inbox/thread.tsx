@@ -351,13 +351,17 @@ export function Thread({
                         </Badge>
                       ) : message.origin === "external" && conversation.channel === "whatsapp" ? (
                         // IX-01: an echo from the WhatsApp Business app (ADR-129, ADR-204).
-                        <Badge tone="neutral" icon={false} data-mark="business-app">
-                          {t("coexistence.fromApp")}
-                        </Badge>
+                        <span data-mark="business-app" className="inline-flex">
+                          <Badge tone="neutral" icon={false}>
+                            {t("coexistence.fromApp")}
+                          </Badge>
+                        </span>
                       ) : message.edited_at ? (
-                        <Badge tone="neutral" icon={false} data-mark="edited">
-                          {t("coexistence.edited")}
-                        </Badge>
+                        <span data-mark="edited" className="inline-flex">
+                          <Badge tone="neutral" icon={false}>
+                            {t("coexistence.edited")}
+                          </Badge>
+                        </span>
                       ) : null
                     }
                     media={

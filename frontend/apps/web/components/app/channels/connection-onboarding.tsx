@@ -110,13 +110,13 @@ export function ConnectionOnboarding({ id }: { id: string }) {
       <div className="flex flex-col gap-5">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="m-0 text-lg font-semibold text-text">{t("onboarding.title")}</h2>
-          <Badge tone="info" data-testid="onboarding-method">
-            {t("onboarding.withMeta")}
-          </Badge>
+          <span data-testid="onboarding-method" className="inline-flex">
+            <Badge tone="info">{t("onboarding.withMeta")}</Badge>
+          </span>
           {coexistence ? (
-            <Badge tone="neutral" data-testid="onboarding-coexistence">
-              {t("onboarding.coexistence")}
-            </Badge>
+            <span data-testid="onboarding-coexistence" className="inline-flex">
+              <Badge tone="neutral">{t("onboarding.coexistence")}</Badge>
+            </span>
           ) : null}
         </div>
         {disconnect ? (

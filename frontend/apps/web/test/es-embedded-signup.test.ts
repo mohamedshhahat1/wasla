@@ -309,6 +309,16 @@ describe("SD-08: Meta's SDK lives in one file", () => {
     }
   });
 
+  it("no hook is put on a Badge, which drops data attributes (FEF-50)", () => {
+    for (const file of [
+      "../components/app/channels/connection-onboarding.tsx",
+      "../components/inbox/thread.tsx",
+    ]) {
+      const source = readFileSync(join(here, file), "utf8");
+      expect(source, file).not.toMatch(/<Badge[^>]*\sdata-/);
+    }
+  });
+
   it("the code is never put in storage, a URL or a log (ST-01)", () => {
     const component = readFileSync(
       join(here, "../components/app/channels/embedded-signup.tsx"),
