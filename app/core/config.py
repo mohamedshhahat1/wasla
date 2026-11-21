@@ -1088,6 +1088,26 @@ class Settings(BaseSettings):
     # Checked against `META_API_SUNSETS` at start-up, which warns when this
     # version is inside its final 90 days. See `api_version_warning`.
     meta_api_version: str = "v21.0"
+    # WhatsApp Embedded Signup (ADR-204). The Facebook Login for Business
+    # configuration id the owner creates in the App Dashboard; empty, Embedded
+    # Signup is not offered and only the access-token form connects a number.
+    meta_embedded_signup_config_id: str | None = None
+    # The Embedded Signup version sent in `extras.version` (EXT-ES-01: v5 is the
+    # latest, v4 still served; v2 and v3 were deprecated on 2026-10-15).
+    meta_embedded_signup_version: Literal["v4", "v5"] = "v5"
+    # The Graph version of the onboarding calls only - the code exchange,
+    # subscribed_apps, register, the Coexistence read and smb_app_data (OQ-9,
+    # the ADR-146 precedent). META_API_VERSION is not moved by this.
+    meta_onboarding_api_version: str = "v27.0"
+    # Whether a number already in the WhatsApp Business app may be connected
+    # (Coexistence, EXT-ES-02). False sends v5's documented opt-out.
+    meta_embedded_signup_coexistence: bool = True
+    # The reminder to open the WhatsApp Business app, in days (OQ-11): a margin
+    # under Meta's "approximately 14 days" of PRIMARY_INACTIVITY (EXT-ES-32).
+    coexistence_reminder_days: int = Field(default=13, ge=1, le=14)
+    # Meta's limit on new WhatsApp accounts onboarded in a rolling 7 days
+    # (EXT-ES-18, OQ-12): 10 until Meta raises it. Counted across the platform.
+    meta_onboarding_weekly_limit: int = Field(default=10, ge=1, le=10_000)
     # Where a media download may carry the Meta token (MEDIA-01). A hop to any
     # other host is refused outright rather than fetched without the token: a
     # provider response naming a host outside this list is not a file Meta is
@@ -1298,6 +1318,24 @@ class Settings(BaseSettings):
             return [item.strip() for item in raw.split(",") if item.strip()]
         return value
 
+    @field_validator("meta_onboarding_api_version")
+    @classmethod
+    def _check_onboarding_api_version(cls, value: str) -> str:
+        """A Graph version this release knows (versions.py), never a free string."""
+        from app.integrations.whatsapp.versions import KNOWN_API_VERSIONS
+
+        if value not in KNOWN_API_VERSIONS:
+            raise ValueError(
+                f"META_ONBOARDING_API_VERSION {value!r} is not a Graph API version this "
+                f"release knows: {', '.join(sorted(KNOWN_API_VERSIONS))}"
+            )
+        return value
+
+    @field_validator("meta_embedded_signup_config_id")
+    @classmethod
+    def _blank_config_id_is_unset(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
     @field_validator("meta_media_host_roots", mode="before")
     @classmethod
     def _parse_meta_media_host_roots(cls, value: Any) -> Any:
@@ -1416,6 +1454,23 @@ class Settings(BaseSettings):
             allowed = ", ".join(sorted(VALID_LOG_LEVELS))
             raise ValueError(f"log_level must be one of: {allowed}")
         return level
+
+    @property
+    def embedded_signup_enabled(self) -> bool:
+        """Whether this deployment can finish an Embedded Signup onboarding (CF-04).
+
+        Every piece the server side needs: the app id and secret for the code
+        exchange, the configuration id for the popup, a credential key to keep
+        the business token and the PIN, and the verify token without which the
+        webhook - and so every message on the number - cannot be subscribed.
+        """
+        return bool(
+            self.meta_app_id
+            and self.meta_app_secret
+            and self.meta_embedded_signup_config_id
+            and self.credential_encryption_keys
+            and self.meta_verify_token
+        )
 
     @property
     def is_production(self) -> bool:
