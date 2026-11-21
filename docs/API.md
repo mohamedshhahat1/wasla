@@ -4,7 +4,7 @@
 
 Scope: API conventions and the endpoint catalogue. The interactive schema is served by FastAPI's OpenAPI docs.
 
-The production shape - `DOCS_ENABLED=false` - serves **269 operations**, of which
+The production shape - `DOCS_ENABLED=false` - serves **273 operations**, of which
 19 are unauthenticated and each is listed with what bounds it in
 [AUTHORIZATION.md](AUTHORIZATION.md). Both numbers are asserted rather than
 maintained: `tests/integration/test_documentation_claims.py` walks the resolved
@@ -46,7 +46,7 @@ ADR-191):
 
 | File | What |
 | --- | --- |
-| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (269 operations less `/metrics`, which keeps itself out of the schema) |
+| `frontend/packages/api-client/openapi.json` | the document of the routes production serves (273 operations less `/metrics`, which keeps itself out of the schema) |
 | `frontend/packages/api-client/event-types.json` | the event stream's `event_types`, `close_reasons` and the two control frames |
 
 `python -m scripts.export_openapi` writes both from the application factory, in

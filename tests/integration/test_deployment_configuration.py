@@ -154,8 +154,6 @@ EXPECTED_ABSENT: dict[tuple[str, str], str] = {
     ("worker", "META_VERIFY_TOKEN"): ("only the API answers Meta's subscription challenge"),
     ("worker", "META_INSTAGRAM_APP_SECRET"): "only the API verifies a webhook signature",
     ("worker", "META_MESSENGER_APP_SECRET"): "only the API verifies a webhook signature",
-    ("api", "META_APP_ID"): "declared for documentation; no code reads it",
-    ("worker", "META_APP_ID"): "declared for documentation; no code reads it",
 }
 
 # Values the *backup* process holds and no application process may. Asserted

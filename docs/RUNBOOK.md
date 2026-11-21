@@ -89,7 +89,7 @@ is how WhatsApp username senders were lost (OMNI-002). The `reason` says which:
 | Reason | What it means | What to do |
 | --- | --- | --- |
 | `foreign_object` | The payload is another Meta product's (`object` is `page` or `instagram`, not `whatsapp_business_account`) | A webhook subscription for another product points at `/api/v1/webhooks/whatsapp`. Fix it in the App Dashboard; nothing was misread |
-| `unsupported_field` | A WhatsApp change Wasla does not process: template updates, `user_id_update`, the Coexistence fields `history`, `smb_app_state_sync`, `smb_message_echoes` | Expected as a trickle if the app is subscribed to those fields; unsubscribe if they are not needed. Not alerted |
+| `unsupported_field` | A WhatsApp change Wasla does not process: `user_id_update` and any field nobody handles. The Coexistence fields `history`, `smb_app_state_sync`, `smb_message_echoes` and `account_update` are handled since ADR-204 | Expected as a trickle if the app is subscribed to those fields; unsubscribe if they are not needed. Not alerted |
 | `missing_sender` | A message with neither `from` nor `from_user_id` | Meta changed the sender shape again. Compare a raw delivery with docs/WHATSAPP.md |
 | `identifier_too_long` | A sender identifier longer than any documented form (a phone past 32, a business-scoped id past 255) | Same: compare with Meta's current documentation |
 | `missing_event_id`, `missing_status`, `missing_connection`, `malformed` | An entry without the ids Wasla needs | A malformed or truncated delivery; check the log line below |
@@ -2687,3 +2687,26 @@ See "Search is slow (Part 3)". Answers are unaffected.
 ### Row-level security
 
 Not applied (ADR-185). Isolation is enforced by the repository predicates and the isolation gate. Applying it needs a second database role with `BYPASSRLS` for the sweeps, gauges and purge; the design is in ADR-185.
+
+## WhatsApp Embedded Signup and Coexistence (ADR-204)
+
+**The owner's Meta dashboard steps, before Embedded Signup is offered.** None is done by Wasla; each is the owner's in Meta's own tools:
+
+1. Business Verification of the Meta business portfolio.
+2. App Review: Advanced Access for `whatsapp_business_messaging` and `whatsapp_business_management` - one written explanation and one separate screen recording per permission.
+3. Facebook Login for Business: create the Embedded Signup configuration (template "WhatsApp Embedded Signup Configuration With 60 Expiration Token" or custom) and copy its id into `META_EMBEDDED_SIGNUP_CONFIG_ID`; turn on the Client OAuth settings; add the app's HTTPS domain to Allowed domains and Valid OAuth redirect URIs.
+4. App Dashboard → WhatsApp → Configuration: subscribe `account_update`, `history`, `smb_app_state_sync` and `smb_message_echoes` beside the existing `messages` fields.
+
+`GET /api/v1/whatsapp/embedded-signup/config` answers `enabled: false` until `META_APP_ID`, `META_APP_SECRET`, `META_EMBEDDED_SIGNUP_CONFIG_ID`, `CREDENTIAL_ENCRYPTION_KEYS` and `META_VERIFY_TOKEN` are all set.
+
+**What to watch (log events, no new alert rule).**
+
+| Event | Means | Do |
+| --- | --- | --- |
+| `whatsapp.onboarding_refused` with `step` | Meta refused an onboarding call; `meta_code` says why (never its text) | `190`: the business token is gone - the customer connects again. Anything else: the connection page's *Retry setup* |
+| `whatsapp.provider_disconnected` | Meta removed the number (`PARTNER_REMOVED`, `ACCOUNT_OFFBOARDED`, `PARTNER_APP_UNINSTALLED`) | Nothing at Wasla: the customer reconnects through Embedded Signup. `PRIMARY_INACTIVITY` means the WhatsApp Business app was not opened for about 14 days |
+| `whatsapp.coexistence_sync` with `expired` | A Coexistence number's sync was not accepted inside Meta's 24 hours | The business disconnects in the WhatsApp Business app and connects again (Meta's rule) |
+| `whatsapp.es_coexistence_hint_mismatch` | The browser said one mode, Meta another; Meta's read was used | None; a trend means the popup's session info changed shape |
+| `embedded_signup_onboarding_limit` answers | Meta's 10 onboardings in a rolling 7 days reached | Raise `META_ONBOARDING_WEEKLY_LIMIT` only after Meta raises the portfolio's limit (200 after verification) |
+
+**Releasing** an Embedded Signup number unsubscribes the app from its webhooks, best-effort (`whatsapp.unsubscribe_failed` when Meta refused). Wasla never calls Meta's Deregister API.

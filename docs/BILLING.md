@@ -408,6 +408,8 @@ packs in one purchase; top-ups for `agents` or `owned_workspaces`; enforcement o
 `period_messages`; automatic self-refund.
 
 
+**Meta's own charges are the customer's** (ADR-204). A number connected with Embedded Signup is billed by Meta directly to the customer's Messaging account: Meta charges per delivered message, and from 2026-10-01 service messages too, past a free 1,000 per number each month; without a payment method in WhatsApp Manager, Meta stops delivering service messages after the free tier. Wasla neither collects nor marks up these charges and cannot read whether a payment method exists - the connection page tells the customer to add one.
+
 ## Entitlements and channel capacity (ADR-131)
 
 The rules a second channel needed, taken by the product (ENT-01..ENT-24) and

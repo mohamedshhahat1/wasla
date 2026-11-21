@@ -232,6 +232,16 @@ services:
       # (LIM-01): the API reads it on connect and schedule, the worker never
       # does, and both carry it so the two cannot disagree.
       META_MESSAGING_LIMIT_API_VERSION: ${META_MESSAGING_LIMIT_API_VERSION:-v24.0}
+      # WhatsApp Embedded Signup (ADR-204): the API exchanges the code, the
+      # worker requests Coexistence's syncs - both with the app's id and on the
+      # onboarding version. Empty: Embedded Signup is not offered.
+      META_APP_ID: ${META_APP_ID:-}
+      META_EMBEDDED_SIGNUP_CONFIG_ID: ${META_EMBEDDED_SIGNUP_CONFIG_ID:-}
+      META_EMBEDDED_SIGNUP_VERSION: ${META_EMBEDDED_SIGNUP_VERSION:-v5}
+      META_ONBOARDING_API_VERSION: ${META_ONBOARDING_API_VERSION:-v27.0}
+      META_EMBEDDED_SIGNUP_COEXISTENCE: ${META_EMBEDDED_SIGNUP_COEXISTENCE:-true}
+      META_ONBOARDING_WEEKLY_LIMIT: ${META_ONBOARDING_WEEKLY_LIMIT:-10}
+      COEXISTENCE_REMINDER_DAYS: ${COEXISTENCE_REMINDER_DAYS:-13}
       META_MEDIA_HOST_ROOTS: ${META_MEDIA_HOST_ROOTS:-graph.facebook.com,fbsbx.com,fbcdn.net}
       # --- Media storage (ADR-077) ---
       #
@@ -481,6 +491,16 @@ services:
       # (LIM-01): the API reads it on connect and schedule, the worker never
       # does, and both carry it so the two cannot disagree.
       META_MESSAGING_LIMIT_API_VERSION: ${META_MESSAGING_LIMIT_API_VERSION:-v24.0}
+      # WhatsApp Embedded Signup (ADR-204): the API exchanges the code, the
+      # worker requests Coexistence's syncs - both with the app's id and on the
+      # onboarding version. Empty: Embedded Signup is not offered.
+      META_APP_ID: ${META_APP_ID:-}
+      META_EMBEDDED_SIGNUP_CONFIG_ID: ${META_EMBEDDED_SIGNUP_CONFIG_ID:-}
+      META_EMBEDDED_SIGNUP_VERSION: ${META_EMBEDDED_SIGNUP_VERSION:-v5}
+      META_ONBOARDING_API_VERSION: ${META_ONBOARDING_API_VERSION:-v27.0}
+      META_EMBEDDED_SIGNUP_COEXISTENCE: ${META_EMBEDDED_SIGNUP_COEXISTENCE:-true}
+      META_ONBOARDING_WEEKLY_LIMIT: ${META_ONBOARDING_WEEKLY_LIMIT:-10}
+      COEXISTENCE_REMINDER_DAYS: ${COEXISTENCE_REMINDER_DAYS:-13}
       META_MEDIA_HOST_ROOTS: ${META_MEDIA_HOST_ROOTS:-graph.facebook.com,fbsbx.com,fbcdn.net}
       # `META_APP_SECRET` and `META_VERIFY_TOKEN` are deliberately absent: only
       # the API serves the webhook, so only the API verifies a signature or
