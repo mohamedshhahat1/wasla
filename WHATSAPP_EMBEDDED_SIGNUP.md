@@ -2,8 +2,8 @@
 
 ## 1. Verdict
 
-`ES MERGED AND PUSHED, CI PENDING` at the time of this commit. The final verdict is in addendum 1, written after GitHub's
-`ci.yml` and `frontend.yml` have finished on the pushed head.
+**ES MERGED AND PUSHED, CI GREEN. PREVIEWS UPDATED.** (addendum 1: four red rounds, each fixed in its own commit; the
+owner approved rounds 2 .. 4 and the one WebKit re-run.)
 
 ## 2. Heads
 
@@ -194,3 +194,65 @@ among them; EXT-ES-09b, 12, 16, 33, 39 observed. 6. `META_API_VERSION` off v21.0
 ## 21. Cleanup
 
 Part D, after CI: addendum 1.
+
+
+## Addendum 1 — CI, previews, cleanup (2026-11-22)
+
+### Verdict
+
+`ES MERGED AND PUSHED, CI GREEN. PREVIEWS UPDATED.` Pushed head `272d707`: `ci.yml` 44951051071 — 18 / 18 jobs green;
+`frontend.yml` 44951051073 attempt 2 — 8 / 8 jobs green (attempt 1: WebKit JR-02 red, see round 4).
+
+### The pushes and the red rounds
+
+| Round | Pushed head | What was red | Cause | Fix |
+|---|---|---|---|---|
+| 1 | `69647ad` | ci.yml model 1/7, migrations 4/5: `test_0120_fills_the_cap_from_the_last_day_of_marketing` | the test seeded a 0119 database through the models, which now map 0143's columns (this stage's) | `3173164`: the account and messages written with 0119's columns, as its contacts already were |
+| 1 | `69647ad` | ci.yml model 3/7: `test_only_one_account_exists_after_two_logins` (157 users) | the shared `inbox` fixture never erased its `@inbox.test` users; new test files reshuffled the shards and put the Google check after `test_contact_detail.py` (found by bisecting the shard; pre-existing) | `0f0828f`: the fixture erases its own users |
+| 1 | `69647ad` | frontend.yml Firefox KY8-02 (ar) | FEB-47: the fake Paymob page's transaction id was the clock second | round 2 |
+| 2 | `81cb581` | frontend.yml (one `--failed` re-run): Firefox KY8-02 again | FEB-47, the same cause — stopped; the owner: "Fix FEB-47, push" | `a958399`: one counter per run from a random start; `2a20441` the frontend README's section (frontend.yml is path-filtered to `frontend/**` and has no dispatch) |
+| 3 | `456bb0f` | frontend.yml Chromium e2e cancelled at its 40-minute limit (also in both attempts of round 1's run — first reported, wrongly, as cancelled by the re-run) | turbo's strict env mode dropped `WASLA_E2E_META_FAKE_ORIGIN` from the e2e build, so GitHub loaded Meta's real SDK and every flow journey timed out; local runs had built with `next build` directly | `9263d1a`: declared in `frontend/turbo.json` globalEnv (owner: "Push the fix") |
+| 4 | `272d707` | frontend.yml WebKit JR-02 (ar, desktop): axe color-contrast on the account menu | the scan during the menu's fade; the code untouched, the same frontend green on `456bb0f` | one re-run of the failed job (owner: "Re-run WebKit once") → green |
+
+No test was skipped, loosened or marked flaky; no assertion changed. Firefox and WebKit run the Embedded Signup spec as
+skipped by design (the light gates chose Chromium); Chromium ran all 11 journeys on desktop and phone on GitHub.
+
+### CI accounting
+
+ci.yml's "every test ran exactly once" gate passed on every push. The changed and added test files: +29 unit, +35
+integration (section 15); the round 1 fixes added no test.
+
+### Previews (Part C)
+
+Account "Mohamedshhahat1@gmail.com's Account" (`1cc89863…`, = FE-8L's). Built from `272d707` with
+`node scripts/build-workers-linux.mjs --env preview` and the three workers.dev origins; `workers:smoke`: every page 200 on
+workerd, session routes GET 405 / POST 503 `session_unavailable` (a first smoke run without the origins in its own
+environment answered 403, as it should). All three Workers changed (web's screens; `@wasla/i18n` and
+`@wasla/session` bundled by all three).
+
+| Worker | Previous (FE-8L) | New version | Upload (gzip) |
+|---|---|---|---|
+| wasla-preview-web | 45114436 | d04ff688 | 9823.69 KiB (1906.84 KiB) |
+| wasla-preview-console | fca96d3d | cdff0026 | 6851.66 KiB (1452.56 KiB) |
+| wasla-preview-marketing | 5cabba87 | 66290067 | 0.35 KiB (0.24 KiB) |
+
+Live: web `/login` and `/channels/connect/whatsapp-embedded`, console `/`, marketing `/en/` → 200. The preview has no
+API, so the connect screen shows only the access-token form (UA-02). Live CSP: `/login` keeps `frame-src 'none'`; only
+`/channels/connect/whatsapp-embedded` names `connect.facebook.net` and `frame-src https://www.facebook.com
+https://*.facebook.com` (SD-06). Nothing on iwasla.tech; no secret; no account setting. Rollback, if ever needed (not run):
+`wrangler rollback <previous id> --name <worker>` from each app's folder.
+
+### Findings added after the report
+
+| ID | Finding | Status |
+|---|---|---|
+| FEB-50 | `test_0120` seeded an old schema through the models | FIXED `3173164` |
+| FEB-51 | the `inbox` fixture leaked six users per test | FIXED `0f0828f` |
+| FEB-47 | the fake Paymob transaction id from the clock second (FE-8L's) | FIXED `a958399`, the owner's go-ahead |
+| FEF-55 | turbo's strict env mode dropped the e2e build's fake origin; local verification bypassed turbo | FIXED `9263d1a` |
+| FEF-56 | six `next start` servers from the local neighbour run (ports 3000–3002) outlived it; stopping them was refused by this session's permission check | for the owner (Part D) |
+| FEB-46, FEF-49 | FE-8 / FE-8L's | unchanged |
+
+### Cleanup (Part D)
+
+Recorded in `E:\wasla-cleanup\CLEANUP_es_2026-11-22.md`.
