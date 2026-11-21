@@ -26,13 +26,14 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event
+from sqlalchemy import delete, event, select
 
 from app.api.dependencies import get_media_storage
 from app.core.config import Settings
 from app.core.dependencies import get_settings_from_state
 from app.core.security import create_access_token
 from app.db.models import Membership, MembershipStatus, User
+from app.db.models.audit import AuditLog
 from app.db.models.channel import (
     Channel,
     ContactIdentity,
@@ -124,7 +125,7 @@ async def _person(
 ) -> Person:
     async with database.session_factory() as session:
         user = User(
-            email=f"{role.value}-{uuid.uuid4().hex[:8]}@inbox.test",
+            email=f"{role.value}-{uuid.uuid4().hex[:8]}{INBOX_USER_DOMAIN}",
             hashed_password="x",
             is_active=True,
             email_verified_at=NOW,
@@ -269,6 +270,10 @@ def stored(key: str, **extra: Any) -> dict[str, Any]:
     }
 
 
+#: The people `inbox` makes; erased with them (`_erase_people`).
+INBOX_USER_DOMAIN = "@inbox.test"
+
+
 @pytest_asyncio.fixture
 async def inbox(
     prepared_database: str, settings: Settings, fake_redis: FakeDependency
@@ -304,7 +309,22 @@ async def inbox(
             yield Inbox(client, database, storage, shops[0], shops[1])
     finally:
         await erase(database)
+        await _erase_people(database)
         await database.dispose()
+
+
+async def _erase_people(database: Any) -> None:
+    """The fixture's own people: `erase` removes only the campaign harness's domain.
+
+    Without this every test using `inbox` left six committed users behind, and a
+    later test in the same shard that counts users saw them (ES stage, CI shard
+    reshuffle: test_google_profile's one-account check found 157).
+    """
+    async with database.session_factory() as session:
+        users = select(User.id).where(User.email.endswith(INBOX_USER_DOMAIN))
+        await session.execute(delete(AuditLog).where(AuditLog.actor_id.in_(users)))
+        await session.execute(delete(User).where(User.email.endswith(INBOX_USER_DOMAIN)))
+        await session.commit()
 
 
 async def twelve(inbox: Inbox) -> dict[str, Conversation]:
