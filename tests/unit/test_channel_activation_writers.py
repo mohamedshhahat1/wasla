@@ -31,6 +31,8 @@ KNOWN_WRITERS: dict[tuple[str, str], str] = {
     ("services/whatsapp_account_service.py", "set_status"): "reserve_or_refuse on enable",
     ("services/channel_connection_service.py", "connect"): "reserve_or_refuse before insert",
     ("services/channel_connection_service.py", "_write_status"): "takes the guard's ChannelSlot",
+    # An Embedded Signup re-link of a number Meta disconnected (ADR-204, RL-05).
+    ("services/whatsapp_onboarding_service.py", "_relink"): "reserve_or_refuse on enable",
 }
 
 STATUS_TYPES = {"WhatsAppAccountStatus", "ConnectionStatus"}

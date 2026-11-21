@@ -32,6 +32,7 @@ from app.db.models.billing import LimitKey
 from app.db.models.knowledge import EMBEDDING_DIMENSIONS
 from app.integrations.billing import build_checkout_provider
 from app.integrations.openai.embeddings import build_http_client as build_embeddings_http_client
+from app.integrations.whatsapp.onboarding import MetaOnboardingClient
 from app.integrations.whatsapp.ownership import MetaOwnershipVerifier
 from app.platform.access_audit import PlatformAccessAudit
 from app.platform.hierarchy import require_platform_authority_over
@@ -53,7 +54,7 @@ from app.services.campaign_segment_service import CampaignSegmentService
 from app.services.campaign_service import CampaignService
 from app.services.checkout_service import CheckoutService
 from app.services.contact_service import ContactService
-from app.services.credential_service import CredentialService
+from app.services.credential_service import CredentialService, build_cipher
 from app.services.custom_plan_offer_service import CustomPlanOfferService
 from app.services.entitlement_service import Entitlement, EntitlementService
 from app.services.follow_up_service import FollowUpService
@@ -78,6 +79,7 @@ from app.services.template_service import TemplateService
 from app.services.topup_service import TopupService
 from app.services.usage_service import UsageService
 from app.services.whatsapp_account_service import WhatsAppAccountService
+from app.services.whatsapp_onboarding_service import WhatsAppOnboardingService
 from app.services.workspace_service import WorkspaceService
 from app.workers.ingestion_queue import IngestionQueue
 
@@ -204,6 +206,45 @@ def get_whatsapp_account_service(
 WhatsAppAccountServiceDep = Annotated[
     WhatsAppAccountService,
     Depends(get_whatsapp_account_service),
+]
+
+
+def get_whatsapp_onboarding_service(
+    settings: SettingsDep,
+    session: SessionDep,
+    accounts: WhatsAppAccountServiceDep,
+) -> WhatsAppOnboardingService:
+    """Embedded Signup (ADR-204), over the account service's own claim path.
+
+    The onboarding client exists only where the deployment can finish an
+    onboarding (CF-04); without it every Embedded Signup route answers
+    `embedded_signup_disabled`, and nothing is sent to Meta.
+    """
+    client = (
+        MetaOnboardingClient(
+            app_id=settings.meta_app_id or "",
+            app_secret=settings.meta_app_secret or "",
+            api_version=settings.meta_onboarding_api_version,
+        )
+        if settings.embedded_signup_enabled
+        else None
+    )
+    return WhatsAppOnboardingService(
+        session=session,
+        settings=settings,
+        accounts=accounts,
+        # The Embedded Signup proof is the assisted connect's (EX-08), on the
+        # onboarding version: the token Meta just issued is read on it.
+        ownership=MetaOwnershipVerifier(api_version=settings.meta_onboarding_api_version),
+        client=client,
+        credentials=CredentialService(settings),
+        cipher=build_cipher(settings),
+    )
+
+
+WhatsAppOnboardingServiceDep = Annotated[
+    WhatsAppOnboardingService,
+    Depends(get_whatsapp_onboarding_service),
 ]
 
 
