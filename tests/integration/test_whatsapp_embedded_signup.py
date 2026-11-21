@@ -10,6 +10,7 @@ the number away disables it like any disable.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -939,3 +940,122 @@ async def test_rl03_a_failed_unsubscribe_never_undoes_the_release(
         ReleaseFollowUp(token=owed[0], messaging_account_id=owed[1])
     )
     assert released.released_at is not None
+
+
+# ----------------------------------- gaps the mutants found (M-R06/07/14/17)
+
+
+async def test_sb12_the_pin_and_the_token_never_reach_a_log(
+    db_session: AsyncSession, settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M-R06: the PIN is sealed, never logged (SB-12, P-E23)."""
+    caplog.set_level(logging.DEBUG)
+    tenant = await _tenant(db_session)
+    client = FakeOnboardingClient()
+    await _onboard(db_session, settings, client, tenant)
+    pin = client.calls[-1]["pin"]
+    assert client.steps()[-1] == "register"
+    logged = caplog.text + "".join(repr(record.__dict__) for record in caplog.records)
+    assert pin not in logged
+    assert BUSINESS_TOKEN not in logged
+    assert "es-code-ok" not in logged
+
+
+@pytest.mark.parametrize(
+    ("number", "hint", "registered", "mode"),
+    [
+        (NUMBER, True, True, "cloud_api"),
+        (COEXISTING, False, False, "coexistence"),
+    ],
+)
+async def test_cx02_metas_read_decides_never_the_browsers_hint(
+    db_session: AsyncSession,
+    settings: Settings,
+    number: str,
+    hint: bool,
+    registered: bool,
+    mode: str,
+) -> None:
+    """M-R07: a hint that disagrees with Meta changes nothing (CX-02, CX-05)."""
+    tenant = await _tenant(db_session)
+    client = FakeOnboardingClient().coexists(COEXISTING)
+    service = _services(db_session, settings, client)
+    result = await service.onboard(
+        tenant_id=tenant.id, request=_request(number, hint=hint), idempotency_key=uuid.uuid4().hex
+    )
+    assert result.complete is not None
+    await result.complete()
+    assert ("register" in client.steps()) is registered
+    assert result.account.onboarding_mode == mode
+
+
+async def test_hi13_a_message_delivered_in_two_chunks_is_one_line(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """M-R14: the per-message identity rule, not the delivery digest (HI-06, HI-13)."""
+    tenant = await _tenant(db_session)
+    account = await _onboard(
+        db_session, settings, FakeOnboardingClient().coexists(COEXISTING), tenant, COEXISTING
+    )
+    then = datetime.now(UTC) - timedelta(days=5)
+    shared = _line("wamid.twice", "Twice", from_business=False, at=then)
+    ingestion = WhatsAppIngestionService(session=db_session)
+    await ingestion.ingest(_history(phase=0, chunk=1, progress=10, messages=[shared]))
+    await ingestion.ingest(
+        _history(
+            phase=1,
+            chunk=2,
+            progress=60,
+            messages=[shared, _line("wamid.once", "Once", from_business=False, at=then)],
+        )
+    )
+    await db_session.flush()
+    await CoexistenceProjector(db_session).run()
+    await db_session.flush()
+    ids = (
+        (
+            await db_session.execute(
+                select(Message.wa_message_id).where(Message.connection_id == account.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert sorted(str(value) for value in ids) == ["wamid.once", "wamid.twice"]
+
+
+async def test_ct05_an_address_book_name_never_replaces_a_name_wasla_holds(
+    db_session: AsyncSession, settings: Settings
+) -> None:
+    """M-R17: a member's name wins over the owner's phone book (CT-05)."""
+    tenant = await _tenant(db_session)
+    await _onboard(
+        db_session, settings, FakeOnboardingClient().coexists(COEXISTING), tenant, COEXISTING
+    )
+    await _customer_wrote(db_session, COEXISTING, "wamid.named", "Hello")
+    contact = (
+        await db_session.execute(select(Contact).where(Contact.tenant_id == tenant.id))
+    ).scalar_one()
+    contact.name = "Mona from sales"
+    contact.display_name = "Mona from sales"
+    await db_session.flush()
+    await WhatsAppIngestionService(session=db_session).ingest(
+        _messages(
+            "smb_app_state_sync",
+            {
+                "state_sync": [
+                    {
+                        "type": "contact",
+                        "contact": {"full_name": "Phone Book Name", "phone_number": CUSTOMER},
+                        "action": "add",
+                    }
+                ]
+            },
+        )
+    )
+    await db_session.flush()
+    await CoexistenceProjector(db_session).run()
+    await db_session.flush()
+    await db_session.refresh(contact)
+    assert contact.name == "Mona from sales"
+    assert contact.display_name == "Mona from sales"
