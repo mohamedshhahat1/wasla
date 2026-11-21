@@ -8674,6 +8674,14 @@ number and brings four webhook fields the parser refused (OMNI-010).
   `v27.0`; `META_API_VERSION` stays `v21.0` and its move is its own stage before 2027-01-21.
 - **The 13-day reminder** (OQ-11, `COEXISTENCE_REMINDER_DAYS`): a margin under Meta's "approximately 14 days".
 - Two stream types: `whatsapp.onboarding.updated` and `message.revised`. Migration 0143.
+- **In the browser** (ADR-196's adapter registry): `whatsapp-embedded` before the form, offered only when
+  `GET …/embedded-signup/config` says enabled. Meta's SDK is loaded by one component on one route; its URL lives in one
+  module and one browser chunk (the connection page's and home's helpers are in `lib/coexistence.ts`). That route's CSP
+  alone adds `https://connect.facebook.net` and `facebook.com` for frames and requests; every other route's policy is
+  unchanged. The message listener accepts `facebook.com` or a subdomain over https (Meta's `endsWith` without
+  `evilfacebook.com`). The code is held in a ref, sent once with one Idempotency-Key per flow, and retried only on a
+  network failure inside its five minutes. The e2e build loads the fakes' SDK and trusts their origin by a build-time
+  value refused outside a development build; never a runtime switch.
 
 **Rejected.** Trusting the popup's ids; registering a Coexistence number; calling the Deregister API; creating contacts
 from an address book; letting the AI answer or meter imported history; resuming the AI after an app reply (a product
