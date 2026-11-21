@@ -78,32 +78,37 @@ export function BillingFrame({
 }) {
   const t = useTranslations("app.billing");
   const { owner } = useBillingRoles();
-  // The billing area's own navigation sits where the settings area's does (LY7-01, DESIGN.md):
-  // beside the page from `md`, a wrapped row of links above it on a phone - never stacked inside
-  // the head band, which made the band half the screen (FEF-46).
+  const tabs = (
+    <SettingsNav
+      label={t("tabs.label")}
+      items={billingTabs(owner).map((tab) => ({
+        key: tab,
+        href: TAB_HREF[tab],
+        label: t(`tabs.${tab}`),
+      }))}
+      current={current}
+      renderLink={({ href, children: content, ...rest }) => (
+        <NextLink href={href} {...rest}>
+          {content}
+        </NextLink>
+      )}
+    />
+  );
+  // The billing area's own navigation: from `md` beside the page, where the settings area's sits
+  // (LY7-01) - never stacked inside the head band, which made the band half the screen (FEF-46);
+  // on a phone a wrapped row inside the head band, which keeps the 30 % on the head there (the
+  // owner's choice, 2026-11-21). One of the two is drawn at any width (`display: none` on the
+  // other), so a reader meets one navigation.
   return (
     <div
       className="flex flex-col gap-6 md:flex-row md:items-start"
       data-screen={`billing-${current}`}
     >
-      <div className="md:w-nav md:shrink-0">
-        <SettingsNav
-          label={t("tabs.label")}
-          items={billingTabs(owner).map((tab) => ({
-            key: tab,
-            href: TAB_HREF[tab],
-            label: t(`tabs.${tab}`),
-          }))}
-          current={current}
-          renderLink={({ href, children: content, ...rest }) => (
-            <NextLink href={href} {...rest}>
-              {content}
-            </NextLink>
-          )}
-        />
-      </div>
+      <div className="hidden md:block md:w-nav md:shrink-0">{tabs}</div>
       <div className="flex min-w-0 flex-1 flex-col gap-6">
-        <ScreenHead id={BILLING_HEADING} title={t("title")} line={line ?? t("line")} />
+        <ScreenHead id={BILLING_HEADING} title={t("title")} line={line ?? t("line")}>
+          <div className="md:hidden">{tabs}</div>
+        </ScreenHead>
         {children}
       </div>
     </div>
