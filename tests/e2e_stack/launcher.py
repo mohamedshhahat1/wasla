@@ -13,7 +13,7 @@ before the application is imported:
   host of `app.integrations.billing.paymob.REGIONS["egypt"]`;
 - api only: WhatsApp ownership verification uses
   `tests.fake_ownership.FakeOwnershipVerifier`, which owns every phone number id
-  starting ``PNID-E2E``;
+  starting ``PNID-E2E`` - for the access-token form and for Embedded Signup;
 - worker only: the email provider is `tests.e2e_stack.mailbox.CapturingEmailProvider`,
   so a message stays readable in the mailbox after it is sent.
 """
@@ -25,10 +25,13 @@ import os
 import sys
 from typing import Any
 
+from app.api.dependencies import WhatsAppAccountServiceDep
 from app.core.dependencies import SessionDep, SettingsDep
-from app.services.credential_service import CredentialService
+from app.integrations.whatsapp.onboarding import MetaOnboardingClient
+from app.services.credential_service import CredentialService, build_cipher
 from app.services.messaging_limit_service import MessagingLimitService
 from app.services.whatsapp_account_service import WhatsAppAccountService
+from app.services.whatsapp_onboarding_service import WhatsAppOnboardingService
 from tests.e2e_stack.guard import install_reroute, install_socket_wall
 from tests.fake_ownership import FakeOwnershipVerifier
 
@@ -66,12 +69,43 @@ def whatsapp_accounts(settings: SettingsDep, session: SessionDep) -> WhatsAppAcc
     )
 
 
+def whatsapp_onboarding(
+    settings: SettingsDep, session: SessionDep, accounts: WhatsAppAccountServiceDep
+) -> WhatsAppOnboardingService:
+    """`get_whatsapp_onboarding_service`, with the same fake ownership verifier (ADR-204).
+
+    The five onboarding calls are real requests, rerouted to the fakes' Graph.
+    """
+    client = (
+        MetaOnboardingClient(
+            app_id=settings.meta_app_id or "",
+            app_secret=settings.meta_app_secret or "",
+            api_version=settings.meta_onboarding_api_version,
+        )
+        if settings.embedded_signup_enabled
+        else None
+    )
+    return WhatsAppOnboardingService(
+        session=session,
+        settings=settings,
+        accounts=accounts,
+        ownership=_VERIFIER,
+        client=client,
+        credentials=CredentialService(settings),
+        cipher=build_cipher(settings),
+    )
+
+
 def _api() -> None:
-    from app.api.dependencies import get_whatsapp_account_service
+    from app.api.dependencies import (
+        get_whatsapp_account_service,
+        get_whatsapp_onboarding_service,
+    )
     from app.main import app as application
     from app.serve import main as serve
 
     application.dependency_overrides[get_whatsapp_account_service] = whatsapp_accounts
+    application.dependency_overrides[get_whatsapp_onboarding_service] = whatsapp_onboarding
     serve(["--host", "0.0.0.0", "--port", os.environ.get("PORT", "8000")])  # noqa: S104
 
 

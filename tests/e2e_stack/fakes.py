@@ -25,6 +25,17 @@ suites already have a double, it is reused rather than rewritten:
   start-up, whose JWKS this service also serves. Every check the API makes -
   binding cookie, state, nonce, signature, issuer, audience - is the real one.
 
+- **Meta Embedded Signup** (ADR-204, FK-01 .. FK-07): the five onboarding Graph
+  calls - the code exchange, ``subscribed_apps``, ``register``, the
+  ``is_on_biz_app`` read and ``smb_app_data`` - each logged by method and step
+  (``GET /_meta/calls``; ``DELETE`` clears it). The outcome is chosen by the
+  code (``es-expired``, ``es-invalid``, ``es-subfail-*``, ``es-regfail-*``)
+  or the number (an id containing ``COEX`` is on the WhatsApp Business app),
+  never by a global switch. ``/meta/sdk.js`` is a fake of Meta's SDK and
+  ``/meta/popup`` a fake of the Embedded Signup window, which posts Meta's
+  documented message events to its opener; ``POST /_meta/webhook`` signs and
+  posts a Coexistence or account_update delivery to the API.
+
 Run as a service: ``python -m tests.e2e_stack.fakes``. Every answer is logged
 to stdout by host and path only.
 """
@@ -34,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import itertools
 import json
 import os
@@ -54,6 +66,8 @@ from tests.integration.ai_harness import SENTIMENT_FORMAT, embedding_response, t
 from tests.paymob_orders import order_for
 
 API_INTERNAL = os.environ.get("WASLA_E2E_API_INTERNAL", "http://api:8000")
+FAKES_PUBLIC = os.environ.get("WASLA_E2E_FAKES_PUBLIC_URL", "http://localhost:8026").rstrip("/")
+META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
 PAYMOB_HMAC_SECRET = os.environ.get("PAYMOB_HMAC_SECRET", "")
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 DEFAULT_GOOGLE_EMAIL = "e2e.google.user@example.com"
@@ -70,6 +84,11 @@ _signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _sent = itertools.count(1)
 _intentions: dict[str, dict[str, Any]] = {}
 _codes: dict[str, dict[str, str]] = {}
+# Every onboarding call the API or worker made, by method and step only (FK-03).
+_meta_calls: list[dict[str, str]] = []
+_sync_requests = itertools.count(1)
+#: The Messaging account the e2e ownership fake answers for every e2e number.
+ES_WABA = "555000111"
 
 
 def _say(*parts: object) -> None:
@@ -86,6 +105,9 @@ def _jwks() -> dict[str, Any]:
 
 
 async def _graph(method: str, path: str, request: Request) -> Response:
+    onboarding = await _onboarding(method, path, request)
+    if onboarding is not None:
+        return onboarding
     parts = [part for part in path.split("/") if part]
     if method == "POST" and parts[-1:] == ["messages"]:
         body = json.loads(await request.body() or b"{}")
@@ -111,6 +133,186 @@ async def _graph(method: str, path: str, request: Request) -> Response:
             }
         )
     return JSONResponse({"data": [], "id": parts[-1] if parts else "e2e"})
+
+
+# ------------------------------------------------- Meta Embedded Signup (FK-01)
+
+
+def _bearer(request: Request) -> str:
+    return request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+
+
+def _logged(step: str, method: str, path: str) -> None:
+    # The path names a number or an account, never a credential (FK-03).
+    _meta_calls.append({"step": step, "method": method, "path": path})
+
+
+async def _onboarding(method: str, path: str, request: Request) -> Response | None:
+    """The five onboarding calls, or None for any other Graph request."""
+    parts = [part for part in path.split("/") if part]
+    token = _bearer(request)
+    if method == "GET" and parts[-2:] == ["oauth", "access_token"]:
+        _logged("exchange", method, path)
+        code = request.query_params.get("code", "")
+        if code == "es-expired":
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": "This authorization code has expired.",
+                        "type": "OAuthException",
+                        "code": 100,
+                    }
+                },
+                status_code=400,
+            )
+        if code == "es-invalid":
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": "This authorization code has been used.",
+                        "type": "OAuthException",
+                        "code": 100,
+                    }
+                },
+                status_code=400,
+            )
+        marker = "subfail" if "subfail" in code else "regfail" if "regfail" in code else "ok"
+        return JSONResponse(
+            {
+                "access_token": f"e2e-es-token-{marker}-{uuid.uuid4().hex[:8]}",
+                "token_type": "bearer",
+            }
+        )
+    if parts[-1:] == ["subscribed_apps"] and method in ("POST", "DELETE", "GET"):
+        step = {"POST": "subscribe", "DELETE": "unsubscribe", "GET": "subscriptions"}[method]
+        _logged(step, method, path)
+        if method == "POST" and "subfail" in token:
+            return JSONResponse(
+                {"error": {"message": "Unsupported request", "code": 100}}, status_code=400
+            )
+        return JSONResponse({"success": True})
+    if method == "POST" and parts[-1:] == ["register"]:
+        _logged("register", method, path)
+        if "regfail" in token:
+            return JSONResponse(
+                {"error": {"message": "Registration failed", "code": 133005}}, status_code=400
+            )
+        return JSONResponse({"success": True})
+    if method == "POST" and parts[-1:] == ["smb_app_data"]:
+        body = json.loads(await request.body() or b"{}")
+        _logged(f"sync:{body.get('sync_type')}", method, path)
+        return JSONResponse(
+            {"messaging_product": "whatsapp", "request_id": f"e2e-request-{next(_sync_requests)}"}
+        )
+    fields = request.query_params.get("fields", "")
+    if method == "GET" and "is_on_biz_app" in fields and len(parts) == 2:
+        _logged("coexistence", method, path)
+        number = parts[1]
+        return JSONResponse(
+            {"is_on_biz_app": "COEX" in number, "platform_type": "CLOUD_API", "id": number}
+        )
+    return None
+
+
+SDK = """(function () {
+  var ORIGIN = "__ORIGIN__";
+  var pending = null;
+  window.FB = {
+    init: function (options) { window.__waslaFakeFbInit = options; },
+    login: function (callback, options) {
+      pending = callback;
+      window.__waslaFakeFbLogin = options;
+      window.open(ORIGIN + "/meta/popup", "wasla-fake-es", "width=600,height=720");
+    }
+  };
+  window.addEventListener("message", function (event) {
+    if (event.origin !== ORIGIN) return;
+    var data;
+    try { data = typeof event.data === "string" ? JSON.parse(event.data) : event.data; }
+    catch (error) { return; }
+    if (data && data.type === "FAKE_FB_LOGIN_RESULT" && pending) {
+      var callback = pending; pending = null; callback(data.response);
+    }
+  });
+  if (typeof window.fbAsyncInit === "function") window.fbAsyncInit();
+})();
+"""
+
+POPUP = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Fake Embedded Signup</title></head>
+<body>
+<h1>Fake Embedded Signup (e2e)</h1>
+<label>Number <input id="number" value="PNID-E2E-ES-NEW-1"></label>
+<label>Code <input id="code" value="es-ok"></label>
+<button data-action="finish">Finish</button>
+<button data-action="finish-app">Finish (WhatsApp Business app number)</button>
+<button data-action="close">Close on the last screen</button>
+<button data-action="cancel">Cancel at phone verification</button>
+<button data-action="error">Error 3441042</button>
+<script>
+  function send(message) { window.opener.postMessage(JSON.stringify(message), "*"); }
+  function session(event, onApp) {
+    var number = document.getElementById("number").value;
+    send({
+      type: "WA_EMBEDDED_SIGNUP", event: event,
+      data: {
+        phone_number_id: number, is_on_biz_app: onApp,
+        messaging_account_ids: ["__WABA__"], primary_waac_ids: [],
+        business_id: "e2e-business", page_ids: [], catalog_ids: [], dataset_ids: [],
+        instagram_account_ids: []
+      }
+    });
+  }
+  function login(code) {
+    send({ type: "FAKE_FB_LOGIN_RESULT",
+           response: code
+             ? { authResponse: { code: code } }
+             : { authResponse: null, status: "unknown" } });
+  }
+  document.querySelectorAll("button").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var action = button.getAttribute("data-action");
+      var code = document.getElementById("code").value;
+      if (action === "finish") { session("FINISH", false); login(code); }
+      if (action === "finish-app") {
+        session("FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING", true);
+        login(code);
+      }
+      if (action === "close") { session("FINISH", false); login(null); }
+      if (action === "cancel") {
+        send({ type: "WA_EMBEDDED_SIGNUP", event: "CANCEL",
+               data: { current_step: "PHONE_NUMBER_VERIFICATION" } });
+        login(null);
+      }
+      if (action === "error") {
+        send({ type: "WA_EMBEDDED_SIGNUP", event: "ERROR",
+               data: { error_message: "Unavailable in this region", error_code: 3441042,
+                       session_id: "e2e-session-3441042", timestamp: String(Date.now()) } });
+        login(null);
+      }
+      setTimeout(function () { window.close(); }, 50);
+    });
+  });
+</script>
+</body></html>
+"""
+
+
+async def _inject(body: dict[str, Any]) -> Response:
+    """Sign a delivery as Meta would and post it to the API (FK-07)."""
+    payload = json.dumps(body.get("payload", body)).encode()
+    signature = hmac.new(META_APP_SECRET.encode(), payload, hashlib.sha256).hexdigest()
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        posted = await client.post(
+            f"{API_INTERNAL}/api/v1/webhooks/whatsapp",
+            content=payload,
+            headers={
+                "content-type": "application/json",
+                "x-hub-signature-256": f"sha256={signature}",
+            },
+        )
+    _say("meta webhook injected", posted.status_code)
+    return JSONResponse({"status": posted.status_code}, status_code=posted.status_code)
 
 
 # ----------------------------------------------------------------------- OpenAI
@@ -315,6 +517,30 @@ def service() -> FastAPI:
         if host.endswith("googleapis.com"):
             return await _google(request.method, host, path, request)
         return JSONResponse({"error": f"no fake for {host}"}, status_code=404)
+
+    @api.get("/_meta/calls")
+    async def meta_calls() -> list[dict[str, str]]:
+        return list(_meta_calls)
+
+    @api.delete("/_meta/calls")
+    async def clear_meta_calls() -> dict[str, int]:
+        cleared = len(_meta_calls)
+        _meta_calls.clear()
+        return {"cleared": cleared}
+
+    @api.get("/meta/sdk.js")
+    async def meta_sdk() -> Response:
+        return Response(
+            SDK.replace("__ORIGIN__", FAKES_PUBLIC), media_type="application/javascript"
+        )
+
+    @api.get("/meta/popup")
+    async def meta_popup() -> Response:
+        return Response(POPUP.replace("__WABA__", ES_WABA), media_type="text/html")
+
+    @api.post("/_meta/webhook")
+    async def meta_webhook(request: Request) -> Response:
+        return await _inject(json.loads(await request.body() or b"{}"))
 
     @api.get("/google/authorize")
     async def google_authorize(request: Request) -> Response:
