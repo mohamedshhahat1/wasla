@@ -50,6 +50,7 @@ import itertools
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from typing import Any
@@ -87,6 +88,10 @@ _codes: dict[str, dict[str, str]] = {}
 # Every onboarding call the API or worker made, by method and step only (FK-03).
 _meta_calls: list[dict[str, str]] = []
 _sync_requests = itertools.count(1)
+#: Paymob transaction ids (FEB-47): one counter per run started at a random place, so two
+#: checkouts in the same second never share an id (the clock second made the API drop the second
+#: callback as a duplicate and leave that payment pending).
+_transactions = itertools.count(190_000_000 + secrets.randbelow(800_000) * 1_000)
 #: The Messaging account the e2e ownership fake answers for every e2e number.
 ES_WABA = "555000111"
 
@@ -398,7 +403,7 @@ def _transaction(intention: dict[str, Any]) -> dict[str, Any]:
     reference = intention.get("special_reference")
     methods = [m for m in intention.get("payment_methods", []) if isinstance(m, int)]
     return {
-        "id": 190_000_000 + int(time.time()) % 1_000_000,
+        "id": next(_transactions),
         "pending": False,
         "amount_cents": int(intention.get("amount", 0)),
         "success": True,
