@@ -271,8 +271,19 @@ for (const locale of ["en", "ar"] as const) {
     // "Cancel now": the radio by arrows, the typed confirmation's field reached, Escape.
     await page.keyboard.press("Enter");
     await expect(page.getByRole("dialog")).toBeVisible();
+    // The dialog has finished opening (no finite animation running) before a key reaches it.
+    await page.waitForFunction(() =>
+      document
+        .getAnimations()
+        .every(
+          (animation) =>
+            animation.playState !== "running" ||
+            animation.effect?.getComputedTiming().iterations === Infinity,
+        ),
+    );
     await tabTo(page, { role: "radio" });
     await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("radio").nth(1)).toBeChecked();
     await tabTo(page, { field: "cancel-confirm" });
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toHaveCount(0);
