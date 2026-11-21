@@ -1,6 +1,7 @@
 # FE-8 leftovers — DK-05, the mutants, keyboard and focus over billing, 60/30/10, impeccable (ADR-203)
 
-**Verdict: PENDING CI** (completed in addendum 1).
+**Verdict: FE-8 LEFTOVERS MERGED AND PUSHED, CI GREEN. PREVIEWS UPDATED.** ci.yml 44856348610 and frontend.yml 44856348618
+(attempt 2) green in every job on `793be80` (addendum 1).
 
 | | |
 |---|---|
@@ -206,7 +207,7 @@ origin had not moved (`f15d926`); `git merge --ff-only fe8l-leftovers-20261121` 
 
 ## 12. Previews
 
-PENDING (app code changed: `apps/web` billing components and lib, `@wasla/i18n` messages).
+See addendum 1.
 
 ## 13. Findings
 
@@ -239,8 +240,8 @@ FEF-48. New and open:
 | visual-roles captures | 73 / 77 in the averages | same in the averages + 52 billing gated apart |
 | impeccable | — | round 1: 0 / 1 / 1 / 4 → round 2: 0 / 0 / 0 / 2 (P0/P1/P2/P3) |
 | DK-05 dependency step on a code change | old re-runs (65 s, +0.60 GB) | new CACHED (23 s, +0.38 GB) |
-| C: free | 19.08 GB | END_DISK |
-| build cache | 20.94 GB | END_CACHE |
+| C: free | 19.08 GB | 14.97 GB (before the cleanup; after: the cleanup record) |
+| build cache | 20.94 GB | 21.8GB (read only; never pruned here) |
 
 ## 15. ADR
 
@@ -250,3 +251,36 @@ amounts people read.
 ## 16. Left for the owner
 
 See the final message and the cleanup record.
+
+## Addendum 1 — the pushes, CI, the previews (2026-11-21)
+
+| push | head | ci.yml | frontend.yml | outcome |
+|---|---|---|---|---|
+| 1 | `0d83f72` (fast-forward to `20ca564` + the report) | 44852435664: **every job green** (7 model and 5 migration shards, migrations, parity, coverage, lint, Docker build, alert rules); completeness 8548 → **8553** model, 4352 → **4356** migrations — exactly this stage's tests | 44852435533: checks, Storybook, drift, Chromium, Firefox and **visual roles (with the 52 billing captures and `--check`)** green; **WebKit red**: KY8-02 (en, desktop) — after ArrowDown the second radio had the focus but was not yet checked | fixed below |
+| 2 | `793be80` (merge of `de74f5f`: Space selects the focused radio, WAI-ARIA) | 44856348610: **every job green** | 44856348618 attempt 1: WebKit phone KY8-02 (en) — the return page never reached succeeded (FEB-47's same-second transaction id under parallel checkouts); Chromium desktop JR-04 (ar) — FE-7/FE-8's known runner intermittent; Firefox AJ-07 (known) and IJ-03 (an FE-4 inbox wait) — none in this diff's code. Re-run once (`gh run rerun --failed`): attempt 2 **every job green** | **CI GREEN** |
+
+Locally the WebKit failure could not be reproduced: Windows' WebKit build never reaches a link with Tab (every KY8-02 run
+stops at its first step there). Two fix rounds in all; no test was skipped, loosened or marked flaky.
+
+### Part C — previews
+
+Account "Mohamedshhahat1@gmail.com's Account", 1cc89863… (= FE-8's). Changed since FE-8's deploy: web's billing components
+and lib, and `@wasla/i18n` (bundled by all three) → all three rebuilt with `build-workers-linux.mjs --env preview` from
+`793be80` (the three workers.dev origins passed as PUBLIC_*; the first attempt without them refused at next.config, as it
+should). `workers:smoke`: every page 200 on workerd, session routes GET 405 / POST 503, console 404 for an unknown page.
+Every wrangler.jsonc unchanged; nothing on iwasla.tech; no secret; no account setting.
+
+| Worker | Previous (FE-8) | New version | Upload (gzip) |
+| --- | --- | --- | --- |
+| wasla-preview-web | 224eda62 | 45114436 | 9679.26 KiB (1877.17 KiB) — was 9675.88 (1876.82) |
+| wasla-preview-console | dfe706c0 | fca96d3d | 6771.31 KiB (1434.14 KiB) |
+| wasla-preview-marketing | 23b89511 | 5cabba87 | 0.35 KiB (0.24 KiB) |
+
+Rollback, if ever needed (not run): `wrangler rollback <previous id> --name <worker>` from each app's folder.
+
+Live checks: web `/`, `/login`, `/billing`, `/billing/checkout/return`, `/team`, `/settings/account`, console `/`, marketing
+`/en/` `/ar/` → 200; HSTS, CSP, referrer and permissions policy, nosniff present; `/session/login` and `/session/refresh`:
+GET 405, cross-origin POST 403, same-origin POST 403 `session_request_refused`. From this machine the web host's two edge
+addresses (188.114.96.6 / .97.6) time out at TCP connect (FE-8 saw the same); the web checks were made through the
+console's edge address with `curl --resolve` — same host name, TLS and headers. `/billing`'s PreviewNotice is drawn
+client-side (page-gate.tsx), so the server HTML was checked for the 200 only.
