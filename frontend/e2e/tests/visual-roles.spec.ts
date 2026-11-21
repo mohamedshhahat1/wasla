@@ -30,6 +30,7 @@ import { connectNumber, freshNumber, gateState, memberOf, restore, suspend } fro
 import { connectedOwner, conversationOf, freshCustomer, inbound, text } from "../support/fe4";
 import { createLead } from "../support/fe5";
 import { answeringAgent, baseWithDocument, settled } from "../support/fe6";
+import { checkoutAnswer, payWith, returnSucceeded } from "../support/fe8";
 
 interface Shares {
   dominant: number;
@@ -153,7 +154,9 @@ async function capture(
   testInfo: TestInfo,
   screen: string,
   locale: Locale,
-  kind: "screen" | "gate" = "screen",
+  // FE-8 leftovers (ADR-203): "apart" holds a screen to the screen's own hard limits but keeps it
+  // out of the averages, in the gate states' folder (the billing pages, the owner's choice).
+  kind: "screen" | "gate" | "apart" = "screen",
   // FE-4 (VQ4-02): a modal is measured as itself - the scrim that dims the page behind it is not
   // part of its composition and would read as text/other.
   only?: Locator,
@@ -161,7 +164,7 @@ async function capture(
   await settle(page);
   const width = widthOf(testInfo);
   const name = `${screen}-${locale}-${width}.png`;
-  const path = join(kind === "gate" ? gateDir(testInfo) : outDir(testInfo), name);
+  const path = join(kind === "screen" ? outDir(testInfo) : gateDir(testInfo), name);
   if (only) await only.screenshot({ path, animations: "disabled", caret: "hide" });
   else await page.screenshot({ path, fullPage: true, animations: "disabled", caret: "hide" });
 
@@ -544,6 +547,129 @@ for (const locale of LOCALES) {
       await page.goto(`${WEB}/settings/account`);
       await expect(page.locator('[data-action="close-account"]')).toBeVisible({ timeout: 30_000 });
       await capture(page, testInfo, "web-account", locale);
+    });
+
+    // FE-8 leftovers (VQ8-01 / VQL-02, ADR-203): the billing screens join the gate on their hard
+    // limits and targets, out of the averages (the owner's choice, 2026-11-21) - the plan page
+    // (owner, after paying for pro on the fake page, and the administrator's read-only view), the
+    // return page's succeeded state, the invoices, a paid invoice, the payment methods, usage and
+    // capacity on the screen's own limits ("apart"); the cancel, refund and change-role dialogs as
+    // themselves, the past-due plan page and the declined return as gate states (status up to 8 %).
+    test(`web-fe8 billing ${locale}`, async ({ page, context }, testInfo) => {
+      // Sign-in, a payment on the fake page and eight screens: more than the default minute.
+      test.setTimeout(240_000);
+      await useLocale(context, locale);
+      await useAddress(context);
+      const owner = await verifiedOwner("vis8");
+      await answeringAgent(owner);
+      const admin = await memberOf(owner, "tenant_admin");
+      await logInThroughTheApp(page, locale, owner.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+
+      await page.goto(`${WEB}/billing`);
+      const upgrade = page.locator('[data-plan-price="pro:monthly"]');
+      await expect(upgrade).toBeVisible({ timeout: 30_000 });
+      const started = checkoutAnswer(page);
+      await upgrade.click();
+      expect((await started).status()).toBe(201);
+      await returnSucceeded(page);
+      await capture(page, testInfo, "web-billing-return-succeeded", locale, "apart");
+
+      await page.goto(`${WEB}/billing`);
+      await expect(page.locator('[data-action="cancel-subscription"]')).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(page.locator("[data-plans]")).toBeVisible();
+      await capture(page, testInfo, "web-billing", locale, "apart");
+      await page.locator('[data-action="cancel-subscription"]').click();
+      await expect(page.getByRole("dialog")).toBeVisible();
+      // A destructive confirmation: its one control is the danger button, a status colour (VQL-03).
+      await capture(page, testInfo, "web-billing-cancel", locale, "gate", page.getByRole("dialog"));
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+
+      await page.goto(`${WEB}/billing/invoices`);
+      await expect(page.locator('[data-action="open-invoice"]').first()).toBeVisible({
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-invoices", locale, "apart");
+      await page.locator('[data-action="open-invoice"]').first().click();
+      await expect(page.locator('[data-action="ask-refund"]')).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-invoice", locale, "apart");
+      await page.locator('[data-action="ask-refund"]').click();
+      await expect(page.getByRole("dialog")).toBeVisible();
+      // A confirmation dialog measured as itself is nearly all white: a gate state (ADR-203).
+      await capture(page, testInfo, "web-invoice-refund", locale, "gate", page.getByRole("dialog"));
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+
+      await page.goto(`${WEB}/billing/payment-methods`);
+      await expect(page.locator("[data-methods], [data-methods-empty]").first()).toBeVisible({
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-payment-methods", locale, "apart");
+
+      await page.goto(`${WEB}/billing/usage`);
+      await expect(page.locator("[data-bar-series]").first()).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-usage", locale, "apart");
+
+      await page.goto(`${WEB}/billing/capacity`);
+      await expect(page.locator('[data-screen="billing-capacity"]')).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(page.getByText(label(locale, "app.billing.loading"))).toHaveCount(0, {
+        timeout: 30_000,
+      });
+      await capture(page, testInfo, "web-capacity", locale, "apart");
+
+      await page.goto(`${WEB}/team`);
+      await expect(page.locator('[data-action="change-role"]')).toBeVisible({ timeout: 30_000 });
+      await page.locator('[data-action="change-role"]').click();
+      await expect(page.getByRole("dialog")).toBeVisible();
+      // A gate state, as the refund dialog (ADR-203).
+      await capture(
+        page,
+        testInfo,
+        "web-team-change-role",
+        locale,
+        "gate",
+        page.getByRole("dialog"),
+      );
+      await page.keyboard.press("Escape");
+
+      // The administrator's read-only plan page.
+      await context.clearCookies();
+      await useAddress(context);
+      await useLocale(context, locale);
+      await logInThroughTheApp(page, locale, admin.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+      await page.goto(`${WEB}/billing`);
+      await expect(page.locator("[data-plans]")).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-billing-admin", locale, "apart");
+    });
+
+    // The past-due plan page and a declined return carry the danger colour: gate states (VQ3-02).
+    test(`web-fe8 billing gates ${locale}`, async ({ page, context }, testInfo) => {
+      // Sign-in, a payment on the fake page and eight screens: more than the default minute.
+      test.setTimeout(240_000);
+      await useLocale(context, locale);
+      await useAddress(context);
+      const owner = await verifiedOwner("vis8g");
+      await answeringAgent(owner);
+      await gateState("past-due", owner.slug);
+      await payWith(context, "outcome=declined");
+      await logInThroughTheApp(page, locale, owner.email);
+      await expect(page.locator('[data-page="home"]')).toBeVisible({ timeout: 30_000 });
+
+      await page.goto(`${WEB}/billing`);
+      await expect(page.locator('[data-action="pay-owed"]')).toBeVisible({ timeout: 30_000 });
+      await capture(page, testInfo, "web-billing-past-due", locale, "gate");
+      const started = checkoutAnswer(page);
+      await page.locator('[data-action="pay-owed"]').click();
+      expect((await started).status()).toBe(201);
+      await page.waitForURL(`${WEB}/billing/checkout/return**`, { timeout: 30_000 });
+      await expect(page.locator('[data-return-state="declined"]')).toBeVisible({ timeout: 60_000 });
+      await capture(page, testInfo, "web-billing-return-failed", locale, "gate");
     });
 
     test(`web-home-member ${locale}`, async ({ page, context }, testInfo) => {
