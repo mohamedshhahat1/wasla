@@ -244,6 +244,7 @@ POPUP = """<!doctype html>
 <h1>Fake Embedded Signup (e2e)</h1>
 <label>Number <input id="number" value="PNID-E2E-ES-NEW-1"></label>
 <label>Code <input id="code" value="es-ok"></label>
+<label>Account <input id="waba" value="__WABA__"></label>
 <button data-action="finish">Finish</button>
 <button data-action="finish-app">Finish (WhatsApp Business app number)</button>
 <button data-action="close">Close on the last screen</button>
@@ -257,7 +258,7 @@ POPUP = """<!doctype html>
       type: "WA_EMBEDDED_SIGNUP", event: event,
       data: {
         phone_number_id: number, is_on_biz_app: onApp,
-        messaging_account_ids: ["__WABA__"], primary_waac_ids: [],
+        messaging_account_ids: [document.getElementById("waba").value], primary_waac_ids: [],
         business_id: "e2e-business", page_ids: [], catalog_ids: [], dataset_ids: [],
         instagram_account_ids: []
       }

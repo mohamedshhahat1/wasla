@@ -62,7 +62,12 @@ if (!own.includes("--skip-build")) {
   const built = run("pnpm", ["exec", "turbo", "run", "build", "--filter=./apps/*"], {
     cwd: frontend,
     // FE-3: the web build carries the journeys' test hooks (next.config.ts: PUBLIC_WASLA_E2E_HOOKS).
-    env: { ...env, WASLA_E2E_ROUTES: "1" },
+    // ADR-204 (SD-09): the web build loads the fakes' SDK and trusts their origin, by build value.
+    env: {
+      ...env,
+      WASLA_E2E_ROUTES: "1",
+      WASLA_E2E_META_FAKE_ORIGIN: `http://localhost:${process.env.WASLA_E2E_FAKES_PORT ?? "8026"}`,
+    },
   });
   if (built !== 0) process.exit(built);
 }

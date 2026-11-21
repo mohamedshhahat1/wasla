@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 from typing import Any
 
@@ -40,10 +41,18 @@ OWNED_PREFIX = "PNID-E2E"
 
 
 class _OwnsTheE2ENumbers(dict[str, str]):
-    """`FakeOwnershipVerifier`'s ownership table: every e2e phone number id, one WABA."""
+    """`FakeOwnershipVerifier`'s ownership table: every e2e phone number id.
+
+    The WABA is 555000111, or the digits after a trailing ``-W`` (``PNID-E2E-…-W777``), so an
+    Embedded Signup journey that disconnects its own WABA touches no other journey's number.
+    """
 
     def get(self, key: Any, default: Any = None) -> Any:
-        return "555000111" if str(key).startswith(OWNED_PREFIX) else default
+        number = str(key)
+        if not number.startswith(OWNED_PREFIX):
+            return default
+        own = re.search(r"-W(\d+)$", number)
+        return own.group(1) if own else "555000111"
 
 
 def _browser_urls() -> None:
