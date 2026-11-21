@@ -130,6 +130,9 @@ class ConnectionDisabledReason(StrEnum):
     MANUAL = "manual"
     CAPACITY_REDUCTION = "capacity_reduction"
     CAPACITY_REDUCTION_AUTOMATIC = "capacity_reduction_automatic"
+    #: Meta disconnected the number - the business removed Wasla in the
+    #: WhatsApp Business app, or Meta offboarded it (AU-03, ADR-204).
+    PROVIDER_DISCONNECTED = "provider_disconnected"
 
 
 class ConnectionHealth(StrEnum):
@@ -147,6 +150,8 @@ class ConnectionHealth(StrEnum):
     PERMISSION_MISSING = "permission_missing"
     RATE_LIMITED = "rate_limited"
     WEBHOOK_UNHEALTHY = "webhook_unhealthy"
+    #: Meta disconnected the number; `health_reason` holds Meta's reason word.
+    PROVIDER_DISCONNECTED = "provider_disconnected"
 
 
 class IdentityKind(StrEnum):

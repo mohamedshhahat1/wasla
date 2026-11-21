@@ -65,6 +65,15 @@ class ChannelEventKind(StrEnum):
     #: The person changed their marketing preference through the provider -
     #: WhatsApp's `user_preferences` stop or resume (OMNI-046).
     PREFERENCE = "preference"
+    #: A chunk of the WhatsApp Business app's chat history (Coexistence,
+    #: ADR-204): stored as received, projected by the onboarding worker.
+    HISTORY = "history"
+    #: The WhatsApp Business app's contacts (`smb_app_state_sync`).
+    STATE_SYNC = "state_sync"
+    #: A customer's edit or revoke of a message they sent (EXT-ES-29).
+    REVISION = "revision"
+    #: Meta's `account_update` about a connection, recorded per connection (AU).
+    ACCOUNT_UPDATE = "account_update"
 
 
 class ChannelEventState(StrEnum):

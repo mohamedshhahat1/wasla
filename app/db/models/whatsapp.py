@@ -31,9 +31,11 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -54,6 +56,24 @@ from app.db.models.channel_event import (
     ChannelEventState,
 )
 from app.db.models.enums import _enum_type
+
+
+class OnboardingMethod(StrEnum):
+    """How the number was connected (ADR-204)."""
+
+    #: The access-token form: the workspace pasted a token and the ids.
+    ASSISTED = "assisted"
+    #: Meta's Embedded Signup popup: a code exchanged for a business token.
+    EMBEDDED_SIGNUP = "embedded_signup"
+
+
+class OnboardingMode(StrEnum):
+    """Which WhatsApp the number is on, as Meta said at onboarding (CX-02)."""
+
+    #: Only the Cloud API: registered by Wasla with a PIN.
+    CLOUD_API = "cloud_api"
+    #: The Cloud API and the WhatsApp Business app on one number (Coexistence).
+    COEXISTENCE = "coexistence"
 
 
 class WhatsAppAccountStatus(StrEnum):
@@ -136,6 +156,40 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
             "portfolio_id",
             postgresql_where=text("portfolio_id IS NOT NULL"),
         ),
+        # The onboarding columns of ADR-204, 0143.
+        CheckConstraint(
+            "onboarding_method IN ('assisted', 'embedded_signup')",
+            name="onboarding_method_known",
+        ),
+        CheckConstraint(
+            "onboarding_mode IS NULL OR onboarding_mode IN ('cloud_api', 'coexistence')",
+            name="onboarding_mode_known",
+        ),
+        # A replayed Embedded Signup request finds what the first one wrote (EX-12).
+        Index(
+            "uq_whatsapp_accounts_onboarding_idempotency",
+            "tenant_id",
+            "onboarding_idempotency_key",
+            unique=True,
+            postgresql_where=text("onboarding_idempotency_key IS NOT NULL"),
+        ),
+        # The platform's weekly onboarding count (OQ-12).
+        Index(
+            "ix_whatsapp_accounts_onboarded_at",
+            "onboarded_at",
+            postgresql_where=text("onboarding_method = 'embedded_signup'"),
+        ),
+        # The Coexistence numbers whose one-time syncs are still owed (SY).
+        Index(
+            "ix_whatsapp_accounts_sync_due",
+            "sync_next_attempt_at",
+            postgresql_where=text(
+                "onboarding_mode = 'coexistence' AND released_at IS NULL "
+                "AND (contacts_sync_request_id IS NULL OR history_sync_request_id IS NULL)"
+            ),
+        ),
+        # account_update names the Messaging account, not the number (AU-01).
+        Index("ix_whatsapp_accounts_waba_id", "waba_id"),
     )
 
     phone_number_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -203,6 +257,69 @@ class WhatsAppAccount(Base, UUIDPrimaryKeyMixin, TenantScopedMixin, TimestampMix
         nullable=True,
     )
 
+    # ------------------------------------------------------------ ADR-204, 0143
+    # How the number was connected, and - for Embedded Signup - each step of
+    # the onboarding with its time. Every existing row is `assisted`.
+    onboarding_method: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=OnboardingMethod.ASSISTED.value
+    )
+    onboarding_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # The customer's Messaging account id - today the same value as `waba_id`,
+    # kept apart so Meta's account-model phases need no rename (EXT-ES-40).
+    messaging_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The number's two-step verification PIN, set by Wasla at registration and
+    # sealed like the token (SB-08, OQ-10). Never returned, never logged.
+    registration_pin_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    onboarding_idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    onboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    subscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Meta's 24 hours for the two one-time syncs (EXT-ES-23).
+    sync_deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sync_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    contacts_sync_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    contacts_sync_request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    contacts_sync_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    history_sync_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    history_sync_request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    history_sync_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    history_progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    history_phase_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    history_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    history_declined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Meta's own words when it disconnected the number (AU-03, EXT-ES-32).
+    provider_disconnect_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_disconnect_initiated_by: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )
+    provider_disconnected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    @property
+    def is_embedded_signup(self) -> bool:
+        return self.onboarding_method == OnboardingMethod.EMBEDDED_SIGNUP.value
+
+    @property
+    def is_coexistence(self) -> bool:
+        return self.onboarding_mode == OnboardingMode.COEXISTENCE.value
+
     @property
     def is_active(self) -> bool:
         return self.status is WhatsAppAccountStatus.ACTIVE and self.released_at is None
@@ -257,6 +374,8 @@ event.listen(WhatsAppAccount.__table__, "after_create", install_whatsapp_connect
 
 __all__ = [
     "WHATSAPP_ACCOUNT_STATUS_TYPE",
+    "OnboardingMethod",
+    "OnboardingMode",
     "WHATSAPP_EVENT_KIND_TYPE",
     "WHATSAPP_EVENT_STATE_TYPE",
     "WhatsAppAccount",
